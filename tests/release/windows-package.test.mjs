@@ -3,7 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { realpathSync } from 'node:fs';
-import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, lstat, link, symlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, appendFile, readFile, readdir, rm, lstat, link, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve, relative, isAbsolute, sep } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -110,7 +110,8 @@ test('packaging diagnostics preserve original thrown errors and frozen values', 
   const original = Object.assign(new Error('Synthetic Node probe failure.'), { code: 'EBADF', path: options.nodeExecutable, syscall: 'realpath' });
   const stack = original.stack;
   for (const failure of [original, Object.freeze(new Error('Frozen probe failure.')), Object.freeze({ reason: 'Non-Error probe failure.' })]) {
-    await assert.rejects(packageWindows({ ...options, inspectNode: async () => { throw failure; } }), error => {
+    await assert.rejects(packageWindows({ ...options, inspectNode: async () => { throw failure; },
+      onProgress: async () => { throw new Error('Synthetic diagnostic write failure.'); } }), error => {
       assert.equal(error, failure);
       if (error === original) {
         assert.equal(error.stack, stack); assert.equal(error.code, 'EBADF');
@@ -158,12 +159,27 @@ test('dependency path rejection identifies and retains the incomplete owned bund
 });
 
 test('directory package has a real PE exe, explicit app entry, standalone Node and only production closure', async t => {
-  const { root, write, options, probes } = await fixture(t);
+  const { root, scratch, write, options, probes } = await fixture(t);
   await write('runtime/product/daemon.json', '{"token":"never-copy-runtime"}');
   await write('.codex/auth.json', '{"access_token":"never-copy-provider-auth"}');
   await write('apps/mcp/generated/claude.mcp.json', '{"password":"never-copy-generated"}');
   await write('node_modules/zod/tests/auth.json', '{"access_token":"never-copy-test-data"}');
-  const result = await packageWindows(options), data = await manifest(result.directory);
+  const progressFile = join(scratch, 'package-progress.jsonl'), progressRecords = [];
+  const result = await packageWindows({ ...options, onProgress: async record => {
+    progressRecords.push(record);
+    await appendFile(progressFile, JSON.stringify(record) + '\n');
+  } }), data = await manifest(result.directory);
+  const recordedProgress = (await readFile(progressFile, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  assert.deepEqual(recordedProgress, progressRecords, 'all diagnostic writes must drain before the API returns');
+  assert.equal(recordedProgress[0].phase, 'validate-inputs');
+  assert.equal(recordedProgress.at(-1).phase, 'verify-output');
+  assert.ok(recordedProgress.some(record => record.phase === 'copy-dependencies'));
+  for (const record of recordedProgress) {
+    assert.deepEqual(Object.keys(record).sort(), ['completedBytes', 'completedFiles', 'phase', 'relativePath']);
+    assert.ok(Number.isSafeInteger(record.completedFiles) && record.completedFiles >= 0);
+    assert.ok(Number.isSafeInteger(record.completedBytes) && record.completedBytes >= 0);
+    assert.ok(record.relativePath === null || !isAbsolute(record.relativePath) && !record.relativePath.includes('\\'));
+  }
   assert.equal(probes.length, 1); assert.equal(probes[0], options.nodeExecutable);
   assert.equal(result.signed, false); assert.equal(result.installer, false);
   assert.equal(result.installedNodeRequired, false); assert.equal(result.applicationLaunchVerified, false);

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { constants } from 'node:fs';
+import { constants, write as writeDiagnostic } from 'node:fs';
 import { copyFile, readFile, writeFile, readdir, lstat, realpath, mkdir, mkdtemp } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -7,6 +7,8 @@ import { resolve, join, relative, dirname, isAbsolute, sep, posix } from 'node:p
 import { fileURLToPath } from 'node:url';
 import { createLocalRelease, verifyLocalRelease, inside, REQUIRED_FRONTEND_FILES } from './create-local-release.mjs';
 import { REQUIRED_MANAGED_LUAU_FILES } from './managed-luau-compiler.mjs';
+import { copyInBatches, COPY_BATCH_FILES, COPY_BATCH_BYTES } from './bounded-copy.mjs';
+import { createPackageProgress } from './package-progress.mjs';
 
 const REPOSITORY = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const run = promisify(execFile);
@@ -85,8 +87,11 @@ async function safeParents(path) {
     if (dirname(current) === current) return;
   }
 }
-async function regularBytes(path) {
+async function regularBytes(path, expected) {
   const before = await checkedPath(path);
+  if (expected && ['dev', 'ino', 'size', 'mtimeMs', 'ctimeMs', 'nlink'].some(key => before[key] !== expected[key])) {
+    throw new Error('Dependency changed since inventory; incomplete owned output retained.');
+  }
   const bytes = await readFile(path), after = await checkedPath(path);
   if (before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs || bytes.length !== after.size) {
     throw new Error('Packaging input changed while reading; retry after writers finish.');
@@ -254,14 +259,24 @@ function appPackage(version) {
  * never accepted from HTTP/IPC. The CLI always uses the real executable probe. */
 export async function packageWindows(options = {}) {
   const context = { phase: 'validate-inputs', outputDirectory: null, lastBundlePath: null };
-  try { return await assembleWindowsPackage(options, context); }
+  // Trusted build callback only. It receives fixed diagnostic metadata and must
+  // return a promise covering all of its writes; it cannot grant verification.
+  const progress = createPackageProgress(options.onProgress);
+  let result;
+  try {
+    await progress.phase(context.phase);
+    result = await assembleWindowsPackage(options, context, progress);
+  }
   catch (error) {
     annotateFailure(error, 'packageContext', { ...context, outputDirectory: diagnosticPath(context.outputDirectory) });
+    await progress.finish(true, error);
     throw error;
   }
+  await progress.finish(false);
+  return result;
 }
 async function assembleWindowsPackage({ repository = REPOSITORY, electronDist,
-  nodeExecutable = process.execPath, nodeLicense, inspectNode = probeNodeRuntime } = {}, context) {
+  nodeExecutable = process.execPath, nodeLicense, inspectNode = probeNodeRuntime } = {}, context, progress) {
   repository = resolve(repository);
   await checkedPath(repository, true);
   electronDist = resolve(electronDist ?? join(repository, 'node_modules/electron/dist'));
@@ -282,11 +297,13 @@ async function assembleWindowsPackage({ repository = REPOSITORY, electronDist,
   const hostRoot = join(repository, 'apps/desktop/electron');
   for (const file of HOST_FILES) await regularBytes(join(hostRoot, file));
   context.phase = 'resolve-dependencies';
+  await progress.phase(context.phase);
   const dependencies = await productionDependencies(repository, pkg, lock);
 
   // This API owns the source/compiled-map proof and excludes root runtime,
   // credentials, generated client configurations and dependency/user caches.
   context.phase = 'prepare-source-release';
+  await progress.phase(context.phase);
   const release = await createLocalRelease({ repository });
   const releaseProof = await verifyLocalRelease(release.directory);
   const releaseManifest = await json(join(release.directory, 'release-manifest.json'));
@@ -302,6 +319,7 @@ async function assembleWindowsPackage({ repository = REPOSITORY, electronDist,
     }
   }
   context.phase = 'create-output';
+  await progress.phase(context.phase);
   const outputRoot = join(repository, 'runtime/windows');
   await safeParents(outputRoot); await mkdir(outputRoot, { recursive: true }); await checkedPath(outputRoot, true);
   const directory = await mkdtemp(join(outputRoot, 'arcane-win32-x64-'));
@@ -326,8 +344,9 @@ async function assembleWindowsPackage({ repository = REPOSITORY, electronDist,
     } else await writeFile(target, bytes, { flag: 'wx' });
     files.push({ path, bytes: bytes.length, sha256: hash(bytes) });
   };
-  const copy = async (source, path) => add(path, await regularBytes(source), source);
+  const copy = async (source, path, expected) => add(path, await regularBytes(source, expected), source);
   context.phase = 'copy-electron';
+  await progress.phase(context.phase);
   await walk(electronDist, async (source, path) => {
     if (!electronPath(path)) throw new Error('Unexpected Electron distribution payload: ' + path);
     await copy(source, path === 'electron.exe' ? 'Arcane.exe' : path);
@@ -335,6 +354,7 @@ async function assembleWindowsPackage({ repository = REPOSITORY, electronDist,
   for (const file of ELECTRON_REQUIRED) if (!seen.has(file.toLowerCase())) throw new Error('Incomplete Electron distribution: ' + file);
   if (!files.some(file => file.path.startsWith('locales/'))) throw new Error('Missing Electron locales.');
   context.phase = 'copy-host'; context.lastBundlePath = null;
+  await progress.phase(context.phase);
   await add('resources/app/package.json', Buffer.from(JSON.stringify(appPackage(pkg.version), null, 2) + '\n'));
   for (const file of HOST_FILES) await copy(join(hostRoot, file), 'resources/app/' + file);
   if (await exists(join(hostRoot, 'icon.png'))) {
@@ -343,9 +363,11 @@ async function assembleWindowsPackage({ repository = REPOSITORY, electronDist,
     await copy(join(hostRoot, 'icon.png'), 'resources/app/icon.png');
   }
   context.phase = 'copy-node'; context.lastBundlePath = null;
+  await progress.phase(context.phase);
   await copy(nodeExecutable, 'resources/node/node.exe');
   await copy(licensePath, 'resources/node/LICENSE');
   context.phase = 'copy-product'; context.lastBundlePath = null;
+  await progress.phase(context.phase);
   const deployedManifest = deploymentManifest(releaseManifest);
   for (const entry of deployedManifest.files) await copy(join(release.directory, entry.path), 'resources/product/' + entry.path);
   const deployedManifestBytes = Buffer.from(JSON.stringify(deployedManifest, null, 2) + '\n');
@@ -353,16 +375,42 @@ async function assembleWindowsPackage({ repository = REPOSITORY, electronDist,
   // Retain the complete original integrity metadata, not test/private-key fixture payloads.
   await copy(join(release.directory, 'release-manifest.json'), 'resources/source-manifest.json');
   context.phase = 'copy-dependencies'; context.lastBundlePath = null;
+  await progress.phase(context.phase);
   for (const dependency of dependencies) {
-    await walk(join(repository, dependency.path), (source, path) => copy(source, 'resources/product/' + dependency.path + '/' + path),
-      (_path, name) => name.startsWith('.') || DEPENDENCY_OMISSIONS.has(name.toLowerCase()), '', true);
+    const descriptors = [], inventorySeen = new Set();
+    await walk(join(repository, dependency.path), async (source, path) => {
+      const target = 'resources/product/' + dependency.path + '/' + path;
+      safeRelative(target);
+      const key = target.toLowerCase();
+      if (seen.has(key) || inventorySeen.has(key)) throw new Error('Duplicate/case-colliding dependency path.');
+      if (descriptors.length >= MAX_FILES - files.length) throw new Error('Windows bundle file budget exceeded.');
+      const stat = await checkedPath(source);
+      const expected = Object.fromEntries(['dev', 'ino', 'size', 'mtimeMs', 'ctimeMs', 'nlink'].map(key => [key, stat[key]]));
+      inventorySeen.add(key);
+      descriptors.push({ source, path: target, bytes: stat.size, expected });
+    }, (_path, name) => name.startsWith('.') || DEPENDENCY_OMISSIONS.has(name.toLowerCase()), '', true);
+    const diagnostic = { dependency: dependency.path, total: descriptors.length, completed: 0,
+      batchFiles: COPY_BATCH_FILES, batchBytes: COPY_BATCH_BYTES, firstFailedPath: null };
+    context.dependencyCopy = diagnostic;
+    await copyInBatches(descriptors, async descriptor => {
+      try {
+        await copy(descriptor.source, descriptor.path, descriptor.expected);
+        diagnostic.completed++;
+        await progress.copied(descriptor.path, descriptor.bytes);
+      } catch (error) {
+        if (diagnostic.firstFailedPath === null) diagnostic.firstFailedPath = descriptor.path;
+        throw error;
+      }
+    });
   }
   context.phase = 'recheck-sources'; context.lastBundlePath = null;
+  await progress.phase(context.phase);
   for (const { source, sha256 } of sourceChecks) {
     if (hash(await regularBytes(source)) !== sha256) throw new Error('Packaging source changed; incomplete owned output retained for diagnosis.');
   }
 
   context.phase = 'brand-executable';
+  await progress.phase(context.phase);
   let branding = { applied: false };
   // Build-only, pinned official resource editor. Never reachable from the app or renderer.
   if (pkg.devDependencies?.rcedit !== undefined) {
@@ -399,8 +447,10 @@ async function assembleWindowsPackage({ repository = REPOSITORY, electronDist,
     dependencies, fileCount: files.length, totalBytes, files,
   };
   context.phase = 'write-manifest';
+  await progress.phase(context.phase);
   await writeFile(join(directory, MANIFEST), JSON.stringify(manifest, null, 2) + '\n', { flag: 'wx' });
   context.phase = 'verify-output';
+  await progress.phase(context.phase);
   const proof = await verifyWindowsBundle(directory);
   return { directory, executable: join(directory, 'Arcane.exe'), ...proof };
 }
@@ -493,12 +543,24 @@ export async function verifyWindowsBundle(directory) {
     electronVersion: manifest.electron.version, nodeVersion: manifest.node.version };
 }
 
+// CLI diagnostics use the caller-owned stderr descriptor. No path/authority is
+// accepted from a progress record, and each write finishes before it resolves.
+function cliProgress(record) {
+  const line = Buffer.from(JSON.stringify(record) + '\n');
+  return new Promise((accept, reject) => {
+    writeDiagnostic(2, line, 0, line.length, null, (error, written) => {
+      if (error) reject(error);
+      else if (written !== line.length) reject(new Error('Package progress write was incomplete.'));
+      else accept();
+    });
+  });
+}
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const args = process.argv.slice(2);
   if (args.length === 2 && args[0] === '--verify' && isAbsolute(args[1])) {
     console.log(JSON.stringify(await verifyWindowsBundle(args[1]), null, 2));
   } else if (!args.length || (args.length === 2 && args[0] === '--node-license' && isAbsolute(args[1]))) {
-    console.log(JSON.stringify(await packageWindows({ nodeLicense: args[1] }), null, 2));
+    console.log(JSON.stringify(await packageWindows({ nodeLicense: args[1], onProgress: cliProgress }), null, 2));
   } else throw new Error('Usage: node scripts/package-windows.mjs [--node-license ABSOLUTE_LICENSE_FILE | --verify ABSOLUTE_BUNDLE_DIRECTORY]');
 }
 
