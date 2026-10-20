@@ -117,33 +117,35 @@ export class SharedConversations {
     const focused=this.doc.activeElement as HTMLElement|null,focusKey=focused?.dataset?.libraryFocus;
     mount.replaceChildren();
     const heading=this.node('p','Chats');heading.className='sidebar-label';mount.append(heading);
-    if(!this.ready){const note=this.node('p',this.persistenceError?'Saved chats could not be loaded. Reopen Arcane to retry.':'Loading saved chats…');note.className='hint';mount.append(note);return;}
-    if(this.persistenceError){const note=this.node('p','Chat organisation has not been saved.');note.className='hint';mount.append(note,this.button('Retry saving',()=>{this.persistenceError=false;this.flush();}));}
-    const folders=this.node('details'),summary=this.node('summary','Manage folders');folders.append(summary);
-    const input=this.node('input');input.type='text';input.maxLength=80;input.placeholder='Folder name';input.setAttribute('aria-label','Folder name');input.dataset.libraryFocus='folder-name';
-    folders.append(input,this.button('New folder',()=>this.edit(()=>{this.library!.createFolder(input.value);})));
+    if(!this.ready){const note=this.node('p',this.persistenceError?'Saved chats could not be loaded. Reopen Arcane to retry.':'Loading saved chats…');note.className='hint library-status';note.dataset.state=this.persistenceError?'error':'loading';note.setAttribute('role','status');mount.setAttribute('aria-busy',String(!this.persistenceError));mount.append(note);return;}
+    mount.removeAttribute('aria-busy');
+    if(this.persistenceError){const note=this.node('p','Chat organisation has not been saved.');note.className='hint library-status';note.dataset.state='error';note.setAttribute('role','status');const retry=this.button('Retry saving',()=>{this.persistenceError=false;this.flush();});retry.className='library-action';mount.append(note,retry);}
+    const folders=this.node('details'),summary=this.node('summary','Manage folders');folders.className='library-manage';summary.className='library-summary';folders.append(summary);
+    const input=this.node('input');input.type='text';input.maxLength=80;input.placeholder='Folder name';input.setAttribute('aria-label','Folder name');input.dataset.libraryFocus='folder-name';input.className='library-input';
+    const create=this.button('New folder',()=>this.edit(()=>{this.library!.createFolder(input.value);}));create.className='library-action';
+    folders.append(input,create);
     mount.append(folders);
     const active=state!.activeId;
     for(const folder of [{id:null,name:'Unfiled'},...state!.folders]){
-      const group=this.node('details'),name=this.node('summary',folder.name);group.open=folder.id===null||state!.conversations.some(c=>c.id===active&&c.folderId===folder.id);group.append(name);
-      const rows=state!.conversations.filter(c=>c.folderId===folder.id);
+      const group=this.node('details'),name=this.node('summary',folder.name);group.open=folder.id===null||state!.conversations.some(c=>c.id===active&&c.folderId===folder.id);group.className='library-folder';name.className='library-summary library-folder-name';group.append(name);
+      const rows=state!.conversations.filter(c=>c.folderId===folder.id);name.dataset.count=String(rows.length);
       for(const c of rows){const b=this.button(c.title,()=>{void this.open(c.id);});b.className='library-chat';b.dataset.libraryFocus=c.id;b.setAttribute('aria-current',String(c.id===active));b.title=c.bindings.map(b=>b.provider==='codex'?'Codex':b.provider==='claude'?'Claude':'Arcane').join(' · ');group.append(b);}
-      if(!rows.length)group.append(this.node('p','No chats'));
-      if(folder.id!==null){group.append(this.button('Rename folder',()=>this.edit(()=>{this.library!.renameFolder(folder.id!,input.value);})),this.button('Remove folder',()=>this.edit(()=>{this.library!.removeFolder(folder.id!);})));}
+      if(!rows.length){const empty=this.node('p','No chats');empty.className='library-empty';group.append(empty);}
+      if(folder.id!==null){const rename=this.button('Rename folder',()=>this.edit(()=>{this.library!.renameFolder(folder.id!,input.value);})),remove=this.button('Remove folder',()=>this.edit(()=>{this.library!.removeFolder(folder.id!);}));rename.className='library-action';remove.className='library-action library-action-danger';group.append(rename,remove);}
       mount.append(group);
     }
-    if(active){const label=this.node('label','Move current chat'),select=this.node('select');select.setAttribute('aria-label','Folder for current chat');select.dataset.libraryFocus='move-chat';for(const f of [{id:null,name:'Unfiled'},...state!.folders]){const o=this.node('option',f.name);o.value=f.id??'';o.selected=state!.conversations.find(c=>c.id===active)?.folderId===f.id;select.append(o);}select.addEventListener('change',()=>this.edit(()=>this.library!.move(active,select.value||null)));label.append(select);mount.append(label);}
+    if(active){const label=this.node('label','Move current chat'),select=this.node('select');label.className='library-move';select.setAttribute('aria-label','Folder for current chat');select.dataset.libraryFocus='move-chat';for(const f of [{id:null,name:'Unfiled'},...state!.folders]){const o=this.node('option',f.name);o.value=f.id??'';o.selected=state!.conversations.find(c=>c.id===active)?.folderId===f.id;select.append(o);}select.addEventListener('change',()=>this.edit(()=>this.library!.move(active,select.value||null)));label.append(select);mount.append(label);}
     if(focusKey)Array.from(mount.querySelectorAll<HTMLElement>('[data-library-focus]')).find(n=>n.dataset.libraryFocus===focusKey)?.focus({preventScroll:true});
   }
   private renderHistory():void{
     const history=this.doc.getElementById('shared-conversation-history');if(!history)return;
     const c=this.library?.active();history.hidden=!c?.messages.length;if(!c)return;
     let detail=history.querySelector('details'),title=history.querySelector('summary'),list=history.querySelector('div');
-    if(!detail||!title||!list){detail=this.node('details');title=this.node('summary');list=this.node('div');detail.append(title,list);detail.addEventListener('toggle',()=>{if(detail!.open)this.renderHistory();});history.replaceChildren(detail);}
+    if(!detail||!title||!list){detail=this.node('details');title=this.node('summary');list=this.node('div');detail.className='shared-history';title.className='shared-history-summary';list.className='shared-history-list';list.setAttribute('role','list');detail.append(title,list);detail.addEventListener('toggle',()=>{if(detail!.open)this.renderHistory();});history.replaceChildren(detail);}
     title.textContent='Shared history · '+c.title;
     if(!detail.open)return;
     const signature=JSON.stringify([c.id,c.messages]);if(signature===this.historySignature)return;this.historySignature=signature;list.replaceChildren();
-    for(const m of c.messages){const article=this.node('article');article.className='shared-history-message';article.append(this.node('small',(m.provider==='codex'?'Codex':m.provider==='claude'?'Claude':'Arcane')+' · '+m.role+(m.model?' · '+m.model:'')),this.node('p',m.text));list.append(article);}
+    for(const m of c.messages){const article=this.node('article');article.className='shared-history-message';article.setAttribute('role','listitem');article.dataset.role=m.role;const meta=this.node('small',(m.provider==='codex'?'Codex':m.provider==='claude'?'Claude':'Arcane')+' · '+m.role+(m.model?' · '+m.model:''));meta.className='shared-history-meta';article.append(meta,this.node('p',m.text));list.append(article);}
   }
   stop():void{this.flush();this.stopped=true;}
   resume():void{this.stopped=false;this.observe();this.flush();}

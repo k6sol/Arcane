@@ -2286,4 +2286,550 @@ body.arcane-app.shell-compact .workspace-topbar .icon-button{min-height:36px;min
 /* Installed app updates */
 .desktop-update-banner{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:10px 18px;background:var(--accent-tint);border-bottom:1px solid var(--accent-line);color:var(--text);font-size:13px}.desktop-update-banner[hidden]{display:none}.desktop-update-banner p{margin:0;overflow-wrap:anywhere}.desktop-update-banner button{flex-shrink:0;font-size:12px;padding:8px 12px}@media(max-width:520px){.desktop-update-banner{align-items:flex-start;flex-direction:column;gap:8px;padding:12px}}
 
+/* ---- C22 revamp: one type scale, an 8px rhythm, role-based radii and restrained elevation; a red/white/dark-red/black palette; layout and glitch fixes; a docked narrow panel.
+   Owned block; keep before the reduced-motion reset. Static: no transitions, no animation, no keyframes.
+   Anchors kept on purpose: the canvas gradients, the red diamond beside assistant replies, red inline code chips, the New chat pill
+   with its keycap, the spaced TOOLS label and the Blender / Roblox Studio tool tiles. Gradients stay on atmosphere, the logo and Send only. ---- */
+:root{
+  --s-0:4px;--s-1:8px;--s-2:16px;--s-3:24px;--s-4:32px;--s-5:48px;
+  --gutter:clamp(12px,1.4vw + 4px,32px);
+  --t-meta:12px;--t-body:13px;--t-ui:14px;--t-lead:15px;--t-title:16px;--t-h2:20px;
+  --r-row:6px;--r-control:8px;--r-card:12px;--r-pane:16px;--r-dock:18px;--r-chip:999px;
+  --e-1:inset 0 1px 0 var(--glass-hi);
+  --e-2:inset 0 1px 0 var(--glass-hi),0 1px 2px rgba(0,0,0,.35),0 12px 32px -12px rgba(0,0,0,.7);
+  --e-3:inset 0 1px 0 var(--glass-hi),0 2px 6px rgba(0,0,0,.4),0 32px 80px -24px rgba(0,0,0,.85);
+  --z-sticky:10;--z-overlay:20;
+  --dock-clear:184px;
+  --logo-a:#ff4a3f;--logo-b:#e5323f;
+}
+
+/* Palette lock: red, white, dark red, black. Warning and success read as white on dark red / near-black; danger stays red.
+   The Playtest "on" green (--playtest-on) is the only green. */
+:root{
+  --warning:#f5f5f5;--warning-bg:#1a0a0d;--warning-line:#5a1e26;
+  --success:#f5f5f5;--success-bg:#0f0a0b;--success-line:#3a1a1f;
+  --dark-red:#8e0f22;--dark-red-deep:#5a1e26;
+}
+@media (prefers-color-scheme:light){
+  :root:not([data-theme=dark]){--warning:#8e0f22;--warning-bg:#fbeef0;--warning-line:#e3a4ac;--success:#080808;--success-bg:#f5f5f5;--success-line:rgba(8,8,8,.24)}
+}
+:root[data-theme=light]{--warning:#8e0f22;--warning-bg:#fbeef0;--warning-line:#e3a4ac;--success:#080808;--success-bg:#f5f5f5;--success-line:rgba(8,8,8,.24)}
+/* Diagnostic warning colors retain the component's established dark/light palette. */
+.arcane-app .studio-diagnostics{--warning:#f0b85a;--warning-line:#6e5524}
+@media (prefers-color-scheme:light){
+  :root:not([data-theme=dark]) .arcane-app .studio-diagnostics{--warning:#8a5a00;--warning-line:#d9b36a}
+}
+:root[data-theme=light] .arcane-app .studio-diagnostics{--warning:#8a5a00;--warning-line:#d9b36a}
+.arcane-app .studio-connection-banner{border-color:var(--warning-line);background:linear-gradient(100deg,rgba(142,15,34,.22) 0%,transparent 55%),var(--glass-solid)}
+.arcane-app .studio-connection-banner::before{background:var(--accent);box-shadow:0 0 0 4px rgba(255,51,64,.16)}
+.arcane-app .studio-connection-banner.good{border-color:var(--success-line);background:linear-gradient(100deg,rgba(255,255,255,.04) 0%,transparent 55%),var(--glass-solid)}
+.arcane-app .studio-connection-banner.good::before{background:var(--text);box-shadow:0 0 0 4px rgba(255,255,255,.1)}
+.arcane-app .preview-cube path[stroke="#54504f"]{stroke:var(--line-strong)}
+.arcane-app .preview-cube path[stroke="#33302f"]{stroke:var(--line)}
+
+/* No eyebrows or kickers: removed where they repeat the heading, set in sentence case where they carry meaning.
+   Sidebar section labels (TOOLS) stay as the user likes them. */
+.arcane-app :is(.eyebrow,.setup-step){display:none}
+.arcane-app :is(.task-plan-phase-title,.studio-diagnostic-kind){letter-spacing:0;text-transform:none}
+
+/* Official mark: one shape (the red A with its notch crossbar), one shared gradient (#arcane-logo-fill in studio.html), square boxes. */
+.arcane-app .arcane-logo-defs{position:absolute;width:0;height:0;overflow:hidden}
+.arcane-app .arcane-logo-stop-a{stop-color:var(--logo-a)}
+.arcane-app .arcane-logo-stop-b{stop-color:var(--logo-b)}
+.arcane-app .arcane-logo path{fill:url(#arcane-logo-fill) var(--logo-b)}
+.arcane-app .arcane-logo .arcane-logo-shard{display:none}
+.arcane-app .arcane-logo{flex:none;aspect-ratio:1/1}
+.arcane-app .wordmark .arcane-logo{width:28px;height:28px;filter:drop-shadow(0 0 8px var(--glow))}
+.arcane-app .chat-avatar .arcane-logo{width:18px;height:18px;filter:none}
+.arcane-app .app-sidebar.compact .wordmark .arcane-logo{width:28px;height:28px}
+
+/* Canvas: the crimson light and vignette stay; the concentric grain rings are dropped (they formed a dotted ring that
+   moiréd behind the conversation header while status text streamed). */
+body.arcane-app{background:var(--vignette),var(--canvas);background-color:var(--bg)}
+
+/* Type: one scale. Prose 15/1.7, UI 13–14/1.5, meta 12. Counts and costs use tabular figures. */
+.arcane-app .workspace-stage h1{font-size:14px;line-height:20px;font-weight:600;letter-spacing:0}
+.arcane-app .arcane-num,.arcane-app :is(.claude-usage-meter,.arcane-balance-chip,.setup-checklist-progress,.codex-task-usage,.upload-progress-detail,.library-folder-name,.shared-history-meta){font-variant-numeric:tabular-nums}
+
+/* Sidebar: same anchors, tighter rhythm. The New chat pill, the spaced TOOLS label and the tool tiles keep their look. */
+@media (min-width:761px){
+  .arcane-app .app-sidebar{padding:var(--s-3) var(--s-2) var(--s-2);gap:var(--s-3)}
+  .arcane-app .sidebar-links .nav-link{min-height:52px;padding:var(--s-1) 10px;gap:12px}
+  .arcane-app .sidebar-links .nav-link>span{display:flex;flex-direction:column;gap:2px;min-width:0;line-height:18px}
+  .arcane-app .sidebar-links .nav-link small{margin-top:0;line-height:16px}
+  .arcane-app .sidebar-secondary .nav-link{min-height:36px;padding:var(--s-1) 12px}
+}
+.arcane-app .nav-link[aria-pressed=true]::before,.arcane-app .settings-nav button[aria-current=page]::before{box-shadow:none}
+.arcane-app .workspace-chat-tabs [role=tab][aria-selected=true]::after{box-shadow:none}
+
+/* Sidebar: a frosted glass panel floating over the crimson atmosphere, 12px in from the window edges.
+   Rows share one height (36px), one left edge and one icon size (18px, 1.75 stroke); radii 10 (rows) / 14 (tiles, pill) / 18 (panel).
+   Selected rows: red-tinted glass with a leading inner line drawn by the background, not a border. Hover changes colour only. */
+:root{
+  --sidebar-glass:rgba(10,8,9,.62);--sidebar-solid:#0b0a0b;--sidebar-line:rgba(255,255,255,.08);--sidebar-rim:rgba(142,15,34,.38);
+  --sidebar-shadow:inset 0 1px 0 rgba(255,255,255,.06),0 0 0 1px var(--sidebar-rim),0 24px 60px -24px rgba(0,0,0,.85);
+  --row-h:36px;--r-1:10px;--r-2:14px;--r-3:18px;
+  --row-selected:linear-gradient(var(--accent),var(--accent)) 0 50%/2px 16px no-repeat,linear-gradient(90deg,rgba(255,51,64,.18) 0%,rgba(142,15,34,.1) 60%,rgba(142,15,34,0) 100%);
+}
+@media (prefers-color-scheme:light){
+  :root:not([data-theme=dark]){--sidebar-glass:rgba(255,255,255,.72);--sidebar-solid:#ffffff;--sidebar-line:rgba(8,8,8,.09);--sidebar-rim:rgba(142,15,34,.16);--sidebar-shadow:inset 0 1px 0 rgba(255,255,255,.9),0 0 0 1px var(--sidebar-rim),0 18px 40px -22px rgba(8,8,8,.25)}
+}
+:root[data-theme=light]{--sidebar-glass:rgba(255,255,255,.72);--sidebar-solid:#ffffff;--sidebar-line:rgba(8,8,8,.09);--sidebar-rim:rgba(142,15,34,.16);--sidebar-shadow:inset 0 1px 0 rgba(255,255,255,.9),0 0 0 1px var(--sidebar-rim),0 18px 40px -22px rgba(8,8,8,.25)}
+@media (min-width:761px){
+  body.arcane-app.shell-compact{--shell-sidebar:84px}
+  .arcane-app .app-sidebar:not(.collapsed){top:12px;bottom:12px;left:12px;width:calc(var(--shell-sidebar) - 16px);border:1px solid var(--sidebar-line);border-radius:var(--r-3);background:var(--sidebar-glass);box-shadow:var(--sidebar-shadow);-webkit-backdrop-filter:blur(24px) saturate(140%);backdrop-filter:blur(24px) saturate(140%)}
+  .arcane-app .app-sidebar .icon{width:18px;height:18px;stroke-width:1.75}
+  .arcane-app .new-chat{min-height:40px;border-radius:var(--r-2)}
+  .arcane-app .sidebar-links .nav-link{border-radius:var(--r-2)}
+  .arcane-app .sidebar-links .tool-icon{border-radius:var(--r-1)}
+  .arcane-app .sidebar-secondary{gap:2px;padding-top:var(--s-1)}
+  .arcane-app .sidebar-secondary .nav-link{min-height:var(--row-h);height:var(--row-h);padding:0 10px;gap:10px;border-radius:var(--r-1)}
+  .arcane-app .conversation-library :is(.library-summary,.library-chat){min-height:var(--row-h);padding-inline:10px;border-radius:var(--r-1)}
+  .arcane-app .sidebar-label{margin-inline:10px}
+  .arcane-app .nav-link[aria-pressed=true],.arcane-app .conversation-library .library-chat[aria-current=true]{background:var(--row-selected);border-color:transparent;box-shadow:inset 0 1px 0 var(--glass-hi);color:var(--text)}
+  .arcane-app .nav-link[aria-pressed=true]::before{content:none}
+}
+/* Bottom glass card: Studio status and the Arcane actions meter (hidden until studio.ts binds it). */
+.arcane-app .sidebar-status-card{display:grid;gap:var(--s-1);margin-top:var(--s-1);padding:12px;border:1px solid var(--sidebar-line);border-radius:var(--r-2);background:linear-gradient(180deg,rgba(255,255,255,.04) 0%,rgba(255,255,255,0) 100%),rgba(0,0,0,.18);box-shadow:inset 0 1px 0 var(--glass-hi)}
+.arcane-app .sidebar-status-card[hidden]{display:none}
+.arcane-app .sidebar-status-line{display:flex;align-items:center;gap:var(--s-1);min-width:0;margin:0;color:var(--text);font-size:13px;line-height:18px}
+.arcane-app .sidebar-status-dot{flex:none;width:8px;height:8px;border-radius:50%;background:var(--muted)}
+.arcane-app .sidebar-status-card[data-studio=connected] .sidebar-status-dot{background:var(--text)}
+.arcane-app .sidebar-status-card[data-studio=error] .sidebar-status-dot{background:var(--accent)}
+.arcane-app .sidebar-status-text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.arcane-app .sidebar-meter{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:var(--s-0) var(--s-1)}
+.arcane-app .sidebar-meter-label{color:var(--muted);font-size:12px;line-height:16px}
+.arcane-app .sidebar-meter-value{color:var(--text-secondary);font-size:12px;line-height:16px;font-variant-numeric:tabular-nums}
+.arcane-app .sidebar-meter meter{position:absolute;width:1px;height:1px;margin:-1px;padding:0;border:0;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap}
+.arcane-app .sidebar-meter-track{grid-column:1/-1;display:block;height:4px;overflow:hidden;border-radius:2px;background:var(--hover-strong)}
+.arcane-app .sidebar-meter-fill{display:block;width:100%;height:100%;background:linear-gradient(90deg,var(--dark-red) 0%,var(--accent) 100%);transform-origin:left center;transform:scaleX(var(--meter-value,0))}
+.arcane-app .sidebar-account{display:flex;align-items:center;gap:var(--s-1);min-width:0;margin:0;color:var(--text-secondary);font-size:12px;line-height:16px}
+.arcane-app .sidebar-account[hidden]{display:none}
+.arcane-app .sidebar-account-name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);font-weight:550}
+.arcane-app .sidebar-account-plan{flex:none;color:var(--muted)}
+.arcane-app .app-sidebar.compact .sidebar-status-card{padding:var(--s-1);justify-items:center}
+.arcane-app .app-sidebar.compact :is(.sidebar-status-text,.sidebar-meter,.sidebar-account){position:absolute;width:1px;height:1px;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap}
+/* Blur is reserved for the sidebar, the composer and dialogs/popovers; other surfaces use flat translucent fills. */
+.arcane-app .workspace-topbar{background:transparent;border-bottom-color:var(--line);box-shadow:none}
+.arcane-app :is(.workspace-topbar,.workspace-search,.secondary,.welcome-connect,.settings-secret-row button,.arcane-balance-chip,.studio-diagnostics-badge,.playtest-toggle,.artifact-panel,.workspace-search-results,.tool-switcher .workspace-tabs):not(.composer-model-popover *){-webkit-backdrop-filter:none;backdrop-filter:none}
+.arcane-app .workspace-stage #provider-login-gate{-webkit-backdrop-filter:none;backdrop-filter:none}
+@supports not ((backdrop-filter:blur(1px)) or (-webkit-backdrop-filter:blur(1px))){
+  .arcane-app .app-sidebar{background:var(--sidebar-solid)}
+}
+@media (prefers-reduced-transparency:reduce){
+  .arcane-app .app-sidebar,.arcane-app .app-sidebar:not(.collapsed){background:var(--sidebar-solid);-webkit-backdrop-filter:none;backdrop-filter:none}
+  .arcane-app .workspace-stage .composer{background:var(--glass-solid) padding-box,var(--edge-quiet) border-box;-webkit-backdrop-filter:none;backdrop-filter:none}
+}
+/* Palette lock for script diffs: additions read white, removals stay red. */
+.arcane-app .script-diff-row.add{background:rgba(255,255,255,.05);box-shadow:inset 3px 0 0 var(--text)}
+
+/* Top bar: the sidebar toggle, chat chip, +, search (Ctrl K), actions pill and Studio pill share one 36px height, one 10px
+   radius, a glass fill with a hairline and inset highlight (no blur), 1.75 icon strokes and palette-only colour. */
+.arcane-app .workspace-topbar{min-height:56px;padding-block:10px;gap:var(--s-1);align-items:center}
+.arcane-app .workspace-topbar :is(#sidebar-toggle,#workspace-new-chat){width:36px;min-width:36px;height:36px;min-height:36px;padding:0;border:1px solid var(--glass-line);border-radius:var(--r-1);background:var(--glass);box-shadow:inset 0 1px 0 var(--glass-hi);color:var(--text-secondary)}
+.arcane-app .workspace-topbar .icon{width:18px;height:18px;stroke-width:1.75}
+.arcane-app .workspace-chat-tabs [role=tab]{min-height:36px;height:36px;padding:0 12px;border-radius:var(--r-1)}
+.arcane-app .chat-tab>button[aria-label^="Close "]{min-height:36px;height:36px;border-radius:var(--r-1)}
+.arcane-app .chat-tabs-history>summary{min-height:36px;border-radius:var(--r-1)}
+.arcane-app .workspace-search{min-height:36px;height:36px;border-radius:var(--r-1);background:var(--glass);border-color:var(--glass-line)}
+.arcane-app .workspace-search input[type=search]{min-height:34px;padding-block:0}
+.arcane-app .workspace-search kbd{min-height:20px;padding:1px 6px;border-radius:var(--r-row);font-size:12px;line-height:16px}
+.arcane-app .workspace-topbar :is(.arcane-balance-chip,.studio-diagnostics-badge){min-height:36px;height:36px;border-radius:var(--r-1);background:var(--glass);border-color:var(--glass-line)}
+.arcane-app .arcane-balance-chip-mark{box-shadow:0 0 0 3px var(--accent-tint)}
+.arcane-app .arcane-balance-chip-value{font-variant-numeric:tabular-nums}
+.arcane-app .studio-diagnostics-badge{padding:0 6px 0 10px}
+.arcane-app .studio-diagnostics-badge .icon{color:var(--text)}
+.arcane-app .studio-diagnostics-count{display:inline-grid;place-items:center;min-width:20px;height:20px;padding:0 6px;font-size:12px;line-height:1}
+@media (hover:hover) and (pointer:fine){
+  .arcane-app .workspace-topbar :is(#sidebar-toggle,#workspace-new-chat):hover{background:var(--hover);border-color:var(--line-strong);color:var(--text)}
+}
+
+/* Model chip: a glass chip as tall as Send, model name in the UI sans, effort as a quiet second segment, then the chevron. */
+.arcane-app .composer-model-trigger,.arcane-app .composer-model-trigger *{font-family:var(--font-ui)}
+.arcane-app .workspace-stage .composer-model-trigger{display:inline-flex;align-items:center;gap:0;min-height:36px;height:36px;padding:0 10px 0 12px;border:1px solid var(--glass-line);border-radius:var(--r-1);background:var(--glass);box-shadow:inset 0 1px 0 var(--glass-hi);color:var(--text);font-size:13px;font-weight:550;letter-spacing:0}
+.arcane-app .workspace-stage .composer-model-trigger #codex-model-label{color:var(--text)}
+.arcane-app .workspace-stage .composer-model-trigger .picker-effort:not([hidden]){display:inline-flex;align-items:center;height:20px;margin-left:var(--s-1);padding:0 0 0 var(--s-1);border-left:1px solid var(--line-strong);color:var(--muted);font-size:12px;font-weight:500;max-width:12ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.arcane-app .workspace-stage .composer-model-trigger .icon{width:14px;height:14px;margin-left:6px;stroke-width:1.75;color:var(--muted)}
+@media (hover:hover) and (pointer:fine){
+  .arcane-app .workspace-stage .composer-model-trigger:hover:not(:disabled){background:var(--hover);border-color:var(--line-strong)}
+}
+.arcane-app .workspace-stage .composer-model-trigger[aria-expanded=true]{background:var(--hover);border-color:var(--accent-line)}
+
+/* Sidebar declutter: ~264px panel, whitespace instead of dividers (24px between sections), the two tool tiles as a compact
+   side-by-side pair (subtitles stay in the accessibility tree and the title tooltip; shown again on very wide windows), quiet
+   folder rows whose totals and context glyphs appear on hover, focus, expanded or current. */
+@media (min-width:1100px){body.arcane-app:not(.shell-compact){--shell-sidebar:280px}}
+.arcane-app .sidebar-secondary{border-top:0}
+@media (min-width:1100px){
+  .arcane-app .app-sidebar:not(.compact) .sidebar-links{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--s-1);align-items:stretch}
+  .arcane-app .app-sidebar:not(.compact) .sidebar-links .sidebar-label{grid-column:1/-1;margin-bottom:0}
+  .arcane-app .app-sidebar:not(.compact) .sidebar-links .nav-link{flex-direction:column;align-items:flex-start;justify-content:flex-start;gap:var(--s-1);width:auto;min-width:0;height:auto;min-height:0;padding:10px}
+  .arcane-app .app-sidebar:not(.compact) .sidebar-links .nav-link>span{display:block;width:100%;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;line-height:18px}
+  .arcane-app .app-sidebar:not(.compact) .sidebar-links .nav-link small{position:absolute;width:1px;height:1px;margin:-1px;padding:0;border:0;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap}
+  .arcane-app .app-sidebar:not(.compact) .sidebar-secondary{padding-top:0}
+}
+@media (min-width:1800px){
+  .arcane-app .app-sidebar:not(.compact) .sidebar-links .nav-link>span{white-space:normal}
+  .arcane-app .app-sidebar:not(.compact) .sidebar-links .nav-link small{position:static;width:auto;height:auto;margin:2px 0 0;overflow:visible;clip:auto;clip-path:none;white-space:normal;display:block;font-size:12px;line-height:16px}
+}
+.arcane-app .folder-row :is(.folder-row__total,.folder-row__context){opacity:0}
+.arcane-app .folder-row:is(:hover,:focus-visible,[aria-expanded=true],[aria-current=true]) :is(.folder-row__total,.folder-row__context){opacity:1}
+@media (hover:none){.arcane-app .folder-row :is(.folder-row__total,.folder-row__context){opacity:1}}
+
+/* Chats and folders (shared-conversations.ts): one scroller (the sidebar), quiet rows, counts as tabular figures. */
+.arcane-app .conversation-library{max-height:none;overflow:visible;gap:var(--s-0);font-size:13px}
+.arcane-app .conversation-library .library-summary{display:flex;align-items:center;gap:var(--s-1);min-height:32px;padding:0 var(--s-1);border-radius:var(--r-row);color:var(--text-secondary);font-size:12px;font-weight:600;list-style:none}
+.arcane-app .conversation-library .library-summary::-webkit-details-marker{display:none}
+.arcane-app .conversation-library .library-folder-name::after{content:attr(data-count);margin-left:auto;color:var(--muted);font-weight:500}
+.arcane-app .conversation-library .library-chat{min-height:32px;padding:6px var(--s-1);border-radius:var(--r-row);color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.arcane-app .conversation-library .library-chat[aria-current=true]{background:var(--hover);border-color:var(--glass-line);color:var(--text);font-weight:550}
+.arcane-app .conversation-library .library-action{display:inline-flex;align-items:center;min-height:28px;padding:0 var(--s-1);color:var(--text-secondary);font-size:12px}
+.arcane-app .conversation-library .library-action-danger{color:var(--danger)}
+.arcane-app .conversation-library .library-input{min-height:32px;margin:var(--s-0) 0;padding:6px var(--s-1);border-radius:var(--r-control);font-size:13px}
+.arcane-app .conversation-library :is(.library-empty,.library-status){margin:0;padding:var(--s-0) var(--s-1);color:var(--muted);font-size:12px;line-height:1.5}
+.arcane-app .conversation-library .library-status[data-state=error]{color:var(--danger)}
+.arcane-app .conversation-library .library-move{padding:var(--s-1) var(--s-1) 0;font-size:12px}
+@media (hover:hover) and (pointer:fine){.arcane-app .conversation-library :is(.library-summary,.library-chat,.library-action):hover{background:var(--hover);color:var(--text)}}
+
+/* Shared Codex/Claude history: part of the conversation scroll, not a second scroller. */
+.arcane-app .shared-conversation-history{max-height:none;overflow:visible;margin:0 0 var(--s-2);padding:0;border:0}
+.arcane-app .shared-conversation-history .shared-history-summary{display:flex;align-items:center;min-height:32px;padding:0 var(--s-1);border-radius:var(--r-row);color:var(--text-secondary);font-size:12px;font-weight:600}
+.arcane-app .shared-history-list{display:grid;gap:0;margin-top:var(--s-1);border-top:1px solid var(--line)}
+.arcane-app .shared-history-message{padding:var(--s-1) var(--s-1) 12px;border-top:0;border-bottom:1px solid var(--line)}
+.arcane-app .shared-history-meta{display:block;margin-bottom:var(--s-0);color:var(--muted);font-size:12px;line-height:16px}
+.arcane-app .shared-history-message p{font-size:13px;line-height:1.6;color:var(--text-secondary)}
+
+/* Workspace: fluid gutter, one scroll per pane. The page itself never scrolls on desktop-sized windows. */
+.arcane-app .app-content{padding:var(--gutter) var(--gutter) 12px}
+@media (min-height:441px){.arcane-app .app-content{overflow:hidden}}
+.arcane-app .workspace-stage{position:relative;gap:var(--s-3)}
+.arcane-app .workspace-stage:not(.preview-open)>.codex-panel{max-width:880px}
+@media (min-width:2000px){
+  .arcane-app .workspace-stage:not(.preview-open)>.codex-panel{max-width:960px}
+  .arcane-app .workspace-stage .codex-message.codex :is(.message-text,pre.message-text){font-size:16px}
+}
+
+/* Conversation header: a solid strip above every decorative layer; status text wraps and never shares a box with the mark. */
+.arcane-app .workspace-stage>.codex-panel>summary.chat-heading{position:relative;z-index:var(--z-sticky);isolation:isolate;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:var(--s-0) var(--s-2);min-height:40px;padding:0 0 var(--s-1);background:transparent}
+.arcane-app .chat-heading .chat-title{flex:0 1 auto;min-width:0}
+.arcane-app .chat-heading .status-text{flex:1 1 160px;min-width:0;max-width:none;margin-left:auto;text-align:right;line-height:18px}
+.arcane-app .workspace-stage .chat-topline{position:relative;z-index:var(--z-sticky);isolation:isolate;gap:var(--s-1);min-height:40px;padding:var(--s-0) 0;border-bottom:1px solid var(--line)}
+.arcane-app .workspace-welcome{isolation:isolate}
+
+/* No provider eyebrows: the status ids stay, rendered as plain quiet text. */
+.arcane-app .workspace-stage .codex-message .eyebrow{display:none}
+.arcane-app .chat-heading :is(#codex-status,#claude-chat-status){padding:0;border:0;border-radius:0;background:transparent;box-shadow:none;color:var(--muted);font-size:12px;font-weight:400;letter-spacing:0;text-transform:none}
+
+/* Messages: less dead space; the red diamond stays; cards lose accent bars and side glows (one hairline, one radius). */
+.arcane-app .workspace-stage .codex-message{padding:12px 0 16px;margin:0 0 var(--s-1)}
+.arcane-app .workspace-stage .codex-message.codex{padding-left:28px}
+.arcane-app .workspace-stage .codex-message.codex::before{left:6px;top:21px;box-shadow:0 0 0 3px rgba(255,51,64,.12)}
+.arcane-app .workspace-stage .codex-message.human{padding:12px var(--s-2);border-radius:var(--r-pane) var(--r-pane) var(--r-row) var(--r-pane)}
+.arcane-app .workspace-stage .codex-message.tool{margin:0 0 12px 28px;padding:var(--s-1) 12px;border-left:1px solid var(--glass-line);border-radius:var(--r-card);box-shadow:var(--e-1)}
+.arcane-app :where(.chat-change-card,.chat-choices,.workspace-stage .tool-group,.workspace-stage .build-progress){border-left:1px solid var(--card-line)}
+.arcane-app :is(.claude-message-body,.message-text) pre,.arcane-app .claude-message-body pre{border-left:1px solid rgba(255,255,255,.08);border-radius:var(--r-card);box-shadow:inset 0 1px 0 rgba(255,255,255,.05)}
+.arcane-app .claude-message-body :not(pre)>code,.arcane-app .codex-message :not(pre)>code{padding:1px 6px;border-radius:var(--r-row)}
+.arcane-app .message-details>summary{color:var(--muted);font-size:12px}
+
+/* Empty, loading and error states. */
+.arcane-app .codex-messages>.empty{color:var(--muted);font-size:13px}
+.arcane-app .workspace-stage .notice.error{border-color:var(--danger-line);background:var(--danger-bg);color:var(--danger)}
+.arcane-app .workspace-stage .notice.warning{border-color:var(--warning-line);background:var(--warning-bg)}
+.arcane-app .workspace-welcome h2{letter-spacing:-.03em}
+.arcane-app .workspace-welcome p{max-width:52ch;margin-inline:auto}
+
+/* Composer: the dock stays a gradient-edged glass; less padding; Send and the model chip stay prominent. */
+.arcane-app .workspace-stage .composer{margin-top:var(--s-1);padding:12px 12px var(--s-1);border-radius:var(--r-dock)}
+.arcane-app .workspace-stage .composer textarea{margin:0 0 var(--s-1);min-height:48px}
+.arcane-app .composer-controls{gap:var(--s-1)}
+.arcane-app #codex-model-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.arcane-app .workspace-stage #codex-submit{width:36px;min-width:36px;height:36px;min-height:36px;padding:8px;border-radius:50%}
+
+/* The steer hint placeholder is not shown (the shortcut lives in the queue strip and the help menu). */
+.arcane-app #codex-composer[data-steer-hint=true]::placeholder{color:transparent}
+
+/* Queue strip (final DOM contract from root): #codex-chat-queue / #claude-chat-queue are .queue-strip[role=list], a darker tab
+   attached to the top of the composer. Rows: .queue-row[data-queue-state=queued|paused|sending|unknown|rejected] holding
+   .queue-list-icon .queue-text .queue-status .queue-steer .queue-remove .queue-menu-toggle, an optional open .queue-menu
+   (.queue-edit .queue-up .queue-down .queue-next) and an optional .queue-editor (.queue-edit-input .queue-save .queue-cancel). */
+.arcane-app .queue-strip{display:grid;gap:0;margin:var(--s-1) 12px -1px;padding:var(--s-0) var(--s-0) 0;border:1px solid var(--glass-line);border-bottom:0;border-radius:var(--r-dock) var(--r-dock) 0 0;background:var(--sunken);color:var(--text-secondary)}
+.arcane-app .queue-strip:empty{display:none}
+.arcane-app .queue-strip+.composer{margin-top:0}
+.arcane-app .queue-row{position:relative;display:flex;flex-wrap:wrap;align-items:center;gap:2px var(--s-1);min-height:36px;padding:0 var(--s-0) 0 12px;border-radius:var(--r-1)}
+.arcane-app .queue-row+.queue-row{margin-top:2px}
+.arcane-app .queue-list-icon{flex:none;width:16px;height:16px;color:var(--muted)}
+.arcane-app .queue-text{flex:1 1 0;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);font-size:13px;line-height:20px}
+.arcane-app .queue-status{flex:none;color:var(--muted);font-size:12px;line-height:16px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.arcane-app .queue-status:empty{display:none}
+.arcane-app .queue-row :is(.queue-steer,.queue-remove,.queue-menu-toggle){flex:none;display:inline-flex;align-items:center;justify-content:center;gap:6px;min-width:28px;min-height:28px;padding:0 var(--s-1);border:1px solid transparent;border-radius:var(--r-row);background:transparent;color:var(--text-secondary);font:500 12px/1 var(--font-ui);box-shadow:none}
+.arcane-app .queue-row :is(.queue-steer,.queue-remove,.queue-menu-toggle) svg{width:16px;height:16px}
+.arcane-app .queue-row .queue-steer{color:var(--accent-text);font-weight:600}
+.arcane-app .queue-row .queue-menu-toggle[aria-expanded=true]{background:var(--hover-strong);color:var(--text)}
+/* Menu: opens upward from the row's end, over the transcript, never over the composer. */
+.arcane-app .queue-menu{position:absolute;right:var(--s-0);bottom:calc(100% + 4px);z-index:var(--z-menu);display:grid;gap:2px;min-width:180px;max-width:min(260px,calc(100vw - 32px));padding:var(--s-0);border:1px solid var(--glass-line);border-radius:var(--r-card);background:var(--glass-solid);box-shadow:var(--e-2)}
+.arcane-app .queue-menu[hidden]{display:none}
+.arcane-app .queue-menu :is(.queue-edit,.queue-up,.queue-down,.queue-next){display:flex;align-items:center;width:100%;min-height:32px;padding:0 10px;border:0;border-radius:var(--r-row);background:transparent;color:var(--text);font:500 13px/1 var(--font-ui);text-align:left;box-shadow:none}
+.arcane-app .queue-menu :is(.queue-edit,.queue-up,.queue-down,.queue-next):disabled{color:var(--muted)}
+/* Inline editor: a full-width second line inside the row. */
+.arcane-app .queue-editor{display:flex;flex:1 0 100%;align-items:center;gap:var(--s-1);padding:var(--s-0) 0 var(--s-1)}
+.arcane-app .queue-editor[hidden]{display:none}
+.arcane-app .queue-editor .queue-edit-input{flex:1 1 auto;min-width:0;min-height:32px;padding:6px 10px;border:1px solid var(--field-line);border-radius:var(--r-control);background:var(--input);color:var(--text);font:400 13px/20px var(--font-ui);resize:none}
+.arcane-app .queue-editor :is(.queue-save,.queue-cancel){flex:none;min-height:32px;padding:0 12px;border-radius:var(--r-control);font:600 12px/1 var(--font-ui)}
+.arcane-app .queue-editor .queue-save{border:1px solid var(--btn-primary-line);background-color:var(--action);background-image:var(--grad-action);color:#fff}
+.arcane-app .queue-editor .queue-cancel{border:1px solid var(--glass-line);background:transparent;color:var(--text-secondary)}
+.arcane-app .queue-row:has(.queue-editor:not([hidden])) :is(.queue-text,.queue-status){display:none}
+/* States. Paused: dormant (restored, never auto-sent). Sending: a thin progress line. Rejected/unknown: dark red with white text. */
+.arcane-app .queue-row[data-queue-state=paused] :is(.queue-text,.queue-list-icon){color:var(--muted)}
+.arcane-app .queue-row[data-queue-state=paused] .queue-text{font-style:italic}
+.arcane-app .queue-row[data-queue-state=paused]{background:repeating-linear-gradient(135deg,transparent 0 6px,rgba(255,255,255,.025) 6px 12px)}
+.arcane-app .queue-row[data-queue-state=sending]::after{content:"";position:absolute;left:12px;right:12px;bottom:2px;height:2px;border-radius:1px;background:linear-gradient(90deg,var(--dark-red),var(--accent));opacity:.7;transform-origin:left center}
+.arcane-app .queue-row[data-queue-state=sending] .queue-status{color:var(--text-secondary)}
+.arcane-app .queue-row:is([data-queue-state=rejected],[data-queue-state=unknown]){background:linear-gradient(90deg,rgba(142,15,34,.42) 0%,rgba(90,30,38,.28) 100%);box-shadow:inset 0 0 0 1px var(--dark-red)}
+.arcane-app .queue-row:is([data-queue-state=rejected],[data-queue-state=unknown]) :is(.queue-text,.queue-list-icon){color:var(--text)}
+.arcane-app .queue-row:is([data-queue-state=rejected],[data-queue-state=unknown]) .queue-status{color:var(--text);font-weight:600}
+@media (hover:hover) and (pointer:fine){
+  .arcane-app .queue-row:hover:not([data-queue-state=rejected]):not([data-queue-state=unknown]){background-color:var(--hover)}
+  .arcane-app :is(.queue-row :is(.queue-steer,.queue-remove,.queue-menu-toggle),.queue-menu button,.queue-editor .queue-cancel):hover:not(:disabled){background:var(--hover-strong);color:var(--text)}
+}
+.arcane-app :is(.queue-row :is(.queue-steer,.queue-remove,.queue-menu-toggle),.queue-menu button):active:not(:disabled){background:var(--hover-strong)}
+@media (max-width:520px){
+  .arcane-app .queue-row .queue-steer{padding:0 6px}
+  .arcane-app .queue-status{display:none}
+}
+
+/* Focus: one visible ring on every control. Disabled: dimmed but legible, with a not-allowed cursor; the reason is the live notice. */
+.arcane-app :where(button,a,input,select,textarea,summary,[tabindex],[role=tab],[role=option],[role=button],[role=switch]):not(.composer-model-popover *):focus-visible{outline:2px solid var(--focus-ring);outline-offset:2px}
+.arcane-app :where(button,input,select,textarea):disabled{cursor:not-allowed}
+.arcane-app .composer-model-trigger:disabled{opacity:.6}
+.arcane-app .codex-panel:has(#codex-submit:disabled) .chat-topline [role=status]:not(:empty){color:var(--text-secondary)}
+
+/* Popovers, menus and dialogs: viewport-aware height, own scroller, stacking from one scale. */
+.arcane-app .workspace-search-results{max-height:min(480px,calc(100dvh - 96px));overflow:auto;overscroll-behavior:contain;border-radius:var(--r-card)}
+.arcane-app .tool-switcher .workspace-tabs{max-height:min(60svh,calc(100dvh - 96px))}
+.arcane-app .chat-tabs-history[open]{max-height:min(560px,calc(100dvh - 24px));overscroll-behavior:contain}
+.arcane-app :where(.composer-command-menu,.studio-diagnostics-panel){max-height:min(420px,calc(100dvh - 120px));overflow:auto;overscroll-behavior:contain}
+.arcane-app .settings-drawer{max-height:calc(100dvh - 32px);border-radius:var(--r-pane)}
+.arcane-app .settings-pages{padding:var(--s-3) var(--s-4)}
+.arcane-app :is(.settings-card,.settings-page>.panel,.settings-drawer .settings-group .panel){border-radius:var(--r-card)}
+.arcane-app .artifact-panel{border-radius:var(--r-pane)}
+
+/* Sign-in card: less padding. */
+.arcane-app #provider-login-gate{padding:var(--s-4) var(--s-4) var(--s-3);border-radius:var(--r-pane)}
+
+/* Medium widths: preview becomes an overlay sheet over the conversation, above the decorative layers and below the
+   composer, so the composer and Send stay reachable and the stage never becomes a second scroller. */
+@media (max-width:1099px){
+  .arcane-app .workspace-stage.preview-open{grid-template-columns:minmax(0,1fr);overflow:visible}
+  .arcane-app .workspace-stage.preview-open>.codex-panel{min-height:0}
+  .arcane-app .workspace-stage.preview-open>.artifact-panel{position:absolute;top:0;left:0;right:0;z-index:var(--z-overlay);height:calc(100% - var(--dock-clear));min-height:240px;margin:0;background:var(--glass-solid);box-shadow:var(--e-3)}
+  .arcane-app .workspace-stage.preview-open .composer{z-index:calc(var(--z-overlay) + 1)}
+}
+/* Narrow desktop windows: the sidebar becomes the icon rail automatically (labels stay in the accessibility tree). */
+@media (max-width:899px) and (min-width:761px){
+  body.arcane-app{--shell-sidebar:84px}
+  .arcane-app .app-sidebar:not(.collapsed){width:68px;padding:18px 10px 14px;gap:14px;align-items:center;overflow-x:hidden}
+  .arcane-app .app-sidebar:not(.collapsed) .wordmark{justify-content:center;gap:0;margin:0}
+  .arcane-app .app-sidebar:not(.collapsed) :is(.wordmark>span,.new-chat>span,.new-chat>kbd,.nav-link>span,.sidebar-label,.sidebar-note){position:absolute;width:1px;height:1px;margin:-1px;padding:0;border:0;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap}
+  .arcane-app .app-sidebar:not(.collapsed) :is(.sidebar-links,.sidebar-secondary){align-items:center;gap:6px;width:100%}
+  .arcane-app .app-sidebar:not(.collapsed) :is(.new-chat,.nav-link){width:46px;min-height:44px;height:44px;padding:0;gap:0;justify-content:center}
+  .arcane-app .app-sidebar:not(.collapsed) .conversation-library{visibility:hidden;height:0;min-height:0;overflow:hidden}
+  .arcane-app .app-sidebar:not(.collapsed) .sidebar-compact-toggle{visibility:hidden}
+  .arcane-app .settings-drawer{inset:0;width:100%;height:100dvh;max-height:100dvh;border-radius:0}
+}
+/* Short windows: the page keeps a single scroller and the conversation sizes to its content. */
+@media (max-height:440px){
+  .arcane-app .workspace-stage .composer textarea{min-height:36px}
+}
+
+/* Compact composer row for small hosts (for example a pop-out mini window): .arcane-bar and its parts.
+   Not used by the main window layout; the narrow side-panel layout below keeps the full composer. */
+.arcane-bar{display:flex;align-items:center;gap:var(--s-1);min-height:44px;padding:var(--s-0) var(--s-0) var(--s-0) 12px;border:1px solid var(--glass-line);border-radius:var(--r-dock);background:var(--glass-solid);box-shadow:var(--e-2);color:var(--text)}
+.arcane-bar__status{flex:none;width:8px;height:8px;border-radius:50%;background:var(--muted)}
+.arcane-bar__status[data-state=ready]{background:var(--success)}
+.arcane-bar__status[data-state=busy]{background:var(--accent)}
+.arcane-bar__status[data-state=error]{background:var(--danger)}
+.arcane-bar__input{flex:1 1 auto;min-width:0;height:36px;min-height:36px;max-height:36px;margin:0;padding:6px var(--s-0);border:0;background:transparent;color:var(--text);font:15px/24px var(--font-ui);resize:none;overflow:hidden;white-space:nowrap}
+.arcane-bar__input::placeholder{color:var(--muted);opacity:1}
+.arcane-bar__model{flex:0 1 auto;display:inline-flex;align-items:center;gap:6px;min-width:0;max-width:28ch;min-height:32px;padding:0 12px;border:1px solid var(--glass-line);border-radius:var(--r-chip);background:var(--glass);color:var(--text);font:600 12px/1 var(--font-ui);font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.arcane-bar__send{flex:none;display:grid;place-items:center;width:36px;height:36px;min-height:36px;padding:8px;border:1px solid var(--btn-primary-line);border-radius:50%;background-color:var(--action);background-image:var(--grad-action);color:#fff}
+.arcane-bar__send:disabled{background:var(--hover);border-color:var(--glass-line);color:var(--muted)}
+.arcane-bar__reason{flex:0 1 auto;min-width:0;color:var(--muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.arcane-bar :where(button,input,textarea,[tabindex]):focus-visible{outline:2px solid var(--focus-ring);outline-offset:2px}
+/* Docked side panel (window ≤520px wide, any height): one column beside Roblox Studio, like a narrow messaging window.
+   Header: the sidebar becomes one icon row (logo, tools, project, history, settings, new chat); the top bar holds the
+   menu, the current chat (chats switcher) and search; the conversation heading is one status line. Labels stay in the
+   accessibility tree. The composer stays docked at the bottom with the queue strip above it; preview is an overlay. */
+@media (max-width:520px){
+  .arcane-app .app-sidebar:not(.collapsed){flex-direction:row;flex-wrap:nowrap;align-items:center;gap:2px;max-height:none;min-height:48px;padding:var(--s-0) var(--s-1);overflow:hidden}
+  .arcane-app .app-sidebar:not(.collapsed) :is(.wordmark>span,.new-chat>span,.new-chat>kbd,.nav-link>span,.sidebar-label,.sidebar-note){position:absolute;width:1px;height:1px;margin:-1px;padding:0;border:0;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap}
+  .arcane-app .app-sidebar:not(.collapsed) .wordmark{flex:none;margin:0 var(--s-1) 0 var(--s-0);gap:0}
+  .arcane-app .app-sidebar:not(.collapsed) .wordmark .arcane-logo{width:24px;height:24px}
+  .arcane-app .app-sidebar:not(.collapsed) :is(.sidebar-links,.sidebar-secondary){flex:0 0 auto;flex-direction:row;align-items:center;gap:2px;margin:0;padding:0;border:0}
+  .arcane-app .app-sidebar:not(.collapsed) .sidebar-secondary{margin-left:auto}
+  .arcane-app .app-sidebar:not(.collapsed) :is(.nav-link,.new-chat){flex:none;width:40px;min-height:40px;height:40px;padding:0;gap:0;justify-content:center;border-radius:var(--r-control)}
+  .arcane-app .app-sidebar:not(.collapsed) .sidebar-links .tool-icon{width:16px;height:16px;padding:5px;border-radius:var(--r-row)}
+  .arcane-app .app-sidebar:not(.collapsed) .new-chat{order:9;margin-left:var(--s-0)}
+  .arcane-app .app-sidebar:not(.collapsed) .conversation-library{visibility:hidden;position:absolute;width:0;height:0;overflow:hidden}
+  .arcane-app .workspace-topbar{min-height:44px;padding:var(--s-0) var(--s-1);gap:var(--s-0)}
+  .arcane-app .workspace-topbar .icon-button{width:36px;min-width:36px;height:36px}
+  .arcane-app .chat-tabs-history{flex:1 1 auto;min-width:0}
+  .arcane-app .workspace-topbar .workspace-search{flex:0 0 36px;width:36px;min-width:36px;padding-inline:9px}
+  .arcane-app .workspace-topbar .workspace-search:focus-within{flex:1 1 auto;width:auto}
+  .arcane-app .workspace-topbar .workspace-search kbd{display:none}
+  .arcane-app .app-content{padding:var(--s-1) var(--s-1) var(--s-1)}
+  .arcane-app .workspace-stage>.codex-panel>summary.chat-heading{min-height:28px;padding:0 var(--s-0) var(--s-0)}
+  .arcane-app .chat-heading .chat-avatar{display:none}
+  .arcane-app .chat-heading .status-text{flex:1 1 auto;text-align:left;margin-left:0}
+  .arcane-app .workspace-stage .chat-topline{min-height:36px;padding:2px 0}
+  .arcane-app .workspace-stage .codex-message{padding:var(--s-1) 0 12px}
+  .arcane-app .workspace-stage .codex-message.codex{padding-left:22px}
+  .arcane-app .workspace-stage .codex-message.codex::before{left:4px;top:17px}
+  .arcane-app .workspace-stage .codex-message.codex :is(.message-text,pre.message-text){font-size:14px;line-height:1.65}
+  .arcane-app .workspace-stage .codex-message.human{padding:10px 12px}
+  .arcane-app .workspace-stage .codex-message.tool{margin-left:22px}
+  .arcane-app .workspace-stage :is(.tool-group,.build-progress){margin-left:0}
+  .arcane-app .workspace-stage .composer{margin-top:var(--s-0);padding:10px 10px 6px;border-radius:var(--r-card)}
+  .arcane-app .queue-strip{margin-inline:var(--s-1);border-radius:var(--r-card) var(--r-card) 0 0}
+  .arcane-app .workspace-stage .composer textarea{min-height:44px;font-size:15px}
+  .arcane-app #codex-model-label{max-width:18ch}
+  .arcane-app .playtest-toggle{gap:0;width:32px;min-width:32px;padding:0;justify-content:center}
+  .arcane-app .playtest-toggle :is(.playtest-toggle-label,.playtest-toggle-state){position:absolute;width:1px;height:1px;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap}
+  .arcane-app .claude-usage-meter .usage-meter-cost{display:none}
+  .arcane-app .workspace-stage.preview-open>.artifact-panel{border-radius:var(--r-card)}
+  .arcane-app .settings-drawer{inset:0;width:100%;height:100dvh;max-height:100dvh;border-radius:0}
+}
+
+/* Provider marks (the OpenAI mark, the Claude spark, the Arcane A from codex-chat.ts PROVIDER_MARKS): faithful, single-colour white.
+   The red diamond remains only as the assistant message marker. */
+.arcane-app .provider-logo,.arcane-app .workspace-chat-tabs [role=tab] .provider-logo,.arcane-app .model-column[data-picker-group=arcane] .model-group-heading .provider-logo{color:var(--text)}
+.arcane-app .workspace-chat-tabs [role=tab]:not([aria-selected=true]) .provider-logo{opacity:.72}
+.arcane-app .workspace-stage .composer-model-trigger .provider-logo{width:16px;height:16px;margin-right:var(--s-1);color:var(--text)}
+@media (min-width:761px){
+  body.arcane-app.shell-compact .workspace-chat-tabs [role=tab]:has(.provider-logo){padding-left:10px}
+  body.arcane-app.shell-compact .workspace-chat-tabs [role=tab]:has(.provider-logo)::before{content:none}
+  body.arcane-app.shell-compact .workspace-chat-tabs [role=tab] svg.provider-logo{display:inline-block;width:14px;height:14px;margin-right:6px;vertical-align:-2px}
+}
+/* Tool tiles: the Blender silhouette (eye, inner ring, prongs to the upper left) and the Roblox mark in white; Blender's dot is red. */
+.arcane-app .sidebar-links :is(.blender-icon,.roblox-icon){color:var(--text)}
+.arcane-app .blender-icon .blender-icon-dot{fill:var(--accent)}
+
+/* Folder tree (context bubbles; expand/collapse logic belongs to Codex): chevron, shared-context glyph, indented chats.
+   Markup contract: button.folder-row[aria-expanded] > (.folder-row__chevron, .folder-row__context, .folder-row__name, .folder-row__count)
+   followed by .folder-chats > .folder-chat[aria-current]. */
+.arcane-app .folder-row{display:flex;align-items:center;gap:var(--s-1);width:100%;min-height:var(--row-h);padding:0 10px 0 6px;border:0;border-radius:var(--r-1);background:transparent;color:var(--text-secondary);font:550 13px/18px var(--font-ui);text-align:left}
+.arcane-app .folder-row::before{content:"";flex:none;width:6px;height:6px;margin:0 4px 0 3px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;transform:rotate(-45deg);opacity:.7}
+.arcane-app .folder-row[aria-expanded=true]::before{transform:rotate(45deg)}
+.arcane-app .folder-row__chevron{display:none}
+.arcane-app .folder-row__context{flex:none;width:16px;height:16px;border:1.5px solid var(--dark-red);border-radius:50%;background:radial-gradient(circle,var(--accent) 0 2px,transparent 2.5px)}
+.arcane-app .folder-row__name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.arcane-app .folder-row__count{flex:none;color:var(--muted);font-size:12px;font-weight:500;font-variant-numeric:tabular-nums}
+.arcane-app .folder-chats{display:grid;gap:2px;margin:2px 0 var(--s-0);padding-left:22px;background:linear-gradient(var(--line),var(--line)) 13px 0/1px 100% no-repeat}
+.arcane-app .folder-chats[hidden],.arcane-app .folder-row[aria-expanded=false]+.folder-chats{display:none}
+.arcane-app .folder-chat{display:block;width:100%;min-height:32px;padding:0 10px;border:0;border-radius:var(--r-1);background:transparent;color:var(--text-secondary);font:400 13px/32px var(--font-ui);text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.arcane-app .folder-chat[aria-current=true],.arcane-app .folder-chat[aria-selected=true]{background:var(--row-selected);color:var(--text);font-weight:550}
+@media (hover:hover) and (pointer:fine){.arcane-app :is(.folder-row,.folder-chat):hover:not([aria-current=true]){background:var(--hover);color:var(--text)}}
+.arcane-app :is(.folder-row,.folder-chat):active{background:var(--hover-strong)}
+
+/* Per-reply usage footer: one muted tabular line under an assistant reply ("18.4k tokens · £0.21"). Existing .reply-usage
+   lines share the look. [data-live] marks a reply still streaming (a static red dot, no motion). The breakdown
+   (.message-usage__detail) extends the same line on hover or keyboard focus: inline, so it is never clipped by the scroller. */
+.arcane-app :is(.message-usage,.reply-usage){max-width:100%;margin:var(--s-1) 0 0 28px;color:var(--muted);font:400 12px/16px var(--font-ui);font-variant-numeric:tabular-nums;white-space:nowrap}
+.arcane-app .message-usage{position:relative;display:flex;align-items:baseline;gap:var(--s-1);overflow:hidden}
+.arcane-app #codex-messages>:is(.message-usage,.reply-usage){margin:-8px 0 12px 28px}
+.arcane-app .message-usage[data-live]{overflow:visible}
+.arcane-app .message-usage[data-live]::before{content:"";position:absolute;left:-14px;top:5px;width:6px;height:6px;border-radius:50%;background:var(--accent)}
+.arcane-app .message-usage[data-live]{color:var(--text-secondary)}
+.arcane-app .message-usage[tabindex]{border-radius:var(--r-row);cursor:default}
+.arcane-app .message-usage__detail{display:none;min-width:0;margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-size:12px}
+.arcane-app .message-usage:is(:hover,:focus-visible,:focus-within) .message-usage__detail{display:block}
+.arcane-app .message-usage__detail :is(dt,dd){display:inline;margin:0}
+.arcane-app .message-usage__detail dt::after{content:" "}
+.arcane-app .message-usage__detail dd{color:var(--text-secondary);font-variant-numeric:tabular-nums}
+.arcane-app .message-usage__detail dd:not(:last-child)::after{content:" · ";color:var(--muted)}
+@media (max-width:520px){.arcane-app :is(.message-usage,.reply-usage),.arcane-app #codex-messages>:is(.message-usage,.reply-usage){margin-left:22px}}
+
+/* Folder totals (aggregation is Codex-owned): a right-aligned total on the folder row and an expanded summary card. */
+.arcane-app .folder-row__total{flex:none;margin-left:auto;color:var(--muted);font-size:12px;font-weight:500;font-variant-numeric:tabular-nums;white-space:nowrap}
+.arcane-app .folder-row__total~.folder-row__count{margin-left:var(--s-1)}
+.arcane-app .folder-summary{display:grid;gap:6px;margin:var(--s-0) 0 var(--s-1);padding:10px 12px;border:1px solid var(--glass-line);border-radius:var(--r-1);background:linear-gradient(180deg,rgba(142,15,34,.12) 0%,rgba(142,15,34,0) 100%),rgba(0,0,0,.16);color:var(--text-secondary);font-size:12px;line-height:16px;font-variant-numeric:tabular-nums}
+.arcane-app .folder-summary strong{color:var(--text);font-weight:600}
+.arcane-app .folder-summary__bar{display:flex;gap:2px;height:4px;overflow:hidden;border-radius:2px;background:var(--hover-strong)}
+.arcane-app .folder-summary__bar>span{flex:0 0 auto;min-width:2px;background:var(--accent)}
+.arcane-app .folder-summary__bar>span:nth-child(even){background:var(--dark-red)}
+.arcane-app .folder-summary__bar>span[aria-current=true]{background:var(--text)}
+
+/* Pyx perch (markup and sprite arrive in C23 as new files): a 40px pixel sprite perched on the composer's top-left edge.
+   Markup contract, first child of #codex-compose:
+   <button type="button" class="pyx-perch pyx--idle" aria-label="Open Pyx"><span class="pyx-perch__body"><span class="pyx-perch__frames"></span></span></button>
+   Sprite: --pyx-sprite:url(...) on .pyx-perch, a sheet of 2 frames x 5 mood rows in 40px cells (idle, listening, working, done, alert).
+   The tooltip is drawn from aria-label (no title attribute, so no double tooltip). Static here; frames and bob live in the motion block. */
+.arcane-app .pyx-perch{position:absolute;left:16px;top:-34px;z-index:1;display:block;width:40px;height:40px;min-width:40px;min-height:40px;padding:0;border:0;border-radius:var(--r-1);background:transparent;box-shadow:none;cursor:pointer}
+.arcane-app .pyx-perch__body{display:block;width:40px;height:40px;overflow:hidden}
+.arcane-app .pyx-perch__frames{display:block;width:80px;height:40px;background-image:var(--pyx-sprite,none);background-repeat:no-repeat;background-size:80px 200px;background-position:0 calc(var(--pyx-row,0) * -40px);image-rendering:pixelated}
+.arcane-app .pyx--idle{--pyx-row:0}
+.arcane-app .pyx--listening{--pyx-row:1}
+.arcane-app .pyx--working{--pyx-row:2}
+.arcane-app .pyx--done{--pyx-row:3}
+.arcane-app .pyx--alert{--pyx-row:4}
+.arcane-app .pyx-perch::after{content:attr(aria-label);position:absolute;left:calc(100% + 6px);top:10px;display:none;padding:2px var(--s-1);border:1px solid var(--glass-line);border-radius:var(--r-row);background:var(--glass-solid);box-shadow:var(--e-2);color:var(--text);font:500 12px/16px var(--font-ui);white-space:nowrap;pointer-events:none}
+.arcane-app .pyx-perch:is(:hover,:focus-visible)::after{display:block}
+.arcane-app .codex-conversation:has(.pyx-perch) .conversation-scroll{padding-bottom:40px;scroll-padding-bottom:40px}
+.arcane-app .codex-conversation:has(.pyx-perch) .queue-strip{margin-left:64px}
+@media (max-width:520px){
+  .arcane-app .pyx-perch{left:8px;top:-32px}
+  .arcane-app .codex-conversation:has(.pyx-perch) .queue-strip{margin-left:52px}
+}
+
+/* Zero-glitch pass. Stacking: overlay (20) and composer (21) stay under the top bar (30) and its menus; the composer rises
+   above the top bar only while its own popover or command menu is open. No glass inside glass: popovers inside the blurred
+   composer are solid. Focus rings inside clipping scrollers are drawn inset. The only remaining nested scroller is released. */
+.arcane-app .workspace-stage .composer:has(#codex-model-popover:not([hidden]),.composer-command-menu:not([hidden])){z-index:var(--z-popover)}
+.arcane-app :is(.workspace-chat-tabs,.workspace-search-results,.chat-tabs-history,.settings-nav,.artifact-toolbar,.studio-diagnostics-list,.tool-switcher .workspace-tabs,.queue-strip,.queue-menu) :focus-visible{outline-offset:-2px}
+.arcane-app #codex-messages:focus-visible{outline-offset:-2px}
+.arcane-app .build-progress-items{max-height:none;overflow:visible}
+.arcane-app .conversation-scroll:has(.studio-connection-banner){-webkit-mask-image:linear-gradient(180deg,#000 calc(100% - 16px),transparent 100%);mask-image:linear-gradient(180deg,#000 calc(100% - 16px),transparent 100%)}
+
+/* Scrollbars: none drawn anywhere (wheel, touch, keyboard and focus scrolling still work); soft fade masks mark the
+   scroll edges of each pane. Forced colors restores system scrollbars. No horizontal overflow: panes clip x and shrink. */
+.arcane-app,.arcane-app *:not(.composer-model-popover,.composer-model-popover *){scrollbar-width:none!important}
+.arcane-app :not(.composer-model-popover,.composer-model-popover *)::-webkit-scrollbar,.arcane-app::-webkit-scrollbar{width:0!important;height:0!important;background:transparent}
+.arcane-app :is(.app-main,.app-content,.workspace-stage,.codex-panel,.codex-conversation,.conversation-scroll,.codex-messages,.codex-message,.composer,.composer-controls,.artifact-panel,.settings-pages){min-width:0}
+.arcane-app :is(.conversation-scroll,.app-sidebar,.settings-pages,.artifact-files){overflow-x:hidden}
+.arcane-app .conversation-scroll{-webkit-mask-image:linear-gradient(180deg,transparent 0,#000 12px,#000 calc(100% - 16px),transparent 100%);mask-image:linear-gradient(180deg,transparent 0,#000 12px,#000 calc(100% - 16px),transparent 100%)}
+.arcane-app :is(.settings-pages,.studio-diagnostics-list){-webkit-mask-image:linear-gradient(180deg,transparent 0,#000 10px,#000 calc(100% - 10px),transparent 100%);mask-image:linear-gradient(180deg,transparent 0,#000 10px,#000 calc(100% - 10px),transparent 100%)}
+@media (forced-colors:active){
+  .arcane-app,.arcane-app *:not(.composer-model-popover,.composer-model-popover *){scrollbar-width:auto!important}
+  .arcane-app :is(.conversation-scroll,.settings-pages,.studio-diagnostics-list){-webkit-mask-image:none;mask-image:none}
+}
+
+@media (forced-colors:active){
+  .arcane-app .arcane-logo path{fill:CanvasText}
+  .arcane-app .arcane-logo{filter:none}
+  .arcane-app .conversation-library .library-chat[aria-current=true]{border-color:Highlight;background:Canvas;color:CanvasText}
+  .arcane-bar__status{forced-color-adjust:none;background:CanvasText}
+  .arcane-bar{border-color:CanvasText;background:Canvas;color:CanvasText;box-shadow:none}
+  .arcane-bar__model{border-color:ButtonText;background:ButtonFace;color:ButtonText}
+  .arcane-bar__send{border:2px solid Highlight;background:ButtonFace;color:ButtonText}
+  .arcane-app .workspace-stage.preview-open>.artifact-panel{border-color:CanvasText}
+  .arcane-app .queue-strip{border-color:CanvasText;background:Canvas;color:CanvasText}
+  .arcane-app .queue-row :is(.queue-steer,.queue-remove,.queue-menu-toggle),.arcane-app .queue-menu button{border-color:ButtonText;color:ButtonText}
+  .arcane-app .queue-menu{border-color:CanvasText;background:Canvas}
+  .arcane-app .queue-row:is([data-queue-state=rejected],[data-queue-state=unknown]){background:Canvas;box-shadow:none;outline:2px solid Highlight;outline-offset:-2px}
+  .arcane-app .queue-row[data-queue-state=sending]::after{forced-color-adjust:none;background:Highlight}
+  .arcane-app .app-sidebar:not(.collapsed){border-color:CanvasText;background:Canvas;box-shadow:none;-webkit-backdrop-filter:none;backdrop-filter:none}
+  .arcane-app .nav-link[aria-pressed=true],.arcane-app .conversation-library .library-chat[aria-current=true]{background:Canvas;border-color:Highlight}
+  .arcane-app .sidebar-status-card{border-color:CanvasText;background:Canvas}
+  .arcane-app .sidebar-status-dot{forced-color-adjust:none;background:CanvasText}
+  .arcane-app .folder-chat[aria-current=true],.arcane-app .folder-chat[aria-selected=true]{background:Canvas;outline:2px solid Highlight;outline-offset:-2px}
+  .arcane-app .folder-row__context{forced-color-adjust:none;border-color:CanvasText;background:radial-gradient(circle,CanvasText 0 2px,transparent 2.5px)}
+  .arcane-app .blender-icon .blender-icon-dot{fill:CanvasText}
+  .arcane-app .pyx-perch{outline:1px solid ButtonText}
+  .arcane-app .pyx-perch__frames{forced-color-adjust:none}
+  .arcane-app .pyx-perch::after{border-color:CanvasText;background:Canvas;color:CanvasText}
+  .arcane-app .sidebar-meter-fill{forced-color-adjust:none;background:Highlight}
+  .arcane-app .message-usage__detail,.arcane-app .folder-summary{border-color:CanvasText;background:Canvas;color:CanvasText;box-shadow:none}
+  .arcane-app .message-usage[data-live]::before,.arcane-app .folder-summary__bar>span{forced-color-adjust:none;background:CanvasText}
+  .arcane-app :where(button,a,input,select,textarea,summary,[tabindex],[role=tab],[role=option],[role=button],[role=switch]):focus-visible,.arcane-bar :where(button,input,textarea,[tabindex]):focus-visible{outline-color:Highlight}
+}
+/* ---- End C22 revamp ---- */
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
