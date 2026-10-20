@@ -87,7 +87,11 @@ export function diagnosticEvent(value: unknown): DiagnosticEvent {
     const raw = record(v.context); const clean: Record<string, string | number> = {};
     for (const key of Object.keys(raw).sort()) {
       const entry = raw[key];
-      if (key === 'jobId' || key === 'operationId') { if (!diagnosticEventId(entry)) fail(); }
+      if (key === 'jobId') { if (!diagnosticEventId(entry)) fail(); }
+      else if (key === 'operationId') {
+        // Correlation only: native action UUIDs also admit the two reserved RFC forms.
+        if (!diagnosticEventId(entry) && entry !== '00000000-0000-0000-0000-000000000000' && entry !== 'ffffffff-ffff-ffff-ffff-ffffffffffff') fail();
+      }
       else if (key === 'exceptionType') { if (!DIAGNOSTIC_EXCEPTIONS.includes(entry as typeof DIAGNOSTIC_EXCEPTIONS[number])) fail(); }
       else if (key === 'signal') { if (!SIGNALS.includes(entry as typeof SIGNALS[number])) fail(); }
       else if (key === 'exitCode') { if (!Number.isSafeInteger(entry) || Number(entry) < -2147483648 || Number(entry) > 4294967295) fail(); }

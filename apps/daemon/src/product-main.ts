@@ -87,7 +87,7 @@ let learning: ReturnType<typeof createLearningService>;
 try { learning = createLearningService({ directory: join(directory, 'learning'), projectPath }); }
 catch (error) { await startupFailed('services', error, [() => importStaging.close(), () => importHost.close(), () => assets.close(), () => preparations.close(), () => associations.close(), () => work.close(), () => store.close()]); throw error; }
 let app: Awaited<ReturnType<typeof createConnectionLab>>;
-try { app = await createConnectionLab({ cwd, stateDirectory: connectionDirectory, studioStore: store, workStore: work, conversationWorkStore: associations, assetService: assets, studioImportStaging: importStaging, assetReviewHostFactory:conversation=>{
+try { app = await createConnectionLab({ cwd, codexReportFailure:diagnosticReporter.report, stateDirectory: connectionDirectory, studioStore: store, workStore: work, conversationWorkStore: associations, assetService: assets, studioImportStaging: importStaging, assetReviewHostFactory:conversation=>{
   const host=createAssetReviewHost({directory:join(directory,'asset-reviews'),projectPath:associations.projectPath,workAssociations:associations,bindingHuman:jobId=>conversation.bindingHuman(jobId),readSubject:(jobId,scope,guard)=>assets.modelReviewSubject(jobId,scope,guard)});
   modelReviewHost=host;let release:()=>void;
   try{release=store.bindAssetModelReview(intent=>{if(!intent.modelReview)assetReviewFailure('REQUIRED');assets.assertReviewedImport(intent.jobId,{projectId:intent.projectId,conversation:intent.conversation},intent.modelReview);});}

@@ -24,6 +24,26 @@ export function assetFailureEvent(jobId: string, error: AssetJobError, occurredA
   }
   return diagnosticEvent({schemaVersion: 1, eventId: randomUUID(), occurredAt, component: 'blender', stage, code, context});
 }
+const CODEX_FAILURE_STAGES = {
+  connect:'authenticate',disconnect:'request-stream',select:'request-validation',
+  'thread-start':'request-submit','thread-resume':'request-submit','history-load':'history-load',
+  'grant-assets':'tool-approval','revoke-assets':'tool-approval','grant-writes':'tool-approval','revoke-writes':'tool-approval',
+  'turn-start':'request-submit','turn-steer':'request-submit','turn-interrupt':'request-stream',
+  'task-stop':'request-stream','task-focus':'request-submit','proposal-start':'request-submit',approval:'tool-approval',
+} as const satisfies Record<string, DiagnosticEvent['stage']>;
+const CODEX_FAILURE_CODES = {
+  TIMEOUT:'REQUEST_TIMEOUT',REMOTE_REJECTED:'REQUEST_REJECTED',
+  PROCESS_START:'PROCESS_LAUNCH',CLI_MISSING:'PROCESS_LAUNCH',PROCESS_EXIT_UNCONFIRMED:'SUPERVISION_LOST',
+  DISCONNECTED:'CONNECTION_UNAVAILABLE',STALE_CONNECTION:'CONNECTION_UNAVAILABLE',CLOSED:'CONNECTION_UNAVAILABLE',
+  JOURNAL_FAILURE:'STORAGE_UNAVAILABLE',JOURNAL_LIMIT:'STORAGE_UNAVAILABLE',NATIVE_ERROR:'INTERNAL_ERROR',
+} as const satisfies Record<string, DiagnosticEvent['code']>;
+/** Only the canonical request UUID and fixed host-owned classifications leave the native action journal. */
+export function codexActionFailureEvent(operationId:string,action:keyof typeof CODEX_FAILURE_STAGES,errorCode:string|null,occurredAt=Date.now()):DiagnosticEvent {
+  const code=errorCode!==null&&Object.hasOwn(CODEX_FAILURE_CODES,errorCode)
+    ?CODEX_FAILURE_CODES[errorCode as keyof typeof CODEX_FAILURE_CODES]:'HOST_FAILURE';
+  return diagnosticEvent({schemaVersion:1,eventId:randomUUID(),occurredAt,component:'chat',
+    stage:CODEX_FAILURE_STAGES[action],code,context:{operationId:operationId.toLowerCase()}});
+}
 /** Fixed private child-parent protocol. A send() boolean is not a durable acknowledgement. */
 export function createDiagnosticReporter(channel: DiagnosticChannel = process, timeoutMs = 1000): {report: FailureReporter; close(): void} {
   const pending = new Map<string, {eventId: string; finish: (value: string | null) => void}>(); let closed = false;

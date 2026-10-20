@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {diagnosticEvent, DiagnosticValidationError, DIAGNOSTIC_REASONS} from '../../packages/diagnostics/src/report.js';
+import {diagnosticEvent, diagnosticEventId, DiagnosticValidationError, DIAGNOSTIC_REASONS} from '../../packages/diagnostics/src/report.js';
 
 const input = {schemaVersion: 1, eventId: '8e6bc8a1-a0ea-4823-8998-0f82d14469ba', occurredAt: 1792500000000,
   component: 'blender', stage: 'texture-authoring', code: 'MEMORY_LIMIT', context: {exceptionType: 'MemoryError', exitCode: 1, triangleBudget: 16000}};
@@ -30,5 +30,23 @@ test('fixed launcher failures preserve the actionable startup cause without exce
   for(const code of ['PORT_IN_USE','PROJECT_IN_USE','STATE_NEWER','STATE_UNSAFE','RESOURCE_UNAVAILABLE']){
     const event=diagnosticEvent({...input,component:'daemon',stage:'startup',code});
     assert.equal(event.code,code);assert.ok(event.reason.length>20);
+  }
+});
+
+test('reserved native request UUIDs are correlation metadata only, never event, job or IPC request identities',()=>{
+  for(const operationId of ['00000000-0000-0000-0000-000000000000','ffffffff-ffff-ffff-ffff-ffffffffffff']){
+    const event=diagnosticEvent({...input,component:'chat',context:{operationId}});
+    assert.deepEqual(event.context,{operationId});assert.deepEqual(diagnosticEvent(JSON.parse(JSON.stringify(event))),event);
+    assert.equal(diagnosticEventId(operationId),false,'the unchanged event/IPC UUID validator refuses reserved identities');
+    assert.throws(()=>diagnosticEvent({...input,eventId:operationId}),DiagnosticValidationError);
+    assert.throws(()=>diagnosticEvent({...input,context:{jobId:operationId}}),DiagnosticValidationError);
+  }
+});
+
+test('operation correlation still rejects arbitrary strings and reserved UUID near misses',()=>{
+  for(const operationId of ['private prompt','00000000-0000-0000-0000-000000000001','ffffffff-ffff-ffff-ffff-fffffffffffe',
+    'FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF','11111111-2222-0333-8444-555555555555','11111111-2222-4333-0444-555555555555',
+    '11111111-2222-4333-c444-555555555555','11111111-2222-9333-8444-555555555555','00000000-0000-0000-0000-000000000000x']){
+    assert.throws(()=>diagnosticEvent({...input,context:{operationId}}),DiagnosticValidationError);
   }
 });

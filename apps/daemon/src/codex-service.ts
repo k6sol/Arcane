@@ -23,6 +23,7 @@ import { createChatTaskNativePlan, type NativePlanClient } from './chat-task-nat
 import { createTaskAcceptancePort } from './chat-task-acceptance.js';
 import { SubmittedChatStore, type SubmittedChatTranscript } from '../../../packages/storage/src/submitted-chat-store.js';
 import { TASK_PLAN_REVIEW_TASK_STATES, type TaskPlanView, type TaskPlanReviewView, type TaskPlanReviewTaskState } from '../../../packages/protocol/src/chat-task-plan.js';
+import {codexActionFailureEvent,type FailureReporter} from './diagnostic-reporter.js';
 
 const uuid = z.string().uuid();
 const identifier = z.string().min(1).max(256).refine(value => !/[\x00-\x1f]/.test(value));
@@ -136,6 +137,8 @@ export interface CodexServiceOptions {
   workStore?: WorkStore;
   /** Trusted host callback: the learned-preference block (<= 600 chars) appended after project memory; never HTTP input. */
   learnedContext?: () => Promise<string>;
+  /** Trusted owned-host diagnostics only; never an action envelope or native/agent callback. */
+  reportFailure?: FailureReporter;
 }
 function safeDirectory(path: string): string {
   if (!isAbsolute(path)) throw new CodexClientError('PATH', 'Trusted runtime paths must be absolute.');
@@ -157,6 +160,7 @@ function repairPrompt(report: StudioTestTaskSettled): string {
 }
 /** Durable human action receipts; native conversations remain owned by the actual CLI. */
 export function createCodexService(options: CodexServiceOptions) {
+  const reportFailure=options.reportFailure;
   const projectPath = realpathSync(options.projectPath);
   if (options.workStore && (!(options.workStore instanceof WorkStore) ||
       (process.platform==='win32'?options.workStore.projectPath.toLowerCase()!==projectPath.toLowerCase():options.workStore.projectPath!==projectPath)))
@@ -705,6 +709,14 @@ export function createCodexService(options: CodexServiceOptions) {
         catch { retireAssets(); record.state='unknown'; record.errorCode='ASSET_AUTHORITY';
           try { save(record); } catch { await fenceJournalFailure(); throw new CodexClientError('JOURNAL_FAILURE','Asset permission acknowledgement could not be persisted. Authority retired; no retry.',true); }
         }
+      }
+      if(reportFailure&&(record.state==='rejected'||record.state==='unknown')){
+        // Both the primary transition and any asset-grant conversion are durable before reporting.
+        // Detached reporting never delays, retries or changes a native action or its receipt.
+        try{
+          const event=codexActionFailureEvent(record.requestId,record.action,record.errorCode);
+          void Promise.resolve().then(()=>reportFailure(event)).catch(()=>{});
+        }catch{/* A diagnostic cannot change the recorded native outcome. */}
       }
       if(taskAfterCommit && record.state==='acknowledged') {
         try {tasks!.acknowledged(taskAfterCommit);}

@@ -104,6 +104,8 @@ interface Options {
   codexProposalWorker?: CodexServiceOptions['proposalWorker'];
   /** Trusted embedding opt-in; never accepted from HTTP. Standard chat leaves this disabled. */
   codexAutomaticTaskPlanning?: boolean;
+  /** Owned product diagnostics callback; never supplied by HTTP or agent data. */
+  codexReportFailure?: CodexServiceOptions['reportFailure'];
   /** Explicit trusted launcher configuration. Never supplied by route JSON. Missing means no compiler preflight. */
   workflowCodeVerification?: WorkflowCodeHostConfiguration;
   /** Trusted/test-only borrowed verifier. Never accepted from HTTP or agent data. */
@@ -159,6 +161,7 @@ export async function createConnectionLab(options: Options) {
     ...(options.codexConnect ? {connect:options.codexConnect} : {}),
     ...(options.codexProposalWorker ? {proposalWorker:options.codexProposalWorker} : {}),
     ...(options.codexAutomaticTaskPlanning === true ? {automaticTaskPlanning:true} : {}),
+    ...(options.codexReportFailure ? {reportFailure:options.codexReportFailure} : {}),
     ...(nativeAssetRegistry ? {assetRegistry:nativeAssetRegistry} : {}),
     ...(options.workStore ? {workStore:options.workStore} : {}),
     learnedContext: async () => learnedStore ? learnedStore.context() : '',
