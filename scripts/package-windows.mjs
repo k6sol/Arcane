@@ -18,7 +18,7 @@ function deploymentManifest(source) {
   const files = source.files.filter(file => deploymentPath(file.path));
   return { ...source, fileCount: files.length, totalBytes: files.reduce((total, file) => total + file.bytes, 0), files };
 }
-const HOST_FILES = ['main.cjs', 'policy.cjs', 'preload.cjs', 'code-verification.cjs', 'provider-setup.cjs', 'provider-login.cjs', 'studio-key-vault.cjs', 'workspace-preferences.cjs', 'runtime-recovery.cjs', 'native-handoff.cjs', 'native-handoff-host.cjs', 'native-handoff-ipc.cjs', 'claude-chat.cjs', 'arcane-chat.cjs', 'plugin-install.cjs', 'in-app-dialog.cjs', 'project-permissions.cjs', 'billing.cjs', 'build-notifications.cjs', 'mesh-keep.cjs', 'desktop-updates.cjs', 'trusted-dialog.cjs', 'trusted-dialog-preload.cjs', 'trusted-dialog.html', 'trusted-dialog.css', 'trusted-dialog.js'];
+const HOST_FILES = ['main.cjs', 'diagnostics-host.cjs', 'diagnostics-storage.cjs', 'diagnostics-directory.cjs', 'policy.cjs', 'preload.cjs', 'code-verification.cjs', 'provider-setup.cjs', 'provider-login.cjs', 'studio-key-vault.cjs', 'workspace-preferences.cjs', 'runtime-recovery.cjs', 'native-handoff.cjs', 'native-handoff-host.cjs', 'native-handoff-ipc.cjs', 'claude-chat.cjs', 'arcane-chat.cjs', 'plugin-install.cjs', 'in-app-dialog.cjs', 'project-permissions.cjs', 'billing.cjs', 'build-notifications.cjs', 'mesh-keep.cjs', 'desktop-updates.cjs', 'trusted-dialog.cjs', 'trusted-dialog-preload.cjs', 'trusted-dialog.html', 'trusted-dialog.css', 'trusted-dialog.js'];
 const PRODUCTION_ROOTS = ['@modelcontextprotocol/sdk', 'zod'];
 const ELECTRON_FILES = new Set([
   'electron.exe', 'LICENSE', 'LICENSES.chromium.html', 'version',
@@ -307,6 +307,9 @@ async function assembleWindowsPackage({ repository = REPOSITORY, electronDist,
   const release = await createLocalRelease({ repository });
   const releaseProof = await verifyLocalRelease(release.directory);
   const releaseManifest = await json(join(release.directory, 'release-manifest.json'));
+  for (const required of ['dist/apps/daemon/src/diagnostic-reporter.js', 'dist/packages/diagnostics/src/report.js', 'dist/packages/diagnostics/src/outbox.js']) {
+    if (!releaseManifest.files.some(file => file.path === required)) throw new Error('Diagnostic runtime is absent from the verified source release: ' + required);
+  }
   if (releaseManifest.version !== pkg.version ||
       hash(await regularBytes(join(repository, 'package.json'))) !== releaseManifest.files.find(file => file.path === 'package.json')?.sha256 ||
       hash(await regularBytes(join(repository, 'package-lock.json'))) !== releaseManifest.files.find(file => file.path === 'package-lock.json')?.sha256) {
@@ -487,6 +490,7 @@ export async function verifyWindowsBundle(directory) {
   for (const path of [...ELECTRON_REQUIRED, 'resources/app/package.json', ...HOST_FILES.map(file => 'resources/app/' + file),
     'resources/node/node.exe', 'resources/node/LICENSE', 'resources/product/release-manifest.json',
     'resources/product/dist/apps/daemon/src/product-main.js', 'resources/product/dist/apps/mcp/src/main.js',
+    'resources/product/dist/apps/daemon/src/diagnostic-reporter.js', 'resources/product/dist/packages/diagnostics/src/report.js', 'resources/product/dist/packages/diagnostics/src/outbox.js',
     ...[...REQUIRED_FRONTEND_FILES, ...REQUIRED_MANAGED_LUAU_FILES].map(file => 'resources/product/' + file)]) {
     if (!seen.has(path.toLowerCase())) throw new Error('Missing required Windows bundle file: ' + path);
   }

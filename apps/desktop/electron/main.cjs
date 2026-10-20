@@ -33,6 +33,106 @@ let recoveryWindow = null, recoveryWindowFailure = null, deferWindowShow = false
 let claudeChat;
 let arcaneChat;
 let billing;
+let diagnostics = null, diagnosticStorage = null, diagnosticInit = null, diagnosticClose = null, diagnosticTimer = null;
+let diagnosticState = 'unavailable', diagnosticRetiring = false, diagnosticBooting = false, diagnosticFlushing = false;
+const diagnosticPending = [], diagnosticReports = new Set(), diagnosticChildren = new Map();
+let diagnosticSchema = null;
+function attachDiagnosticChild(owned) {
+  if (smoke || diagnosticRetiring || !owned || owned.exitCode != null || owned.signalCode != null || diagnosticChildren.has(owned)) return;
+  const relay = new (require('node:events').EventEmitter)(), pending = [];
+  let live = true, detach = null;
+  const current = () => live && child === owned && !closing && !diagnosticRetiring && owned.exitCode == null && owned.signalCode == null;
+  Object.defineProperty(relay, 'connected', { get: () => owned.connected });
+  relay.send = (message, callback) => { if (current()) owned.send(message, callback); else callback?.(new Error('Diagnostic child retired.')); };
+  const activate = () => {
+    if (detach || !diagnostics || !current()) return;
+    detach = diagnostics.attach(relay, current);
+    for (const frame of pending.splice(0)) { if (!current()) break; relay.emit('message', frame); }
+  };
+  const receive = message => {
+    if (!current() || !diagnosticSchema) return;
+    try {
+      if (!message || Object.getPrototypeOf(message) !== Object.prototype || Object.keys(message).sort().join(',') !== 'event,protocolVersion,requestId,type' ||
+          message.type !== 'arcane-diagnostic-report' || message.protocolVersion !== 1 || !diagnosticSchema.diagnosticEventId(message.requestId)) return;
+      const frame = { type: 'arcane-diagnostic-report', protocolVersion: 1, requestId: message.requestId, event: diagnosticSchema.diagnosticEvent(message.event) };
+      if (Buffer.byteLength(JSON.stringify(frame)) > 9 * 1024) return;
+      activate();
+      if (detach) relay.emit('message', frame); else if (pending.length < 16) pending.push(frame);
+    } catch { /* Unvalidated text is neither retained nor acknowledged. */ }
+  };
+  const retire = () => { if (!live) return; live = false; pending.length = 0; detach?.(); owned.removeListener('message', receive); diagnosticChildren.delete(owned); };
+  diagnosticChildren.set(owned, { activate, retire });
+  owned.on('message', receive); owned.once('close', retire); activate();
+}
+function retireDiagnosticChild(owned) { diagnosticChildren.get(owned)?.retire(); }
+
+function persistDiagnostic(event, finishing = false) {
+  const host = diagnostics;
+  if (diagnosticRetiring && !finishing || !host || diagnosticReports.size >= 16) return;
+  const work = Promise.resolve().then(() => host.report(event)).then(result => { if (result?.stored !== true) diagnosticState = 'unavailable'; }).catch(() => { diagnosticState = 'unavailable'; });
+  diagnosticReports.add(work); void work.finally(() => diagnosticReports.delete(work)).catch(() => {});
+}
+function recordStartupDiagnostic(code) {
+  const codes = { PROJECT_IN_USE: 'PROJECT_IN_USE', PORT_IN_USE: 'PORT_IN_USE', STATE_NEWER: 'STATE_NEWER', STATE_UNSAFE: 'STATE_UNSAFE',
+    RESOURCE_UNAVAILABLE: 'RESOURCE_UNAVAILABLE', STARTUP_TIMEOUT: 'REQUEST_TIMEOUT', STARTUP_FAILED: 'INTERNAL_ERROR' };
+  if (smoke || diagnosticRetiring || !Object.hasOwn(codes, code)) return;
+  const event = { schemaVersion: 1, eventId: require('node:crypto').randomUUID(), occurredAt: Date.now(), component: 'daemon', stage: 'startup', code: codes[code] };
+  if (diagnostics) persistDiagnostic(event); else if (diagnosticBooting && diagnosticPending.length < 8) diagnosticPending.push(event);
+}
+async function flushDiagnostics() {
+  if (diagnosticRetiring || diagnosticFlushing || !diagnostics) return;
+  diagnosticFlushing = true;
+  try { await diagnostics.flush(); } catch { diagnosticState = 'unavailable'; }
+  finally { diagnosticFlushing = false; }
+}
+async function closeDiagnosticResources() {
+  try {
+    if (diagnostics && await diagnostics.close() !== true) return false;
+    diagnosticStorage?.close(); diagnosticStorage = null; diagnostics = null; return true;
+  } catch { diagnosticState = 'unavailable'; return false; }
+}
+function initializeDiagnostics() {
+  if (smoke || diagnosticInit || diagnosticRetiring) return;
+  diagnosticBooting = true;
+  diagnosticInit = (async () => {
+    try {
+      const load = relative => import(require('node:url').pathToFileURL(join(productRoot, relative)).href);
+      const [report, outbox, plans] = await Promise.all([load('dist/packages/diagnostics/src/report.js'), load('dist/packages/diagnostics/src/outbox.js'), load('dist/packages/protocol/src/plans.js')]);
+      diagnosticSchema = report;
+      if (diagnosticRetiring && !diagnosticPending.length) return;
+      diagnosticStorage = await require('./diagnostics-storage.cjs').openDiagnosticsStorage({ directory: join(userRoot, 'diagnostics'),
+        prepareDirectory: require('./diagnostics-directory.cjs').createDiagnosticsDirectoryPreparer({ root: userRoot }) });
+      if (diagnosticRetiring && !diagnosticPending.length) return;
+      diagnostics = await require('./diagnostics-host.cjs').createDiagnosticsHost({ enabled: true, safeStorage, storage: diagnosticStorage,
+        loadRuntime: async () => ({ ...report, ...outbox }), allowedOrigins: plans.ARCANE_PLANS.gateway.allowedOrigins,
+        credential: async () => (await billing?.accountCredential().catch(() => null)) ?? null });
+      diagnostics.list(); // Refuse a host whose private queue could not be initialized.
+      if (diagnosticRetiring && !diagnosticPending.length) return;
+      diagnosticState = 'ready';
+      for (const event of diagnosticPending.splice(0)) persistDiagnostic(event, true);
+      if (diagnosticRetiring) return;
+      attachDiagnosticChild(child);
+      for (const entry of diagnosticChildren.values()) entry.activate();
+      diagnosticTimer = setInterval(() => { void flushDiagnostics(); }, 60000); diagnosticTimer.unref?.();
+      void flushDiagnostics();
+    } catch { diagnosticState = 'unavailable'; diagnosticPending.length = 0; await closeDiagnosticResources(); }
+    finally { diagnosticBooting = false; }
+  })().catch(() => { diagnosticState = 'unavailable'; });
+}
+function closeDiagnostics() {
+  diagnosticRetiring = true; clearInterval(diagnosticTimer); diagnosticTimer = null;
+  for (const entry of [...diagnosticChildren.values()]) entry.retire();
+  if (diagnosticClose) return diagnosticClose;
+  diagnosticClose = (async () => {
+    await diagnosticInit;
+    let timer;
+    try { await Promise.race([Promise.allSettled([...diagnosticReports]), new Promise(resolve => { timer = setTimeout(resolve, 1000); })]); }
+    finally { clearTimeout(timer); }
+    return closeDiagnosticResources();
+  })().catch(() => false).finally(() => { diagnosticClose = null; });
+  return diagnosticClose;
+}
+async function exitAfterDiagnostics(code) { const clean = await closeDiagnostics(); app.exit(clean ? code : 1); }
 let studioPlugin;
 let projectPermissions;
 // Decisions (any question with more than one button: Claude tool consent, provider sign-in/terminal, plugin install,
@@ -115,6 +215,7 @@ async function stopDaemon() {
   // Retire authority while the owned daemon closes; cleanup never holds its shutdown request.
   const handoffCleanup = handoff?.dispose().catch(() => null) ?? Promise.resolve(null);
   const owned = child; child = null; token = ''; origin = '';
+  retireDiagnosticChild(owned);
   if (!owned) { await handoffCleanup; return true; }
   if (owned.exitCode !== null || owned.signalCode != null) { await handoffCleanup; return owned.exitCode === 0; }
   const clean = await new Promise(resolve => {
@@ -137,8 +238,10 @@ async function startDaemon(project) {
   const portFile = join(stateRoot, 'listener-port.json'); let savedPort = null;
   const startupPortError = message => Object.assign(new Error(message), { code: 'ARCANE_PROJECT_PORT' });
   // Only a daemon-proved listener bind conflict uses port wording and the port code; other outcomes stay generic.
-  const startupFailure = code => code === 'PORT_IN_USE' ? startupPortError(STARTUP_FAILURE_TEXT[code]) :
-    Object.assign(new Error(STARTUP_FAILURE_TEXT[code]), { code: code === 'PROJECT_IN_USE' ? 'ARCANE_PROJECT_IN_USE' : 'ARCANE_STARTUP' });
+  let diagnosticFailureRecorded = false;
+  const reportFailureOnce = code => { if (!diagnosticFailureRecorded) { diagnosticFailureRecorded = true; recordStartupDiagnostic(code); } };
+  const startupFailure = code => { reportFailureOnce(code); return code === 'PORT_IN_USE' ? startupPortError(STARTUP_FAILURE_TEXT[code]) :
+    Object.assign(new Error(STARTUP_FAILURE_TEXT[code]), { code: code === 'PROJECT_IN_USE' ? 'ARCANE_PROJECT_IN_USE' : 'ARCANE_STARTUP' }); };
   const STARTUP_FAILURE_TEXT = Object.freeze({
     PROJECT_IN_USE: 'Arcane is already open for this project in another window. Switch to it, or close it and try again.',
     PORT_IN_USE: 'The local runtime could not start because its local port is in use. Project records and the saved port were retained. Check for another app using the local port, then restart Arcane. No automatic retry was attempted.',
@@ -212,6 +315,7 @@ async function startDaemon(project) {
   const owned = spawn(nodeExecutable, [entry], { cwd: userRoot, env, shell: false, windowsHide: true, stdio: ['ignore', 'ignore', stderrLog ? 'pipe' : 'ignore', 'ipc'] });
   if (stderrLog) { if (owned.stderr) stderrLog.attach(owned.stderr); else stderrLog.close(); }
   child = owned;
+  attachDiagnosticChild(owned);
   let reportedFailure = null;
   const ready = await new Promise((resolve, reject) => {
     const cleanup = () => { clearTimeout(timer); owned.removeListener('error', fail); owned.removeListener('exit', fail); owned.removeListener('message', onMessage); };
@@ -220,7 +324,7 @@ async function startDaemon(project) {
     const onMessage = message => {
       if (child !== owned || origin) return;
       // The first valid report is kept until exit; it never establishes readiness or a retry.
-      try { const code = policy.startupFailureMessage(message); reportedFailure ??= code; return; } catch { /* Not a failure report. */ }
+      try { const code = policy.startupFailureMessage(message); reportedFailure ??= code; reportFailureOnce(reportedFailure); return; } catch { /* Not a failure report. */ }
       let ready; try { ready = policy.readyMessage(message); } catch { return; }
       if (reportedFailure !== null) { cleanup(); reject(startupFailure(reportedFailure)); return; }
       // Use the validated literal port: URL normalizes the explicit HTTP port 80.
@@ -370,9 +474,10 @@ function installMenu() {
 async function failStartup(message) {
   providerSetup?.dispose(); void stopClaudeChat();
   if (closing) return; closing = true; appDialogs?.dispose(); trustedDialogs?.dispose();
-  if (!smoke) await dialog.showMessageBox({ type: 'error', title: 'Arcane could not continue', message });
+  if (!smoke) { try { await dialog.showMessageBox({ type: 'error', title: 'Arcane could not continue', message }); } catch { /* Shutdown still releases the owned diagnostic store. */ } }
   else if (smokeRoot) { try { await writeFile(join(smokeRoot, 'error.json'), JSON.stringify({ version: 1, error: message }) + '\n', { flag: 'wx' }); } catch {} }
-  await stopDaemon(); app.exit(1);
+  try { await stopDaemon(); } catch { /* Preserve the original startup failure. */ }
+  await exitAfterDiagnostics(1);
 }
 /** Start a project's runtime; when another open Arcane already owns it, ask in a trusted Arcane window (not a native box)
  * to try again or quit. Never closes the other instance or takes over its lock. Resolves false when the person quits. */
@@ -394,7 +499,8 @@ async function startProjectRuntime(project) {
 async function quitStartup() {
   providerSetup?.dispose(); void stopClaudeChat();
   if (closing) return; closing = true; appDialogs?.dispose(); trustedDialogs?.dispose();
-  await stopDaemon(); app.exit(0);
+  let code = 0; try { await stopDaemon(); } catch { code = 1; }
+  await exitAfterDiagnostics(code);
 }
 async function runtimeStopped(info) {
   if (smoke) return failStartup('The local runtime stopped. Your project records have been retained.');
@@ -589,13 +695,13 @@ async function checkSmoke() {
     localChat: { harnessOnlyRendererIntents: true, nativeKeyboardInputVerified: false, inferenceStarted: false },
     inferenceStarted: false, studioOperations: 0, signed: false, fullProductVerified: false };
   await writeFile(join(smokeRoot, 'checks.json'), JSON.stringify(report, null, 2) + '\n', { flag: 'wx' });
-  closing = true; app.exit(Object.values(checks).every(Boolean) ? 0 : 1);
+  closing = true; await exitAfterDiagnostics(Object.values(checks).every(Boolean) ? 0 : 1);
 }
 if (profilePreparationFailed) app.whenReady().then(() => failStartup('Arcane application data could not be opened safely. No project or provider was started.'));
 else if (!locked) app.quit();
 else {
   app.on('second-instance', () => { if (window) { if (window.isMinimized()) window.restore(); window.show(); window.focus(); } });
-  app.on('before-quit', event => { if (!closing) { event.preventDefault(); closing = true; providerSetup?.dispose(); void Promise.all([stopClaudeChat(), stopDaemon()]).then(([, clean]) => app.exit(clean ? 0 : 1)); } });
+  app.on('before-quit', event => { if (!closing) { event.preventDefault(); closing = true; providerSetup?.dispose(); void Promise.all([stopClaudeChat(), stopDaemon()]).then(([, clean]) => exitAfterDiagnostics(clean ? 0 : 1)).catch(() => exitAfterDiagnostics(1)); } });
   app.on('window-all-closed', () => { if (!switching && !closing) app.quit(); });
   app.whenReady().then(async () => {
     try {
@@ -711,7 +817,7 @@ else {
           switching = true;
           try {
             const [, clean] = await Promise.all([stopClaudeChat(), stopDaemon()]);
-            if (!clean) { switching = false; return false; }
+            if (!clean || !await closeDiagnostics()) { switching = false; return false; }
             providerSetup?.dispose();
             app.relaunch({ execPath: executable, args: [] });
             closing = true; setTimeout(() => app.exit(0), 100); return true;
@@ -749,6 +855,7 @@ else {
       productRoot = app.isPackaged ? join(process.resourcesPath, 'product') : resolve(__dirname, '../../..');
       nodeExecutable = app.isPackaged ? join(process.resourcesPath, 'node/node.exe') : join(process.env.ProgramFiles ?? 'C:/Program Files', 'nodejs/node.exe');
       await policy.directPath(productRoot); await policy.directPath(nodeExecutable, 'file');
+      initializeDiagnostics(); // Asynchronous best-effort storage; diagnostics never blocks opening a workspace.
       const defaultProject = await ownedDirectory(join(userRoot, 'projects', 'Untitled')); let selected = defaultProject;
       try {
         const pref = join(userRoot, 'last-project.json'); await policy.directPath(pref, 'file'); const bytes = await readFile(pref);

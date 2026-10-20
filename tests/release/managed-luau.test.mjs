@@ -226,6 +226,7 @@ test('actual root-project cold-start bootstrap emits managed adapter fields with
     // Same semantics as main's ownedDirectory: direct-path policy, private creation, then physical revalidation.
     ownedDirectory: async full => { await policy.directPath(full, 'directory', true); fs.mkdirSync(full, { recursive: true, mode: 0o700 }); return policy.directPath(full); },
     smoke: false, window: null, nativeHandoff: null, providerSetup: { cancelPending() {} },
+    recordStartupDiagnostic() {}, attachDiagnosticChild() {},
     // Managed compiler wiring is the boundary under test. The separate handoff suite
     // executes its actual broker; here the newly mounted host capability has no actions.
     require(name) {

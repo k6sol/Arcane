@@ -68,7 +68,7 @@ const jobError = z.unknown().transform((value, context) => {
   catch { context.addIssue({ code: 'custom', message: 'Invalid asset failure evidence.' }); return z.NEVER; }
 });
 export const assetJob: z.ZodType<AssetJobRecord> = z.object({
-  schemaVersion: z.literal(1), jobId: assetJobId, directory: path, state: jobState,
+  schemaVersion: z.literal(1), jobId: assetJobId, reportId:assetJobId.optional(), directory: path, state: jobState,
   manifestPath: path.nullable(), error: jobError.nullable(), request: z.union([assetRequest,adoptedGlbRequest]),
   stage: id.max(48), startedAt: id, updatedAt: id, manifestAvailable: z.boolean(),
   events: z.array(z.object({ jobId: assetJobId, at: id, stage: id.max(48), state: jobState })).max(64), finishedAt: id.optional(),
@@ -78,7 +78,7 @@ export const assetJob: z.ZodType<AssetJobRecord> = z.object({
     (!job.retention||job.state!=='running'&&(job.state!=='interrupted'||job.resolution?.status==='resolved')), 'Asset history evidence must match this exact job and terminal state.')
   // The marker is checked before transformation, but human recovery controls
   // are never exposed to an agent as a reusable approval or effect capability.
-  .transform(({ finishedAt,retention,resolution:_resolution, ...job }) => ({ ...job, ...(finishedAt === undefined ? {} : { finishedAt }),
+  .transform(({ finishedAt,retention,reportId,resolution:_resolution, ...job }) => ({ ...job, ...(finishedAt === undefined ? {} : { finishedAt }),...(reportId===undefined?{}:{reportId}),
     ...(retention===undefined?{}:{retention}) }));
 
 export const assetHistoryInput = z.strictObject({ limit: z.number().int().min(1).max(64).optional(), after: assetJobId.optional() });

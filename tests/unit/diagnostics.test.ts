@@ -26,3 +26,9 @@ test('canonical serialization ignores object insertion order without retaining m
   assert.equal(JSON.stringify(a), JSON.stringify(b));
   input.context.triangleBudget = 1; assert.equal(a.context?.triangleBudget, 16000);
 });
+test('fixed launcher failures preserve the actionable startup cause without exception text',()=>{
+  for(const code of ['PORT_IN_USE','PROJECT_IN_USE','STATE_NEWER','STATE_UNSAFE','RESOURCE_UNAVAILABLE']){
+    const event=diagnosticEvent({...input,component:'daemon',stage:'startup',code});
+    assert.equal(event.code,code);assert.ok(event.reason.length>20);
+  }
+});

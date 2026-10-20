@@ -138,6 +138,7 @@ function stopFixture(child, broker) {
   const code = block('async function stopDaemon()', 'async function startDaemon(');
   const timers = [];
   const context = vm.createContext({ child, token, origin, nativeHandoff: broker, providerSetup: { cancelled: 0, cancelPending() { this.cancelled++; } },
+    retireDiagnosticChild() {},
     setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; }, clearTimeout() {} });
   vm.runInContext(code + '\nglobalThis.stopOwned = stopDaemon;', context);
   return { context, timers };

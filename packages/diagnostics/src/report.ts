@@ -1,5 +1,12 @@
 /** Shared wire contract. Never pass raw exception messages, paths, prompts or source here. */
 export const DIAGNOSTIC_REASONS = {
+  PORT_IN_USE: 'Another local process already owns the saved runtime port.',
+  PROJECT_IN_USE: 'Another running Arcane process owns this project workspace.',
+  STATE_NEWER: 'Saved runtime state requires a newer Arcane build.',
+  STATE_UNSAFE: 'The runtime state directory failed its direct private storage checks.',
+  RESOURCE_UNAVAILABLE: 'The installed application resources could not be verified or opened.',
+  OPERATION_CANCELLED: 'The operation was cancelled before it completed.',
+  SUPERVISION_LOST: 'Worker closure could not be verified; retained records require reconciliation.',
   REQUEST_PROVENANCE: 'Request bytes failed their size or SHA-256 provenance check.',
   WINDOWS_PATH_LIMIT: 'The installed worker cannot use the asset path without a verified short directory alias.',
   MESH_REPAIR: 'Generated mesh required structural repair and was rejected.',

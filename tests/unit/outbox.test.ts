@@ -88,3 +88,11 @@ test('encryption failure refuses enqueue, tampering never transmits, queue capac
   assert.throws(() => queue.enqueue(scope, event())); assert.equal(queue.pending(), 1000);
   clock += 30 * 86400000 + 1; queue.enqueue(scope, {...event(), occurredAt: clock}); assert.equal(queue.pending(), 1);
 });
+test('idle queues enforce fixed retention even without an endpoint or signed-in account',async t=>{
+  const db=new DatabaseSync(':memory:');t.after(()=>db.close());let clock=now;
+  const options={db,codec:codec(),allowedOrigins:[] as string[],credential:async()=>null,now:()=>clock};
+  const offline=new DiagnosticOutbox(options);offline.enqueue(scope,event());clock+=30*86400000+1;
+  assert.deepEqual(await offline.flush(),{state:'disabled',sent:0,pending:0});
+  const signedOut=new DiagnosticOutbox({...options,allowedOrigins:[base]});signedOut.enqueue(scope,{...event(),occurredAt:clock});clock+=30*86400000+1;
+  assert.deepEqual(await signedOut.flush(),{state:'signed-out',sent:0,pending:0});
+});

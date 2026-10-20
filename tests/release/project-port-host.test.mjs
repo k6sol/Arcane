@@ -56,6 +56,7 @@ function host(f, { filesystem = fs, action, real = false } = {}) {
   const context = {
     child: null, origin: '', token: '', projectSession: null, projectPath: '', closing: false, switching: false,
     smoke: false, window: null, nativeHandoff: null,
+    recordStartupDiagnostic() {}, attachDiagnosticChild() {}, retireDiagnosticChild() {},
     ...f, nodeExecutable: process.execPath, process: { platform: process.platform, env: { ARCANE_PORT: '9', ARCANE_DAEMON_URL: 'https://invalid.example', NODE_OPTIONS: 'untrusted' } },
     fs: filesystem, Buffer, URL, join: path.join, resolve: path.resolve, createHash, policy,
     performance: { now: () => 0 }, started: 0, daemonReadyMs: 0, CODE_VERIFICATION_WARNING: 'Fixture warning.', console,

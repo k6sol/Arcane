@@ -41,6 +41,10 @@ export class DiagnosticOutbox {
   }
   private expire(now: number): void {this.options.db.prepare('DELETE FROM diagnostic_outbox WHERE queued_at<=?').run(now - RETENTION);}
   pending(): number {try {return Number(this.options.db.prepare('SELECT count(*) AS n FROM diagnostic_outbox').get()!.n);} catch {throw new DiagnosticOutboxError();}}
+  prune(): number {
+    try {return this.transaction(() => {const before=this.pending();this.expire(this.now());return before-this.pending();});}
+    catch {throw new DiagnosticOutboxError();}
+  }
   enqueue(scope: string, input: unknown): string {
     try {
       if (!validScope(scope)) throw Error();
@@ -78,6 +82,7 @@ export class DiagnosticOutbox {
     }
   }
   async flush(): Promise<DiagnosticDelivery> {
+    this.prune();
     const result = (state: DiagnosticDelivery['state'], sent = 0): DiagnosticDelivery => ({state, sent, pending: this.pending()});
     if (this.busy) return result('busy');
     if (!this.options.allowedOrigins.length) return result('disabled');

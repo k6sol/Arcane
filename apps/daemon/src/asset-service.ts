@@ -26,6 +26,7 @@ import {AssetArchiveStore,type AssetArchiveScan,type AssetJobDirectory} from './
 import { decodeAssetJobError } from '../../../packages/asset-pipeline/src/failure-diagnostics.js';
 import type { AssetJobError } from '../../../packages/asset-pipeline/src/types.js';
 import type {ArchiveHostFacts} from '../../../packages/asset-pipeline/src/archive-ledger.js';
+import {assetFailureEvent,type FailureReporter} from './diagnostic-reporter.js';
 import {assetReviewCanonical,assetReviewFailure,modelReviewSubject,snapshotAssetReviewScope,snapshotAssetReviewReference,
   type AssetReviewGate,type AssetReviewImportGuard,type AssetReviewReference,type AssetReviewScope,type AssetReviewSubject} from './asset-review.js';
 
@@ -42,6 +43,8 @@ interface StudioImportReaders {
 }
 
 export interface AssetServiceOptions {
+  /** Private daemon composition only. A returned id proves the main host committed a redacted report. */
+  reportFailure?:FailureReporter;
   /** Trusted repository installation root, independent of the selected project. */
   cwd: string;
   projectPath?: string;
@@ -86,6 +89,7 @@ function synchronousAdmissionResult(result: unknown): void {
 }
 export interface AssetJobRecord {
   schemaVersion: 1;
+  reportId?:string;
   jobId: string;
   directory: string;
   manifestPath: string | null;
@@ -174,12 +178,17 @@ export async function createAssetService(options: AssetServiceOptions) {
   let scheduledIndex: string | null = null;
   let closing: Promise<void> | null = null;
   let persistenceIssue: {phase:'path-check'|'write'|'replace';code:string}|null=null;
+  async function reportFailure(job:AssetJobRecord):Promise<void>{
+    if(!job.error||!options.reportFailure)return;
+    try{const event=assetFailureEvent(job.jobId,job.error),reportId=await options.reportFailure(event);if(reportId===event.eventId)job.reportId=reportId;}
+    catch{/* Diagnostic storage cannot replace the original failure or change job state. */}
+  }
   const ordered = () => [...entries.values()].map(e => e.job).sort((a, b) => b.startedAt.localeCompare(a.startedAt) || b.jobId.localeCompare(a.jobId));
   const snapshot = () => structuredClone(ordered());
   const persist = () => {
     // The advisory index stores only observed events. Full requests remain in journals/manifests.
     if (persistenceError) return;
-    const jobs = [...entries.values()].map(({ job }) => ({ jobId: job.jobId, events: structuredClone(job.events) }));
+    const jobs = [...entries.values()].map(({ job }) => ({ jobId: job.jobId, events: structuredClone(job.events),...(job.reportId?{reportId:job.reportId}:{}) }));
     const text = JSON.stringify({ schemaVersion: 1, jobs }, null, 2) + '\n';
     // Completion changes job state, not the event-only index. Avoid replacing identical bytes.
     if (text === scheduledIndex) return;
@@ -324,6 +333,8 @@ export async function createAssetService(options: AssetServiceOptions) {
             events.push(event as unknown as AssetJobEvent);
           }
           current.job.events = events;
+          // Display-only correlation to an acknowledged host report; never job state or write authority.
+          if(current.job.error&&typeof old.reportId==='string'&&ID.test(old.reportId))current.job.reportId=old.reportId;
         }
       }
     } catch { /* Index is rebuildable; verified journals remain the authority. */ }
@@ -873,7 +884,10 @@ export async function createAssetService(options: AssetServiceOptions) {
           }
           const finishedAt = new Date().toISOString();
           Object.assign(job, { state, stage: 'complete', updatedAt: finishedAt, finishedAt, error, manifestPath, manifestAvailable: manifestPath !== null });
-        }).catch(() => { job.state = 'interrupted'; job.stage = 'supervision-lost'; job.error = { code: 'SUPERVISION_LOST', message: 'Asset supervision ended unexpectedly; inspect the job directory.' }; })
+          await reportFailure(job);
+        }).catch(async() => { job.state = 'interrupted'; job.stage = 'supervision-lost'; job.error = { code: 'SUPERVISION_LOST', message: 'Asset supervision ended unexpectedly; inspect the job directory.' };
+          await reportFailure(job);
+        })
           .finally(() => { active.delete(handle.id); persist(); });
         active.set(handle.id, { handle, completion });
         // Install supervision before host bookkeeping can throw. A created job is

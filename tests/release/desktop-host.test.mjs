@@ -31,6 +31,7 @@ test('packaged smoke records module delivery after initialization and fails when
       projectSession:{verificationUnavailable:false},safeStorage:{isEncryptionAvailable:()=>false},
       smokePackagedFeatures:async()=>({bundledPluginVerified:true,plansConfigValid:true,chatInstructionsBundled:true,trustedDialogBundled:true}),
       stopDaemon:async()=>true,app:{getVersion:()=> 'fixture',exit:code=>exits.push(code)},
+      exitAfterDiagnostics:async code=>exits.push(code),
       writeFile:async(path,value)=>writes.set(path,value),
       policy:{validOrigin:value=>value===origin,navigationAllowed:()=>false,requestAllowed:()=>false},
       fetch:async url=>({ok:true,headers:{get:()=>"script-src 'self'"},json:async()=>url.endsWith('/v1/product/state')?{studioSessions:[],commandCounts:{}}:
@@ -176,6 +177,7 @@ function productServiceFixture({ closeFailAt } = {}) {
   const context = {
     cwd, runtimeRoot:'C:\\UserData', directory, connectionDirectory:win32.join(directory,'connection-lab'),
     stateOverride:directory, resourceOverride:cwd, port:0, workflowCodeVerification:undefined,
+    diagnosticReporter:{report:async()=>null,close(){}},
     process:{env:{ARCANE_PROJECT:projectPath},pid:17,exit(code){exitCode=code;}},
     join:win32.join, resolve:win32.resolve, basename:win32.basename, dirname:win32.dirname,
     async reportStartupFailure(){ assert.fail('A healthy product composition must not report a startup failure.'); },
@@ -449,7 +451,7 @@ function stopFixture(child) {
   const begin = mainSource.indexOf('async function stopDaemon()');
   const end = mainSource.indexOf('async function startDaemon(', begin);
   assert.ok(begin >= 0 && end > begin, 'Expected the named desktop shutdown boundary.');
-  const context = { child, token, origin, nativeHandoff: null, loginCancellations: 0, providerSetup: null, setTimeout: () => 1, clearTimeout() {} };
+  const context = { child, token, origin, nativeHandoff: null, loginCancellations: 0, providerSetup: null, setTimeout: () => 1, clearTimeout() {}, retireDiagnosticChild() {} };
   context.providerSetup = { cancelPending() { context.loginCancellations++; } };
   vm.createContext(context);
   vm.runInContext(mainSource.slice(begin, end) + '\nglobalThis.stopOwned = stopDaemon;', context);
@@ -868,7 +870,7 @@ function projectInUseFixture({ answers = [], failures = 1, error = null, smoke =
     stopDaemon: async () => { calls.push(['stopDaemon']); return true; },
     trustedDialogs: { showStandalone: async config => { calls.push(['ask', config]); return { response: answers.shift() ?? 0 }; }, dispose: () => calls.push(['trustedDialogs.dispose']) },
     nativeDialog: { showMessageBox: async () => assert.fail('The in-use question uses the trusted Arcane window, not a native box.') },
-    app: { exit: code => calls.push(['exit', code]) } });
+    app: { exit: code => calls.push(['exit', code]) }, exitAfterDiagnostics: async code => calls.push(['exit', code]) });
   vm.runInContext(mainSource.slice(begin, end) + '\nglobalThis.run = startProjectRuntime;', context);
   return { calls, context, run: project => context.run(project) };
 }

@@ -9,6 +9,8 @@ import { WorkStore } from '../../../packages/storage/src/work-store.js';
 import { ConversationWorkStore } from '../../../packages/storage/src/conversation-work-store.js';
 import { createConnectionLab } from './lab-server.js';
 import { createAssetService } from './asset-service.js';
+import {createDiagnosticReporter} from './diagnostic-reporter.js';
+const diagnosticReporter=createDiagnosticReporter();
 import {createAssetReviewHost,type AssetReviewHost} from './asset-review-host.js';
 import {assetReviewFailure,type AssetReviewGate} from './asset-review.js';
 import { createStudioImportHost } from './studio-import-host.js';
@@ -24,6 +26,7 @@ async function startupFailed(phase: StartupPhase, error: unknown, services: Arra
   // Close owned services first, then send only a fixed code. Callers rethrow the original error.
   await cleanupStartup(services);
   await reportStartupFailure(phase, error);
+  diagnosticReporter.close();
 }
 // The desktop host keeps immutable application resources separate from its owned writable cwd.
 // These environment values come only from a trusted local launcher, never HTTP/MCP input.
@@ -74,7 +77,7 @@ try {
       pluginArtifactHash, persistPreparation: (...args) => preparations.save(...args) });
   } catch (error) { await cleanupStartup([() => preparations.close()]); throw error; }
 } catch (error) { await startupFailed('services', error, [() => associations.close(), () => work.close(), () => store.close()]); throw error; }
-try {assets=await createAssetService({cwd:runtimeRoot,workerRoot:join(cwd,'workers','blender'),projectPath:associations.projectPath,modelReview,modelReviewAssociations:associations,studioImport:importHost.hooks,retentionPins:{preparationRecord:jobId=>preparations.hasRecordForJob(jobId),pendingStage:jobId=>store.hasPendingStageWork(associations.projectId,jobId),importCaptured:jobId=>importHost.hasCapturedJob(jobId)},...((stateOverride === undefined && resourceOverride === undefined) ? {} : {outputRoot:join(directory,'assets')})});}catch(error){await startupFailed('services', error, [() => importHost.close(), () => preparations.close(), () => associations.close(), () => work.close(), () => store.close()]);throw error;}
+try {assets=await createAssetService({reportFailure:diagnosticReporter.report,cwd:runtimeRoot,workerRoot:join(cwd,'workers','blender'),projectPath:associations.projectPath,modelReview,modelReviewAssociations:associations,studioImport:importHost.hooks,retentionPins:{preparationRecord:jobId=>preparations.hasRecordForJob(jobId),pendingStage:jobId=>store.hasPendingStageWork(associations.projectId,jobId),importCaptured:jobId=>importHost.hasCapturedJob(jobId)},...((stateOverride === undefined && resourceOverride === undefined) ? {} : {outputRoot:join(directory,'assets')})});}catch(error){await startupFailed('services', error, [() => importHost.close(), () => preparations.close(), () => associations.close(), () => work.close(), () => store.close()]);throw error;}
 try {importStaging=createStudioImportStagingController({projectPath: associations.projectPath, workAssociations: associations, studio: store,
   assets, host: importHost.hooks, pluginArtifactHash});}
 catch(error){await startupFailed('services', error, [() => importHost.close(), () => assets.close(), () => preparations.close(), () => associations.close(), () => work.close(), () => store.close()]);throw error;}
@@ -114,7 +117,7 @@ async function shutdown() {
   let failed = false;
   // Each resource closes even if an earlier cleanup fails. Never remove another
   // daemon's descriptor or promise a rollback for an interrupted Studio write.
-  for (const close of [() => app.close(), () => importStaging.close(), () => importHost.close(), () => assets.close(), () => learning.close(), () => preparations.close(), () => associations.close(), () => work.close(), () => store.close()]) {
+  for (const close of [() => app.close(), () => importStaging.close(), () => importHost.close(), () => assets.close(), () => learning.close(), () => preparations.close(), () => associations.close(), () => work.close(), () => store.close(), () => diagnosticReporter.close()]) {
     try { await close(); } catch { failed = true; }
   }
   try {

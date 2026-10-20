@@ -248,6 +248,7 @@ test('main cold start passes an isolated unavailable compiler to the core daemon
     policy: { ...f.policy, directPath: async value => value },
     ownedDirectory: async value => { owned.push(value); return value; },
     smoke: false, window: null, nativeHandoff: null, providerSetup: { cancelPending() {} },
+    recordStartupDiagnostic() {}, attachDiagnosticChild() {},
     // Compiler isolation is the boundary under test. The separate handoff suite
     // executes its actual broker; here the newly mounted host capability has no actions.
     require(name) {
