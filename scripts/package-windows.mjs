@@ -16,7 +16,7 @@ function deploymentManifest(source) {
   const files = source.files.filter(file => deploymentPath(file.path));
   return { ...source, fileCount: files.length, totalBytes: files.reduce((total, file) => total + file.bytes, 0), files };
 }
-const HOST_FILES = ['main.cjs', 'policy.cjs', 'preload.cjs', 'code-verification.cjs', 'provider-setup.cjs', 'provider-login.cjs', 'studio-key-vault.cjs', 'workspace-preferences.cjs', 'runtime-recovery.cjs', 'native-handoff.cjs', 'native-handoff-host.cjs', 'native-handoff-ipc.cjs', 'claude-chat.cjs', 'mesh-keep.cjs', 'desktop-updates.cjs', 'plugin-install.cjs', 'in-app-dialog.cjs', 'project-permissions.cjs', 'billing.cjs', 'build-notifications.cjs', 'trusted-dialog.cjs', 'trusted-dialog-preload.cjs', 'trusted-dialog.html', 'trusted-dialog.css', 'trusted-dialog.js'];
+const HOST_FILES = ['main.cjs', 'policy.cjs', 'preload.cjs', 'code-verification.cjs', 'provider-setup.cjs', 'provider-login.cjs', 'studio-key-vault.cjs', 'workspace-preferences.cjs', 'runtime-recovery.cjs', 'native-handoff.cjs', 'native-handoff-host.cjs', 'native-handoff-ipc.cjs', 'claude-chat.cjs', 'arcane-chat.cjs', 'plugin-install.cjs', 'in-app-dialog.cjs', 'project-permissions.cjs', 'billing.cjs', 'build-notifications.cjs', 'mesh-keep.cjs', 'desktop-updates.cjs', 'trusted-dialog.cjs', 'trusted-dialog-preload.cjs', 'trusted-dialog.html', 'trusted-dialog.css', 'trusted-dialog.js'];
 const PRODUCTION_ROOTS = ['@modelcontextprotocol/sdk', 'zod'];
 const ELECTRON_FILES = new Set([
   'electron.exe', 'LICENSE', 'LICENSES.chromium.html', 'version',

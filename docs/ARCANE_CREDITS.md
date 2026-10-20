@@ -148,14 +148,17 @@ with `redirect: "error"`. JSON replies may be at most 64 KB, and a stream at mos
 | `POST` | `/v1/auth/logout` | Revokes the presented token. |
 | `GET` | `/v1/balance` | `{"credits":1200,"actionsRemaining":40,"plan":"Pro","renewsAt":"2026-11-01T00:00:00Z"}`. `actionsRemaining`, `plan` and `renewsAt` may be `null`. |
 | `GET` | `/v1/usage` | `{"period":"2026-10","creditsUsed":300,"actionsUsed":12}` (current UTC month). |
-| `GET` | `/v1/models` | `{"models":[{"id":"arcane-default","label":"Arcane default"}]}`, with at most 32 models. |
+| `GET` | `/v1/models` | `{"models":[{"id":"arcane-default","label":"Arcane default","pricing":{"inputPerMTok":360,"outputPerMTok":1800},"tools":true}]}`, with at most 32 models. `pricing` is credits per million tokens with the markup applied (shown in the model picker). |
 | `POST` | `/v1/chat/stream` (alias `/v1/chat`) | Request body: `{"model":"…","messages":[{"role":"user","content":"…"}],"conversationId":"…","turnId":"…","maxTokens":4096}`. `turnId` and `maxTokens` are optional. An optional `Idempotency-Key` header refuses a resend with `409`. The reply is Server-Sent Events. |
+
+Function calling (optional, provider-neutral): the body may add `tools` (at most 64 `{name, description, inputSchema}`), assistant messages may carry `toolCalls` (`{id, name, arguments}`) and `role: "tool"` messages answer one call by `toolCallId` (optional `isError`). The gateway translates these to the provider's own function-calling format and never runs a tool; the desktop runs the loop (`apps/desktop/electron/arcane-chat.cjs`).
 
 The `/v1/chat/stream` reply sends these events:
 
 - `data: {"type":"delta","text":"…"}`, repeated as text arrives.
+- `data: {"type":"tool_call","id":"…","name":"…","arguments":{…}}` for each tool the model calls (only offered tools).
 - Then one of:
-  - `data: {"type":"done","creditsUsed":3,"actionsUsed":0}`
+  - `data: {"type":"done","creditsUsed":3,"actionsUsed":0}` (with tools offered it also carries `stopReason`, `inputTokens` and `outputTokens`)
   - `data: {"type":"error","message":"…"}`
 
 Error statuses:
@@ -187,9 +190,9 @@ Error statuses:
    only) for a later handoff. Hand `{base, token}` to the daemon over the existing authenticated host-to-daemon
    channel. Then build `createArcaneGateway({ config, vault, localUrl })` with a vault that reads that value, and pass
    `gatewaySignedIn` to `plansRoutes` so the page says "Arcane Credits are ready".
-3. Chat: add the `arcane` provider to the model picker only when `gateway.showInModelPicker` is true. Stream turns
-   through `streamChat` and send the chat turn id as `turnId`. Count each finished turn as an action, like the other
-   providers. Not done yet: the model picker and chat files are shared with work in progress.
+3. ~~Chat~~: done. With an account connected, the composer model picker shows a third Arcane column (credit prices,
+   balance). The desktop host `arcane-chat.cjs` streams through `streamChat` with one `turnId` per reply, offers Arcane's
+   MCP tools (scoped handoff credential, same consent as Claude chat) and runs a bounded tool loop; a `402` shows Buy credits.
 
 ## Local routes (human bearer only)
 

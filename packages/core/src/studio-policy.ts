@@ -2,7 +2,9 @@ import { ArcaneError } from '../../protocol/src/providers.js';
 import { isAssetMethod, validateAssetCommand, validateBuildClone, validateBuildTemplates } from './studio-asset-policy.js';
 import { validateTerrainGenerate } from './terrain-policy.js';
 import { validateMeshKeep } from './mesh-keep-policy.js';
-import { instanceRef, jsonObject, object, textField, studioImportContextObservation, STUDIO_ASSET_TRANSFER_LIMITS, STUDIO_RECONSTRUCTION_LIMITS, type StudioImportContextObservation, type StudioCommand, type Json, type StudioMethod, type StudioSession, type StudioRoot, ROOTS, isWrite, SCENE_BUILD_LIMITS, ENVIRONMENT_LIMITS, EFFECT_LIMITS, STUDIO_EFFECTS_CAPABILITY, STUDIO_GUI_CAPABILITY, STUDIO_GUI_FLEX_CAPABILITY, STUDIO_GUI_EDIT_CAPABILITY, STUDIO_CHARACTERS_CAPABILITY, GUI_LIMITS } from '../../protocol/src/studio.js';
+import { instanceRef, jsonObject, object, textField, studioImportContextObservation, STUDIO_ASSET_TRANSFER_LIMITS, STUDIO_RECONSTRUCTION_LIMITS, type StudioImportContextObservation, type StudioCommand, type Json, type StudioMethod, type StudioSession, type StudioRoot, ROOTS, isWrite, SCENE_BUILD_LIMITS, ENVIRONMENT_LIMITS, EFFECT_LIMITS, STUDIO_EFFECTS_CAPABILITY, STUDIO_GUI_CAPABILITY, STUDIO_GUI_FLEX_CAPABILITY, STUDIO_GUI_EDIT_CAPABILITY, STUDIO_CHARACTERS_CAPABILITY, GUI_LIMITS, STUDIO_SEARCH_CLASS_CAPABILITY, OUTPUT_LEVELS, OUTPUT_READ_LIMITS } from '../../protocol/src/studio.js';
+/** One engine class name for scene.search IsA filtering (never a path or expression). */
+export const SEARCH_CLASS_NAME = /^[A-Z][A-Za-z0-9]{0,63}$/;
 
 export const MATERIALS = ['Plastic', 'SmoothPlastic', 'Metal', 'Wood', 'WoodPlanks', 'Concrete', 'Brick', 'Glass', 'Neon', 'Slate', 'Sand', 'Fabric', 'Grass', 'Ground', 'Rock', 'Cobblestone', 'Asphalt', 'Marble', 'Granite', 'Limestone', 'Sandstone', 'Basalt', 'Pebble', 'LeafyGrass', 'Mud', 'Snow', 'Ice', 'Pavement', 'Plaster', 'DiamondPlate', 'CorrodedMetal', 'Foil'] as const;
 export const CREATE_CLASSES = ['Folder', 'Model', 'Part', 'Script', 'LocalScript', 'ModuleScript'] as const;
@@ -849,8 +851,23 @@ export function validateCommandArgs(method: StudioMethod, value: unknown, sessio
       if (a.ref) { const r = ref(a.ref, session); if (r.root !== a.root) throw new ArcaneError('SCOPE', 'Root/ref mismatch.'); }
       if (a.limit !== undefined && (!Number.isInteger(a.limit) || (a.limit as number) < 1 || (a.limit as number) > 200)) throw new ArcaneError('INPUT', 'Limit must be 1..200.'); break;
     case 'scene.search':
-      keys(a, ['root', 'query', 'limit']); root(a.root, session); textField(a.query, 'search query', 100);
+      keys(a, ['root', 'query', 'className', 'limit']); root(a.root, session);
+      if (a.query !== undefined || a.className === undefined) textField(a.query, 'search query', 100);
+      if (a.className !== undefined) {
+        if (typeof a.className !== 'string' || !SEARCH_CLASS_NAME.test(a.className)) throw new ArcaneError('INPUT', 'className must be one Roblox class name.');
+        requireEffects(session, 'class search', STUDIO_SEARCH_CLASS_CAPABILITY);
+      }
       if (a.limit !== undefined && (!Number.isInteger(a.limit) || (a.limit as number) < 1 || (a.limit as number) > 200)) throw new ArcaneError('INPUT', 'Limit must be 1..200.'); break;
+    case 'output.read': {
+      keys(a, ['levels', 'query', 'after', 'limit']);
+      if (a.levels !== undefined && (!Array.isArray(a.levels) || a.levels.length < 1 || a.levels.length > OUTPUT_LEVELS.length
+        || new Set(a.levels).size !== a.levels.length || a.levels.some(level => !(OUTPUT_LEVELS as readonly unknown[]).includes(level)))) throw new ArcaneError('INPUT', 'levels must be distinct output/info/warning/error values.');
+      if (a.query !== undefined && (typeof a.query !== 'string' || !a.query.length || Buffer.byteLength(a.query, 'utf8') > OUTPUT_READ_LIMITS.queryBytes || /[\x00-\x1f\x7f]/.test(a.query)
+        || /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(a.query))) throw new ArcaneError('INPUT', `Use a literal single-line query of at most ${OUTPUT_READ_LIMITS.queryBytes} UTF-8 bytes.`);
+      if (a.after !== undefined && (!Number.isSafeInteger(a.after) || (a.after as number) < 0 || (a.after as number) > OUTPUT_READ_LIMITS.cursor)) throw new ArcaneError('INPUT', 'after must be a nonnegative output cursor.');
+      if (a.limit !== undefined && (!Number.isInteger(a.limit) || (a.limit as number) < 1 || (a.limit as number) > OUTPUT_READ_LIMITS.entries)) throw new ArcaneError('INPUT', `Limit must be 1..${OUTPUT_READ_LIMITS.entries}.`);
+      break;
+    }
     case 'script.search': {
       keys(a, ['root', 'ref', 'query', 'limit', 'caseSensitive']); root(a.root, session);
       if (a.ref !== undefined) { const r = ref(a.ref, session); if (r.root !== a.root) throw new ArcaneError('SCOPE', 'Root/ref mismatch.'); }

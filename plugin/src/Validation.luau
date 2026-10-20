@@ -11,7 +11,7 @@ Validation.MAX_CACHE_BYTES = 16 * 1024 * 1024
 Validation.NULL = table.freeze({})
 local ARRAY = table.freeze({})
 Validation.ROOTS = table.freeze({"Workspace", "ReplicatedStorage", "ServerScriptService", "ServerStorage", "StarterGui", "StarterPlayer", "Lighting"})
-Validation.READ_METHODS = table.freeze({"scene.children", "scene.inspect", "scene.search", "selection.read", "script.read", "script.search", "scene.import_context", "scene.upload_context", "scene.asset_watch"})
+Validation.READ_METHODS = table.freeze({"scene.children", "scene.inspect", "scene.search", "selection.read", "script.read", "script.search", "scene.import_context", "scene.upload_context", "scene.asset_watch", "output.read"})
 Validation.WRITE_METHODS = table.freeze({"scene.create", "scene.update", "script.update", "script.set_enabled", "scene.restore", "scene.remove", "scene.build", "environment.apply", "scene.place_asset", "scene.apply_material", "terrain.generate"})
 Validation.REMOVE_LIMITS = table.freeze({targets = 64, topLevel = 10000, descendants = 100000})
 Validation.BUILD_LIMITS = table.freeze({items = 2000, prototypes = 32, prototypeParts = 64, instances = 4000, keys = 32})
@@ -21,7 +21,7 @@ Validation.ASSET_STAGE_METHODS = table.freeze({"asset.stage_packet", "asset.reco
 Validation.MESH_KEEP_METHODS = table.freeze({"asset.keep_mesh"})
 -- Non-method feature capabilities (effects classes, environment extras, inspect bounds; GUI classes and ScreenGui builds;
 -- character classes: Humanoid, HumanoidDescription, AnimationController, Animator).
-Validation.FEATURE_CAPABILITIES = table.freeze({"scene.effects", "scene.gui", "scene.gui.flex", "scene.gui.edit", "scene.characters", "asset.mesh_parts"})
+Validation.FEATURE_CAPABILITIES = table.freeze({"scene.effects", "scene.gui", "scene.gui.flex", "scene.gui.edit", "scene.characters", "asset.mesh_parts", "scene.search.class"})
 Validation.CREATE_CLASSES = table.freeze({"Folder", "Model", "Part", "Script", "LocalScript", "ModuleScript", "WedgePart", "CornerWedgePart", "SpawnLocation"})
 Validation.BASE_PART_CLASSES = table.freeze({"Part", "FlagStand", "Platform", "Seat", "SkateboardPlatform", "SpawnLocation", "MeshPart", "UnionOperation", "NegateOperation", "IntersectOperation", "WedgePart", "CornerWedgePart", "TrussPart", "VehicleSeat"})
 Validation.PART_SHAPE_CLASSES = table.freeze({"Part", "FlagStand", "Platform", "Seat", "SkateboardPlatform", "SpawnLocation"})

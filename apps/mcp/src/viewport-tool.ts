@@ -3,6 +3,7 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { BridgeError, type DaemonClient } from './daemon-client.js';
 import { id, ref, timeoutMs } from './schemas.js';
+import { round3 } from './token-lean.js';
 import { frameCamera, viewportBoundsSchema, viewportCameraSchema, viewportSheetSchema, VIEWPORT_LIMITS, VIEWPORT_VIEWS } from '../../../packages/studio-test-controller/src/viewport.js';
 
 export const STUDIO_VIEWPORT_TOOL = 'studio_viewport_capture';
@@ -31,10 +32,7 @@ export const viewportCaptureResponse = (sessionId: string) => z.strictObject({
   data: z.string().min(1).max(base64Limit).regex(/^[A-Za-z0-9+/]+={0,2}$/),
 }).refine(value => Buffer.from(value.data, 'base64').length === value.viewport.bytes, 'Viewport bytes mismatch.');
 
-const DESCRIPTION = 'Read: see the exact paired Studio session\'s current Edit-mode 3D viewport as a PNG image (longest side maxDimension 256–1024, default 768; at most 600 KiB, downscaled if needed). ' +
-  'Uses the built-in Studio screen capture only; never starts Play, sends input or edits the place. Optional camera {position,lookAt} (studs) frames a specific area; ' +
-  'Or frame {ref, view front/three_quarter/top/low_angle, or views:[2–4] for one multi-view sheet}: the plugin reports the ref world bounds and the host places the camera at a fitting distance. ' +
-  'The host restores the previous Edit camera afterwards and reports camera unchanged/restored/restore_failed. Requires a live, unpublished, write-granted pairing in Edit mode; refuses while a playtest runs. ' +
+const DESCRIPTION = 'Read: capture the exact paired session’s Edit-mode 3D viewport as a PNG (longest side maxDimension 256–1024, default 768; ≤600 KiB). Built-in screen capture only: never starts Play, sends input or edits. Aim with camera {position,lookAt} (studs) or frame {ref, view front/three_quarter/top/low_angle, or views:[2–4] for one sheet}, which fits the camera to the ref’s world bounds; the previous camera is then restored (camera unchanged/restored/restore_failed). Needs a live, unpublished, write-granted pairing in Edit mode; refused during a playtest. ' +
   'Use it after major build steps to check composition, scale, spacing, colour and gaps against the request, then fix what you see. Keep it to 2–3 captures per task; an image is visual context, not gameplay or playtest evidence.';
 
 /** Registers the viewport tool with MCP image content plus a small JSON summary. */
@@ -55,10 +53,12 @@ export function registerViewportTool(server: McpServer, client: DaemonClient): v
         const views = frame.views ?? [frame.view];
         const cameras = views.map(view => frameCamera(parsed.data, view, frame.padding));
         if (cameras.length > 1) request.sheet = cameras; else request.camera = cameras[0];
-        framing = { views, bounds: { center: parsed.data.center, size: parsed.data.size } };
+        framing = { views, bounds: { center: parsed.data.center.map(round3), size: parsed.data.size.map(round3) } };
       }
       const result = await client.viewportCapture(request, { timeoutMs: wait, signal: extra.signal });
-      const summary = client.redact({ viewport: result.viewport, ...(framing ? { framing } : {}) });
+      // The model already knows its session, and the image block carries the PNG type; Edit is the only mode.
+      const { sessionId: _session, mimeType: _mime, mode: _mode, ...viewport } = result.viewport;
+      const summary = client.redact({ viewport, ...(framing ? { framing } : {}) });
       return { content: [{ type: 'text', text: JSON.stringify(summary) }, { type: 'image', data: result.data, mimeType: 'image/png' }], structuredContent: summary };
     } catch (error) {
       const known = error instanceof Error && 'code' in error && typeof error.code === 'string' && /^[A-Z_]{1,64}$/.test(error.code);

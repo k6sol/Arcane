@@ -267,7 +267,43 @@ test('malformed, oversized and unknown output is ignored; missing results become
   assert.deepEqual([(await f.done(b.turnId)).ok, (await f.done(b.turnId)).error], [false, 'Claude Code ended without a reply.']);
   f.scripts.push(child => { child.write(init()); child.close(1); });
   const c = await f.host.send(turnInput('go', a.conversationId));
-  assert.equal((await f.done(c.turnId)).error, 'Claude Code stopped before finishing the reply.');
+  assert.equal((await f.done(c.turnId)).error, chat.CLAUDE_CHAT_MESSAGES.exited);
+  assert.match(chat.CLAUDE_CHAT_MESSAGES.exited, /stopped unexpectedly[\s\S]*retry/);
+});
+
+test('expired sign-in, outages, an offline Studio and a services restart become fixed messages with a next step', async t => {
+  const f = await fixture(t), M = chat.CLAUDE_CHAT_MESSAGES;
+  f.scripts.push(child => { child.write(init()); child.write(result({ subtype: 'error_during_execution', is_error: true, api_error_status: 401, result: 'OAuth token has expired' })); child.close(1); });
+  const a = await f.host.send(turnInput('go'));
+  assert.equal((await f.done(a.turnId)).error, M.authExpired);
+  f.scripts.push(child => { child.write(init()); child.write(result({ subtype: 'error_during_execution', is_error: true, result: 'Invalid API key · Please run /login' })); child.close(1); });
+  const b = await f.host.send(turnInput('go', a.conversationId));
+  assert.equal((await f.done(b.turnId)).error, M.authExpired);
+  f.scripts.push(child => { child.write(init()); child.write(result({ subtype: 'error_during_execution', is_error: true, api_error_status: 529, result: 'Overloaded' })); child.close(1); });
+  const c = await f.host.send(turnInput('go', a.conversationId));
+  assert.equal((await f.done(c.turnId)).error, M.network);
+  // No result at all, only the CLI's own assistant error marker before it exits.
+  f.scripts.push(child => { child.write(init()); child.write(line({ type: 'assistant', error: 'authentication_failed', message: { content: [] }, parent_tool_use_id: null, session_id: SESSION })); child.close(1); });
+  const d = await f.host.send(turnInput('go', a.conversationId));
+  assert.equal((await f.done(d.turnId)).error, M.authExpired);
+  for (const key of ['authExpired', 'network', 'studioOffline', 'interrupted', 'exited', 'start']) assert.match(M[key], /retry/i, key);
+  // The first SESSION_OFFLINE refusal stops the reply, so no further command reaches the offline session.
+  const offline = JSON.stringify({ error: { code: 'SESSION_OFFLINE', message: 'Studio session is not live.' } });
+  f.scripts.push(child => {
+    child.write(init()); child.write(assistant([{ type: 'tool_use', id: 'toolu_1', name: 'mcp__arcane__scene_create', input: {} }]));
+    child.write(line({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: [{ type: 'text', text: offline }], is_error: true }] }, parent_tool_use_id: null, session_id: SESSION }));
+  });
+  const e = await f.host.send(turnInput('go', a.conversationId));
+  const done = await f.done(e.turnId);
+  assert.deepEqual([done.ok, done.error], [false, M.studioOffline]);
+  assert.ok(f.turns().at(-1)!.child.killed >= 1);
+  // A host disposed for a services restart records the running reply as interrupted (never resent).
+  f.scripts.push(child => { child.write(init()); });
+  const g = await f.host.send(turnInput('go', a.conversationId));
+  await waitFor(() => f.turns().length === 6);
+  await f.host.dispose('interrupted');
+  assert.equal((await f.done(g.turnId)).error, M.interrupted);
+  assert.equal(f.turns().length, 6, 'Nothing was spawned again.');
 });
 
 test('stderr and unsafe result text never reach events or transcripts; short plain CLI errors do', async t => {

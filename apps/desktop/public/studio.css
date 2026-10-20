@@ -1473,11 +1473,11 @@ body.arcane-app{font-family:var(--font-ui);background:var(--vignette),var(--grai
   background:var(--pop-bg);border:1px solid var(--glass-line);border-radius:var(--radius-card);box-shadow:var(--pop-shadow);backdrop-filter:blur(24px) saturate(140%);color:var(--text)}
 
 /* Buttons: one size scale and four variants. */
-.arcane-app :where(.chat-edit-send,.chat-edit-cancel,.chat-choice,.arcane-modal-button,.plans-buy,.chat-change-restore,.studio-diagnostics-clear,.studio-diagnostic-fix,.setup-checklist-item .secondary,.usage-limit-notice button){
+.arcane-app :where(.chat-edit-send,.chat-edit-cancel,.chat-choice,.arcane-modal-button,.plans-buy,.chat-change-restore,.studio-diagnostics-clear,.studio-diagnostic-fix,.setup-checklist-item .secondary,.studio-connection-reconnect,.chat-message-retry,.usage-limit-notice button){
   display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:var(--control-sm);padding:0 14px;border:1px solid var(--line-strong);border-radius:var(--radius-sm);
   font:600 13px/1.2 var(--font-ui);letter-spacing:0;text-shadow:none;cursor:pointer}
 /* Secondary: glass with a hairline edge. */
-.arcane-app :where(.chat-edit-cancel,.chat-choice,.arcane-modal-button,.plans-buy,.chat-change-restore,.studio-diagnostics-clear,.setup-checklist-item .secondary){
+.arcane-app :where(.chat-edit-cancel,.chat-choice,.arcane-modal-button,.plans-buy,.chat-change-restore,.studio-diagnostics-clear,.setup-checklist-item .secondary,.studio-connection-reconnect){
   background:var(--btn-secondary-bg);color:var(--text);box-shadow:inset 0 1px 0 var(--glass-hi)}
 /* Primary: the Arcane red gradient over a solid action colour (the solid colour is what contrast checks read). */
 .arcane-app :where(.chat-edit-send,.chat-choice.chat-choice-primary,.arcane-modal-primary,.plans-buy-primary,.studio-diagnostic-fix,.usage-limit-notice button){
@@ -1485,9 +1485,9 @@ body.arcane-app{font-family:var(--font-ui);background:var(--vignette),var(--grai
 /* Ghost: transparent until hovered. */
 .arcane-app :where(.chat-message-edit,.chat-change-copy,.composer-queue-remove,.sidebar-compact-toggle){
   display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--line);border-radius:var(--radius-sm);background:transparent;color:var(--text-secondary);font:500 12px/1.2 var(--font-ui);box-shadow:none}
-.arcane-app :where(.chat-edit-send,.chat-edit-cancel,.chat-choice,.arcane-modal-button,.plans-buy,.chat-change-restore,.studio-diagnostics-clear,.studio-diagnostic-fix,.setup-checklist-item .secondary,.usage-limit-notice button,.chat-message-edit,.chat-change-copy,.composer-queue-remove,.sidebar-compact-toggle):disabled{cursor:not-allowed}
+.arcane-app :where(.chat-edit-send,.chat-edit-cancel,.chat-choice,.arcane-modal-button,.plans-buy,.chat-change-restore,.studio-diagnostics-clear,.studio-diagnostic-fix,.setup-checklist-item .secondary,.studio-connection-reconnect,.chat-message-retry,.usage-limit-notice button,.chat-message-edit,.chat-change-copy,.composer-queue-remove,.sidebar-compact-toggle):disabled{cursor:not-allowed}
 @media (hover:hover) and (pointer:fine){
-  .arcane-app :where(.chat-edit-cancel,.chat-choice:not(.chat-choice-primary),.arcane-modal-button:not(.arcane-modal-primary),.plans-buy:not(.plans-buy-primary),.chat-change-restore,.studio-diagnostics-clear,.setup-checklist-item .secondary):hover:not(:disabled){background:var(--hover);border-color:var(--accent-line);color:var(--text)}
+  .arcane-app :where(.chat-edit-cancel,.chat-choice:not(.chat-choice-primary),.arcane-modal-button:not(.arcane-modal-primary),.plans-buy:not(.plans-buy-primary),.chat-change-restore,.studio-diagnostics-clear,.setup-checklist-item .secondary,.studio-connection-reconnect):hover:not(:disabled){background:var(--hover);border-color:var(--accent-line);color:var(--text)}
   .arcane-app :where(.chat-edit-send,.chat-choice.chat-choice-primary,.arcane-modal-primary,.plans-buy-primary,.studio-diagnostic-fix,.usage-limit-notice button):hover:not(:disabled){background-image:var(--grad-action-hover);border-color:rgba(255,140,146,.45);box-shadow:var(--btn-primary-shadow-hover)}
   .arcane-app :where(.chat-message-edit,.chat-change-copy,.composer-queue-remove,.sidebar-compact-toggle):hover:not(:disabled){background:var(--hover);border-color:var(--accent-line);color:var(--text)}
 }
@@ -1500,7 +1500,7 @@ body.arcane-app{font-family:var(--font-ui);background:var(--vignette),var(--grai
 .arcane-app :where(.setup-checklist,.chat-change-card,.chat-choices,.tool-group,.plans-page,.studio-diagnostics,.composer-queue,.arcane-modal,.permission-switch,.chat-edit,.display-settings,.shortcut-card,.workspace-topbar,.app-sidebar) :where(button,summary,input,select,textarea,[tabindex]):focus-visible{outline:2px solid var(--focus-ring);outline-offset:2px}
 @media (forced-colors:active){
   .arcane-app :where(.setup-checklist,.chat-change-card,.chat-choices,.workspace-stage .tool-group,.plans-offer,.plans-notice,.arcane-modal,.studio-diagnostics-panel,.composer-command-menu){border-color:CanvasText;background:Canvas;color:CanvasText;box-shadow:none;backdrop-filter:none}
-  .arcane-app :where(.chat-edit-send,.chat-edit-cancel,.chat-choice,.arcane-modal-button,.plans-buy,.chat-change-restore,.studio-diagnostics-clear,.studio-diagnostic-fix,.setup-checklist-item .secondary,.usage-limit-notice button,.chat-message-edit,.chat-change-copy,.composer-queue-remove,.sidebar-compact-toggle,.arcane-balance-chip,.studio-diagnostics-badge,.playtest-toggle){border-color:ButtonText;background:ButtonFace;color:ButtonText;box-shadow:none;backdrop-filter:none;opacity:1}
+  .arcane-app :where(.chat-edit-send,.chat-edit-cancel,.chat-choice,.arcane-modal-button,.plans-buy,.chat-change-restore,.studio-diagnostics-clear,.studio-diagnostic-fix,.setup-checklist-item .secondary,.studio-connection-reconnect,.chat-message-retry,.usage-limit-notice button,.chat-message-edit,.chat-change-copy,.composer-queue-remove,.sidebar-compact-toggle,.arcane-balance-chip,.studio-diagnostics-badge,.playtest-toggle){border-color:ButtonText;background:ButtonFace;color:ButtonText;box-shadow:none;backdrop-filter:none;opacity:1}
   .arcane-app :where(.chat-edit-send,.chat-choice.chat-choice-primary,.arcane-modal-primary,.plans-buy-primary,.studio-diagnostic-fix,.usage-limit-notice button){border:2px solid Highlight}
   .arcane-app :where(.setup-checklist,.chat-change-card,.chat-choices,.tool-group,.plans-page,.studio-diagnostics,.composer-queue,.arcane-modal,.permission-switch,.chat-edit,.display-settings,.shortcut-card,.workspace-topbar,.app-sidebar) :where(button,summary,input,select,textarea,[tabindex]):focus-visible{outline-color:Highlight}
 }
@@ -1516,6 +1516,12 @@ body.arcane-app{font-family:var(--font-ui);background:var(--vignette),var(--grai
 .arcane-app .model-column .picker-model-option{min-height:36px}
 .arcane-app .model-column .picker-model-option:disabled .hint{color:var(--text-secondary)}
 .arcane-app .model-column-empty{margin:0;padding:8px 6px;color:var(--text-secondary);font-size:12px}
+/* Arcane Credits: a third column (ChatGPT, Claude, Arcane), stacked when narrow; a balance note and per-model credit prices. */
+.arcane-app #codex-model-options[data-layout=columns][data-columns="3"]{grid-template-columns:repeat(3,minmax(0,1fr))}
+.arcane-app .composer-model-popover[data-columns=stacked] #codex-model-options[data-layout=columns][data-columns="3"]{grid-template-columns:minmax(0,1fr)}
+.arcane-app .model-column-note{margin:-2px 0 4px;padding:0 6px;color:var(--text-secondary);font-size:12px;overflow-wrap:anywhere}
+.arcane-app .picker-model-option:has(.picker-model-detail){flex-wrap:wrap;row-gap:2px}
+.arcane-app .picker-model-option .picker-model-detail{display:block;order:3;flex:1 0 100%;color:var(--text-secondary);font-size:11px;font-weight:400;line-height:1.3}
 .arcane-app .workspace-chat-tabs [role=tab] .provider-logo{width:14px;height:14px;color:var(--text-secondary)}
 .arcane-app .workspace-chat-tabs [role=tab][aria-selected=true] .provider-logo{color:var(--text)}
 @media (forced-colors:active){
@@ -2119,6 +2125,48 @@ body.arcane-app.shell-compact .workspace-topbar .icon-button{min-height:36px;min
   .arcane-app .welcome-tour-count,.arcane-app #welcome-tour-body,.arcane-app .welcome-tour-keys{color:CanvasText}
 }
 /* ---- End welcome tour ---- */
+/* ---- Premium polish: Studio connection banner, Retry message, loading skeleton, Arcane credits column, tour card, thin rail ----
+   Component-system tokens only (spacing, type, radii, card depth); static (no transitions or animation). */
+/* Studio connection banner (setup-checklist.ts): an opaque glass card pinned above the chat with a status dot. */
+.arcane-app .studio-connection-banner{position:sticky;top:0;z-index:3;display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-3) var(--space-4);margin:0 0 var(--space-4);padding:var(--space-3) var(--space-3) var(--space-3) var(--space-4);
+  border:1px solid var(--warning-line);border-radius:var(--radius-card);background:linear-gradient(100deg,rgba(240,184,90,.07) 0%,transparent 55%),var(--glass-solid);color:var(--text);box-shadow:var(--card-shadow);font-size:var(--fs-body);line-height:1.5}
+.arcane-app .studio-connection-banner.good{border-color:var(--success-line);background:linear-gradient(100deg,rgba(127,212,154,.07) 0%,transparent 55%),var(--glass-solid)}
+.arcane-app .studio-connection-banner::before{content:"";flex:0 0 auto;align-self:flex-start;width:8px;height:8px;margin-top:6px;border-radius:50%;background:var(--warning);box-shadow:0 0 0 4px rgba(240,184,90,.16)}
+.arcane-app .studio-connection-banner.good::before{background:var(--success);box-shadow:0 0 0 4px rgba(127,212,154,.16)}
+.arcane-app .studio-connection-banner>p{flex:1 1 240px;min-width:0;margin:0;color:var(--text);font-size:var(--fs-body);line-height:1.5;overflow-wrap:anywhere}
+.arcane-app .studio-connection-banner>button{flex:0 0 auto;margin-left:auto}
+.arcane-app .studio-connection-banner>button:disabled{opacity:.6}
+/* Retry message under a reply that did not finish (claude-chat.ts): a quiet red action, one control height. */
+.arcane-app .workspace-stage .codex-message .chat-message-retry{display:inline-flex;width:fit-content;margin:var(--space-2) 0 var(--space-1);border-color:var(--accent-line);background:var(--accent-tint);color:var(--accent-text)}
+.arcane-app .workspace-stage .codex-message .chat-message-retry::before{content:"\21BB";font-size:14px;line-height:1}
+@media (hover:hover) and (pointer:fine){.arcane-app .workspace-stage .codex-message .chat-message-retry:hover:not(:disabled){background:var(--hover);border-color:var(--accent);color:var(--text)}}
+.arcane-app .workspace-stage .codex-message .chat-message-retry:active:not(:disabled){background:var(--hover-strong)}
+/* Loading a saved conversation: a static skeleton (one message bubble, one reply) in place of the welcome screen. */
+.arcane-app .workspace-stage .codex-messages[aria-busy=true]:not(:has(.codex-message)){flex:1 1 auto;padding:var(--space-6) 0}
+.arcane-app .workspace-stage .codex-messages[aria-busy=true]:not(:has(.codex-message))~.workspace-welcome{display:none}
+.arcane-app .workspace-stage .codex-messages[aria-busy=true]:not(:has(.codex-message))>.empty{display:grid;gap:var(--space-4);margin:0;padding:0;color:var(--muted);font-size:var(--fs-meta);text-align:center}
+.arcane-app .workspace-stage .codex-messages[aria-busy=true]:not(:has(.codex-message))>.empty::before{content:"";order:-2;justify-self:end;width:min(360px,62%);height:64px;border:1px solid var(--accent-line);border-radius:var(--radius-xl);background:var(--grad-user);opacity:.7}
+.arcane-app .workspace-stage .codex-messages[aria-busy=true]:not(:has(.codex-message))>.empty::after{content:"";order:-1;justify-self:start;width:min(560px,86%);height:58px;margin-left:34px;
+  background:linear-gradient(var(--hover-strong),var(--hover-strong)) 0 0/100% 12px no-repeat,linear-gradient(var(--hover-strong),var(--hover-strong)) 0 23px/88% 12px no-repeat,linear-gradient(var(--hover),var(--hover)) 0 46px/54% 12px no-repeat;border-radius:6px}
+/* Arcane credits column in the model picker: red mark, a faint red edge and the balance as a pill. */
+.arcane-app .model-column[data-picker-group=arcane]{border-color:var(--accent-line);background:linear-gradient(180deg,var(--accent-tint) 0%,transparent 42%)}
+.arcane-app .model-column[data-picker-group=arcane] .model-group-heading .provider-logo{color:var(--accent)}
+.arcane-app .model-column .model-column-note{align-self:flex-start;display:inline-flex;align-items:center;min-height:24px;margin:0 6px 6px;padding:3px 10px;border:1px solid var(--accent-line);border-radius:var(--radius-sm);background:var(--accent-tint);color:var(--text);font:600 var(--fs-meta)/1.3 var(--font-ui);font-variant-numeric:tabular-nums}
+.arcane-app .picker-model-option .picker-model-detail{font-variant-numeric:tabular-nums}
+/* Welcome tour card: the dialog edge (one red top line) and the shared card glass. */
+.arcane-app .welcome-tour-card{border-top:2px solid var(--accent);background:var(--card-bg);box-shadow:var(--lift-lg),0 0 120px -50px var(--glow-strong)}
+.arcane-app .welcome-tour-actions{margin-top:var(--space-1)}
+.arcane-app .welcome-tour-keys{padding-top:var(--space-2);border-top:1px solid var(--glass-line)}
+@media (forced-colors:active){
+  .arcane-app .studio-connection-banner{border-color:CanvasText;background:Canvas;color:CanvasText;box-shadow:none}
+  .arcane-app .studio-connection-banner::before{background:CanvasText;box-shadow:none}
+  .arcane-app .studio-connection-banner>p{color:CanvasText}
+  .arcane-app .workspace-stage .codex-message .chat-message-retry{border-color:ButtonText;background:ButtonFace;color:ButtonText}
+  .arcane-app .workspace-stage .codex-messages[aria-busy=true]:not(:has(.codex-message))>.empty::before,.arcane-app .workspace-stage .codex-messages[aria-busy=true]:not(:has(.codex-message))>.empty::after{content:none}
+  .arcane-app .model-column .model-column-note{border-color:CanvasText;background:Canvas;color:CanvasText}
+  .arcane-app .welcome-tour-card{border-top:2px solid Highlight}
+}
+/* ---- End premium polish ---- */
 /* Keep this mesh (mesh-keep.ts): assets panel list and inline chat-card controls. */
 .mesh-keep-panel{margin:14px 0;display:flex;flex-direction:column;gap:6px}
 .mesh-keep-panel h3{margin:0;font-size:13px;font-weight:600}

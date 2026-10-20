@@ -117,8 +117,59 @@ test('upstream failure refunds the hold; bounded bodies; unknown models; CORS st
     const preflight = await fetch(h.base + '/v1/chat/stream', { method: 'OPTIONS', headers: { Origin: 'https://evil.example', 'Access-Control-Request-Method': 'POST' } });
     assert.equal(preflight.status, 204); assert.equal(preflight.headers.get('access-control-allow-origin'), null);
     const models = await (await fetch(h.base + '/v1/models', { headers: bearer(token) })).json();
-    assert.deepEqual(models, { models: [{ id: 'arcane-default', label: 'Arcane default' }, { id: 'arcane-fast', label: 'Arcane fast' }] });
+    // Credits per million tokens with the 20 % markup applied, rounded up.
+    assert.deepEqual(models, { models: [{ id: 'arcane-default', label: 'Arcane default', pricing: { inputPerMTok: 360, outputPerMTok: 1800 }, tools: true },
+      { id: 'arcane-fast', label: 'Arcane fast', pricing: { inputPerMTok: 120, outputPerMTok: 480 }, tools: true }] });
     const health = await (await fetch(h.base + '/v1/health')).json() as any;
     assert.equal(health.service, 'arcane-billing'); assert.equal(health.version, 1);
+  } finally { await h.close(); }
+});
+
+test('function calling: offered tools pass through, tool calls stream back and the loop turns are validated', async () => {
+  const seen: { messages: unknown[]; tools: unknown }[] = [];
+  const upstream: UpstreamStreamer = async function* (_c, _m, messages, _max, _signal, tools) {
+    seen.push({ messages, tools });
+    yield { type: 'usage', inputTokens: 100 };
+    if (messages.at(-1)?.role === 'tool') { yield { type: 'delta', text: 'Placed it.' }; yield { type: 'usage', outputTokens: 5 }; yield { type: 'stop', reason: 'end' }; return; }
+    yield { type: 'delta', text: 'Checking.' };
+    yield { type: 'tool_call', id: 'call_1', name: 'scene_read', arguments: { path: 'Workspace' } };
+    yield { type: 'usage', outputTokens: 20 }; yield { type: 'stop', reason: 'tool_use' };
+  };
+  const h = await startHarness({ upstream });
+  try {
+    const token = await signIn(h);
+    setCredits(h, 10_000);
+    const tools = [{ name: 'scene_read', description: 'Read the scene.', inputSchema: { type: 'object', properties: { path: { type: 'string' } } } }];
+    const first = await events(await ask(h, token, { tools }));
+    assert.deepEqual(first.find(e => e.type === 'tool_call'), { type: 'tool_call', id: 'call_1', name: 'scene_read', arguments: { path: 'Workspace' } });
+    assert.deepEqual(first.at(-1), { type: 'done', creditsUsed: creditsFor(model, 100, 20, 12000), actionsUsed: 0, stopReason: 'tool_use', inputTokens: 100, outputTokens: 20 });
+    assert.deepEqual(seen[0].tools, tools);
+    const turn = [{ role: 'user', content: 'Build a lobby' }, { role: 'assistant', content: 'Checking.', toolCalls: [{ id: 'call_1', name: 'scene_read', arguments: { path: 'Workspace' } }] },
+      { role: 'tool', toolCallId: 'call_1', content: '{"children":[]}' }];
+    const second = await events(await ask(h, token, { tools, messages: turn }));
+    assert.equal(second.filter(e => e.type === 'delta').map(e => e.text).join(''), 'Placed it.');
+    assert.equal(second.at(-1).stopReason, 'end');
+    assert.deepEqual(seen[1].messages, [turn[0], turn[1], { role: 'tool', content: '{"children":[]}', toolCallId: 'call_1' }]);
+    // Tool turns need offered tools; malformed tools and calls are refused before any upstream call.
+    const calls = seen.length;
+    assert.equal((await ask(h, token, { messages: turn })).status, 400);
+    assert.equal((await ask(h, token, { tools: [{ name: 'bad name', description: 'x', inputSchema: {} }] })).status, 400);
+    assert.equal((await ask(h, token, { tools: [...tools, ...tools] })).status, 400, 'duplicate names');
+    assert.equal((await ask(h, token, { tools: [{ name: 'big', description: 'x', inputSchema: { blob: 'x'.repeat(40000) } }] })).status, 400);
+    assert.equal((await ask(h, token, { tools, messages: [{ role: 'tool', toolCallId: '../x', content: 'x' }] })).status, 400);
+    assert.equal((await ask(h, token, { tools, messages: [{ role: 'assistant', content: '', toolCalls: [{ id: 'c', name: 'scene_read', arguments: [] }] }] })).status, 400);
+    assert.equal(seen.length, calls);
+  } finally { await h.close(); }
+});
+
+test('a tool the client did not offer ends the stream with an error', async () => {
+  const upstream: UpstreamStreamer = async function* () { yield { type: 'tool_call', id: 'call_x', name: 'shell', arguments: {} }; };
+  const h = await startHarness({ upstream });
+  try {
+    const token = await signIn(h);
+    setCredits(h, 10_000);
+    const stream = await events(await ask(h, token, { tools: [{ name: 'scene_read', description: 'Read.', inputSchema: { type: 'object' } }] }));
+    assert.equal(stream.some(e => e.type === 'tool_call'), false);
+    assert.equal(stream.at(-1).type, 'error');
   } finally { await h.close(); }
 });

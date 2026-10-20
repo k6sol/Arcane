@@ -259,7 +259,7 @@ test('LAB native SDK starts before turn ACK, binds original chat, and requires e
   f.releaseTurn(); assert.equal((await pending).status, 200);
   // Changing the fake provider's displayed chat cannot adopt/rebind native asset scope.
   f.snapshot.thread!.threadId = 'foreign-display-chat';
-  const page = nativeAssetJobPage.parse(toolData(await f.tool('assets_jobs')));
+  const page = nativeAssetJobPage.parse(toolData(await f.tool('assets_jobs', { detail: true })));
   assert.deepEqual(page.conversation, started.conversation); assert.deepEqual(page.jobs.map(job => job.jobId), [started.jobId]);
   assert.equal((await f.native('/v1/assets/native/manifest?jobId=' + global.jobId)).status, 404);
   assert.equal((await f.tool('assets_cancel', { jobId: global.jobId })).isError, true); assert.equal(f.cancels, 0);
@@ -269,7 +269,7 @@ test('LAB native SDK starts before turn ACK, binds original chat, and requires e
   assert.equal((await f.action('revoke-assets', { threadId: f.threadId })).status, 200);
   assert.equal((await f.tool('assets_start', { template: 'hero-prop', name: 'revoked' })).isError, true);
   assert.equal((await f.tool('assets_cancel', { jobId: started.jobId })).isError, true); assert.equal(f.starts, 2); assert.equal(f.cancels, 1);
-  assert.equal(nativeAssetJobPage.parse(toolData(await f.tool('assets_jobs'))).jobs.length, 1, 'Revocation retains scoped reads');
+  assert.equal(nativeAssetJobPage.parse(toolData(await f.tool('assets_jobs', { detail: true }))).jobs.length, 1, 'Revocation retains scoped reads');
   await f.lab.close(); assert.equal(f.closes, 1, 'Shutdown fences before provider close');
   const retained = new ConversationWorkStore({ directory: f.bindingsDirectory, projectPath: f.projectPath });
   try { assert.deepEqual(retained.binding('asset-job', started.jobId)?.conversation, started.conversation); assert.equal(retained.binding('asset-job', global.jobId), null); }

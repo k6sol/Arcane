@@ -8,6 +8,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js';
 import { DaemonClient, type AssetAudience } from '../../apps/mcp/src/daemon-client.js';
 import { createMcpServer } from '../../apps/mcp/src/server.js';
+import { compactAssetJobPage } from '../../apps/mcp/src/token-lean.js';
 import { assetHistoryInput, assetJobPage, nativeAssetHistoryInput, nativeAssetJobPage, nativeAssetStart, nativeAssetCancel } from '../../apps/mcp/src/asset-schemas.js';
 import { normalizeRequest } from '../../packages/asset-pipeline/src/validation.js';
 import type { AssetManifest } from '../../packages/asset-pipeline/src/types.js';
@@ -119,12 +120,16 @@ test('native MCP: all asset tools use exact native paths and the same existing b
     }
   });
   assert.deepEqual((await call(f.client, 'assets_probe')).structuredContent, { probe: PROBE });
-  assert.deepEqual((await call(f.client, 'assets_jobs')).structuredContent, page());
+  assert.deepEqual((await call(f.client, 'assets_jobs', { detail: true })).structuredContent, page());
+  const lean = (await call(f.client, 'assets_jobs')).structuredContent!;
+  assert.deepEqual(lean, compactAssetJobPage(page())); assert.equal('byteLimit' in lean, false); assert.equal(lean.projectId, SCOPE.projectId);
+  assert.deepEqual(lean.jobs, [{ jobId: JOB_ID, name: REQUEST.name, kind: REQUEST.template, seed: REQUEST.seed, state: 'failed', stage: 'Retained café 🌿',
+    triangleBudget: REQUEST.triangleBudget, at: '2026-10-13T00:00:01Z', error: { code: 'FIXTURE', message: 'Complete retained failure evidence.' } }]);
   assert.deepEqual((await call(f.client, 'assets_start', INPUT)).structuredContent, ack());
   assert.deepEqual((await call(f.client, 'assets_cancel', { jobId: JOB_ID })).structuredContent, { job: { ...job(), state: 'cancelled' } });
   assert.deepEqual((await call(f.client, 'assets_manifest', { jobId: JOB_ID })).structuredContent, { manifest: manifest() });
   assert.deepEqual(f.requests.map(request => [request.method, request.url]), [
-    ['POST', '/v1/assets/native/probe'], ['GET', '/v1/assets/native/jobs'], ['POST', '/v1/assets/native/start'],
+    ['POST', '/v1/assets/native/probe'], ['GET', '/v1/assets/native/jobs'], ['GET', '/v1/assets/native/jobs'], ['POST', '/v1/assets/native/start'],
     ['POST', '/v1/assets/native/cancel'], ['GET', '/v1/assets/native/manifest?jobId=' + JOB_ID],
   ]);
   assert.ok(f.requests.every(request => request.auth === 'Bearer ' + TOKEN && request.origin === undefined));
@@ -202,9 +207,9 @@ test('native MCP: explicit storage-scope pagination preserves complete records w
     if (after === null) send(response, 200, first);
     else { assert.equal(after, cursor(9)); send(response, 200, second); }
   });
-  const result = await call(f.client, 'assets_jobs', { limit: 1 });
+  const result = await call(f.client, 'assets_jobs', { limit: 1, detail: true });
   assert.deepEqual(result.structuredContent, first); assert.equal(f.requests.length, 1);
-  assert.deepEqual((await call(f.client, 'assets_jobs', { limit: 1, after: result.structuredContent!.nextCursor })).structuredContent, second);
+  assert.deepEqual((await call(f.client, 'assets_jobs', { limit: 1, after: result.structuredContent!.nextCursor, detail: true })).structuredContent, second);
   assert.equal(f.requests[1]!.url, '/v1/assets/native/jobs?limit=1&after=' + encodeURIComponent(cursor(9)));
   assert.equal(f.requests.length, 2);
   assert.equal(assetHistoryInput.safeParse({ after: cursor(9) }).success, false);
@@ -217,7 +222,7 @@ test('native MCP: wrong history schemas, overflows and foreign returned cursors 
   for (const invalid of [genericPage(), { ...page(), projectId: 'bad' },
     { ...page(), conversation: { ...SCOPE.conversation, provider: 'claude-code' } }, page([job()], 'b'.repeat(64) + ':1'),
     page([job(), job(OTHER_ID)]), { ...page(), jobs: [{ ...job(), ignored: 'x'.repeat(HISTORY_PAGE_BYTES) }] }]) {
-    payload = invalid; const result = await call(f.client, 'assets_jobs', { limit: 1 });
+    payload = invalid; const result = await call(f.client, 'assets_jobs', { limit: 1, detail: true });
     assert.equal(result.isError, true); assert.equal((result.structuredContent?.error as { code: string }).code, 'PROTOCOL');
   }
   assert.equal(f.requests.length, 6); onlyNative(f.requests);
@@ -263,7 +268,7 @@ for (const failure of ['dropped', 'malformed', 'schema', 'overflow', '500', 'red
     assert.match(String(result.structuredContent?.nextStep), /assets_jobs.*same native project and conversation scope/);
     assert.match(String(result.structuredContent?.nextStep), /do not repeat.*adopt/);
     assert.equal(f.requests.length, 1, 'No automatic lookup or replay');
-    assert.deepEqual((await call(f.client, 'assets_jobs')).structuredContent, page());
+    assert.deepEqual((await call(f.client, 'assets_jobs', { detail: true })).structuredContent, page());
     assert.equal(f.requests.length, 2); onlyNative(f.requests);
     assert.equal(f.requests.filter(request => request.method === 'POST').length, 1);
   });
@@ -362,7 +367,7 @@ test('generic MCP: endpoints, envelopes, UUID cursors, bearer, descriptions and 
     }
   }, 'generic');
   assert.deepEqual((await call(f.client, 'assets_probe')).structuredContent, { probe: PROBE });
-  assert.deepEqual((await call(f.client, 'assets_jobs', { after: JOB_ID })).structuredContent, genericPage([job(OTHER_ID)]));
+  assert.deepEqual((await call(f.client, 'assets_jobs', { after: JOB_ID, detail: true })).structuredContent, genericPage([job(OTHER_ID)]));
   assert.deepEqual((await call(f.client, 'assets_start', INPUT)).structuredContent, { job: job() });
   assert.deepEqual((await call(f.client, 'assets_cancel', { jobId: JOB_ID })).structuredContent, { job: job() });
   assert.deepEqual((await call(f.client, 'assets_manifest', { jobId: JOB_ID })).structuredContent, { manifest: manifest() });

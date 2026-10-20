@@ -258,9 +258,12 @@ test('Edge simplicity: optional key details, exact navigation, one draft, empty 
     t.diagnostic('Fresh private Edge ' + context.browser()!.version() + '; actual HTML/CSS; three viewports; no catalogue, API or native activity; screenshots=' + root);
   });
 
-test('F2: the sidebar New chat routes to the Claude chat only while the Claude surface is active', async () => {
+test('F2: the sidebar New chat routes to the Claude or Arcane chat only while that surface is active', async () => {
   const boot = await source('apps/desktop/src/studio.ts');
-  assert.match(boot, /alternateNewChat:\s*\{\s*active:\s*\(\)\s*=>\s*!claudeChatStopped\s*&&\s*!!claudeChat\s*&&\s*providerSetup\.chatSurface\(\)\s*===\s*'claude',\s*start:\s*\(\)\s*=>\s*claudeChat\?\.newChat\(\)\s*\}/);
+  // Active only while chats run and the shown surface is Claude (with a Claude chat) or Arcane (with an Arcane chat); ChatGPT keeps the default.
+  assert.match(boot, /alternateNewChat:\s*\{\s*active:\s*\(\)\s*=>\s*!claudeChatStopped\s*&&\s*\(!!claudeChat\s*&&\s*providerSetup\.chatSurface\(\)\s*===\s*'claude'\s*\|\|\s*!!arcaneChat\s*&&\s*providerSetup\.chatSurface\(\)\s*===\s*'arcane'\),/);
+  // Start opens a new chat on exactly the surface that is shown.
+  assert.match(boot, /start:\s*\(\)\s*=>\s*\{\s*if\s*\(providerSetup\.chatSurface\(\)\s*===\s*'arcane'\)\s*arcaneChat\?\.newChat\(\);\s*else\s*claudeChat\?\.newChat\(\);\s*\}\s*\}/);
   const tabs = await source('apps/desktop/src/chat-tabs.ts');
   assert.match(tabs, /\.\.\.\(options\.alternateNewChat\?\{alternateNewChat:options\.alternateNewChat\}:\{\}\)/, 'startChatTabs forwards the routing hook');
 });

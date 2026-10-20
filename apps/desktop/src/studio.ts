@@ -1,3 +1,5 @@
+import { startScriptEditorDrafts, type ScriptDraftTarget, type AppliedScriptDraft } from './script-editor-drafts.js';
+import type { EditorDraft } from './editor-drafts.js';
 import { EditorDraftStore, type EditorDraftBridge } from './editor-drafts.js';
 import { startProjectMemory } from './project-memory.js';
 import { startRuntimeRecovery } from './runtime-recovery.js';
@@ -8,7 +10,7 @@ import { LearningPanel } from './learning-panel.js';
 import { CodexChat, CodexChatApi, setProjectMemorySaver } from './codex-chat.js';
 import { startWorkspaceShell, WORKSPACE_ASSET_ACTIVITY_EVENT, type WorkspaceAssetActivity } from './workspace-shell.js';
 import { startProviderSetup } from './provider-setup.js';
-import { startSetupChecklist } from './setup-checklist.js';
+import { startSetupChecklist, startStudioConnectionBanner } from './setup-checklist.js';
 import { startStarterGallery } from './starter-gallery.js';
 import { startWelcomeTour } from './welcome-tour.js';
 import { ClaudeChat, linkChatProviders } from './claude-chat.js';
@@ -727,6 +729,67 @@ export class StudioWorkbench {
       ? Object.freeze({ projectId: this.canonicalProjectId, projectPath: this.canonicalProjectPath }) : null;
   }
   historyProjectPath(): string { return this.canonicalProjectPath; }
+  private readonly sourceDraftContexts = new Set<() => void>();
+  private readonly sourceDraftApplied = new Set<(value: AppliedScriptDraft) => void>();
+  private readonly sourceDraftRequests = new Map<string, {effect: AppliedScriptDraft; session: StudioSession}>();
+  private sourceDraftKey(ref: InstanceRef): string {
+    return JSON.stringify({sessionId: ref.sessionId, instanceId: ref.instanceId, root: ref.root, className: ref.className});
+  }
+  sourceDraftTarget(): ScriptDraftTarget | null {
+    if (this.stopped) return null;
+    const canRestore = this.online && this.historyReady && !this.busy && !this.pending;
+    if (this.ref && this.sourceBaseline && sameRef(this.ref, this.sourceBaseline.ref) && typeof this.sourceBaseline.source === 'string') {
+      const title = this.ref.root + ' / ' + this.ref.pathSegments.join(' / ');
+      return {context: this.sourceDraftKey(this.ref), title: [...title].slice(0, 100).join(''), baseline: this.sourceBaseline.source, canRestore};
+    }
+    return {context: 'unassigned', title: 'Unassigned script draft', baseline: '', canRestore: canRestore && !this.ref};
+  }
+  restoreSourceDraft(value: EditorDraft): boolean {
+    const target = this.sourceDraftTarget(), input = this.el<HTMLTextAreaElement>('source');
+    if (value.kind !== 'script-source' || !target?.canRestore || target.context !== value.context || target.baseline !== value.baseline ||
+        input.value !== target.baseline && input.value !== value.text) return false;
+    input.value = value.text; this.el<HTMLSelectElement>('method').value = 'script.update'; this.renderForm(true); return true;
+  }
+  clearSourceDraft(value: EditorDraft): boolean {
+    const target = this.sourceDraftTarget(), input = this.el<HTMLTextAreaElement>('source');
+    if (!target || target.context !== value.context || target.baseline !== value.baseline || input.value !== value.text) return false;
+    input.value = target.baseline; this.renderForm(true); return true;
+  }
+  subscribeSourceDraftContext(listener: () => void): () => void {
+    this.sourceDraftContexts.add(listener); return () => {this.sourceDraftContexts.delete(listener);};
+  }
+  subscribeSourceDraftApplied(listener: (value: AppliedScriptDraft) => void): () => void {
+    this.sourceDraftApplied.add(listener); return () => {this.sourceDraftApplied.delete(listener);};
+  }
+  private publishSourceDraftContext(): void {for (const listener of this.sourceDraftContexts) {try {listener();} catch {}}}
+  private captureSourceDraftRequest(request: PendingRequest): void {
+    if (this.sourceDraftRequests.has(request.requestId) || request.path !== '/v1/studio/commands' || !record(request.body) || request.body.method !== 'script.update' || !record(request.body.args)) return;
+    const target = this.sourceDraftTarget(), session = this.active(), args = request.body.args;
+    if (!target || !session || request.sessionId !== session.id || request.body.sessionId !== session.id || request.body.requestId !== request.requestId ||
+        args.expectedSource !== target.baseline || args.source !== this.value('source') || typeof args.source !== 'string') return;
+    try {
+      const ref = readReference(args.ref, session); if (this.sourceDraftKey(ref) !== target.context) return;
+      this.sourceDraftRequests.set(request.requestId, {session, effect: {context: target.context, baseline: target.baseline, text: args.source}});
+      if (this.sourceDraftRequests.size > 64) this.sourceDraftRequests.delete(this.sourceDraftRequests.keys().next().value!);
+    } catch { /* Only a source request bound to the active editor may settle its draft. */ }
+  }
+  private reconcileSourceDrafts(): void {
+    for (const command of this.commands) {
+      const captured = this.sourceDraftRequests.get(command.requestId); if (!captured) continue;
+      if (['failed', 'cancelled', 'needs_reconciliation'].includes(command.state)) {this.sourceDraftRequests.delete(command.requestId); continue;}
+      if (command.state !== 'succeeded') continue;
+      this.sourceDraftRequests.delete(command.requestId);
+      const {effect, session} = captured, mutation = mutationReceipt(command);
+      if (command.method !== 'script.update' || command.sessionId !== session.id || command.clientSessionId !== session.clientSessionId ||
+          !mutation || mutation.kind !== 'script.update' || mutation.before?.source !== effect.baseline || mutation.after.source !== effect.text ||
+          command.args.expectedSource !== effect.baseline || command.args.source !== effect.text) continue;
+      try {
+        if (this.sourceDraftKey(readReference(command.args.ref, session)) !== effect.context || this.sourceDraftKey(readReference(mutation.ref, session)) !== effect.context) continue;
+      } catch {continue;}
+      for (const listener of this.sourceDraftApplied) {try {listener(Object.freeze({...effect}));} catch {}}
+    }
+  }
+
   private readonly projectListeners = new Set<() => void>();
   subscribeProjectChange(listener: () => void): () => void {
     this.projectListeners.add(listener);
@@ -1116,6 +1179,7 @@ export class StudioWorkbench {
     this.text('expected-source', this.sourceBaseline?.source ?? 'No baseline captured.');
     if (rebuildProperties) this.renderProperties();
     this.renderControls();
+    this.publishSourceDraftContext();
   }
   private renderProperties() {
     this.propertyControls.clear(); const editor = this.el('property-editor'); editor.replaceChildren();
@@ -1293,6 +1357,7 @@ export class StudioWorkbench {
   }
   private async submit(request: PendingRequest) {
     if (this.busy) return;
+    this.captureSourceDraftRequest(request);
     const wasUnknown = this.pending?.requestId === request.requestId;
     this.busy = true; this.notice('Submitting ' + request.requestId + ' to the daemon…'); this.renderControls();
     try {
@@ -1328,6 +1393,7 @@ export class StudioWorkbench {
     }
   }
   private renderReceipt() {
+    this.reconcileSourceDrafts();
     const command = this.chosenCommand(); this.el('receipt-empty').hidden = Boolean(command); this.el('receipt-content').hidden = !command;
     if (!command) return;
     this.text('receipt-title', command.method); this.badge('receipt-state', command.state.replaceAll('_', ' '), stateTone(command.state)); this.text('receipt-explanation', STATE_EXPLANATIONS[command.state]);
@@ -2145,6 +2211,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   const editorBridge=(window as unknown as {arcaneDesktop?:{toolDrafts?:EditorDraftBridge}}).arcaneDesktop?.toolDrafts;
   const editorDrafts=editorBridge?new EditorDraftStore(editorBridge):null;
   const memory = startProjectMemory(document, {token:()=>token,drafts:editorDrafts});
+  let scriptDrafts:ReturnType<typeof startScriptEditorDrafts>|null=null;
   setProjectMemorySaver(note=>memory.append(note));
   window.addEventListener('pagehide',()=>{memory.stop();setProjectMemorySaver(null);});
   window.addEventListener('pageshow',event=>{if(event.persisted){memory.resume();setProjectMemorySaver(note=>memory.append(note));}});
@@ -2163,13 +2230,22 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     try { codexChat.yieldSurface(false); } catch { /* A surface hand-off is presentation only and cannot break the workspace. */ }
   };
   if (!chatLink) { providerSetup.subscribeChatSurface(showClaudeChat); showClaudeChat(); }
+  // Arcane Credits chat (desktop only): a third model column and chat surface once the user's Arcane account is connected
+  // to a configured gateway. Loaded lazily; while not configured it stays hidden and requests nothing over the network.
+  let arcaneChat: import('./arcane-chat.js').ArcaneChat | null = null;
+  if (chatLink && (window as unknown as { arcaneDesktop?: { arcaneChat?: unknown } }).arcaneDesktop?.arcaneChat) void import('./arcane-chat.js').then(module => {
+    if (claudeChatStopped) return;
+    const chat = arcaneChat = new module.ArcaneChat(document);
+    chat.subscribeModels(() => providerSetup.setArcaneAvailable(chat.usable()));
+    chatLink.setArcane(chat); void chat.loadModels();
+  }).catch(() => { /* Arcane Credits chat is optional; ChatGPT and Claude are unaffected. */ });
   void import('./desktop-update.js').then(module=>{
-    const updates=module.startDesktopUpdates(document,{beforeRestart:async()=>{await memory.prepareForRestart();await claudeChat?.prepareForRestart();await codexChat.prepareForRestart();}});
+    const updates=module.startDesktopUpdates(document,{beforeRestart:async()=>{await memory.prepareForRestart();await scriptDrafts?.prepareForRestart();await arcaneChat?.prepareForRestart();await claudeChat?.prepareForRestart();await codexChat.prepareForRestart();}});
     window.addEventListener('pagehide',()=>updates.stop());window.addEventListener('pageshow',event=>{if(event.persisted)updates.resume();});
   }).catch(()=>{});
   let recovery:ReturnType<typeof startRuntimeRecovery>|null=null;
   {
-    recovery=startRuntimeRecovery(document,{checkpoint:async()=>{await memory.prepareForRestart();await claudeChat?.prepareForRuntimeRecovery();await codexChat.prepareForRuntimeRecovery();}});
+    recovery=startRuntimeRecovery(document,{checkpoint:async()=>{await memory.prepareForRestart();await scriptDrafts?.prepareForRestart();await arcaneChat?.prepareForRuntimeRecovery();await claudeChat?.prepareForRuntimeRecovery();await codexChat.prepareForRuntimeRecovery();}});
     window.addEventListener('pagehide',()=>recovery?.stop());
     window.addEventListener('pageshow',event=>{if(event.persisted)recovery?.resume();});
   }
@@ -2189,6 +2265,15 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     assetMode: 'conversation', getNativeConversation: () => codexChat.workflowConversation(),
     subscribeContextChange: listener => codexChat.subscribeWorkflowContextChange(listener),
   });
+  // Script-editor drafts: recovered source text only fills the editor on an explicit click and never submits a command.
+  if (editorDrafts) {
+    scriptDrafts = startScriptEditorDrafts(document, { drafts: editorDrafts, target: () => workbench.sourceDraftTarget(),
+      restore: value => workbench.restoreSourceDraft(value), clear: value => workbench.clearSourceDraft(value),
+      subscribeContext: listener => workbench.subscribeSourceDraftContext(listener),
+      subscribeApplied: listener => workbench.subscribeSourceDraftApplied(listener) });
+    window.addEventListener('pagehide', () => scriptDrafts?.stop());
+    window.addEventListener('pageshow', event => { if (event.persisted) scriptDrafts?.resume(); });
+  }
   const desktopVerification = startDesktopVerification(document, {
     getProjectId: () => workbench.getCurrentProduct()?.projectId ?? null,
     subscribeProjectChange: listener => workbench.subscribeProjectChange(listener),
@@ -2203,6 +2288,10 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   const setupChecklist = startSetupChecklist(document, { provider: providerSetup, workbench, storage: checklistStorage,
     desktop: (window as unknown as { arcaneDesktop?: unknown }).arcaneDesktop, pairing: studioPairing });
   window.addEventListener('pagehide', () => { setupChecklist.stop(); studioPairing.stop(); });
+  // Mid-build disconnects: a banner above the chat while the live Studio session is gone (reconnecting / Reconnect Studio).
+  const studioBanner = startStudioConnectionBanner(document, { workbench });
+  window.addEventListener('pagehide', () => studioBanner.stop());
+  window.addEventListener('pageshow', event => { if (event.persisted) studioBanner.resume(); });
   // Quick-start gallery on the empty chat: a click only fills the composer for review.
   startStarterGallery(document);
   // Optional welcome tour: once after sign-in on the desktop app's first launch, and from Settings › Guide › Replay tour.
@@ -2248,21 +2337,22 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   // Build-done notifications: one native notification when a chat turn ends while Arcane is in the background.
   void import('./notifications.js').then(module=>{const start=()=>module.startBuildNotifications(document,{desktop:(window as unknown as {arcaneDesktop?:import('./notifications.js').BuildNotificationOptions['desktop']}).arcaneDesktop??null,storage:checklistStorage});let notices=start();window.addEventListener('pagehide',()=>notices.stop());window.addEventListener('pageshow',event=>{if(event.persisted){notices.stop();notices=start();}});}).catch(()=>{});
   void import('./studio-diagnostics.js').then(module=>{studioDiagnostics=module.startStudioDiagnostics(document,{token:()=>token,active:()=>workbench.hasStudioSessions(),showConversation:()=>workspaceShell.showConversation()});if(workflowsStopped)studioDiagnostics.stop();}).catch(()=>{});
-  window.addEventListener('pagehide', () => { workflowsStopped = true; claudeChatStopped = true; chatLink?.stop(); claudeChat?.stop(); taskPlanCard?.stop(); studioDiagnostics?.stop(); nativeHandoff.stop(); playtests?.stop();chatTabController?.stop(); taskUsageFooter.stop(); providerSetup.stop(); desktopVerification.stop(); workspaceShell.cleanup(); workbench.stop(); codexChat.stop(); learningPanel.stop(); historyPanel.stop();workflows?.stop(); });
+  window.addEventListener('pagehide', () => { workflowsStopped = true; claudeChatStopped = true; chatLink?.stop(); claudeChat?.stop(); arcaneChat?.stop(); taskPlanCard?.stop(); studioDiagnostics?.stop(); nativeHandoff.stop(); playtests?.stop();chatTabController?.stop(); taskUsageFooter.stop(); providerSetup.stop(); desktopVerification.stop(); workspaceShell.cleanup(); workbench.stop(); codexChat.stop(); learningPanel.stop(); historyPanel.stop();workflows?.stop(); });
   window.addEventListener('pageshow', event => { if (event.persisted) { workflowsStopped = false; claudeChatStopped = false; showClaudeChat(); taskPlanCard?.resume(); studioDiagnostics?.resume(); providerSetup.resume(); nativeHandoff.resume(); playtests=startTests(); desktopVerification.resume(); workspaceShell = startWorkspaceShell(document, dismissConnectionSecrets); workbench.resume(); codexChat.resume(); chatTabController?.resume(); taskUsageFooter.resume(); learningPanel.resume(); historyPanel.resume();void workflows?.resume(); } });
   void codexChat.start().then(async () => {
     const module = await import('./chat-tabs.js');
     chatTabController = await module.startChatTabs(document, { chat: codexChat, captureLegacyNewChat: true,
       beforeNewChat: () => workspaceShell.showConversation(),
       // While the Claude surface is shown, sidebar New chat and Ctrl/Cmd+N start a new Claude conversation instead.
-      alternateNewChat: { active: () => !claudeChatStopped && !!claudeChat && providerSetup.chatSurface() === 'claude', start: () => claudeChat?.newChat() } });
+      alternateNewChat: { active: () => !claudeChatStopped && (!!claudeChat && providerSetup.chatSurface() === 'claude' || !!arcaneChat && providerSetup.chatSurface() === 'arcane'),
+        start: () => { if (providerSetup.chatSurface() === 'arcane') arcaneChat?.newChat(); else claudeChat?.newChat(); } } });
     const attachments=await import('./chat-attachments.js');
     codexChat.enableTextAttachments(attachments.startChatAttachments(document,{
       getScope:()=>codexChat.textAttachmentScope(),onChange:()=>codexChat.attachmentPresentationChanged(),
       imageInputAvailable:()=>codexChat.referenceImageInputAvailable(),
     }));
     if (workflowsStopped) chatTabController.stop();
-    if(!workflowsStopped){await claudeChat?.readyForRuntimeRecovery();await codexChat.readyForRuntimeRecovery();if(await memory.readyForRuntimeRecovery())await recovery?.ready();}
+    if(!workflowsStopped){await arcaneChat?.readyForRuntimeRecovery();await claudeChat?.readyForRuntimeRecovery();await codexChat.readyForRuntimeRecovery();if(await memory.readyForRuntimeRecovery()&&(await scriptDrafts?.readyForRuntimeRecovery()??true))await recovery?.ready();}
   }).catch(() => { const notice = document.getElementById('codex-notice'); if (notice) notice.textContent = 'Chat could not be opened. Your saved history is unchanged.'; });
   void workbench.start().catch(error => { const notice = document.getElementById('notice'); if (notice) { notice.textContent = error instanceof Error ? error.message : String(error); notice.className = 'notice error'; } });
 }

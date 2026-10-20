@@ -19,7 +19,11 @@ export interface StudioContinuityProof {
   mode: 'Edit' | 'Play'; playEpoch: number; continuitySupported: boolean;
   connected: boolean; observedAt: string; expiresAt: string;
 }
-export const READ_METHODS = ['scene.children', 'scene.inspect', 'scene.search', 'selection.read', 'script.read', 'script.search', 'scene.import_context', 'scene.upload_context', 'scene.asset_watch'] as const;
+export const READ_METHODS = ['scene.children', 'scene.inspect', 'scene.search', 'selection.read', 'script.read', 'script.search', 'scene.import_context', 'scene.upload_context', 'scene.asset_watch', 'output.read'] as const;
+/** output.read: the plugin keeps a bounded ring of this Studio's Output lines (seeded from LogService history, then
+ * MessageOut), numbered by a per-pairing sequence so `after` is an exact cursor. Place-wide, read-only, untrusted text. */
+export const OUTPUT_READ_LIMITS = Object.freeze({ buffer: 500, entries: 100, messageBytes: 1024, queryBytes: 100, cursor: 2_147_483_647 });
+export const OUTPUT_LEVELS = ['output', 'info', 'warning', 'error'] as const;
 export const WRITE_METHODS = ['scene.create', 'scene.update', 'script.update', 'script.set_enabled', 'scene.restore', 'scene.remove', 'scene.build', 'environment.apply', 'scene.place_asset', 'scene.apply_material', 'terrain.generate'] as const;
 /** Native asset adoption (plugin side). scene.asset_watch arms a one-shot Workspace insertion watch;
  * scene.place_asset adopts exactly one natively inserted/generated instance, strips scripts by default,
@@ -51,8 +55,10 @@ export const STUDIO_GUI_EDIT_CAPABILITY = 'scene.gui.edit' as const;
 /** Non-method plugin capability: character classes (Humanoid, HumanoidDescription, AnimationController, Animator) with typed,
  * bounded properties in scene.create/scene.build. Rig parts, joints and animations stay with server Scripts. Older plugins never advertise it. */
 export const STUDIO_CHARACTERS_CAPABILITY = 'scene.characters' as const;
+/** Non-method feature capability: scene.search filters by className (IsA), with or without a name query. */
+export const STUDIO_SEARCH_CLASS_CAPABILITY = 'scene.search.class' as const;
 /** Every non-method feature capability a plugin may advertise at pairing (anything else must be a known method). */
-export const STUDIO_FEATURE_CAPABILITIES: readonly string[] = Object.freeze([STUDIO_EFFECTS_CAPABILITY, STUDIO_GUI_CAPABILITY, STUDIO_GUI_FLEX_CAPABILITY, STUDIO_GUI_EDIT_CAPABILITY, STUDIO_CHARACTERS_CAPABILITY, 'asset.mesh_parts']);
+export const STUDIO_FEATURE_CAPABILITIES: readonly string[] = Object.freeze([STUDIO_EFFECTS_CAPABILITY, STUDIO_GUI_CAPABILITY, STUDIO_GUI_FLEX_CAPABILITY, STUDIO_GUI_EDIT_CAPABILITY, STUDIO_CHARACTERS_CAPABILITY, 'asset.mesh_parts', STUDIO_SEARCH_CLASS_CAPABILITY]);
 /** GUI value bounds: Text/PlaceholderText UTF-8 bytes, UDim scale magnitude and integer pixel-offset magnitude. */
 export const GUI_LIMITS = Object.freeze({ textBytes: 2000, udimScale: 10, udimOffset: 10000 });
 /** Host-owned intake and detached reconstruction. Neither is a generic agent

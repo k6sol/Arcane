@@ -94,6 +94,8 @@ function Operations:receiveAssetPacket(expected: any, packet: string, guard: () 
 end
 
 function Operations:cancelAssetTransfers(): ()
+	-- Retirement also releases the Output reader; it owns no Studio state, so this never counts as a cleanup failure.
+	self:stopOutput()
 	local failures = 0
 	for id, owned in pairs(self.assetTransfers) do
 		local ok = pcall(function() owned.receiver:cancel() end)
@@ -507,10 +509,21 @@ function Operations:uploadContext(args: any): any
 end
 
 function Operations:search(args: any): any
-	V.fields(args, {"root", "query", "limit"}, "search arguments")
+	V.fields(args, {"root", "query", "className", "limit"}, "search arguments")
 	local root = self.registry:root(args.root)
-	local query = string.lower(V.string(args.query, "query", 100))
+	-- className is one engine class name matched with IsA; a name query is optional only alongside it.
+	local className = if args.className == nil then nil else V.string(args.className, "class name", 64)
+	if className and not string.match(className, "^%u[%w]*$") then V.fail("INPUT", "Invalid class name.") end
+	local query = if args.query == nil and className then nil else string.lower(V.string(args.query, "query", 100))
 	local limit = if args.limit == nil then 100 else V.integer(args.limit, 1, 200, "limit")
+	local function matches(instance: any): boolean
+		if query and not string.find(string.lower(instance.Name), query, 1, true) then return false end
+		if className then
+			local ok, isA = pcall(function(): boolean return instance:IsA(className) end)
+			return ok and isA == true
+		end
+		return true
+	end
 	local queue: {any} = {root}
 	local items = V.array({})
 	local head, visited, omitted = 1, 0, false
@@ -518,7 +531,7 @@ function Operations:search(args: any): any
 		local instance = queue[head]
 		head += 1
 		visited += 1
-		if string.find(string.lower(instance.Name), query, 1, true) then
+		if matches(instance) then
 			if #items == limit then return {items = items, truncated = true} end
 			table.insert(items, self.registry:node(instance))
 		end
@@ -527,6 +540,101 @@ function Operations:search(args: any): any
 		end
 	end
 	return {items = items, truncated = omitted or head <= #queue}
+end
+
+-- Studio Output reader. A bounded ring per pairing, seeded from LogService history on first read and then fed by
+-- MessageOut. Every line gets a sequence number, so `after` is an exact cursor; `gap` reports lines evicted past it.
+-- Output text is place-wide, untrusted data: it is clipped and returned, never interpreted.
+Operations.OUTPUT_LIMITS = table.freeze({buffer = 500, entries = 100, messageBytes = 1024, queryBytes = 100, cursor = 2147483647})
+local OUTPUT_LEVELS: any = table.freeze({MessageOutput = "output", MessageInfo = "info", MessageWarning = "warning", MessageError = "error"})
+local OUTPUT_LEVEL_NAMES = table.freeze({"output", "info", "warning", "error"})
+
+local function outputLevel(messageType: any): string?
+	local ok, name = pcall(function(): any return messageType.Name end)
+	return if ok and type(name) == "string" then OUTPUT_LEVELS[name] else nil
+end
+
+-- Clip on a UTF-8 boundary; invalid bytes and NULs are replaced, never forwarded.
+local function clipOutput(value: any, maximum: number): (string, boolean)
+	local text = if type(value) == "string" then value else ""
+	if utf8.len(text) == nil then text = string.gsub(text, "[\128-\255]", "?") end
+	text = string.gsub(text, "%z", "?")
+	if #text <= maximum then return text, false end
+	local cut = maximum
+	while cut > 0 and utf8.len(string.sub(text, 1, cut)) == nil do cut -= 1 end
+	return string.sub(text, 1, cut), true
+end
+
+function Operations:outputLog(): any
+	if self.output then return self.output end
+	local limits = Operations.OUTPUT_LIMITS
+	local log: any = {entries = {}, nextSeq = 1, evicted = 0, connection = nil}
+	local function push(message: any, messageType: any): ()
+		local level = outputLevel(messageType)
+		if not level then return end
+		local text, truncated = clipOutput(message, limits.messageBytes)
+		table.insert(log.entries, {seq = log.nextSeq, level = level, message = text, truncated = truncated})
+		log.nextSeq += 1
+		if #log.entries > limits.buffer then log.evicted = table.remove(log.entries, 1).seq end
+	end
+	local service = self.gameModel:GetService("LogService")
+	local ok, history = pcall(function(): any return service:GetLogHistory() end)
+	if ok and type(history) == "table" then
+		-- Only the newest buffer-full is kept; older history still consumes sequence numbers so gap is exact.
+		local skip = math.max(0, #history - limits.buffer)
+		log.nextSeq += skip
+		log.evicted = skip
+		for index = skip + 1, #history do
+			local item = history[index]
+			if type(item) == "table" then push(item.message, item.messageType) end
+		end
+	end
+	pcall(function() log.connection = service.MessageOut:Connect(push) end)
+	self.output = log
+	return log
+end
+
+function Operations:stopOutput(): ()
+	local log: any = self.output
+	self.output = nil
+	if log and log.connection then pcall(function() log.connection:Disconnect() end) end
+end
+
+function Operations:readOutput(args: any): any
+	V.fields(args, {"levels", "query", "after", "limit"}, "output arguments")
+	local limits = Operations.OUTPUT_LIMITS
+	local levels: {[string]: boolean}? = nil
+	if args.levels ~= nil then
+		if type(args.levels) ~= "table" or #args.levels < 1 or #args.levels > #OUTPUT_LEVEL_NAMES then V.fail("INPUT", "Invalid output levels.") end
+		local seen: {[string]: boolean} = {}
+		for _, level: any in ipairs(args.levels) do
+			if type(level) ~= "string" or not table.find(OUTPUT_LEVEL_NAMES, level) or seen[level] then V.fail("INPUT", "Invalid output levels.") end
+			seen[level] = true
+		end
+		levels = seen
+	end
+	local query = if args.query == nil then nil else string.lower(V.string(args.query, "output query", limits.queryBytes))
+	if query and string.find(query, "[%c]") then V.fail("INPUT", "Output query must be one line.") end
+	local after = if args.after == nil then 0 else V.integer(args.after, 0, limits.cursor, "output cursor")
+	local limit = if args.limit == nil then 50 else V.integer(args.limit, 1, limits.entries, "limit")
+	local log: any = self:outputLog()
+	local matched: {any} = {}
+	for _, entry: any in ipairs(log.entries) do
+		if entry.seq > after and (not levels or levels[entry.level])
+			and (not query or string.find(string.lower(entry.message), query, 1, true)) then
+			table.insert(matched, entry)
+		end
+	end
+	-- Newest lines win: an agent checks what just happened; omitted counts older matches left out.
+	local first = math.max(1, #matched - limit + 1)
+	local entries = V.array({})
+	for index = first, #matched do
+		local entry: any = matched[index]
+		local line: any = {seq = entry.seq, level = entry.level, message = entry.message}
+		if entry.truncated then line.truncated = true end
+		table.insert(entries, line)
+	end
+	return {entries = entries, latest = log.nextSeq - 1, omitted = first - 1, gap = after < log.evicted}
 end
 
 -- Content discovery reads editor text. Matches never authorize an update:
@@ -1740,6 +1848,7 @@ function Operations:execute(command: any, guard: () -> ()): any
 	elseif method == "scene.upload_context" then result = self:uploadContext(args)
 	elseif method == "scene.search" then result = self:search(args)
 	elseif method == "script.search" then result = self:searchScripts(args, guard)
+	elseif method == "output.read" then result = self:readOutput(args)
 	elseif method == "scene.inspect" then
 		V.fields(args, {"ref", "bounds"}, "inspect arguments")
 		local instance = self.registry:resolve(args.ref)

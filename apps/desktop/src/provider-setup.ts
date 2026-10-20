@@ -2,13 +2,14 @@
 import type { ProviderConnectionStatus } from './codex-chat.js';
 
 export type SetupProvider = 'codex' | 'claude';
-export type ChatSurface = 'codex' | 'claude';
+/** 'arcane' is the Arcane Credits chat: it owns the surface only while the user chose it and it reports availability. */
+export type ChatSurface = 'codex' | 'claude' | 'arcane';
 /**
- * Both providers share one chat surface (tabs strip, transcript, composer and model picker). Only these
- * provider-specific nodes swap: Codex's are hidden (never removed) while the Claude chat owns the surface.
+ * All providers share one chat surface (tabs strip, transcript, composer and model picker). Only these
+ * provider-specific nodes swap: Codex's are hidden (never removed) while the Claude or Arcane chat owns the surface.
  */
 export const CODEX_SURFACE_SELECTORS = ['#codex-notice', '#codex-status', '#workspace-chat-tabs', '#workspace-saved-chats'] as const;
-/** Claude's counterparts, shown only while the Claude chat owns the shared surface. */
+/** Claude's counterparts, shown while the Claude chat (or the Arcane chat, which renders into the same nodes) owns the shared surface. */
 export const CLAUDE_SURFACE_SELECTORS = ['#claude-chat-notice', '#claude-chat-status', '#claude-chat-tabs', '#claude-saved-chats'] as const;
 export interface ClaudeSetupChoices {
   cliVersion: string; aliases: readonly string[]; efforts: readonly string[];
@@ -46,7 +47,7 @@ export interface ProviderSetupController {
   /** Current Claude CLI choices; null when status, sign-in or provider selection is stale. */
   handoffChoices(): ClaudeSetupChoices | null;
   subscribeHandoffChoices(listener: () => void): () => void;
-  /** Which provider owns the shared in-app chat surface: Codex, or Claude after a signed-in Claude status. */
+  /** Which provider owns the shared in-app chat surface: Codex, Claude after a signed-in Claude status, or Arcane Credits. */
   chatSurface(): ChatSurface;
   subscribeChatSurface(listener: () => void): () => void;
   /**
@@ -54,7 +55,12 @@ export interface ProviderSetupController {
    * startup auto-selection and reads that provider's native status. It grants no authority; the Claude surface still
    * waits for a signed-in Claude status. Returns false when setup is stopped.
    */
-  requestProvider(next: SetupProvider): boolean;
+  requestProvider(next: SetupProvider | 'arcane'): boolean;
+  /**
+   * The Arcane Credits chat reports whether it can be used (gateway configured, account connected, models listed).
+   * Until it says true, choosing Arcane is refused and the surface never becomes 'arcane'.
+   */
+  setArcaneAvailable(available: boolean): void;
   /** The currently selected provider (not proof of sign-in). */
   selectedProvider(): SetupProvider;
   stop(): void;
@@ -64,6 +70,8 @@ export interface ProviderSetupController {
 // Origin-local presentation only. Never persist native status, accounts or authority.
 export const PROVIDER_PRESENTATION_KEY = 'arcane.provider-presentation.v1';
 export const PROVIDER_PREFERENCE_EVENT = 'workspace:providerpreference';
+/** Presentation only: the user last chose the Arcane Credits chat (no account data, no authority). */
+export const ARCANE_SURFACE_KEY = 'arcane.chat-surface.v1';
 const providers = (value: unknown): value is SetupProvider => value === 'codex' || value === 'claude';
 function data(value: unknown, keys: string[]): Record<string, unknown> | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -148,7 +156,7 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
     isSignedIn: () => false, subscribeSignInChange: (_listener: () => void) => () => {},
     handoffChoices: () => null, subscribeHandoffChoices: (_listener: () => void) => () => {},
     chatSurface: () => 'codex', subscribeChatSurface: (_listener: () => void) => () => {},
-    requestProvider: (_next: SetupProvider) => false, selectedProvider: () => 'codex',
+    requestProvider: (_next: SetupProvider | 'arcane') => false, selectedProvider: () => 'codex', setArcaneAvailable: (_available: boolean) => {},
     stop() {}, resume() {}, cleanup() {},
   };
   const native = bridge(doc, options), storage = presentationStorage(doc);
@@ -177,11 +185,14 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
   let codexChatEvidence = false, claudeChatEvidence = false, surface: ChatSurface = 'codex';
   const surfaceListeners = new Set<() => void>();
   const claudeChatActive = () => provider === 'claude' && claudeChatEvidence && !!native && !stopped && !disposed;
+  // Arcane Credits chat: the user's explicit choice plus the chat's own availability report (no native CLI involved).
+  let arcaneChosen = false, arcaneAvailable = false;
+  const arcaneChatActive = () => arcaneChosen && arcaneAvailable && !stopped && !disposed;
   const applySurface = () => {
-    const next: ChatSurface = claudeChatActive() ? 'claude' : 'codex';
+    const next: ChatSurface = arcaneChatActive() ? 'arcane' : claudeChatActive() ? 'claude' : 'codex';
     if (next === surface) return;
     surface = next;
-    const claude = next === 'claude';
+    const claude = next !== 'codex';
     for (const [selectors, hidden] of [[CODEX_SURFACE_SELECTORS, claude], [CLAUDE_SURFACE_SELECTORS, !claude]] as const) for (const selector of selectors) {
       let node: HTMLElement | null = null;
       try { node = doc.getElementById(selector.slice(1)); } catch { node = null; }
@@ -193,6 +204,12 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
   const clearLoginWatch = () => { if (loginTimer !== null) clearTimeout(loginTimer); loginTimer = null; loginWatch = null; };
   provider = providers(select.value) ? select.value : 'codex';
   try { provider = readProviderPresentation(storage?.getItem(PROVIDER_PRESENTATION_KEY)) ?? provider; } catch { /* Storage denial cannot block setup. */ }
+  try { arcaneChosen = storage?.getItem(ARCANE_SURFACE_KEY) === '{"version":1,"chosen":true}'; } catch { arcaneChosen = false; }
+  const chooseArcane = (chosen: boolean) => {
+    if (arcaneChosen === chosen) return;
+    arcaneChosen = chosen;
+    try { if (chosen) storage?.setItem(ARCANE_SURFACE_KEY, '{"version":1,"chosen":true}'); else storage?.removeItem(ARCANE_SURFACE_KEY); } catch { /* Only presentation is lost. */ }
+  };
   const el = (id: string) => doc.getElementById(id), button = (id: string) => el(id) as HTMLButtonElement | null;
   const set = (id: string, value: string) => { const node = el(id); if (node) node.textContent = value; };
   const status = () => {
@@ -246,11 +263,11 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
     // Conversation visibility survives native task cancellation/model handoff.
     // This volatile evidence never grants fresh native/task authority.
     if(provider==='codex') {
-      if(connection?.fresh&&connection.auth==='subscription'&&connection.connected&&reconnectAllowed)codexChatEvidence=true;
+      if(connection?.fresh&&connection.auth==='subscription'&&connection.connected&&connection.ready&&reconnectAllowed)codexChatEvidence=true;
       else if(connection?.fresh&&(connection.auth==='signed-out'||connection.auth==='unsupported'))codexChatEvidence=false;
       else if(!connection?.connected&&(state?.auth==='signed-out'||state?.auth==='api-or-cloud'))codexChatEvidence=false;
     }
-    gate.hidden = (provider==='codex'&&codexChatEvidence&&reconnectAllowed) || claudeChatActive(); el('workspace-stage')?.classList.toggle('provider-required', !gate.hidden);
+    gate.hidden = (provider==='codex'&&codexChatEvidence&&reconnectAllowed) || claudeChatActive() || arcaneChatActive(); el('workspace-stage')?.classList.toggle('provider-required', !gate.hidden);
     const checking = busy && activeAction === 'status' || pendingStatus;
     const text = connected() ? 'Codex connected.' : checking ? 'Checking ' + name + ' sign-in…' : connectingSavedLogin ? 'Connecting Codex…' : state?.auth === 'subscription' && !state.busy ? name + ' signed in.' :
       state?.auth === 'signed-out' || provider === 'codex' && connection?.fresh && connection.auth === 'signed-out' ? 'Sign in with ' + name + '.' :
@@ -297,6 +314,8 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
   const choose = (next: SetupProvider, publish = true) => {
     if (next !== provider) clearLoginWatch();
     if (stopped || disposed) return;
+    // An explicit ChatGPT/Claude choice leaves the Arcane chat; a restored preference (publish false) does not.
+    if (publish) chooseArcane(false);
     const changed = next !== provider;
     if (changed) { clearRecovery();recoveryAttempt=0;savedLoginObserved=false;savedLoginConnections.clear(); provider = next; codexChatEvidence=false; epoch++; actionError = null; states.delete(next); claudeChatEvidence = false; if (next === 'claude') claudeSignInObserved = null; }
     try { storage?.setItem(PROVIDER_PRESENTATION_KEY, JSON.stringify({ version: 1, provider })); } catch { /* Only presentation is lost. */ }
@@ -462,12 +481,22 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
       return () => { choiceListeners.delete(listener); };
     },
     chatSurface: () => surface,
-    requestProvider(next: SetupProvider) {
-      if (stopped || disposed || !providers(next)) return false;
+    requestProvider(next: SetupProvider | 'arcane') {
+      if (stopped || disposed) return false;
+      if (next === 'arcane') {
+        if (!arcaneAvailable) return false;
+        autoSelect = false; chooseArcane(true); render();
+        return true;
+      }
+      if (!providers(next)) return false;
       autoSelect = false;
       if (next !== provider) choose(next);
-      else if (next === 'claude' && !claudeChatEvidence) requestStatus();
+      else { chooseArcane(false); render(); if (next === 'claude' && !claudeChatEvidence) requestStatus(); }
       return true;
+    },
+    setArcaneAvailable(available: boolean) {
+      if (disposed || arcaneAvailable === (available === true)) return;
+      arcaneAvailable = available === true; render();
     },
     selectedProvider: () => provider,
     subscribeChatSurface(listener: () => void) {

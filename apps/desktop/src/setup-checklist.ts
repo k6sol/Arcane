@@ -14,7 +14,7 @@ export interface PluginStatus { state: PluginInstallState; pluginVersion: string
 export interface ChecklistSignals {
   /** Fresh provider sign-in evidence; never inferred from saved preferences. */
   signedIn: boolean;
-  providerName: 'ChatGPT' | 'Claude';
+  providerName: 'ChatGPT' | 'Claude' | 'Arcane';
   /** Null while the first native read is pending. */
   plugin: PluginStatus | null;
   /** Desktop app bridge present: plugin install and project picker are available. */
@@ -127,7 +127,7 @@ export interface SetupChecklistOptions {
   /** App-owned presentation memory; survives the temporary browser session and daemon port. */
   persistence?: SetupChecklistPersistence | null;
   provider: {
-    isSignedIn(): boolean; chatSurface(): 'codex' | 'claude'; selectedProvider(): 'codex' | 'claude';
+    isSignedIn(): boolean; chatSurface(): 'codex' | 'claude' | 'arcane'; selectedProvider(): 'codex' | 'claude';
     subscribeSignInChange(listener: () => void): () => void; subscribeChatSurface(listener: () => void): () => void;
   };
   workbench: {
@@ -172,9 +172,9 @@ export function startSetupChecklist(doc: Document, options: SetupChecklistOption
     }
   };
   const signals = (): ChecklistSignals => {
-    let signedIn = false, providerName: 'ChatGPT' | 'Claude' = 'ChatGPT', studio: boolean | null = null, path: string | null = null;
-    try { signedIn = options.provider.isSignedIn() || options.provider.chatSurface() === 'claude'; } catch { signedIn = false; }
-    try { providerName = options.provider.chatSurface() === 'claude' || options.provider.selectedProvider() === 'claude' ? 'Claude' : 'ChatGPT'; } catch { /* Default label. */ }
+    let signedIn = false, providerName: 'ChatGPT' | 'Claude' | 'Arcane' = 'ChatGPT', studio: boolean | null = null, path: string | null = null;
+    try { signedIn = options.provider.isSignedIn() || options.provider.chatSurface() !== 'codex'; } catch { signedIn = false; }
+    try { const surface = options.provider.chatSurface(); providerName = surface === 'arcane' ? 'Arcane' : surface === 'claude' || options.provider.selectedProvider() === 'claude' ? 'Claude' : 'ChatGPT'; } catch { /* Default label. */ }
     try { studio = options.workbench.studioConnected(); } catch { studio = null; }
     try { path = options.workbench.getCurrentProduct()?.projectPath ?? null; } catch { path = null; }
     let pairing: ChecklistPairing | null = null;
@@ -302,5 +302,77 @@ export function startSetupChecklist(doc: Document, options: SetupChecklistOption
     stop() { stopped = true; render(); },
     resume() { if (disposed || !stopped) return; stopped = false; render(); void refreshPlugin(); },
     cleanup() { if (disposed) return; stopped = true; disposed = true; for (const remove of removers.splice(0)) { try { remove(); } catch { /* Already removed. */ } } if (root) root.hidden = true; },
+  };
+}
+
+// ---- Studio connection banner ----
+// Shown only after a live Studio session drops (the workbench's own liveness: a plugin heartbeat within 30 s). The plugin
+// reconnects by itself; after a grace period the banner offers "Reconnect Studio" (an immediate re-read). Arcane tools refuse
+// commands to an offline session (SESSION_OFFLINE), so nothing is sent while this shows. Display only: no command or write.
+export const STUDIO_BANNER_TEXT = Object.freeze({
+  reconnecting: 'Studio disconnected \u2014 reconnecting\u2026',
+  offline: 'Studio is still disconnected. Arcane will not send it commands until it is back. Open your place in Roblox Studio with the Arcane plugin on, or reconnect now.',
+  checking: 'Checking for Studio\u2026',
+  reconnected: 'Studio reconnected.',
+});
+export type StudioBannerState = 'hidden' | 'reconnecting' | 'offline' | 'reconnected';
+export interface StudioBannerOptions {
+  workbench: { studioConnected(): boolean | null; subscribeStudioChange(listener: () => void): () => void; refresh(): Promise<void> };
+  /** How long the plugin's own recovery runs before the banner asks for a manual reconnect. */
+  graceMs?: number;
+  timers?: { set(fn: () => void, ms: number): unknown; clear(handle: unknown): void };
+}
+export function startStudioConnectionBanner(doc: Document, options: StudioBannerOptions): { state(): StudioBannerState; stop(): void; resume(): void; cleanup(): void } {
+  const grace = options.graceMs ?? 60000, timers = options.timers ?? { set: (fn: () => void, ms: number) => setTimeout(fn, ms), clear: (handle: unknown) => clearTimeout(handle as number) };
+  let state: StudioBannerState = 'hidden', wasLive = false, stopped = false, checking = false, timer: unknown = null;
+  let root: HTMLElement | null = null, message: HTMLElement | null = null, button: HTMLButtonElement | null = null;
+  const connected = (): boolean | null => { try { return options.workbench.studioConnected(); } catch { return null; } };
+  const clear = () => { if (timer !== null) { timers.clear(timer); timer = null; } };
+  function mount(): boolean {
+    if (root) return true;
+    const messages = doc.getElementById('codex-messages'), parent = messages?.parentElement;
+    if (!messages || !parent) return false;
+    root = doc.createElement('div'); root.id = 'studio-connection-banner'; root.className = 'notice warning studio-connection-banner';
+    root.setAttribute('role', 'status'); root.setAttribute('aria-live', 'polite'); root.hidden = true;
+    message = doc.createElement('p'); message.className = 'studio-connection-message';
+    button = doc.createElement('button'); button.type = 'button'; button.className = 'secondary studio-connection-reconnect'; button.textContent = 'Reconnect Studio';
+    button.addEventListener('click', () => { void reconnect(); });
+    root.append(message, button); parent.insertBefore(root, messages);
+    return true;
+  }
+  function paint(): void {
+    if (!mount() || !root || !message || !button) return;
+    root.hidden = stopped || state === 'hidden';
+    root.className = 'notice ' + (state === 'reconnected' ? 'good' : 'warning') + ' studio-connection-banner';
+    message.textContent = checking ? STUDIO_BANNER_TEXT.checking : state === 'hidden' ? '' : STUDIO_BANNER_TEXT[state];
+    button.hidden = state === 'hidden' || state === 'reconnected'; button.disabled = checking;
+  }
+  function observe(): void {
+    if (stopped) return;
+    const live = connected();
+    if (live === true) {
+      const wasDown = state === 'reconnecting' || state === 'offline';
+      wasLive = true; clear();
+      if (wasDown) { state = 'reconnected'; timer = timers.set(() => { timer = null; if (state === 'reconnected') { state = 'hidden'; paint(); } }, 4000); }
+    } else if (live === false && wasLive && (state === 'hidden' || state === 'reconnected')) {
+      clear(); state = 'reconnecting';
+      timer = timers.set(() => { timer = null; if (state === 'reconnecting') { state = 'offline'; paint(); } }, grace);
+    }
+    paint();
+  }
+  async function reconnect(): Promise<void> {
+    if (checking || stopped) return;
+    checking = true; paint();
+    try { await options.workbench.refresh(); } catch { /* The banner keeps its state; the next refresh retries. */ }
+    checking = false; observe();
+  }
+  let remove: (() => void) | null = null;
+  try { remove = options.workbench.subscribeStudioChange(observe); } catch { remove = null; }
+  observe();
+  return {
+    state: () => state,
+    stop() { stopped = true; clear(); paint(); },
+    resume() { if (!stopped) return; stopped = false; observe(); },
+    cleanup() { stopped = true; clear(); try { remove?.(); } catch { /* Already removed. */ } remove = null; if (root) root.hidden = true; },
   };
 }

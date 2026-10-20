@@ -1,7 +1,7 @@
 /// <reference lib="dom" />
 import type { CodexChat, ReplyUsageInput } from './codex-chat.js';
 import { WORKSPACE_COMPACT_EVENT, WORKSPACE_COMPACT_RESTORE_EVENT } from './workspace-shell.js';
-import { COST_CURRENCIES, TaskUsageTracker, USAGE_PRICES_AS_OF, compactTokenCount, costLocale, currencyForLocale, estimateUsageUsd, formatUsageCost, readCostPreferences, type CostDisplayPreferences, type TaskUsageCostDisplay } from './task-usage.js';
+import { COST_CURRENCIES, TaskUsageTracker, USAGE_PRICES_AS_OF, compactTokenCount, costConversion, costConversionNote, costLocale, currencyForLocale, estimateUsageUsd, formatUsageCost, readCostPreferences, type CostDisplayPreferences, type TaskUsageCostDisplay } from './task-usage.js';
 
 export interface TaskUsageFooterOptions {
   now?: () => number;
@@ -108,7 +108,7 @@ export function codexReplyUsageView(usage: ReplyUsageInput, display: TaskUsageCo
   const counts = format(usage.tokens) + ' tokens (' + format(usage.inputTokens) + ' input, ' + format(usage.cachedInputTokens) + ' of them cached, ' + format(usage.outputTokens) + ' output).';
   const title = usd === null || !display.preferences.show ? counts + (usd === null ? ' No cost estimate is available for this model.' : '')
     : counts + ' ' + formatUsageCost(usd, display.preferences, display.locale) + ' is estimated from Arcane\'s price table (' + USAGE_PRICES_AS_OF + '). Your ChatGPT plan is not charged per token.' +
-      (display.preferences.currency !== 'USD' && display.preferences.rate !== null ? ' Converted at your rate of ' + display.preferences.rate + ' ' + display.preferences.currency + ' per USD.' : '');
+      costConversionNote(display.preferences);
   return { text: replyUsageText(usage.tokens, usd, display), title };
 }
 
@@ -126,6 +126,7 @@ export function bindCostSettings(doc: Document): () => void {
     rate.setAttribute('aria-describedby', 'cost-settings-note');
     if (note) note.textContent = !prefs.show ? 'Cost estimates are hidden. Token counts still show.'
       : usd ? 'Costs show in US dollars.'
+      : costConversion(prefs).source === 'reference' ? 'Costs show in ' + prefs.currency + ' at an approximate rate of ' + costConversion(prefs).rate + ' per USD (' + formatUsageCost(1, prefs, viewerLocale(doc)).slice(1) + ' for $1.00). Enter your own rate to replace it.'
       : prefs.rate === null ? 'Enter how many ' + prefs.currency + ' equal 1 USD to show ' + prefs.currency + '. Until then costs show in US dollars.'
       : 'Costs show in ' + prefs.currency + ' at your rate of ' + prefs.rate + ' per USD (' + formatUsageCost(1, prefs, viewerLocale(doc)).slice(1) + ' for $1.00).';
   };

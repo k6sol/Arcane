@@ -708,7 +708,7 @@ test('browser active Stop modes respect missing turn IDs, cancellation, freshnes
   assert.equal(await page.locator('#codex-submit').isDisabled(), true);
   f.set(activeState()); await f.refresh(); f.fail(true); await f.refresh();
   assert.equal(await page.locator('#codex-submit').isDisabled(), true);
-  assert.equal(await page.locator('#codex-compose').isVisible(), false, 'Stale native state restores the login gate');
+  assert.equal(await page.locator('#codex-compose').isVisible(), true, 'A temporary read failure keeps the signed-in conversation visible; native actions still need fresh state');
   f.fail(false); await f.refresh();
   await page.evaluate(() => (window as any).fixtureChat.setChatProviderPreference('claude'));
   assert.equal(await page.locator('#codex-submit').isDisabled(), true);

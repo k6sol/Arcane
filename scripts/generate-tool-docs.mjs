@@ -40,8 +40,8 @@ async function listTools(assetAudience) {
 }
 
 const GROUPS = [
-  ['Studio connection and reading', ['sessions', 'scene_children', 'scene_inspect', 'scene_search', 'selection_read', 'script_read', 'script_search', 'studio_viewport_capture']],
-  ['Studio building and editing', ['scene_create', 'scene_update', 'scene_build', 'environment_apply', 'terrain_generate', 'script_update', 'script_set_enabled']],
+  ['Studio connection and reading', ['sessions', 'scene_children', 'scene_inspect', 'scene_search', 'selection_read', 'script_read', 'script_search', 'studio_output_read', 'studio_viewport_capture']],
+  ['Studio building and editing', ['scene_create', 'scene_update', 'scene_build', 'environment_apply', 'terrain_generate', 'scene_delete', 'script_update', 'script_set_enabled']],
   ['Receipts and undo', ['receipt_status', 'receipt_restore']],
   ['Playtests', ['playtest_request', 'playtest_status', 'playtest_cancel']],
   ['Creator Store and Roblox AI generation', ['studio_asset_search', 'studio_asset_insert', 'studio_asset_generate']],

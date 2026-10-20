@@ -238,7 +238,7 @@ test('actual root-project cold-start bootstrap emits managed adapter fields with
     },
     spawn(executable, args, options) { calls.push({ executable, args, options });
       queueMicrotask(() => child.emit('message', { type: 'arcane-ready', protocolVersion: 1, origin: 'http://127.0.0.1:45873', token: 'a'.repeat(64) })); return child; },
-    failStartup() { assert.fail('No runtime process executed.'); },
+    runtimeStopped() { assert.fail('No runtime process executed.'); },
   };
   write(f.productRoot, 'dist/apps/daemon/src/product-main.js', '// Startup entry boundary fixture; never executed.\n');
   vm.createContext(context);

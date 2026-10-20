@@ -157,3 +157,40 @@ test('actual original Blender UV/PBR GLBs preserve embedded PNG pixels and every
     }
   }
 });
+
+async function maskMaps(cutoff?: number) {
+  const f = fixture(); f.doc.materials[0].alphaMode = 'MASK'; if (cutoff !== undefined) f.doc.materials[0].alphaCutoff = cutoff;
+  const { prepared, payload } = await decode(f.generated());
+  assert.equal(prepared.manifest.materials[0]!.alphaMode, 'MASK');
+  createStudioImportTransfer(prepared, payload);
+  return Object.fromEntries(payload.textures!.map(t => [t.semantic, [...t.bytes]]));
+}
+const alphas = (bytes: number[]) => bytes.filter((_, i) => i % 4 === 3);
+
+test('glTF MASK thresholds ColorMap coverage exactly at alphaCutoff (default 0.5) and keeps data maps opaque', async () => {
+  const maps = await maskMaps();
+  // Source albedo alpha is [0,255,128,255]; 128/255 >= 0.5 survives.
+  assert.deepEqual(maps.ColorMap, [188,0,0,0,0,137,0,255,0,0,225,255,92,66,112,255], 'RGB bake is unchanged; alpha is binary coverage');
+  for (const slot of ['NormalMap', 'RoughnessMap', 'MetalnessMap']) assert.deepEqual(alphas(maps[slot]!), [255,255,255,255], slot + ' alpha stays 255');
+});
+
+test('glTF MASK cutoff boundary is inclusive (alpha/255 >= alphaCutoff)', async () => {
+  for (const [cutoff, expected] of [[128 / 255, [0,255,255,255]], [129 / 255, [0,255,0,255]], [0, [255,255,255,255]], [1, [0,255,0,255]]] as const)
+    assert.deepEqual(alphas((await maskMaps(cutoff)).ColorMap!), expected, 'cutoff ' + cutoff);
+});
+
+for (const [name, mutate] of [
+  ['BLEND', (d: Doc) => { d.materials[0].alphaMode = 'BLEND'; }],
+  ['MASK with fractional baseColorFactor alpha', (d: Doc) => { d.materials[0].alphaMode = 'MASK'; d.materials[0].pbrMetallicRoughness.baseColorFactor[3] = 0.5; }],
+] as const) test('texture delivery refuses ' + name + ' instead of approximating blending', async () => {
+  const f = fixture(); mutate(f.doc); const g = f.generated(), p = await prepare(g);
+  assert.throws(() => decodeStudioImportPayload(p, new Map(g.files.map(f => [f.fileId, f.bytes]))), e => e instanceof StudioImportPayloadError && e.code === 'UNSUPPORTED_MATERIAL');
+});
+
+test('direct map conversion refuses BLEND and non-finite or out-of-range alphaCutoff', async () => {
+  const f = fixture(), generated = f.generated(), prepared = await prepare(generated);
+  const bytes = Buffer.from(generated.files[0]!.bytes), bin = bytes.subarray(28 + bytes.readUInt32LE(12));
+  const images = decodeEmbeddedStudioImages(f.doc, bin, prepared.manifest, 'export'), material = prepared.manifest.materials[0]!;
+  for (const change of [{ alphaMode: 'BLEND' }, { alphaMode: 'MASK', alphaCutoff: Number.NaN }, { alphaMode: 'MASK', alphaCutoff: 1.5 }, { alphaMode: 'MASK', alphaCutoff: -0.1 }] as const)
+    assert.throws(() => materialStudioTexturePixels({ ...material, ...change } as typeof material, images), e => e instanceof StudioTextureError && e.code === 'UNSUPPORTED_TEXTURE');
+});

@@ -74,7 +74,7 @@ export class EditorDraftStore {
     await this.initial;
     if (this.loadError || !this.available || !this.projectPath) fail();
   }
-  private enqueue(action: () => Promise<void>): Promise<void> {
+  private enqueue<T>(action: () => Promise<T>): Promise<T> {
     const next = this.operations.then(action);
     this.operations = next.then(() => { this.failure = false; }, () => { this.failure = true; });
     return next;
@@ -108,12 +108,14 @@ export class EditorDraftStore {
       this.dirty = true; await this.persist();
     });
   }
-  async discard(value: EditorDraft): Promise<void> {
+  async discard(value: EditorDraft): Promise<boolean> {
     const captured = draft(value);
     return this.enqueue(async () => {
       await this.usable(); const itemKey = key(captured), current = this.rows.get(itemKey);
-      if (!current || JSON.stringify(current) !== JSON.stringify(captured)) return;
-      this.rows.delete(itemKey); this.dirty = true; await this.persist();
+      if (!current || JSON.stringify(current) !== JSON.stringify(captured)) return false;
+      this.rows.delete(itemKey); this.dirty = true;
+      try {await this.persist();} catch (error) {this.rows.set(itemKey, current); this.dirty = true; throw error;}
+      return true;
     });
   }
   checkpoint(): Promise<void> {

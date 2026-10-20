@@ -159,7 +159,8 @@ test('Edge production surface: three viewports, real disabled browser setup, rem
     assert.equal(await page.locator('#settings-advanced').isVisible(), true);
     assert.equal(await page.locator('#provider-setup-details').evaluate(node => node === document.activeElement), true);
     await page.keyboard.press('Escape');
-    await page.evaluate(() => { const f = (window as any).providerUI; f.account = null; f.refresh(); });
+    // An explicit signed-out observation clears the retained chat binding (a missing or stale read alone keeps the chat visible).
+    await page.evaluate(() => { const f = (window as any).providerUI; f.account = { connected: true, ready: true, fresh: true, auth: 'signed-out' }; f.refresh(); });
     // Even a modified disabled DOM cannot manufacture an absent native bridge.
     await page.locator('#provider-login-start').evaluate((node: HTMLButtonElement) => node.disabled = false);
     await page.locator('#provider-login-start').click(); assert.deepEqual(await f.calls(), []);
@@ -180,9 +181,15 @@ test('Edge native-contract fixture: metadata status reads, explicit login/connec
     await page.locator('#provider-login-start').evaluate((node: HTMLElement) => node.click());
     await page.locator('#provider-login-start').click({ modifiers: ['Shift'] });
     assert.deepEqual(await f.calls(), startup);
+    assert.equal(await page.locator('#provider-login-start').innerText(), 'Check sign-in', 'An unknown sign-in is checked before any browser sign-in starts');
+    await page.evaluate(() => (window as any).providerUI.response.auth = 'signed-out');
+    await page.locator('#provider-login-start').focus(); await page.keyboard.press('Enter');
+    await page.waitForFunction(() => document.getElementById('provider-login-start')?.textContent === 'Sign in with ChatGPT');
+    assert.deepEqual(await f.calls(), [...startup, { action: 'status', provider: 'codex' }]);
+    await page.evaluate(() => (window as any).providerUI.response.auth = 'unknown'); // the browser handoff reports no account yet
     await page.locator('#provider-login-start').focus(); await page.keyboard.press('Enter');
     await page.waitForFunction(() => document.getElementById('provider-login-start')?.textContent === 'Check sign-in');
-    assert.deepEqual(await f.calls(), [...startup, { action: 'login', provider: 'codex' }]);
+    assert.deepEqual(await f.calls(), [...startup, { action: 'status', provider: 'codex' }, { action: 'login', provider: 'codex' }]);
     assert.equal(await page.locator('#provider-login-gate').isVisible(), true, 'A terminal handoff never means signed in');
     await page.evaluate(() => (window as any).providerUI.response.auth = 'subscription');
     await page.locator('#provider-login-start').click();
@@ -190,15 +197,21 @@ test('Edge native-contract fixture: metadata status reads, explicit login/connec
     assert.equal(await page.locator('#provider-login-gate').isVisible(), true, 'Native sign-in metadata alone never creates a chat binding');
     await page.locator('#provider-login-start').click();
     assert.deepEqual(await page.evaluate(() => (window as any).providerUI.sessionActions), ['connect']);
-    assert.deepEqual((await f.calls()).map((call: any) => call.action), ['status', 'login', 'status']);
+    assert.deepEqual((await f.calls()).map((call: any) => call.action), ['status', 'status', 'login', 'status']);
     await page.evaluate(() => { const f = (window as any).providerUI; f.account = { connected: true, ready: true, fresh: true, auth: 'subscription' }; f.refresh(); });
     assert.equal(await page.locator('#provider-login-gate').isVisible(), false);
     assert.equal(await page.locator('#codex-composer').isVisible(), true);
+    // A temporary read failure keeps the signed-in conversation visible; native authority still requires fresh state.
     await page.evaluate(() => { const f = (window as any).providerUI; f.account.fresh = false; f.refresh(); });
-    assert.equal(await page.locator('#provider-login-gate').isVisible(), true);
-    assert.equal(await page.locator('#codex-composer').isVisible(), false);
+    assert.equal(await page.locator('#provider-login-gate').isVisible(), false);
+    assert.equal(await page.locator('#codex-composer').isVisible(), true);
+    assert.equal(await page.evaluate(() => (window as any).providerUI.controller.isSignedIn()), false);
     await page.evaluate(() => { const f = (window as any).providerUI; f.account = null; const original = Date.now; Date.now = () => original() + 60001; f.refresh(); });
-    assert.equal(await page.locator('#provider-login-start').innerText(), 'Sign in with ChatGPT', 'Expired native metadata cannot authorize reuse');
+    assert.equal(await page.locator('#provider-login-start').innerText(), 'Check sign-in', 'Expired native metadata cannot authorize reuse');
+    assert.equal(await page.locator('#provider-login-gate').isVisible(), false, 'A missing read keeps the retained conversation visible');
+    // A fresh signed-out observation clears the retained binding and shows the sign-in card again.
+    await page.evaluate(() => { const f = (window as any).providerUI; f.account = { connected: false, ready: false, fresh: true, auth: 'signed-out' }; f.refresh(); });
+    assert.equal(await page.locator('#provider-login-gate').isVisible(), true);
     await page.evaluate(() => (window as any).providerUI.response.auth = 'unknown');
     await page.locator('#provider-login-claude').click();
     await page.waitForFunction(() => document.getElementById('provider-login-gate')?.getAttribute('aria-busy') === 'false');
@@ -239,7 +252,7 @@ test('Edge setup guards: late provider/lifecycle responses, exact preference res
     await page.locator('#provider-login-claude').click();
     await page.evaluate(() => { const f = (window as any).providerUI; f.hold = false; f.response.auth = 'unknown'; f.release(); });
     await page.waitForFunction(() => document.getElementById('provider-login-gate')?.getAttribute('aria-busy') === 'false');
-    assert.equal(await page.locator('#provider-login-start').innerText(), 'Sign in with Claude Code');
+    assert.equal(await page.locator('#provider-login-start').innerText(), 'Check sign-in', 'An unknown Claude sign-in is checked, never treated as signed in');
     assert.equal(await page.locator('#provider-login-gate').isVisible(), true);
     assert.equal(await page.evaluate(() => (window as any).providerUI.controller.isSignedIn()), false, 'A stale response for Codex cannot sign in Claude');
     await page.evaluate(() => {
@@ -254,14 +267,14 @@ test('Edge setup guards: late provider/lifecycle responses, exact preference res
     assert.equal(await page.evaluate(() => (window as any).providerUI.accessorReads), 0);
     await page.waitForFunction(() => document.getElementById('provider-login-gate')?.getAttribute('aria-busy') === 'false');
     assert.deepEqual(await f.calls(), [
-      { action: 'status', provider: 'codex' }, { action: 'login', provider: 'codex' },
+      { action: 'status', provider: 'codex' }, { action: 'status', provider: 'codex' },
       { action: 'status', provider: 'claude' }, { action: 'status', provider: 'codex' },
     ], 'Only valid provider changes read metadata; hostile preference payloads cause no action');
     await page.evaluate(() => { const f = (window as any).providerUI; f.hold = true; f.release = null; f.response.auth = 'subscription'; });
     await page.locator('#provider-login-start').click(); await page.waitForFunction(() => typeof (window as any).providerUI.release === 'function');
     await page.evaluate(() => { const f = (window as any).providerUI; f.controller.stop(); f.controller.resume(); f.hold = false; f.response.auth = 'unknown'; f.release(); });
     await page.waitForFunction(() => document.getElementById('provider-login-gate')?.getAttribute('aria-busy') === 'false');
-    assert.equal(await page.locator('#provider-login-start').innerText(), 'Sign in with ChatGPT');
+    assert.equal(await page.locator('#provider-login-start').innerText(), 'Check sign-in', 'A late response after stop/resume cannot sign in');
     await page.evaluate(() => { const f = (window as any).providerUI; f.hold = false; f.response.token = 'not-allowed'; });
     await page.locator('#provider-login-start').click();
     await page.waitForFunction(() => document.getElementById('provider-login-message')?.textContent?.includes('Setup unavailable'));

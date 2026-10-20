@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { TaskUsageTracker, currencyForLocale, estimateUsageUsd, formatUsageCost, readCostPreferences, usagePrice, readTaskUsage, taskUsageCost, type ReadonlyTaskUsageState, type TaskUsageRateCard, type TaskUsageSnapshot, type TaskUsageScope } from '../../apps/desktop/src/task-usage.js';
+import { REFERENCE_USD_RATES, TaskUsageTracker, costConversion, costConversionNote, currencyForLocale, estimateUsageUsd, formatUsageCost, readCostPreferences, usagePrice, readTaskUsage, taskUsageCost, type ReadonlyTaskUsageState, type TaskUsageRateCard, type TaskUsageSnapshot, type TaskUsageScope } from '../../apps/desktop/src/task-usage.js';
 import type { NativeTokenUsage, SessionEvent, ThreadState, TokenUsageBreakdown } from '../../packages/codex-client/src/types.js';
 
 const scope: TaskUsageScope = { projectId: 'project:A', connectionId: 'connection:A', threadId: 'thread:A', turnId: 'turn:1' };
@@ -260,14 +260,22 @@ test('price table: exact model IDs only, cached input at the cached rate, unknow
   assert.equal(estimateUsageUsd('fixture-model', { inputTokens: 10, outputTokens: 10 }), null);
 });
 
-test('cost formatting: ~$ by default, local currency only with a user rate, tiny amounts not rounded to zero', () => {
+test('cost formatting: ~$ by default, local currency at the approximate or user rate, tiny amounts not rounded to zero', () => {
   const usd = readCostPreferences(null);
   assert.deepEqual(usd, { show: true, currency: 'USD', rate: null });
   assert.equal(formatUsageCost(2.456, usd), '~$2.46');
   assert.equal(formatUsageCost(0.0042, usd), '~$0.0042');
   assert.equal(formatUsageCost(0, usd), '~$0.00');
   const euroNoRate = readCostPreferences({ currency: 'EUR' });
-  assert.equal(formatUsageCost(2.456, euroNoRate, 'de-DE').includes('$'), true, 'without a rate the cost stays in USD');
+  assert.match(formatUsageCost(2, euroNoRate, 'de-DE'), /^~1,84\s€$/, 'without a user rate the approximate reference rate converts');
+  assert.deepEqual(costConversion(euroNoRate), { currency: 'EUR', rate: REFERENCE_USD_RATES.EUR, source: 'reference' });
+  // A UK viewer: the locale picks GBP and the cost reads in pounds without any setup.
+  const uk = readCostPreferences(null, currencyForLocale('en-GB'));
+  assert.equal(uk.currency, 'GBP'); assert.equal(formatUsageCost(2.46, uk, 'en-GB'), '~£1.94');
+  assert.match(costConversionNote(uk), /^ Converted at an approximate rate of 0\.79 GBP per USD \(\d{4}-\d{2}-\d{2}\); set your own rate/);
+  assert.equal(formatUsageCost(2, readCostPreferences({}, currencyForLocale('ja-JP')), 'ja-JP'), '~￥300', 'yen has no minor units');
+  assert.equal(costConversionNote(usd), '');
+  for (const code of ['EUR', 'GBP', 'JPY', 'CAD', 'INR']) assert.ok(REFERENCE_USD_RATES[code]! > 0, code);
   const euro = readCostPreferences({ currency: 'EUR', rate: 0.5, show: true });
   assert.match(formatUsageCost(2, euro, 'de-DE'), /^~1,00\s€$/);
   assert.equal(readCostPreferences({ currency: 'XXX', rate: -1, show: 'no' }).currency, 'USD');

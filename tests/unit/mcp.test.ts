@@ -26,7 +26,7 @@ import { preflightRecipe, preflightPart, expectedSockets, rotate, CUSTOM_REQUEST
 import { READ_METHODS, WRITE_METHODS } from '../../packages/protocol/src/studio.js';
 import { ARCANE_TOOL_NAMES } from '../../packages/protocol/src/arcane-tools.js';
 import { AjvJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/ajv';
-import { compactOutcome, compactRefs, expandRefs, RefSessionError } from '../../apps/mcp/src/token-lean.js';
+import { compactOutcome, compactRefs, compactToolSchema, expandRefs, float32Text, hoistRepeatedSchemas, RefSessionError, round3 } from '../../apps/mcp/src/token-lean.js';
 import type { StudioCommand, StudioSession, InstanceRef, Json } from '../../packages/protocol/src/studio.js';
 
 // These fixtures exercise actual SDK/HTTP/SQLite code, but simulate the plugin and never use native Studio.
@@ -36,7 +36,7 @@ const TOKEN = 'fixture-control-bearer-1234567890';
 const SESSION_ID = 'fixture-studio-session';
 const REFERENCE: InstanceRef = { instanceId: 'opaque-1', sessionId: SESSION_ID, root: 'Workspace', pathSegments: ['Same', 'Same'], className: 'Part' };
 const TOOL_ACCESS = {
-  sessions: true, scene_children: true, scene_inspect: true, scene_search: true, selection_read: true, script_read: true, script_search: true,
+  sessions: true, scene_children: true, scene_inspect: true, scene_search: true, selection_read: true, script_read: true, script_search: true, studio_output_read: true,
   script_update: false, script_set_enabled: false, scene_delete: false, scene_create: false, scene_update: false, scene_build: false, environment_apply: false, receipt_status: true, receipt_restore: false,
   playtest_request:false,playtest_status:true,playtest_cancel:false,
   skills_recommend: true, skills_list: true, skills_get: true, work_runs: true, work_ready: true, work_create: false, work_claim: false,
@@ -245,7 +245,8 @@ test('compact outcomes keep state, ids, results and receipts but drop repeated s
   const outcome = { commandId: 'cmd-1', requestId: 'req-1', sessionId: SESSION_ID, state: 'succeeded', terminal: true, ambiguous: false, wait: 'terminal', command };
   const compact = compactOutcome(outcome) as any;
   assert.deepEqual(Object.keys(compact), Object.keys(outcome), 'top-level outcome fields are unchanged');
-  assert.deepEqual(compact.command, { id: 'cmd-1', method: 'script.update', state: 'succeeded',
+  // id and state repeat the outcome's commandId/state, so the compact command omits them.
+  assert.deepEqual(compact.command, { method: 'script.update',
     result: { ref, mutation: { kind: 'script.update', before: { source: { omitted: 'text', bytes: Buffer.byteLength(source) } }, after: { source: 'return 1' } } } });
   const read = compactOutcome({ ...outcome, command: { ...command, method: 'script.read', args: { ref }, result: { ref, source } } }) as any;
   assert.equal(read.command.result.source, source, 'a read baseline is never summarised');
@@ -255,6 +256,69 @@ test('compact outcomes keep state, ids, results and receipts but drop repeated s
   assert.equal(children.command.error, 'kept');
   assert.deepEqual(children.command.result.items, [{ ref, childCount: 0 }, { ref, childCount: 2, name: 'Renamed', className: 'Model' }]);
   assert.equal(compactOutcome({ sessions: [] }).sessions.length, 0, 'non-command data passes through');
+  const receipt = compactOutcome({ command: { ...command, state: 'failed' } }) as any;
+  assert.equal(receipt.command.id, 'cmd-1', 'a bare receipt keeps its command id'); assert.equal(receipt.command.state, 'failed');
+});
+
+test('token-lean results: float32 channels shorten losslessly, script hits group per script, constants drop', () => {
+  for (const value of [0.4, 12.3, -42.81, 90 / 255, 64 / 255, 1 / 3, 1e-7, 2048.123]) {
+    const engine = Math.fround(value), short = float32Text(engine);
+    assert.equal(Math.fround(short), engine, String(value)); assert.ok(String(short).length <= String(engine).length);
+  }
+  assert.equal(float32Text(0.1), 0.1, 'a double that is not a float32 is unchanged'); assert.equal(float32Text(3), 3);
+  assert.equal(round3(10.369999885559082), 10.37); assert.equal(round3(-0.0001), 0); assert.equal(round3(7), 7);
+  const ref = REFERENCE as unknown as Json, other = { ...REFERENCE, instanceId: 'opaque-2' } as unknown as Json;
+  const command = { protocolVersion: 1, id: 'c', requestId: 'r', sessionId: SESSION_ID, method: 'scene.inspect', args: {}, state: 'succeeded', error: null,
+    result: { ref, name: 'Same', className: 'Part', childCount: 0, properties: { Size: { type: 'Vector3', value: [Math.fround(0.4), Math.fround(12.3), 2] }, Color: { type: 'Color3', value: [Math.fround(90 / 255), 0, 1] }, Transparency: Math.fround(0.3) } } };
+  const inspected = compactOutcome({ commandId: 'c', state: 'succeeded', command } as any) as any;
+  assert.deepEqual(inspected.command.result.properties.Size.value, [0.4, 12.3, 2]);
+  assert.equal(inspected.command.result.properties.Color.value[0], 0.3529412);
+  assert.equal(inspected.command.result.properties.Transparency, Math.fround(0.3), 'untagged numbers stay exact baselines');
+  const many = Array.from({ length: 40 }, (_, i) => 'n' + i);
+  const built = compactOutcome({ commandId: 'c', state: 'succeeded', command: { ...command, method: 'scene.build', result: { ref, mutation: { kind: 'scene.build', before: null, after: { names: many } } } } } as any) as any;
+  assert.deepEqual(built.command.result.mutation.after.names, [...many.slice(0, 8), { omitted: 'items', count: 32 }], 'long receipt arrays keep a head and a count');
+  const hit = (target: Json, line: number, extra = {}) => ({ ref: target, name: 'Same', className: 'Part', childCount: 0, line, column: 3, excerpt: 'local x' + line, excerptStartColumn: 1, excerptTruncated: false, ...extra });
+  const search = compactOutcome({ commandId: 'c', state: 'succeeded', command: { ...command, method: 'script.search', result: {
+    parentRef: ref, items: [hit(ref, 1), hit(ref, 9, { excerptStartColumn: 40, excerptTruncated: true }), hit(other, 2)], truncated: true, reasons: ['matches'],
+    nodesVisited: 9, scriptsRead: 2, skippedScripts: 0, sourceBytes: 99, literal: true, caseSensitive: false, sourceKind: 'editor', columnEncoding: 'utf8-bytes', atomicSnapshot: false } } } as any) as any;
+  assert.deepEqual(search.command.result, { parentRef: ref, items: [
+    { ref, hits: [{ line: 1, column: 3, excerpt: 'local x1' }, { line: 9, column: 3, excerpt: 'local x9', excerptStartColumn: 40, excerptTruncated: true }] },
+    { ref: other, hits: [{ line: 2, column: 3, excerpt: 'local x2' }] }], truncated: true, reasons: ['matches'], nodesVisited: 9, scriptsRead: 2, sourceBytes: 99, caseSensitive: false });
+});
+
+test('scene_children pages: offset asks the plugin for offset+limit (at most 200) and returns only the tail with nextOffset', async t => {
+  const sent: Record<string, unknown>[] = [], total = 230;
+  const fake = { assetAudience: 'generic', redact: (value: unknown) => value,
+    async execute(_session: string, method: string, args: Record<string, unknown>) {
+      sent.push(args); const limit = Number(args.limit);
+      const items = Array.from({ length: Math.min(limit, total) }, (_, i) => ({ ref: { ...REFERENCE, instanceId: 'child-' + i, pathSegments: ['Same', 'C' + i] }, name: 'C' + i, className: 'Part', childCount: 0 }));
+      return { commandId: 'c', requestId: 'r', sessionId: SESSION_ID, state: 'succeeded', terminal: true, ambiguous: false, wait: 'terminal',
+        command: { protocolVersion: 1, id: 'c', method, args, state: 'succeeded', result: { parentRef: REFERENCE, items, truncated: total > limit }, error: null } };
+    } };
+  const server = createMcpServer({ client: fake as unknown as DaemonClient, projectRoot: ROOT });
+  const client = new Client({ name: 'pages', version: '1.0.0' }), [a, b] = InMemoryTransport.createLinkedPair();
+  await server.connect(a); await client.connect(b); after(t, async () => { await client.close(); await server.close(); });
+  const page = async (args: Record<string, unknown>) => (await call(client, 'scene_children', { sessionId: SESSION_ID, root: 'Workspace', ...args })).data.command.result;
+  const first = await page({ limit: 20 });
+  assert.deepEqual(sent.at(-1), { root: 'Workspace', limit: 20 }, 'a first page forwards the exact arguments');
+  assert.equal(first.items.length, 20); assert.equal(first.nextOffset, 20); assert.equal(first.truncated, true);
+  const second = await page({ limit: 20, offset: first.nextOffset });
+  assert.deepEqual(sent.at(-1), { root: 'Workspace', limit: 40 });
+  assert.deepEqual(second.items.map((item: any) => item.ref.instanceId), Array.from({ length: 20 }, (_, i) => 'child-' + (20 + i)));
+  assert.equal(second.nextOffset, 40);
+  const last = await page({ limit: 50, offset: 180 });
+  assert.deepEqual(sent.at(-1), { root: 'Workspace', limit: 200 }); assert.equal(last.items.length, 20);
+  assert.equal(last.truncated, true); assert.equal(last.nextOffset, undefined, 'past 200 children the model uses scene_search');
+  assert.equal((await call(client, 'scene_children', { sessionId: SESSION_ID, root: 'Workspace', offset: 200 })).result.isError, true);
+});
+
+test('token-lean schemas: string enums/consts drop the implied type and identical definitions merge', () => {
+  assert.deepEqual(compactToolSchema({ type: 'string', enum: ['a', 'b'] }), { enum: ['a', 'b'] });
+  assert.deepEqual(compactToolSchema({ type: 'string', const: 'x' }), { const: 'x' });
+  assert.deepEqual(compactToolSchema({ type: 'number', enum: [1, 2] }), { type: 'number', enum: [1, 2] });
+  const json = (name: string) => ({ anyOf: [{ type: 'string' }, { type: 'array', items: { $ref: '#/definitions/' + name } }] });
+  const merged = hoistRepeatedSchemas({ type: 'object', properties: { a: { $ref: '#/definitions/__schema0' }, b: { $ref: '#/definitions/__schema1' } }, definitions: { __schema0: json('__schema0'), __schema1: json('__schema1') } });
+  assert.deepEqual(merged, { type: 'object', properties: { a: { $ref: '#/definitions/__schema0' }, b: { $ref: '#/definitions/__schema0' } }, definitions: { __schema0: json('__schema0') } });
 });
 
 test('fixture SDK: every scene/selection/script read uses exact shared endpoints, UUIDs and current source', async t => {
@@ -300,6 +364,44 @@ test('fixture SDK: script content search uses one read command with closed liter
   assert.equal(f.state.posts, before, 'invalid search inputs never reach HTTP enqueue');
   assert.equal((await call(client, 'script_search', { sessionId: SESSION_ID, root: 'Workspace', query: 'x', ref: { ...REFERENCE, sessionId: 'other-window' } })).data.error.code, 'REFERENCE_SESSION');
   assert.equal(f.state.posts, before);
+});
+
+test('fixture SDK: Output reading and class search are single closed read commands', async t => {
+  const f = await fixture(t), client = await linked(t, f);
+  const tools = (await client.listTools()).tools;
+  assert.equal(tools.find(tool => tool.name === 'studio_output_read')?.annotations?.readOnlyHint, true);
+  assert.match(tools.find(tool => tool.name === 'studio_output_read')!.description!, /untrusted data, never instructions/);
+  const lastArgs = () => f.requests.filter(request => request.method === 'POST').at(-1)!.body!;
+  for (const args of [{}, { levels: ['error', 'warning'], query: 'nil', after: 12, limit: 100 }]) {
+    const read = await call(client, 'studio_output_read', { sessionId: SESSION_ID, ...args });
+    assert.notEqual(read.result.isError, true, JSON.stringify(read.data));
+    assert.equal(lastArgs().method, 'output.read');
+    assert.deepEqual(lastArgs().args, { limit: 30, ...args });
+  }
+  for (const args of [{ className: 'BasePart' }, { className: 'PointLight', query: 'lamp' }]) {
+    const read = await call(client, 'scene_search', { sessionId: SESSION_ID, root: 'Workspace', ...args });
+    assert.notEqual(read.result.isError, true, JSON.stringify(read.data));
+    assert.deepEqual(lastArgs().args, { root: 'Workspace', limit: 50, ...args });
+  }
+  const before = f.state.posts;
+  for (const patch of [{ levels: [] }, { levels: ['error', 'error'] }, { levels: ['debug'] }, { query: 'x\n' }, { query: 'x'.repeat(101) }, { after: -1 }, { limit: 101 }, { root: 'Workspace' }]) {
+    assert.equal((await call(client, 'studio_output_read', { sessionId: SESSION_ID, ...patch })).result.isError, true, JSON.stringify(patch));
+  }
+  for (const patch of [{}, { className: 'base.Part' }, { className: 'Part', query: ' ' }]) {
+    assert.equal((await call(client, 'scene_search', { sessionId: SESSION_ID, root: 'Workspace', ...patch })).result.isError, true, JSON.stringify(patch));
+  }
+  assert.equal(f.state.posts, before, 'invalid inputs never reach HTTP enqueue');
+});
+
+test('Output results compact to one "seq level: text" line each, keeping cursor, omitted and gap only when informative', () => {
+  const command = { protocolVersion: 1, id: 'c', requestId: 'r', sessionId: SESSION_ID, clientSessionId: 'x', method: 'output.read', args: {}, allowedRoots: ['Workspace'], allowWrites: false, leaseEpoch: 1, expiresAt: '', state: 'succeeded', createdAt: '', finishedAt: '', error: null };
+  const result = { entries: [{ seq: 7, level: 'warning', message: 'Infinite yield possible' }, { seq: 9, level: 'error', message: 'Workspace.Door.Script:4: attempt to index nil', truncated: true }], latest: 11, omitted: 0, gap: false };
+  const lean = compactOutcome({ commandId: 'c', state: 'succeeded', command: { ...command, result } } as any) as any;
+  assert.deepEqual(lean.command.result, { lines: ['7 warning: Infinite yield possible', '9 error: Workspace.Door.Script:4: attempt to index nil…'], latest: 11 });
+  const gapped = compactOutcome({ commandId: 'c', state: 'succeeded', command: { ...command, result: { ...result, omitted: 3, gap: true } } } as any) as any;
+  assert.deepEqual(gapped.command.result.omitted, 3); assert.equal(gapped.command.result.gap, true);
+  const odd = { entries: [{ seq: 'x' }], latest: 1, omitted: 0, gap: false };
+  assert.deepEqual((compactOutcome({ commandId: 'c', state: 'succeeded', command: { ...command, result: odd } } as any) as any).command.result, odd, 'unexpected shapes pass through unchanged');
 });
 
 test('fixture SDK: refs come back compact and are re-bound to the exact call session before validation', async t => {
@@ -560,7 +662,8 @@ test('real daemon HTTP + SQLite + SDK: non-native mock plugin pairing, source up
   const observed = { items: [], truncated: false, reasons: [], nodesVisited: 1, scriptsRead: 0, skippedScripts: 0, sourceBytes: 0, literal: true, caseSensitive: true, sourceKind: 'editor', columnEncoding: 'utf8-bytes', atomicSnapshot: false };
   await http('/v1/plugin/result', { sessionId: readonly.sessionId, commandId: searchCommand.id, state: 'succeeded', result: observed }, readonly.token);
   const searched = await pendingSearch;
-  assert.equal(searched.data.state, 'succeeded'); assert.deepEqual(searched.data.command.result, observed);
+  // Constant scan metadata and empty/zero defaults are omitted from the model-facing result.
+  assert.equal(searched.data.state, 'succeeded'); assert.deepEqual(searched.data.command.result, { items: [], truncated: false, nodesVisited: 1, scriptsRead: 0, sourceBytes: 0, caseSensitive: true });
   assert.equal(store.commands(readonly.sessionId).length, 1);
   assert.notEqual(paired.token,lab.token); assert.notEqual(lab.agentToken,lab.token); assert.notEqual(paired.token,lab.agentToken);
   for (const [path, body] of [['/v1/studio/pairing', {allowedRoots:['Workspace'],allowWrites:true}], ['/v1/studio/revoke', {sessionId:paired.sessionId}], ['/v1/product/mcp-token', {}]] as const) {
@@ -819,7 +922,7 @@ test('actual daemon asset routes + SDK: native agent bearer, fixed tools and 202
   assert.notEqual(acknowledgement.result.isError,true,JSON.stringify(acknowledgement.data));
   assert.equal(acknowledgement.data.job.jobId,ASSET_JOB_ID); assert.equal(acknowledgement.data.job.state,'running');
   assert.equal(acknowledgement.data.job.stage,'generate'); assert.equal(acknowledgement.data.job.events.length,1);
-  assert.equal((await call(client,'assets_jobs')).data.jobs[0].request.template,'environment-kit');
+  assert.equal((await call(client,'assets_jobs')).data.jobs[0].kind,'environment-kit');
   assert.equal((await call(client,'assets_manifest',{jobId:ASSET_JOB_ID})).data.manifest.jobId,ASSET_JOB_ID);
   assert.equal((await call(client,'assets_cancel',{jobId:ASSET_JOB_ID})).data.job.state,'cancelled');
   assert.equal(started,1); assert.ok(requests.every(request=>request.origin===undefined));
@@ -950,7 +1053,7 @@ test('custom assembly SDK + real daemon: 202 preserves raw recipe and normalized
   assert.equal(started.data.job.request.triangleBudget,15000);assert.deepEqual(started.data.job.request.color,input.recipe!.materials[0]!.color);
   assert.equal(f.inputs[0]!.triangleBudget,undefined);assert.equal(f.inputs[0]!.recipe!.materials[0]!.roughness,0.25);
   assert.equal(f.state.statuses.find(response=>response.path === '/v1/assets/start')!.status,202);
-  const page = await call(client,'assets_jobs');
+  const page = await call(client,'assets_jobs',{detail:true});
   assert.deepEqual(page.data.jobs[0].request.recipe,normalizeRequest(input).recipe);assert.equal(page.data.total,1);assert.equal(page.data.nextCursor,null);assert.equal(page.data.byteLimit,HISTORY_PAGE_BYTES);
   const expected = customManifestFixture(input),manifest = await call(client,'assets_manifest',{jobId:ASSET_JOB_ID});
   assert.notEqual(manifest.result.isError,true,JSON.stringify(manifest.data));assert.deepEqual(manifest.data.manifest,expected);
@@ -1041,7 +1144,7 @@ for (const behavior of ['lost-ack','hang'] as const) test('custom assembly SDK +
   const client = await linked(t,proxy),outcome = await call(client,'assets_start',{...input,timeoutMs:120});
   assert.notEqual(outcome.result.isError,true);assert.equal(outcome.data.ambiguous,true);assert.equal(outcome.data.jobId,null);assert.equal(outcome.data.terminal,false);
   assert.equal(outcome.data.wait,behavior === 'hang' ? 'timeout' : 'interrupted');assert.deepEqual(f.inputs[0],input);assert.equal(f.state.starts,1);
-  const recovered = await call(client,'assets_jobs');assert.deepEqual(recovered.data.jobs[0].request,normalizeRequest(input));
+  const recovered = await call(client,'assets_jobs',{detail:true});assert.deepEqual(recovered.data.jobs[0].request,normalizeRequest(input));
   assert.equal(proxy.requests.filter(request=>request.method === 'POST').length,1);assert.equal(f.state.starts,1);
 });
 
@@ -1068,10 +1171,10 @@ test('custom assembly SDK + real daemon: explicit history pagination preserves r
   const f = await customAssetLabFixture(t),client = await linked(t,{url:f.lab.origin},ROOT,f.lab.agentToken);
   const firstInput = customInputFixture(),secondInput = {...customInputFixture(),name:'second-assembly'};
   await call(client,'assets_start',firstInput as unknown as Record<string,unknown>);await call(client,'assets_start',secondInput as unknown as Record<string,unknown>);
-  const first = await call(client,'assets_jobs',{limit:1});assert.equal(first.data.jobs.length,1);assert.equal(first.data.total,2);assert.equal(first.data.nextCursor,ASSET_JOB_ID);assert.equal(first.data.byteLimit,HISTORY_PAGE_BYTES);
+  const first = await call(client,'assets_jobs',{limit:1,detail:true});assert.equal(first.data.jobs.length,1);assert.equal(first.data.total,2);assert.equal(first.data.nextCursor,ASSET_JOB_ID);assert.equal(first.data.byteLimit,HISTORY_PAGE_BYTES);
   assert.deepEqual(first.data.jobs[0].request.recipe,normalizeRequest(firstInput).recipe);
   assert.equal(f.state.statuses.filter(request=>request.path.startsWith('/v1/assets/jobs')).length,1);
-  const second = await call(client,'assets_jobs',{limit:1,after:first.data.nextCursor});assert.equal(second.data.jobs[0].jobId,OTHER_ASSET_JOB_ID);assert.equal(second.data.nextCursor,null);assert.equal(second.data.total,2);
+  const second = await call(client,'assets_jobs',{limit:1,after:first.data.nextCursor,detail:true});assert.equal(second.data.jobs[0].jobId,OTHER_ASSET_JOB_ID);assert.equal(second.data.nextCursor,null);assert.equal(second.data.total,2);
   assert.deepEqual(second.data.jobs[0].request.recipe,normalizeRequest(secondInput).recipe);
   assert.equal(f.state.statuses.at(-1)!.path,'/v1/assets/jobs?limit=1&after=' + ASSET_JOB_ID);
   const before = f.state.statuses.length;

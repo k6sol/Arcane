@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { startWorkspaceShell } from '../../apps/desktop/src/workspace-shell.js';
 
 class Node extends EventTarget {
@@ -47,7 +48,7 @@ test('real browser mouse, Enter and Space keep the main chat open across Preview
     res.writeHead(body?200:404,{'Content-Type':path.endsWith('.js')?'text/javascript':path.endsWith('.css')?'text/css':'text/html'});res.end(body);
   });
   await new Promise<void>(done=>server.listen(0,'127.0.0.1',done));t.after(()=>{server.closeAllConnections();return new Promise<void>(done=>server.close(()=>done()));});
-  const playwright=await import(browserModule!),browser=await playwright.chromium.launch({headless:true,args:['--disable-gpu'],
+  const playwright=await import(pathToFileURL(resolve(browserModule!)).href),browser=await playwright.chromium.launch({headless:true,args:['--disable-gpu'],
     executablePath:process.env.ARCANE_UI_BROWSER_EXE??'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'});
   t.after(()=>browser.close());
   const page=await browser.newPage({viewport:{width:979,height:991}}),errors:string[]=[];page.on('pageerror',(error:Error)=>errors.push(error.message));

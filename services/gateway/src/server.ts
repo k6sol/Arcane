@@ -12,7 +12,7 @@ import { accountByEmail, audit, tx, type Account, type Row } from './db.ts';
 import { ConcurrencyCap, RateLimiter } from './limits.ts';
 import { creditsFor, estimateInputTokens, estimateOutputTokens } from './metering.ts';
 import { releaseStaleHolds, reserve, settle } from './metering-store.ts';
-import type { ChatMessage, UpstreamStreamer } from './providers.ts';
+import type { ChatMessage, StopReason, ToolSpec, UpstreamStreamer } from './providers.ts';
 import { createCheckoutSession, SignatureError, verifyWebhookSignature } from './stripe.ts';
 
 export interface GatewayDeps {
@@ -31,6 +31,8 @@ class HttpError extends Error {
 
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9_-]{8,128}$/;
 const TURN_ID = /^[A-Za-z0-9._:-]{1,128}$/;
+const TOOL_NAME = /^[A-Za-z0-9_-]{1,64}$/, TOOL_CALL_ID = /^[A-Za-z0-9_-]{1,128}$/;
+const plainObject = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
 const html = (value: string) => value.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] as string);
 
 export function createGateway(deps: GatewayDeps) {
@@ -201,15 +203,47 @@ export function createGateway(deps: GatewayDeps) {
     if (!model) throw new HttpError(400, 'unknown_model', 'That model is not available.');
     const messages = body.messages;
     if (!Array.isArray(messages) || messages.length < 1 || messages.length > 200) throw new HttpError(400, 'bad_messages', 'Send between 1 and 200 messages.');
+    const tools = readTools(body.tools);
     const clean: ChatMessage[] = messages.map(raw => {
       const row = raw as Record<string, unknown>;
-      if (!row || !['user', 'assistant', 'system'].includes(row.role as string) || typeof row.content !== 'string' || row.content.length > 200000) throw new HttpError(400, 'bad_messages', 'Each message needs a role and text content.');
+      if (!row || !['user', 'assistant', 'system', 'tool'].includes(row.role as string) || typeof row.content !== 'string' || row.content.length > 200000) throw new HttpError(400, 'bad_messages', 'Each message needs a role and text content.');
+      // Function-calling turns (provider-neutral shape, see providers.ts) are accepted only when tools are offered.
+      if (row.role === 'tool') {
+        if (!tools.length || typeof row.toolCallId !== 'string' || !TOOL_CALL_ID.test(row.toolCallId) || !(row.isError === undefined || typeof row.isError === 'boolean'))
+          throw new HttpError(400, 'bad_messages', 'A tool result needs the id of the call it answers.');
+        return { role: 'tool', content: row.content, toolCallId: row.toolCallId, ...(row.isError === true ? { isError: true } : {}) };
+      }
+      if (row.role === 'assistant' && row.toolCalls !== undefined) {
+        if (!tools.length || !Array.isArray(row.toolCalls) || row.toolCalls.length < 1 || row.toolCalls.length > 32) throw new HttpError(400, 'bad_messages', 'Assistant tool calls are invalid.');
+        const toolCalls = row.toolCalls.map(item => {
+          const call = item as Record<string, unknown>;
+          if (!call || typeof call.id !== 'string' || !TOOL_CALL_ID.test(call.id) || typeof call.name !== 'string' || !TOOL_NAME.test(call.name) ||
+              !plainObject(call.arguments) || JSON.stringify(call.arguments).length > 65536) throw new HttpError(400, 'bad_messages', 'Assistant tool calls are invalid.');
+          return { id: call.id, name: call.name, arguments: call.arguments as Record<string, unknown> };
+        });
+        return { role: 'assistant', content: row.content, toolCalls };
+      }
       return { role: row.role as ChatMessage['role'], content: row.content };
     });
     if (body.turnId !== undefined && (typeof body.turnId !== 'string' || !TURN_ID.test(body.turnId))) throw new HttpError(400, 'bad_turn', 'turnId is invalid.');
     if (body.maxTokens !== undefined && (!Number.isSafeInteger(body.maxTokens) || (body.maxTokens as number) < 1)) throw new HttpError(400, 'bad_max_tokens', 'maxTokens must be a positive integer.');
     const maxTokens = Math.min((body.maxTokens as number | undefined) ?? model.maxOutputTokens, model.maxOutputTokens);
-    return { model, messages: clean, maxTokens, turnId: (body.turnId as string | undefined) ?? null };
+    return { model, messages: clean, maxTokens, turnId: (body.turnId as string | undefined) ?? null, tools };
+  }
+  /** Optional function tools offered to the model: at most 64, unique names, bounded descriptions and JSON schemas. */
+  function readTools(value: unknown): ToolSpec[] {
+    if (value === undefined) return [];
+    if (!Array.isArray(value) || value.length > 64) throw new HttpError(400, 'bad_tools', 'Offer at most 64 tools.');
+    const names = new Set<string>(); let bytes = 0;
+    return value.map(raw => {
+      const row = raw as Record<string, unknown>;
+      if (!row || typeof row.name !== 'string' || !TOOL_NAME.test(row.name) || names.has(row.name) || typeof row.description !== 'string' || row.description.length > 4096 ||
+          !plainObject(row.inputSchema)) throw new HttpError(400, 'bad_tools', 'Each tool needs a unique name, a description and an input schema.');
+      const schema = JSON.stringify(row.inputSchema); bytes += schema.length + row.description.length;
+      if (schema.length > 32768 || bytes > 262144) throw new HttpError(400, 'bad_tools', 'The tool definitions are too large.');
+      names.add(row.name);
+      return { name: row.name, description: row.description, inputSchema: row.inputSchema as Record<string, unknown> };
+    });
   }
 
   async function chatRoute(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -218,14 +252,16 @@ export function createGateway(deps: GatewayDeps) {
     const release = streams.acquire(account.id);
     if (!release) throw new HttpError(429, 'too_many_streams', 'Too many chats are running at once on this account.');
     try {
-      const { model, messages, maxTokens, turnId } = readChat(await readJson(req, config.limits.maxBodyBytes));
+      const { model, messages, maxTokens, turnId, tools } = readChat(await readJson(req, config.limits.maxBodyBytes));
       const key = req.headers['idempotency-key'];
       if (key !== undefined) {
         if (typeof key !== 'string' || !IDEMPOTENCY_KEY.test(key)) throw new HttpError(400, 'bad_idempotency_key', 'Idempotency-Key must be 8-128 URL-safe characters.');
         const inserted = db.prepare("INSERT OR IGNORE INTO idempotency (account_id, route, key, status, body, created_at) VALUES (?, 'chat', ?, 200, '{}', ?)").run(account.id, key, now());
         if (!Number(inserted.changes)) throw new HttpError(409, 'duplicate_request', 'This request was already sent.');
       }
-      const estimatedInput = estimateInputTokens(messages);
+      // Tool definitions and call arguments are prompt tokens too.
+      const estimatedInput = estimateInputTokens([...messages.map(message => message.toolCalls ? { content: message.content + JSON.stringify(message.toolCalls) } : message),
+        ...(tools.length ? [{ content: JSON.stringify(tools) }] : [])]);
       const required = creditsFor(model, estimatedInput, maxTokens, config.markupBps);
       const reservation = reserve(db, config, account.id, turnId, required, now());
       if (!reservation.ok) return json(res, 402, { error: 'insufficient_balance', message: 'You are out of Arcane Credits.', required: reservation.required, available: reservation.available });
@@ -235,10 +271,17 @@ export function createGateway(deps: GatewayDeps) {
       res.on('close', () => { if (!res.writableFinished) controller.abort(); });
       res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
       const send = (event: unknown) => { if (!res.destroyed) res.write('data: ' + JSON.stringify(event) + '\n\n'); };
-      let text = '', inputTokens: number | undefined, outputTokens: number | undefined, failed = false;
+      // `text` is everything the model produced (tool call JSON included) for the no-usage-report fallback.
+      let text = '', inputTokens: number | undefined, outputTokens: number | undefined, failed = false, stopReason: StopReason = 'end', toolCalls = 0;
       try {
-        for await (const event of deps.upstream(config, model, messages, maxTokens, controller.signal)) {
+        for await (const event of deps.upstream(config, model, messages, maxTokens, controller.signal, tools)) {
           if (event.type === 'delta') { text += event.text; send({ type: 'delta', text: event.text }); }
+          else if (event.type === 'tool_call') {
+            // Only offered tools may be called; the desktop runs them, never the gateway.
+            if (!tools.some(tool => tool.name === event.name) || ++toolCalls > 32) throw new Error('unexpected tool call');
+            text += JSON.stringify(event.arguments); send({ type: 'tool_call', id: event.id, name: event.name, arguments: event.arguments });
+          }
+          else if (event.type === 'stop') stopReason = event.reason;
           else { inputTokens = event.inputTokens ?? inputTokens; outputTokens = event.outputTokens ?? outputTokens; }
         }
       } catch (error) {
@@ -250,7 +293,9 @@ export function createGateway(deps: GatewayDeps) {
       const actual = failed && !text ? 0 : creditsFor(model, used.inputTokens, used.outputTokens, config.markupBps);
       const charged = settle(db, hold, actual, { model: model.id, ...used, requestId }, now());
       if (failed) send({ type: 'error', message: controller.signal.aborted ? 'The request was stopped.' : 'The model is unavailable right now.' });
-      else send({ type: 'done', creditsUsed: charged, actionsUsed: hold.actionConsumed ? 1 : 0 });
+      // With tools offered the client runs a loop, so the reply also says why the model stopped and the token counts.
+      else send({ type: 'done', creditsUsed: charged, actionsUsed: hold.actionConsumed ? 1 : 0,
+        ...(tools.length ? { stopReason: toolCalls ? 'tool_use' : stopReason, inputTokens: used.inputTokens, outputTokens: used.outputTokens } : {}) });
       res.end();
     } finally { release(); }
   }
@@ -264,7 +309,10 @@ export function createGateway(deps: GatewayDeps) {
     const key = (req.method ?? 'GET') + ' ' + url.pathname;
     switch (key) {
       case 'GET /v1/health': return json(res, 200, { service: 'arcane-billing', version: 1, gateway: true });
-      case 'GET /v1/models': requireAccount(req); return json(res, 200, { models: config.models.map(model => ({ id: model.id, label: model.label })) });
+      // Prices are credits per million tokens with the markup applied (what the account is charged), rounded up.
+      case 'GET /v1/models': requireAccount(req); return json(res, 200, { models: config.models.map(model => ({ id: model.id, label: model.label,
+        pricing: { inputPerMTok: creditsFor({ inputPerMTok: model.inputPerMTok, outputPerMTok: 0 }, 1_000_000, 0, config.markupBps),
+          outputPerMTok: creditsFor({ inputPerMTok: 0, outputPerMTok: model.outputPerMTok }, 0, 1_000_000, config.markupBps) }, tools: true })) });
       case 'GET /v1/balance': return json(res, 200, balanceOf(requireAccount(req)));
       case 'GET /v1/usage': return json(res, 200, usageOf(db, requireAccount(req).id, new Date(now())));
       case 'POST /v1/chat':

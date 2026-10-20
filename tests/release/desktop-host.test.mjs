@@ -44,7 +44,7 @@ test('packaged smoke records module delivery after initialization and fails when
           if(code.includes('const bridge=window.arcaneDesktop.runtimeRecovery;'))return{frozen:true,status:{version:1,state:'unavailable',message:''}};
           if(code==='window.arcaneDesktop.claudePreferences.read()')return{available:false,projectPath:null,preferences:null};
           if(code==='window.arcaneDesktop.toolDrafts.read()')return{available:false,projectPath:null,preferences:null};
-          if(code.includes('d.claudeChat.status()'))return JSON.stringify({claudeChat:true,studioPlugin:true,workspaceProject:true,dialogs:true,projectPermissions:true,billing:true,notifications:true,meshKeep:true,updates:true});
+          if(code.includes('d.claudeChat.status()'))return JSON.stringify({claudeChat:true,arcaneChat:true,studioPlugin:true,workspaceProject:true,dialogs:true,projectPermissions:true,billing:true,notifications:true,meshKeep:true,updates:true});
           if(code.includes('Arcane smoke first unsent draft.'))return JSON.stringify({draftsSeparate:true,stableComposer:true,cleaned:true,taskUsageInactive:true});
           assert.fail('Unexpected smoke renderer request');
         }}},Math,JSON,Buffer,
@@ -63,7 +63,7 @@ test('packaged smoke records module delivery after initialization and fails when
 test('executable verifier requires every named smoke check, including the newer desktop bridges',()=>{
   const all=Object.fromEntries(REQUIRED_SMOKE_CHECKS.map(name=>[name,true]));
   assert.equal(smokeChecksComplete(all),true);
-  for(const name of ['claudeChatBridgeDisabledInSmoke','studioPluginBridgeDisabledInSmoke','workspaceProjectBridgeDisabledInSmoke','inAppDialogsBridgeMounted',
+  for(const name of ['claudeChatBridgeDisabledInSmoke','arcaneChatBridgeDisabledInSmoke','studioPluginBridgeDisabledInSmoke','workspaceProjectBridgeDisabledInSmoke','inAppDialogsBridgeMounted',
     'projectPermissionsBridgeDisabledInSmoke','billingBridgeNotConnectedInSmoke','notificationsBridgeSilentInSmoke','meshKeepBridgeUnavailableInSmoke','desktopUpdatesUnavailableInSmoke','bundledStudioPluginVerified','bundledPlansConfigValid','bundledChatInstructionsLoadable','trustedDecisionDialogsBundled']){
     assert.ok(REQUIRED_SMOKE_CHECKS.includes(name),name);
     const {[name]:_,...missing}=all;assert.equal(smokeChecksComplete(missing),false,name+' missing');
@@ -80,6 +80,7 @@ test('smoke bridge probe accepts only the disabled verification-mode answers of 
   const bridge=(names,impl={})=>Object.freeze({version:1,...Object.fromEntries(names.map(n=>[n,impl[n]??(()=>{calls.push(n);throw new Error('Smoke must not call '+n+'.');})]))});
   const desktop=overrides=>({
     claudeChat:bridge(['status','list','history','send','rewind','stop','remove','onEvent'],{status:async()=>{calls.push('chat.status');throw new Error('Claude chat is unavailable.');}}),
+    arcaneChat:bridge(['status','list','history','send','rewind','stop','remove','onEvent'],{status:async()=>{calls.push('arcane.status');throw new Error('Arcane chat is unavailable.');}}),
     studioPlugin:bridge(['status','install'],{status:async()=>({version:1,state:'unavailable',pluginVersion:null,message:'Studio plugin setup is disabled in verification mode.'})}),
     workspaceProject:bridge(['open'],{open:async()=>{throw new Error('The project picker is unavailable.');}}),
     dialogs:bridge(['attach','reply']),
@@ -91,8 +92,8 @@ test('smoke bridge probe accepts only the disabled verification-mode answers of 
     ...overrides});
   const observe=async d=>JSON.parse(await vm.runInNewContext(probe,{window:{arcaneDesktop:d},Object,String,JSON}));
   const good=await observe(desktop({}));
-  assert.deepEqual(good,{claudeChat:true,studioPlugin:true,workspaceProject:true,dialogs:true,projectPermissions:true,billing:true,notifications:true,meshKeep:true,updates:true});
-  assert.deepEqual(calls,['chat.status'],'only read-only or disabled calls are made');
+  assert.deepEqual(good,{claudeChat:true,arcaneChat:true,studioPlugin:true,workspaceProject:true,dialogs:true,projectPermissions:true,billing:true,notifications:true,meshKeep:true,updates:true});
+  assert.deepEqual(calls,['chat.status','arcane.status'],'only read-only or disabled calls are made');
   assert.equal((await observe(desktop({meshKeep:bridge(['keep'],{keep:async()=>({state:'started',message:''})})}))).meshKeep,false,'smoke must never start an upload');
   assert.equal((await observe(desktop({meshKeep:undefined}))).meshKeep,false);
   assert.equal((await observe(desktop({studioPlugin:bridge(['status','install'],{status:async()=>({state:'missing',message:'The Arcane Studio plugin is not installed yet.'})})}))).studioPlugin,false);
@@ -101,6 +102,8 @@ test('smoke bridge probe accepts only the disabled verification-mode answers of 
   assert.equal((await observe(desktop({workspaceProject:bridge(['open'],{open:async()=>({requested:true})})}))).workspaceProject,false);
   assert.equal((await observe(desktop({dialogs:{version:1,attach(){},reply(){}}}))).dialogs,false,'bridges must be frozen');
   assert.equal((await observe(desktop({claudeChat:undefined}))).claudeChat,false);
+  assert.equal((await observe(desktop({arcaneChat:undefined}))).arcaneChat,false);
+  assert.equal((await observe(desktop({arcaneChat:bridge(['status','list','history','send','rewind','stop','remove','onEvent'],{status:async()=>({available:false})})}))).arcaneChat,false,'a disabled bridge must refuse in smoke');
   assert.equal((await observe(desktop({projectPermissions:bridge(['read','save'],{read:async()=>({available:true})})}))).projectPermissions,false);
 });
 
@@ -367,7 +370,7 @@ test('preload exposes immutable identity and only the bounded Luau verification 
       return { contextBridge: { exposeInMainWorld(name, value) { assert.equal(name, 'arcaneDesktop'); exposed = value; } } };
     },
   });
-  assert.deepEqual(Object.keys(exposed).sort(), ['billing', 'claudeChat', 'claudePreferences', 'codeVerification', 'dialogs', 'meshKeep', 'nativeHandoff', 'notifications', 'platform', 'projectPermissions', 'providerSetup', 'runtime', 'runtimeRecovery', 'setupChecklist', 'studioKeys', 'studioPlugin', 'toolDrafts', 'updates', 'version', 'welcomeTour', 'workspacePreferences', 'workspaceProject']);
+  assert.deepEqual(Object.keys(exposed).sort(), ['arcaneChat', 'billing', 'claudeChat', 'claudePreferences', 'codeVerification', 'dialogs', 'meshKeep', 'nativeHandoff', 'notifications', 'platform', 'projectPermissions', 'providerSetup', 'runtime', 'runtimeRecovery', 'setupChecklist', 'studioKeys', 'studioPlugin', 'toolDrafts', 'updates', 'version', 'welcomeTour', 'workspacePreferences', 'workspaceProject']);
   assert.equal(Object.isFrozen(exposed.runtimeRecovery), true);
   assert.deepEqual(Object.keys(exposed.runtimeRecovery).sort(), ['acknowledge','onCheckpoint','onState','ready','retry','status','version']);
   assert.equal(Object.isFrozen(exposed.billing), true);
@@ -392,6 +395,8 @@ test('preload exposes immutable identity and only the bounded Luau verification 
   assert.equal(Object.isFrozen(exposed.codeVerification), true);
   assert.equal(Object.isFrozen(exposed.providerSetup),true);
   assert.equal(Object.isFrozen(exposed.claudeChat), true);
+  assert.equal(Object.isFrozen(exposed.arcaneChat), true);
+  assert.deepEqual(Object.keys(exposed.arcaneChat).sort(), ['history', 'list', 'onEvent', 'remove', 'rewind', 'send', 'status', 'stop', 'version']);
   assert.equal(Object.isFrozen(exposed.studioKeys), true);
   assert.equal(Object.isFrozen(exposed.workspacePreferences), true);
   assert.equal(Object.isFrozen(exposed.claudePreferences), true);

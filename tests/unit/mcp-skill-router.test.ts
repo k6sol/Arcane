@@ -14,7 +14,8 @@ import { DaemonClient } from '../../apps/mcp/src/daemon-client.js';
 import { SkillRegistry } from '../../apps/mcp/src/skills.js';
 import { productInstructions, recommendSkills, SKILLS_RECOMMEND_TOOL, SKILL_ROUTER_LIMITS } from '../../apps/mcp/src/skill-router.js';
 import { properties, createClass } from '../../apps/mcp/src/schemas.js';
-import { ARCANE_TOOL_NAMES, missingArcaneTools } from '../../packages/protocol/src/arcane-tools.js';
+import { ARCANE_GUIDANCE, ARCANE_GUIDANCE_START, ARCANE_MANAGED_TAIL_START, ARCANE_TASK_INSTRUCTIONS, ARCANE_TOOL_NAMES, missingArcaneTools } from '../../packages/protocol/src/arcane-tools.js';
+import { createRequire } from 'node:module';
 
 const ROOT = resolve(process.cwd());
 const ENTRY = fileURLToPath(new URL('../../apps/mcp/src/main.js', import.meta.url));
@@ -74,7 +75,7 @@ test('SDK initialize supplies automatic planning and exact scene contracts while
   assert.match(instructions,/no Client datamodel attestation/);assert.match(instructions,/assets_reconstruct_studio_import/);
   assert.doesNotMatch(instructions,/exposes no viewport capture, playtest|Script enabling and arbitrary executable-class creation are not exposed|exposes no Studio asset-import tool/);
   assert.match(instructions, /Automatically plan from the user's brief/);
-  assert.match(instructions, /call skills_recommend/);
+  assert.match(instructions, /[Cc]all skills_recommend/);
   assert.match(instructions, /not behavior-verified or production-approved/);
   assert.match(instructions, /do not ask for repeated conversational permission/);
   assert.match(instructions, /Honor native approval requests/);
@@ -125,7 +126,7 @@ test('router combines combat and server security rather than routing a multi-dom
   const result = await recommendSkills(new SkillRegistry(), { ...INPUT,
     request: 'Implement melee combat weapon attacks and damage with RemoteEvent server validation and datastore saves.' });
   assert.ok(result.ids.includes('arcane-combat')); assert.ok(result.ids.includes('arcane-remote-security'));
-  assert.ok(result.ids.includes('arcane-networking')); assert.ok(result.ids.includes('arcane-persistence'));
+  assert.ok(result.ids.includes('arcane-networking')); assert.ok([...result.ids, ...result.deferredIds].includes('arcane-datastore-safety'));
   assert.ok(!result.ids.includes('arcane-blender-props'));
 });
 
@@ -143,7 +144,8 @@ test('router maps everyday VFX, GUI, scripting, systems, data and realism phrasi
     ['Make a round system with intermission', 'arcane-gameplay-systems', ['arcane-luau-architecture']],
     ['Add doors that need keys', 'arcane-gameplay-systems', []],
     ['Add NPC dialogue with quests', 'arcane-gameplay-systems', ['arcane-npc']],
-    ['Save player coins with a datastore', 'arcane-persistence', ['arcane-datastore-safety']],
+    ['Save player coins with a datastore', 'arcane-datastore-safety', ['arcane-persistence']],
+    ['Migrate our old save schema to a new version', 'arcane-persistence', []],
     ['Stop exploiters from cheating my shop remote', 'arcane-remote-security', []],
     ['Make the scene look realistic', 'arcane-photoreal', []],
     ['photoreal lighting at golden hour', 'arcane-photoreal', []],
@@ -292,4 +294,85 @@ test('default routing is token-lean: the most relevant skill loads first and the
   const firstCore = result.ids.findIndex(id => core.includes(id));
   if (firstCore >= 0) assert.ok(result.ids.slice(firstCore).every(id => core.includes(id)), 'core trails domain skills');
   assert.ok(result.deferredIds.length > 0, 'remaining guidance is listed for on-demand skills_get');
+});
+
+test('router maps genre phrasing to the matching prescriptive genre kit first', async () => {
+  const cases: [string, string][] = [
+    ['Make a tycoon with droppers, conveyors and rebirths', 'arcane-tycoon-kit'],
+    ['Build an obby with stages, kill bricks and moving platforms', 'arcane-obby-kit'],
+    ['Make a pet simulator with eggs and a sell area', 'arcane-simulator-kit'],
+    ['Create a scary horror game with jump scares and a stalker', 'arcane-horror-kit'],
+    ['Build a pvp arena with a map vote', 'arcane-arena-kit'],
+    ['Make a round-based arena battle with a lobby', 'arcane-arena-kit'],
+    ['Build a racing game with a track and laps', 'arcane-racing-kit'],
+    ['Make an rpg with quests, xp and a boss dungeon', 'arcane-rpg-kit'],
+    ['Add a quest chain with xp rewards to my adventure', 'arcane-rpg-kit'],
+  ];
+  for (const [request, first] of cases) {
+    const result = await recommendSkills(new SkillRegistry(), { ...INPUT, request });
+    const domain = result.selected.filter(row => row.reason.startsWith('Task relevance')).map(row => row.id);
+    assert.equal(domain[0], first, request);
+    assert.ok(result.context.includes(`## Loaded skill: ${first}\n`), request);
+    assert.ok(result.bytes <= result.byteBudget, request);
+  }
+});
+
+test('router sends everyday gameplay-code briefs to the prescriptive systems, DataStore and security skills with their code references', async () => {
+  // Pinned in the reviewer catalogue (tests/skills/evaluations.json routingCases) so routing and behavior definitions stay in step.
+  const catalogue = JSON.parse(await readFile(join(ROOT, 'tests/skills/evaluations.json'), 'utf8')) as
+    { routingCases: { id: string; request: string; firstSkill: string; alsoIncluded: string[]; references: string[] }[] };
+  assert.ok(catalogue.routingCases.length >= 10);
+  for (const { request, firstSkill: first, alsoIncluded, references } of catalogue.routingCases) {
+    const result = await recommendSkills(new SkillRegistry(), { ...INPUT, request });
+    const domain = result.selected.filter(row => row.reason.startsWith('Task relevance')).map(row => row.id);
+    assert.equal(domain[0], first, request);
+    assert.ok(result.context.includes(`## Loaded skill: ${first}\n`), request);
+    for (const id of alsoIncluded) assert.ok([...result.ids, ...result.deferredIds].includes(id), `${request}: ${id}`);
+    // Code references load when they fit, otherwise they are named for skills_get; never silently dropped.
+    for (const reference of references) assert.ok([...result.references, ...result.deferredReferences].includes(reference), `${request}: ${reference}`);
+    assert.ok(result.bytes <= result.byteBudget && result.bytes === Buffer.byteLength(result.context), request);
+  }
+  const roomy = await recommendSkills(new SkillRegistry(), { ...INPUT, byteBudget: 40_000, request: 'make a shop with DataStore saving' });
+  assert.deepEqual(roomy.references, ['arcane-datastore-safety:template', 'arcane-gameplay-systems:recipes']);
+  for (const code of ['GetRequestBudgetForRequestType', 'BindToClose', 'UpdateAsync', 'OnServerEvent', 'Net.allow']) assert.ok(roomy.context.includes(code), code);
+});
+
+test('script_update attaches advisory Luau findings without blocking or altering the forwarded write', async t => {
+  const daemon = new DaemonClient({ url: 'http://127.0.0.1:1', token: 'synthetic-luau-lint-bearer' });
+  const forwarded: Record<string, unknown>[] = [];
+  // Handler fixture only; not a plugin execution or receipt.
+  t.mock.method(daemon, 'execute', async (_session: string, method: string, args: Record<string, unknown>) => { forwarded.push({ method, ...args }); return { fixtureForwarded: true }; });
+  const client = await linked(t, undefined, ROOT, daemon);
+  const ref = { instanceId: 'fixture-script', sessionId: 'fixture-session', root: 'ServerScriptService', pathSegments: ['Shop'], className: 'Script' };
+  const risky = 'buy.OnServerEvent:Connect(function(player, itemId, price)\n\tstore:SetAsync(player.UserId, price)\n\twait(1)\nend)\n';
+  const flagged = await call(client, 'script_update', { sessionId: ref.sessionId, ref, expectedSource: '', source: risky });
+  assert.notEqual(flagged.result.isError, true);
+  assert.equal(forwarded.length, 1); assert.equal(forwarded[0]!.source, risky); assert.equal(forwarded[0]!.method, 'script.update');
+  assert.equal(flagged.data.fixtureForwarded, true); assert.equal(flagged.data.luauAdvisories.advisoryOnly, true);
+  const found = new Set((flagged.data.luauAdvisories.items as { rule: string }[]).map(item => item.rule));
+  for (const rule of ['client-trusted-value', 'remote-unvalidated', 'datastore-pcall', 'datastore-setasync', 'datastore-bindtoclose', 'deprecated-scheduler', 'strict-mode']) assert.ok(found.has(rule), rule);
+  const clean = await call(client, 'script_update', { sessionId: ref.sessionId, ref, expectedSource: risky, source: '--!strict\nreturn {}\n' });
+  assert.equal(clean.data.luauAdvisories, undefined); assert.equal(forwarded.length, 2);
+});
+
+test('one canonical guidance block: MCP instructions stay whole in Claude Code and managed chats send it once', () => {
+  const instructions = productInstructions();
+  // Claude Code cuts MCP server instructions above 4096 characters by default; the canonical text must arrive whole.
+  assert.ok(instructions.length <= 4096, `MCP instructions fit Claude Code's bound (${instructions.length} chars)`);
+  assert.ok(instructions.includes('\n' + ARCANE_GUIDANCE + '\n'));
+  assert.ok(ARCANE_TASK_INSTRUCTIONS.includes('\n' + ARCANE_GUIDANCE + '\n' + ARCANE_MANAGED_TAIL_START));
+  assert.ok(ARCANE_GUIDANCE.startsWith(ARCANE_GUIDANCE_START));
+  assert.doesNotMatch(ARCANE_GUIDANCE, /verified before (?:the|every) turn|host verified|arcane-choices/i, 'the shared block holds no host-only claim or chat block');
+  const host = createRequire(join(ROOT, 'package.json'))(join(ROOT, 'apps/desktop/electron/claude-chat.cjs')) as {
+    appendedSystemPrompt(text: string): string; withoutSharedGuidance(text: string): string; GUIDANCE_START: string; MANAGED_TAIL_START: string };
+  assert.equal(host.GUIDANCE_START, ARCANE_GUIDANCE_START); assert.equal(host.MANAGED_TAIL_START, ARCANE_MANAGED_TAIL_START);
+  // Claude Code adds the server instructions itself, so the appended prompt keeps only the managed header and tail.
+  const appended = host.appendedSystemPrompt(ARCANE_TASK_INSTRUCTIONS);
+  assert.ok(!appended.includes(ARCANE_GUIDANCE_START) && !appended.includes('Original assets by default'));
+  assert.equal(host.withoutSharedGuidance(ARCANE_TASK_INSTRUCTIONS), ARCANE_TASK_INSTRUCTIONS.replace('\n' + ARCANE_GUIDANCE, ''));
+  for (const text of ['The user should not choose a tool or workflow', 'This managed host verified before the turn', 'arcane-choices', 'arcane-plan',
+    'an explicit in-scope build request needs no plan approval', 'Playtest setting', 'PLUGIN_UPDATE_REQUIRED']) assert.ok(appended.includes(text), text);
+  assert.equal(appended, host.appendedSystemPrompt(ARCANE_TASK_INSTRUCTIONS), 'byte-stable across turns');
+  // Combined, the Claude chat's system additions stay well under the earlier duplicated size.
+  assert.ok(appended.length + instructions.length < 6400, `combined ${appended.length + instructions.length} chars`);
 });

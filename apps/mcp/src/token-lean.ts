@@ -18,7 +18,13 @@ export function compactToolSchema(value: unknown): unknown {
   const node: Node = {};
   for (const [key, item] of Object.entries(value)) node[key] = key === 'enum' || key === 'required' || key === 'const' || key === 'default' ? item : compactToolSchema(item);
   delete node.$schema;
-  if (isNode(node.propertyNames) && Object.keys(node.propertyNames).join() === 'type' && node.propertyNames.type === 'string') delete node.propertyNames;
+  // A string enum or const already fixes the type.
+  if (node.type === 'string' && ((Array.isArray(node.enum) && node.enum.length && node.enum.every(item => typeof item === 'string')) || typeof node.const === 'string')) delete node.type;
+  // Property names are always strings, and an empty additionalProperties schema allows anything anyway.
+  if (isNode(node.propertyNames) && node.propertyNames.type === 'string') {
+    if (Object.keys(node.propertyNames).join() === 'type') delete node.propertyNames; else { const { type: _type, ...names } = node.propertyNames; node.propertyNames = names; }
+  }
+  if (isNode(node.additionalProperties) && !Object.keys(node.additionalProperties).length) delete node.additionalProperties;
   if (node.type === 'string') {
     if (node.minLength === 1) delete node.minLength;
     if (typeof node.maxLength === 'number' && node.maxLength >= 256) delete node.maxLength;
@@ -84,8 +90,8 @@ export function hoistRepeatedSchemas(schema: Node): Node {
     for (const definition of Object.values(definitions)) if (isNode(definition)) visit(definition);
     let text = '', saving = 0;
     for (const [candidate, group] of groups) {
-      // Each use becomes a ~40-character $ref plus a definitions entry; hoist only when that is a real saving.
-      const gain = (group.slots.length - 1) * candidate.length - group.slots.length * 48 - 32;
+      // Each use becomes a ~35-character {"$ref":"#/definitions/name"} plus one definitions entry; hoist only for a real saving.
+      const gain = (group.slots.length - 1) * candidate.length - group.slots.length * 35 - 24;
       if (group.slots.length > 1 && gain > saving) { text = candidate; saving = gain; }
     }
     if (!saving) break;
@@ -105,6 +111,23 @@ export function hoistRepeatedSchemas(schema: Node): Node {
       write(slot, { $ref: '#/definitions/' + name, ...(shared === undefined && typeof description === 'string' ? { description } : {}) });
     }
   }
+  // Identical definitions (e.g. the SDK's per-use recursive JSON value schemas) collapse into one.
+  const canonical = new Map<string, string>(), renamed = new Map<string, string>();
+  for (const name of Object.keys(definitions)) {
+    const key = JSON.stringify(definitions[name]).split('"#/definitions/' + name + '"').join('"#/definitions/\u0000"');
+    const kept = canonical.get(key);
+    if (kept) renamed.set(name, kept); else canonical.set(key, name);
+  }
+  if (renamed.size) {
+    const relink = (value: unknown): void => {
+      if (Array.isArray(value)) { value.forEach(relink); return; }
+      if (!isNode(value)) return;
+      if (typeof value.$ref === 'string') { const target = renamed.get(value.$ref.replace('#/definitions/', '')); if (target) value.$ref = '#/definitions/' + target; }
+      for (const [key, item] of Object.entries(value)) if (key !== 'enum' && key !== 'const' && key !== 'default') relink(item);
+    };
+    for (const name of renamed.keys()) delete definitions[name];
+    relink(root); relink(definitions);
+  }
   if (Object.keys(definitions).length) root.definitions = definitions;
   return root;
 }
@@ -123,7 +146,7 @@ export function serveCompactToolList(server: McpServer): void {
 
 // ---- Tool results ----
 
-const BULKY_ARGS_BYTES = 200, BULKY_TEXT_CHARS = 512;
+const BULKY_ARGS_BYTES = 200, BULKY_TEXT_CHARS = 512, BULKY_ARRAY_ITEMS = 32, SNAPSHOT_HEAD = 8;
 const isRef = (value: unknown): value is Node => isNode(value) && typeof value.instanceId === 'string' && typeof value.className === 'string' && Array.isArray(value.pathSegments);
 
 /** A scene node repeats its ref's last path segment and class name; keep only what differs. */
@@ -136,13 +159,67 @@ function compactNode(value: unknown): unknown {
 /** Receipt payloads echo text the model just sent (script sources); summarise long strings by size. */
 function compactSnapshot(value: unknown): unknown {
   if (typeof value === 'string') return value.length > BULKY_TEXT_CHARS ? { omitted: 'text', bytes: Buffer.byteLength(value, 'utf8') } : value;
-  if (Array.isArray(value)) return value.map(compactSnapshot);
+  // Long arrays (e.g. many restored refs) keep a head plus the count of what was left out.
+  if (Array.isArray(value)) return value.length > BULKY_ARRAY_ITEMS ? [...value.slice(0, SNAPSHOT_HEAD).map(compactSnapshot), { omitted: 'items', count: value.length - SNAPSHOT_HEAD }] : value.map(compactSnapshot);
   if (!isNode(value)) return value;
   return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, compactSnapshot(item)]));
 }
-function compactResult(result: unknown): unknown {
+/**
+ * The shortest decimal that parses back to the same float32. Engine Vector3/Color3/Vector2 channels
+ * are float32, so 12.300000190734863 -> 12.3 is lossless: sending it back as an exact baseline
+ * rebuilds the identical engine value. Anything that is not exactly a float32 is returned unchanged.
+ */
+export function float32Text(value: number): number {
+  if (!Number.isFinite(value) || Number.isInteger(value) || Math.fround(value) !== value) return value;
+  for (let digits = 1; digits <= 9; digits++) { const short = Number(value.toPrecision(digits)); if (Math.fround(short) === value) return short; }
+  return value;
+}
+/** Informational measurements only (never edit baselines): 3 decimal places. */
+export const round3 = (value: number) => Number.isFinite(value) && !Number.isInteger(value) ? Math.round(value * 1000) / 1000 || 0 : value;
+const FLOAT32_TAGS = new Set(['Vector3', 'Color3', 'Vector2']);
+function compactFloats(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(compactFloats);
+  if (!isNode(value)) return value;
+  if (typeof value.type === 'string' && FLOAT32_TAGS.has(value.type) && Array.isArray(value.value) && Object.keys(value).length === 2)
+    return { type: value.type, value: value.value.map(item => typeof item === 'number' ? float32Text(item) : item) };
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, compactFloats(item)]));
+}
+
+// script.search reports constant scan metadata and one full ref per matching line; group lines per script.
+const SEARCH_CONSTANTS: Node = { literal: true, sourceKind: 'editor', columnEncoding: 'utf8-bytes', atomicSnapshot: false, skippedScripts: 0 };
+function compactScriptSearch(result: Node): Node {
+  if (!Array.isArray(result.items) || !result.items.every(item => isNode(item) && isRef(item.ref))) return result;
+  const scripts: Node[] = [];
+  for (const item of result.items as Node[]) {
+    const { ref, line, column, excerpt, excerptStartColumn, excerptTruncated, childCount: _childCount, ...rest } = compactNode(item) as Node;
+    const hit: Node = { line, column, excerpt, ...(excerptStartColumn !== 1 ? { excerptStartColumn } : {}), ...(excerptTruncated !== false ? { excerptTruncated } : {}) };
+    const last = scripts.at(-1);
+    if (last && same(last.ref, ref) && Object.keys(rest).length === 0) (last.hits as Node[]).push(hit);
+    else scripts.push({ ref, ...rest, hits: [hit] });
+  }
+  const out: Node = {};
+  for (const [key, value] of Object.entries(result)) {
+    if (key === 'items') out.items = scripts;
+    else if (!(key in SEARCH_CONSTANTS && same(SEARCH_CONSTANTS[key], value)) && !(key === 'reasons' && Array.isArray(value) && !value.length)) out[key] = value;
+  }
+  return out;
+}
+
+// output.read: one "seq level: text" string per line ("…" marks a clipped line); zero counters and a false gap are dropped.
+function compactOutput(result: Node): Node {
+  const entries = result.entries;
+  if (!Array.isArray(entries) || !entries.every(entry => isNode(entry) && Number.isSafeInteger(entry.seq) && typeof entry.level === 'string' && typeof entry.message === 'string')) return result;
+  const out: Node = { lines: (entries as Node[]).map(entry => `${entry.seq} ${entry.level}: ${entry.message}${entry.truncated === true ? '…' : ''}`), latest: result.latest };
+  if (result.omitted !== 0) out.omitted = result.omitted;
+  if (result.gap !== false) out.gap = result.gap;
+  return out;
+}
+
+function compactResult(method: unknown, result: unknown): unknown {
   if (!isNode(result)) return result;
-  const out: Node = { ...result };
+  if (method === 'script.search') return compactScriptSearch(result);
+  if (method === 'output.read') return compactOutput(result);
+  const out = compactFloats(result) as Node;
   if (Array.isArray(out.items)) out.items = out.items.map(compactNode);
   if (Array.isArray(out.children)) out.children = out.children.map(compactNode);
   if (isNode(out.mutation)) {
@@ -166,10 +243,11 @@ export function compactOutcome<T>(data: T): T {
   if (!isNode(data) || !isNode(data.command) || !('protocolVersion' in data.command)) return data;
   const command = data.command;
   const args = command.args, argsBytes = args === undefined ? 0 : Buffer.byteLength(JSON.stringify(args));
+  // The command id and state repeat the outcome's commandId/state; keep them only when they differ.
   return { ...data, command: {
-    id: command.id, method: command.method, state: command.state,
+    ...(command.id !== data.commandId ? { id: command.id } : {}), method: command.method, ...(command.state !== data.state ? { state: command.state } : {}),
     ...(args !== undefined && argsBytes <= BULKY_ARGS_BYTES ? { args } : {}),
-    result: compactResult(command.result),
+    result: compactResult(command.method, command.result),
     ...(command.error !== null && command.error !== undefined ? { error: command.error } : {}),
   } } as T;
 }
@@ -249,4 +327,42 @@ export function serveCompactRefs(server: McpServer): void {
     if (text === original) return result;
     return { ...result, structuredContent: compact, content: result.content.map(item => item.type === 'text' && item.text === original ? { ...item, text } : item) };
   });
+}
+
+// ---- Asset history ----
+//
+// A full job record repeats its output directory, manifest path, every lifecycle event and the
+// whole normalized request (defaults included), about 1.4 KB per job. A history poll only needs
+// what decides the next step; assets_jobs {detail:true} still returns the full records.
+
+const JOB_MESSAGE_CHARS = 160;
+const jobKind = (request: Node): string => {
+  const spec = isNode(request.procedural) ? request.procedural : undefined;
+  if (request.template !== 'procedural' || !spec) return String(request.template);
+  const variant = spec.species ?? spec.style;
+  return typeof variant === 'string' ? spec.kind + ':' + variant : String(spec.kind);
+};
+/** One job as {jobId, name, kind, seed, state, stage (while unfinished), triangleBudget, at, error, archived}. */
+export function compactAssetJob(job: unknown): unknown {
+  if (!isNode(job) || !isText(job.jobId) || !isText(job.state) || !isNode(job.request)) return job;
+  const request = job.request, error = isNode(job.error) ? job.error : undefined;
+  const message = error && isText(error.message) ? error.message : undefined;
+  const reason = error && isNode(error.diagnostic) && isText(error.diagnostic.reasonCode) ? error.diagnostic.reasonCode : undefined;
+  return {
+    jobId: job.jobId, name: request.name, kind: jobKind(request), ...(typeof request.seed === 'number' ? { seed: request.seed } : {}), state: job.state,
+    ...(job.state !== 'succeeded' && isText(job.stage) ? { stage: job.stage } : {}),
+    ...(typeof request.triangleBudget === 'number' ? { triangleBudget: request.triangleBudget } : {}),
+    at: job.finishedAt ?? job.updatedAt,
+    // A succeeded job has its manifest; say so only when that does not hold.
+    ...(job.manifestAvailable !== (job.state === 'succeeded') ? { manifest: job.manifestAvailable } : {}),
+    ...(error ? { error: { code: error.code, ...(message !== undefined ? { message: message.length > JOB_MESSAGE_CHARS ? message.slice(0, JOB_MESSAGE_CHARS - 1) + '…' : message } : {}),
+      ...(reason ? { reason } : {}) } } : {}),
+    ...(isNode(job.retention) ? { archived: true } : {}),
+  };
+}
+/** A history page with compact jobs; the constant schemaVersion and byteLimit are dropped. Cursor, total, scope and unavailable stay. */
+export function compactAssetJobPage<T>(page: T): T {
+  if (!isNode(page) || !Array.isArray(page.jobs)) return page;
+  const { schemaVersion: _schemaVersion, byteLimit: _byteLimit, ...rest } = page;
+  return { ...rest, jobs: page.jobs.map(compactAssetJob) } as T;
 }

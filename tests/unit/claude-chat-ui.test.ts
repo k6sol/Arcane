@@ -1174,6 +1174,7 @@ test('tool names and inputs become plain-language activity lines with running, d
   assert.equal(line('scene_update', { ref: ws('Workspace', 'Lobby', 'Door'), expected: {}, properties: { Color: {}, Size: {} } }, 'finished'), 'Updating Workspace.Lobby.Door (Color, Size)');
   assert.equal(line('script_set_enabled', { ref: ws('ServerScriptService', 'Spawner'), enabled: true }, 'failed'), 'Enabling script ServerScriptService.Spawner');
   assert.equal(line('selection_read', null), 'Reading the Studio selection…');
+  assert.equal(line('studio_output_read', null), 'Reading Studio Output…');
   assert.equal(line('scene_search', { root: 'Workspace', query: 'Door' }), 'Searching Workspace for "Door"…');
   assert.equal(line('receipt_restore', { commandId: 'c' }), 'Restoring an earlier change…');
   assert.equal(line('work_progress', {}), 'Updating the task plan…');
@@ -1258,6 +1259,27 @@ test('change cards: counts, copy path through the clipboard seam, and restore te
   assert.deepEqual(copied, ['ServerScriptService.Spawner']); assert.equal(card.querySelector('.chat-change-status')!.textContent, 'Copied ServerScriptService.Spawner');
   assert.equal(renderChangeCard(doc as unknown as Document, []), null);
   assert.match(restoreRequestText(changes), /^Please restore the Studio changes from these receipts, newest first: c3, c2, c1\. Use receipt_restore/);
+});
+
+test('a reply that fails mid-turn offers Retry message: it re-sends only on click and keeps the composer draft', async t => {
+  const b = fakeBridge(); const f = mount(b.bridge); t.after(() => f.chat.stop()); await f.chat.refresh();
+  const retries = () => f.messages.querySelectorAll('.chat-message-retry').filter(node => !node.hidden);
+  f.type('Build a door'); key(f.input, 'Enter'); await tick(); await tick();
+  f.type('my next idea');
+  b.emit({ type: 'done', ok: false, error: 'Claude Code stopped unexpectedly before finishing the reply. Your message is saved; retry it when ready.', usage: null }); await tick();
+  assert.equal(f.bubbles().at(-1)!.role, 'error');
+  assert.equal(retries().length, 1); assert.equal(retries()[0]!.textContent, 'Retry message'); assert.equal(retries()[0]!.type, 'button');
+  assert.equal(sends(b).length, 1, 'never resent automatically'); assert.equal(f.input.value, 'my next idea');
+  click(retries()[0]!); await tick(); await tick();
+  assert.deepEqual(sends(b).map((row: any) => row.text), ['Build a door', 'Build a door']);
+  assert.equal(f.input.value, 'my next idea', 'the draft stays in the composer');
+  assert.equal(retries().length, 0, 'a used retry is gone');
+  // A Stop or a usage limit offers no retry.
+  click(f.submit); await tick(); b.emit({ type: 'done', ok: false, error: null, usage: null }); await tick();
+  assert.equal(retries().length, 0);
+  f.type('x'); key(f.input, 'Enter'); await tick(); await tick();
+  b.emit({ type: 'done', ok: false, error: 'Claude usage limit reached. This message was not answered; try again after the limit resets.', usageLimit: { resetsAt: null }, usage: null }); await tick();
+  assert.equal(retries().length, 0);
 });
 
 test('Claude queue: Enter during a reply queues a removable chip; it sends after success and returns to the draft on failure, Stop or a usage limit', async t => {

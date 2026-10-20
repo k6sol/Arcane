@@ -33,7 +33,7 @@ ${VERIFY}`,
   {
     id: 'obby-checkpoints', title: 'Obby with checkpoints', category: 'Gameplay', icon: 'flag',
     description: '12 stages, kill bricks, moving platforms, saved progress.',
-    prompt: `Build a 12-stage obby with checkpoints. Load skills arcane-genre-adaptation (obby) and arcane-level-design.
+    prompt: `Build a 12-stage obby with checkpoints. Load skills arcane-obby-kit and arcane-level-design.
 1. scene_build one batch per 3 stages under Workspace.Obby: jumps, kill bricks (Neon red), 2 moving platforms (PrismaticConstraint), difficulty ramps up.
 2. A SpawnLocation checkpoint per stage; server Script sets leaderstats.Stage and respawns players at their highest stage.
 3. Decor via original meshes; environment_apply clear_day.
@@ -43,7 +43,7 @@ ${VERIFY}`,
   {
     id: 'tycoon-starter', title: 'Tycoon starter', category: 'Gameplay', icon: 'coins',
     description: 'Claimable plot, droppers, conveyor and purchase buttons.',
-    prompt: `Build a tycoon starter. Load skills arcane-economy and arcane-gameplay-systems.
+    prompt: `Build a tycoon starter. Load skills arcane-tycoon-kit and arcane-economy.
 1. scene_build a claimable plot: claim pad, 2 droppers, conveyor, collector, 6 purchase buttons that reveal hidden items in order.
 2. ModuleScript config (prices, income/sec) in ReplicatedStorage; server Script owns cash in leaderstats and validates every purchase.
 3. Props from original meshes; keep parts anchored and cheap.
@@ -53,7 +53,7 @@ ${VERIFY}`,
   {
     id: 'simulator-loop', title: 'Simulator loop', category: 'Gameplay', icon: 'loop',
     description: 'Collect, fill the bag, sell, upgrade and rebirth.',
-    prompt: `Build a simulator core loop. Load skills arcane-economy and arcane-gameplay-feel.
+    prompt: `Build a simulator core loop. Load skills arcane-simulator-kit and arcane-gameplay-feel.
 1. scene_build a spawn hub, 3 collect zones (rising value), a sell pad and an upgrade shop pad.
 2. Server Script: click or touch to collect into a capped bag; sell converts to Coins; upgrades raise capacity and speed; rebirth resets for a multiplier.
 3. Small HUD in StarterGui: coins, bag fill bar, rebirths.
@@ -63,7 +63,7 @@ ${VERIFY}`,
   {
     id: 'horror-corridor', title: 'Horror corridor with VFX', category: 'Scene', icon: 'ghost',
     description: 'Dark hallway, flicker lights, fog and a jump scare.',
-    prompt: `Build a horror corridor (~120 studs, 2 side rooms) in Workspace.Corridor. Load skills arcane-vfx and arcane-audio.
+    prompt: `Build a horror corridor (~120 studs, 2 side rooms) in Workspace.Corridor. Load skills arcane-horror-kit, arcane-vfx and arcane-audio.
 1. environment_apply preset horror; dense fog, low ambient.
 2. scene_build walls, doors and ceiling lights; a server Script flickers 3 PointLights at random.
 3. VFX: ParticleEmitter dust, Smoke at a vent, a red Highlight on a figure revealed by a Touched trigger once per player.
@@ -83,7 +83,7 @@ Then studio_viewport_capture and fix layout issues. If Playtest is on, playtest_
   {
     id: 'round-arena', title: 'Round-based arena', category: 'Gameplay', icon: 'target',
     description: 'Lobby, intermission timer, arena rounds and winners.',
-    prompt: `Build a round-based arena. Load skills arcane-rounds and arcane-combat.
+    prompt: `Build a round-based arena. Load skills arcane-arena-kit and arcane-rounds.
 1. scene_build a lobby and a separate arena with cover and 8 spawn points.
 2. Server round loop: intermission 15s, teleport players, 90s round, last alive or most KOs wins, return to lobby; handle leaves mid-round.
 3. Status text in StarterGui driven by a StringValue in ReplicatedStorage.
@@ -103,7 +103,7 @@ Then script_read the server script and review it for data-loss paths. If Playtes
   {
     id: 'npc-village', title: 'NPC dialogue village', category: 'Scene', icon: 'chat',
     description: 'Small village with talking NPCs and quests.',
-    prompt: `Build a small village with 3 talking NPCs. Load skills arcane-npc and arcane-world-building.
+    prompt: `Build a small village with 3 talking NPCs. Load skills arcane-rpg-kit, arcane-npc and arcane-world-building.
 1. Houses, fences and a well via original meshes; assets_procedural trees and bushes around them.
 2. Place in scene_build batches; dirt paths with terrain; environment_apply golden_hour.
 3. Each NPC: ProximityPrompt opens a dialogue Gui with branching choices from a ModuleScript; one gives a fetch quest.

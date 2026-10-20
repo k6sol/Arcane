@@ -248,3 +248,16 @@ test('pairing accepts the GUI, effects and mesh feature capabilities and still r
   const other = store.createGrant({ allowedRoots: ['StarterGui'], allowWrites: true });
   assert.throws(() => store.pair({ code: other.code, protocolVersion: 1, identity: { ...identity, clientSessionId: 'other' }, capabilities: ['scene.gui', 'scene.anything'] }), { code: 'METHOD' });
 });
+
+test('interface skill build templates compile and pass the plugin wire policy as written', () => {
+  const blocks = ['recipes', 'controller'].flatMap(name => [...readFileSync(`skills/arcane/arcane-interface/references/${name}.md`, 'utf8').matchAll(/```json\n([\s\S]*?)```/g)]
+    .map(match => JSON.parse(match[1]!) as Record<string, unknown>));
+  assert.ok(blocks.length >= 3, 'menu, shop card and HUD templates');
+  for (const block of blocks) {
+    // A bare prototype map (shop card) is checked by stamping it once inside a ScreenGui.
+    const input = block.container ? block : { name: 'Probe', container: 'ScreenGui', prototypes: block, items: Object.keys(block).map(name => ({ use: name, name })) };
+    const compiled = compileSceneBuild(parse(input), STARTER_GUI as unknown as Json);
+    const wire = validateCommandArgs('scene.build', compiled.args, session());
+    assert.equal(sceneBuildInstanceCount(wire), compiled.instances, String(input.name));
+  }
+});

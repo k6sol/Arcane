@@ -182,3 +182,34 @@ local f,state=factories({revokeSurface=true,destroyFails=2})
 local e=rejects(function() AssetMaterials.create(entry.material,f,guard,entry.textures) end,'ENGINE')
 assert(e.field=='cleanup' and state.destroyed==5 and destroyed==0)
 `));
+
+test('glTF MASK admits binary ColorMap coverage only and creates a Transparency-mode appearance',options,()=>run(`
+local D=function(c) return string.rep(c,64) end
+local function material(mode)
+ return {baseColor={1,1,1,1},metallic=1,roughness=1,alphaMode=mode,alphaCutoff=.5,doubleSided=true,normalScale=1,sha256=D('c'),
+  colorMap={sha256=D('1'),channel='rgba',texCoord=0},normalMap={sha256=D('2'),channel='rgb',texCoord=0}}
+end
+local function map(slot,source,alphas)
+ local bytes=buffer.create(#alphas*4)
+ for i,a in ipairs(alphas) do buffer.writeu8(bytes,(i-1)*4,200);buffer.writeu8(bytes,(i-1)*4+1,128);buffer.writeu8(bytes,(i-1)*4+2,64);buffer.writeu8(bytes,(i-1)*4+3,a) end
+ return {imageId=D(source=='1' and '3' or '4'),sourceSha256=D(source),sourceRgbaSha256=D('5'),sha256=D('6'),materialSha256=D('c'),
+  semantic=slot,channel=slot=='ColorMap' and 'rgba' or 'rgb',orientation='top-left',colorSpace=slot=='ColorMap' and 'srgb' or 'linear',
+  normalConvention=slot=='NormalMap' and 'OpenGL' or nil,width=#alphas,height=1,bytes=bytes,byteLength=#alphas*4,factors=slot=='ColorMap' and {1,1,1} or {1}}
+end
+local function maps(colorAlphas,normalAlphas) return {ColorMap=map('ColorMap','1',colorAlphas),NormalMap=map('NormalMap','2',normalAlphas)} end
+-- Opaque materials still require alpha 255 everywhere; MASK relaxes only ColorMap to {0,255}.
+rejects(function() AssetMaterials.admitTextures(material('OPAQUE'),maps({0,255},{255,255}),guard) end,'INPUT')
+rejects(function() AssetMaterials.admitTextures(material('MASK'),maps({128,255},{255,255}),guard) end,'INPUT')
+rejects(function() AssetMaterials.admitTextures(material('MASK'),maps({0,255},{0,255}),guard) end,'INPUT')
+rejects(function() AssetMaterials.admitTextures(material('BLEND'),maps({255,255},{255,255}),guard) end,'UNSUPPORTED_MATERIAL')
+local opaque=material('OPAQUE');local opaqueHandle=AssetMaterials.admitTextures(opaque,maps({255,255},{255,255}),guard)
+local f0,s0=factories();local plain=AssetMaterials.create(opaque,f0,guard,opaqueHandle)
+assert(plain.plan.alphaMode=='OPAQUE' and s0.appearances[1].AlphaMode==nil,'opaque appearances keep the engine default alpha mode')
+local m=material('MASK');local handle=AssetMaterials.admitTextures(m,maps({0,255},{255,255}),guard)
+Enum={AlphaMode={Transparency='AlphaMode.Transparency'}}
+local f,state=factories();local made=AssetMaterials.create(m,f,guard,handle)
+Enum=nil
+assert(made.plan.alphaMode=='MASK' and made.surfaceAppearance.AlphaMode=='AlphaMode.Transparency')
+assert(made.meshPartProperties.Transparency==0 and made.meshPartProperties.DoubleSided==true)
+local pixels=made.editableImages.ColorMap.pixels;assert(buffer.readu8(pixels,3)==0 and buffer.readu8(pixels,7)==255,'binary coverage is written unchanged')
+`));

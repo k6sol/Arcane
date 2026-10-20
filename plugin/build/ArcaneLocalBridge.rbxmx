@@ -684,7 +684,7 @@ Validation.MAX_CACHE_BYTES = 16 * 1024 * 1024
 Validation.NULL = table.freeze({})
 local ARRAY = table.freeze({})
 Validation.ROOTS = table.freeze({"Workspace", "ReplicatedStorage", "ServerScriptService", "ServerStorage", "StarterGui", "StarterPlayer", "Lighting"})
-Validation.READ_METHODS = table.freeze({"scene.children", "scene.inspect", "scene.search", "selection.read", "script.read", "script.search", "scene.import_context", "scene.upload_context", "scene.asset_watch"})
+Validation.READ_METHODS = table.freeze({"scene.children", "scene.inspect", "scene.search", "selection.read", "script.read", "script.search", "scene.import_context", "scene.upload_context", "scene.asset_watch", "output.read"})
 Validation.WRITE_METHODS = table.freeze({"scene.create", "scene.update", "script.update", "script.set_enabled", "scene.restore", "scene.remove", "scene.build", "environment.apply", "scene.place_asset", "scene.apply_material", "terrain.generate"})
 Validation.REMOVE_LIMITS = table.freeze({targets = 64, topLevel = 10000, descendants = 100000})
 Validation.BUILD_LIMITS = table.freeze({items = 2000, prototypes = 32, prototypeParts = 64, instances = 4000, keys = 32})
@@ -694,7 +694,7 @@ Validation.ASSET_STAGE_METHODS = table.freeze({"asset.stage_packet", "asset.reco
 Validation.MESH_KEEP_METHODS = table.freeze({"asset.keep_mesh"})
 -- Non-method feature capabilities (effects classes, environment extras, inspect bounds; GUI classes and ScreenGui builds;
 -- character classes: Humanoid, HumanoidDescription, AnimationController, Animator).
-Validation.FEATURE_CAPABILITIES = table.freeze({"scene.effects", "scene.gui", "scene.gui.flex", "scene.gui.edit", "scene.characters", "asset.mesh_parts"})
+Validation.FEATURE_CAPABILITIES = table.freeze({"scene.effects", "scene.gui", "scene.gui.flex", "scene.gui.edit", "scene.characters", "asset.mesh_parts", "scene.search.class"})
 Validation.CREATE_CLASSES = table.freeze({"Folder", "Model", "Part", "Script", "LocalScript", "ModuleScript", "WedgePart", "CornerWedgePart", "SpawnLocation"})
 Validation.BASE_PART_CLASSES = table.freeze({"Part", "FlagStand", "Platform", "Seat", "SkateboardPlatform", "SpawnLocation", "MeshPart", "UnionOperation", "NegateOperation", "IntersectOperation", "WedgePart", "CornerWedgePart", "TrussPart", "VehicleSeat"})
 Validation.PART_SHAPE_CLASSES = table.freeze({"Part", "FlagStand", "Platform", "Seat", "SkateboardPlatform", "SpawnLocation"})
@@ -1901,6 +1901,8 @@ function Operations:receiveAssetPacket(expected: any, packet: string, guard: () 
 end
 
 function Operations:cancelAssetTransfers(): ()
+	-- Retirement also releases the Output reader; it owns no Studio state, so this never counts as a cleanup failure.
+	self:stopOutput()
 	local failures = 0
 	for id, owned in pairs(self.assetTransfers) do
 		local ok = pcall(function() owned.receiver:cancel() end)
@@ -2314,10 +2316,21 @@ function Operations:uploadContext(args: any): any
 end
 
 function Operations:search(args: any): any
-	V.fields(args, {"root", "query", "limit"}, "search arguments")
+	V.fields(args, {"root", "query", "className", "limit"}, "search arguments")
 	local root = self.registry:root(args.root)
-	local query = string.lower(V.string(args.query, "query", 100))
+	-- className is one engine class name matched with IsA; a name query is optional only alongside it.
+	local className = if args.className == nil then nil else V.string(args.className, "class name", 64)
+	if className and not string.match(className, "^%u[%w]*$") then V.fail("INPUT", "Invalid class name.") end
+	local query = if args.query == nil and className then nil else string.lower(V.string(args.query, "query", 100))
 	local limit = if args.limit == nil then 100 else V.integer(args.limit, 1, 200, "limit")
+	local function matches(instance: any): boolean
+		if query and not string.find(string.lower(instance.Name), query, 1, true) then return false end
+		if className then
+			local ok, isA = pcall(function(): boolean return instance:IsA(className) end)
+			return ok and isA == true
+		end
+		return true
+	end
 	local queue: {any} = {root}
 	local items = V.array({})
 	local head, visited, omitted = 1, 0, false
@@ -2325,7 +2338,7 @@ function Operations:search(args: any): any
 		local instance = queue[head]
 		head += 1
 		visited += 1
-		if string.find(string.lower(instance.Name), query, 1, true) then
+		if matches(instance) then
 			if #items == limit then return {items = items, truncated = true} end
 			table.insert(items, self.registry:node(instance))
 		end
@@ -2334,6 +2347,101 @@ function Operations:search(args: any): any
 		end
 	end
 	return {items = items, truncated = omitted or head <= #queue}
+end
+
+-- Studio Output reader. A bounded ring per pairing, seeded from LogService history on first read and then fed by
+-- MessageOut. Every line gets a sequence number, so `after` is an exact cursor; `gap` reports lines evicted past it.
+-- Output text is place-wide, untrusted data: it is clipped and returned, never interpreted.
+Operations.OUTPUT_LIMITS = table.freeze({buffer = 500, entries = 100, messageBytes = 1024, queryBytes = 100, cursor = 2147483647})
+local OUTPUT_LEVELS: any = table.freeze({MessageOutput = "output", MessageInfo = "info", MessageWarning = "warning", MessageError = "error"})
+local OUTPUT_LEVEL_NAMES = table.freeze({"output", "info", "warning", "error"})
+
+local function outputLevel(messageType: any): string?
+	local ok, name = pcall(function(): any return messageType.Name end)
+	return if ok and type(name) == "string" then OUTPUT_LEVELS[name] else nil
+end
+
+-- Clip on a UTF-8 boundary; invalid bytes and NULs are replaced, never forwarded.
+local function clipOutput(value: any, maximum: number): (string, boolean)
+	local text = if type(value) == "string" then value else ""
+	if utf8.len(text) == nil then text = string.gsub(text, "[\128-\255]", "?") end
+	text = string.gsub(text, "%z", "?")
+	if #text <= maximum then return text, false end
+	local cut = maximum
+	while cut > 0 and utf8.len(string.sub(text, 1, cut)) == nil do cut -= 1 end
+	return string.sub(text, 1, cut), true
+end
+
+function Operations:outputLog(): any
+	if self.output then return self.output end
+	local limits = Operations.OUTPUT_LIMITS
+	local log: any = {entries = {}, nextSeq = 1, evicted = 0, connection = nil}
+	local function push(message: any, messageType: any): ()
+		local level = outputLevel(messageType)
+		if not level then return end
+		local text, truncated = clipOutput(message, limits.messageBytes)
+		table.insert(log.entries, {seq = log.nextSeq, level = level, message = text, truncated = truncated})
+		log.nextSeq += 1
+		if #log.entries > limits.buffer then log.evicted = table.remove(log.entries, 1).seq end
+	end
+	local service = self.gameModel:GetService("LogService")
+	local ok, history = pcall(function(): any return service:GetLogHistory() end)
+	if ok and type(history) == "table" then
+		-- Only the newest buffer-full is kept; older history still consumes sequence numbers so gap is exact.
+		local skip = math.max(0, #history - limits.buffer)
+		log.nextSeq += skip
+		log.evicted = skip
+		for index = skip + 1, #history do
+			local item = history[index]
+			if type(item) == "table" then push(item.message, item.messageType) end
+		end
+	end
+	pcall(function() log.connection = service.MessageOut:Connect(push) end)
+	self.output = log
+	return log
+end
+
+function Operations:stopOutput(): ()
+	local log: any = self.output
+	self.output = nil
+	if log and log.connection then pcall(function() log.connection:Disconnect() end) end
+end
+
+function Operations:readOutput(args: any): any
+	V.fields(args, {"levels", "query", "after", "limit"}, "output arguments")
+	local limits = Operations.OUTPUT_LIMITS
+	local levels: {[string]: boolean}? = nil
+	if args.levels ~= nil then
+		if type(args.levels) ~= "table" or #args.levels < 1 or #args.levels > #OUTPUT_LEVEL_NAMES then V.fail("INPUT", "Invalid output levels.") end
+		local seen: {[string]: boolean} = {}
+		for _, level: any in ipairs(args.levels) do
+			if type(level) ~= "string" or not table.find(OUTPUT_LEVEL_NAMES, level) or seen[level] then V.fail("INPUT", "Invalid output levels.") end
+			seen[level] = true
+		end
+		levels = seen
+	end
+	local query = if args.query == nil then nil else string.lower(V.string(args.query, "output query", limits.queryBytes))
+	if query and string.find(query, "[%c]") then V.fail("INPUT", "Output query must be one line.") end
+	local after = if args.after == nil then 0 else V.integer(args.after, 0, limits.cursor, "output cursor")
+	local limit = if args.limit == nil then 50 else V.integer(args.limit, 1, limits.entries, "limit")
+	local log: any = self:outputLog()
+	local matched: {any} = {}
+	for _, entry: any in ipairs(log.entries) do
+		if entry.seq > after and (not levels or levels[entry.level])
+			and (not query or string.find(string.lower(entry.message), query, 1, true)) then
+			table.insert(matched, entry)
+		end
+	end
+	-- Newest lines win: an agent checks what just happened; omitted counts older matches left out.
+	local first = math.max(1, #matched - limit + 1)
+	local entries = V.array({})
+	for index = first, #matched do
+		local entry: any = matched[index]
+		local line: any = {seq = entry.seq, level = entry.level, message = entry.message}
+		if entry.truncated then line.truncated = true end
+		table.insert(entries, line)
+	end
+	return {entries = entries, latest = log.nextSeq - 1, omitted = first - 1, gap = after < log.evicted}
 end
 
 -- Content discovery reads editor text. Matches never authorize an update:
@@ -3547,6 +3655,7 @@ function Operations:execute(command: any, guard: () -> ()): any
 	elseif method == "scene.upload_context" then result = self:uploadContext(args)
 	elseif method == "scene.search" then result = self:search(args)
 	elseif method == "script.search" then result = self:searchScripts(args, guard)
+	elseif method == "output.read" then result = self:readOutput(args)
 	elseif method == "scene.inspect" then
 		V.fields(args, {"ref", "bounds"}, "inspect arguments")
 		local instance = self.registry:resolve(args.ref)
@@ -5531,7 +5640,7 @@ return table.freeze(AssetTransfer)
 <bool name="Archivable">true</bool>
 <ProtectedString name="Source"><![CDATA[--!strict
 -- Scalar and privately admitted texture sidecar for the decoder's material manifest (not raw glTF JSON).
--- No services/globals are resolved; only injected factories create resources.
+-- No services are resolved (only Enum.AlphaMode, read for MASK); only injected factories create resources.
 -- Decoded RGBA8 pixels arrive only from a sealed receiver intake; no PNG decoding or uploads.
 -- Checked 2026-10-14 against primary docs:
 -- https://create.roblox.com/docs/reference/engine/classes/SurfaceAppearance
@@ -5560,7 +5669,7 @@ export type ScalarMap = {
 export type Plan = {
 	source: Material, baseColorLinear: {number}, metallic: number, roughness: number,
 	constantMaps: {MetalnessMap: ScalarMap, RoughnessMap: ScalarMap},
-	doubleSided: boolean, transparency: number, emissiveStrength: number?,
+	doubleSided: boolean, transparency: number, alphaMode: string, emissiveStrength: number?,
 	supported: boolean, emissionSupport: "zero-only", limitations: {string},
 	requiresSurfaceAppearance: boolean, engineVerification: "pending",
 }
@@ -5592,7 +5701,7 @@ local EMISSION_LIMITATION = "Nonzero additive glTF emission needs verified emiss
 local LIMITATIONS = table.freeze({
 	"Metallic and roughness use nearest RGBA8 values; original factors and quantization errors are preserved. Engine rendering is pending.",
 	EMISSION_LIMITATION,
-	"Texture delivery requires privately admitted RGBA8 maps; only UV0 repeat sampling and opaque alpha are supported. Engine sampling is pending.",
+	"Texture delivery requires privately admitted RGBA8 maps; only UV0 repeat sampling, opaque alpha and glTF MASK (host-thresholded ColorMap alpha 0/255, AlphaMode Transparency) are supported; BLEND is not. Engine sampling and cutout rendering are pending.",
 })
 local TEXTURE_LIMITS = table.freeze({width = 1024, height = 1024, maps = 4, bytes = 16 * 1024 * 1024})
 local AssetMaterials = {LIMITS = LIMITS, TEXTURE_LIMITS = TEXTURE_LIMITS}
@@ -5688,9 +5797,12 @@ function AssetMaterials.plan(material: Material?, textures: any?): Plan
 	local metallic = scalar(value.metallic, 1, "metallic")
 	local roughness = scalar(value.roughness, 1, "roughness")
 	local cutoff = scalar(value.alphaCutoff, 1, "alphaCutoff")
-	if value.alphaMode ~= "OPAQUE" or baseColor[4] ~= 1 then
-		fail("UNSUPPORTED_MATERIAL", "alphaMode", "Only OPAQUE alpha=1 is supported; transparency is not approximated.")
+	-- MASK is a binary cutout already thresholded by the host (alpha >= cutoff
+	-- becomes 255, else 0). BLEND and fractional factor alpha are never approximated.
+	if (value.alphaMode ~= "OPAQUE" and value.alphaMode ~= "MASK") or baseColor[4] ~= 1 then
+		fail("UNSUPPORTED_MATERIAL", "alphaMode", "Only OPAQUE or MASK with alpha=1 is supported; blending is not approximated.")
 	end
+	local alphaMode: string = value.alphaMode
 	if type(value.doubleSided) ~= "boolean" then fail("INPUT", "doubleSided", "Expected a boolean.") end
 	-- With no normal map, this factor has no visual effect. Preserve it as data.
 	local normalScale = value.normalScale
@@ -5714,12 +5826,12 @@ function AssetMaterials.plan(material: Material?, textures: any?): Plan
 		emission = table.freeze({factor = factor, strength = strength})
 	end
 	local source: Material = table.freeze({baseColor = baseColor, metallic = metallic, roughness = roughness,
-		alphaMode = "OPAQUE", alphaCutoff = cutoff, doubleSided = value.doubleSided,
+		alphaMode = alphaMode, alphaCutoff = cutoff, doubleSided = value.doubleSided,
 		normalScale = normalScale, emission = emission, sha256 = value.sha256,
 		colorMap = sourceMaps.colorMap, normalMap = sourceMaps.normalMap, roughnessMap = sourceMaps.roughnessMap, metalnessMap = sourceMaps.metalnessMap})
 	return table.freeze({source = source, baseColorLinear = if bundle ~= nil and bundle.maps.ColorMap ~= nil then table.freeze({1, 1, 1}) else table.freeze({baseColor[1], baseColor[2], baseColor[3]}),
 		constantMaps = table.freeze({MetalnessMap = constantMap(metallic), RoughnessMap = constantMap(roughness)}),
-		metallic = metallic, roughness = roughness, doubleSided = source.doubleSided, transparency = 0,
+		metallic = metallic, roughness = roughness, doubleSided = source.doubleSided, transparency = 0, alphaMode = alphaMode,
 		emissiveStrength = if emissionSupported then 0 else nil, supported = emissionSupported,
 		emissionSupport = "zero-only", limitations = LIMITATIONS, requiresSurfaceAppearance = true, engineVerification = "pending"})
 end
@@ -5766,8 +5878,11 @@ function AssetMaterials.admitTextures(material: any, maps: any, guard: () -> ())
 		if count > TEXTURE_LIMITS.maps or bytes > TEXTURE_LIMITS.bytes then fail("INPUT", field, "Texture bundle exceeds bounds.") end
 		local copy = buffer.create(width * height * 4)
 		buffer.copy(copy, 0, map.bytes, 0, buffer.len(copy))
+		-- Only a MASK ColorMap may carry binary cutout coverage; every other map stays opaque.
+		local cutout = slot == "ColorMap" and material.alphaMode == "MASK"
 		for index = 3, buffer.len(copy) - 1, 4 do
-			if buffer.readu8(copy, index) ~= 255 then fail("INPUT", field, "Delivered opaque map pixels require alpha 255.") end
+			local alpha = buffer.readu8(copy, index)
+			if alpha ~= 255 and not (cutout and alpha == 0) then fail("INPUT", field, "Delivered map pixels require alpha 255 (or 0/255 for a MASK ColorMap).") end
 			if index % 16384 == 16383 then check() end
 		end
 		owned[slot] = table.freeze({width = width, height = height, bytes = copy})
@@ -5864,6 +5979,10 @@ function AssetMaterials.create(material: Material?, factories: Factories, guard:
 		check()
 		appearance.EmissiveStrength = plan.emissiveStrength :: number
 		if bundle ~= nil and bundle.maps.ColorMap ~= nil then appearance.Color = color end
+		-- MASK ColorMap alpha is already binary; Transparency makes it cut out.
+		-- Without a ColorMap, factor alpha 1 always passes the cutoff (opaque).
+		-- MeshPart.Transparency stays 0. Native cutout rendering is pending.
+		if plan.alphaMode == "MASK" and bundle ~= nil and bundle.maps.ColorMap ~= nil then appearance.AlphaMode = (Enum :: any).AlphaMode.Transparency end
 		check()
 		return table.freeze({surfaceAppearance = appearance,
 			editableImages = table.freeze(images),

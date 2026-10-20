@@ -1,6 +1,6 @@
 # Composer model picker
 
-> **Current behavior (18 October 2026):** the picker now has two columns, ChatGPT and Claude, in one shared chat. ChatGPT rows still come only from the live reported catalogue. Claude rows list the CLI's model aliases. Choosing a model from the other column switches provider in the same chat, and Ctrl+Shift+M opens the picker. The sections below record the original ChatGPT-only picker and its evidence.
+> **Current behavior (18 October 2026):** the picker now has two columns, ChatGPT and Claude, in one shared chat. ChatGPT rows still come only from the live reported catalogue. Claude rows list the CLI's model aliases. Choosing a model from the other column switches provider in the same chat, and Ctrl+Shift+M opens the picker. When an Arcane account is connected to a configured gateway, a third Arcane column lists the gateway's models with credit prices and balance (see docs/ARCANE_CREDITS.md); otherwise it stays hidden. The sections below record the original ChatGPT-only picker and its evidence.
 
 Arcane opens with one conversation column. The compact Codex model/effort button in the composer opens a nonmodal popover using the existing black/red palette and typography. Its rows come exclusively from the validated live `snapshot.models` catalogue: reported display name, exact model value, and that model's reported efforts. There are no bundled model names, provider aliases, entitlement badges, or subscription-access claims.
 

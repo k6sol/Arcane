@@ -264,7 +264,7 @@ test('main cold start passes an isolated unavailable compiler to the core daemon
       requested.push({ executable, args, options });
       queueMicrotask(() => child.emit('message', { type: 'arcane-ready', protocolVersion: 1, origin, token: 'a'.repeat(64) }));
       return child;
-    }, failStartup() { assert.fail('Core startup must survive only this compiler-specific failure.'); },
+    }, runtimeStopped() { assert.fail('Core startup must survive only this compiler-specific failure.'); },
   };
   vm.createContext(context);
   // Substitute only the module loader in this VM; run the real managed resolver

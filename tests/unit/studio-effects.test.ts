@@ -236,3 +236,17 @@ test('multi-view sheet: 2–4 small tiles in one PNG within the dimension and by
   assert.equal(viewportRequestSchema.safeParse({ sessionId: 's', sheet: Array(5).fill(camera) }).success, false);
   assert.equal(viewportRequestSchema.safeParse({ sessionId: 's', camera, sheet: [camera, camera] }).success, false);
 });
+
+test('vfx skill recipe builds compile and pass the plugin wire policy as written', async () => {
+  const { readFileSync } = await import('node:fs');
+  const text = readFileSync('skills/arcane/arcane-vfx/references/recipes.md', 'utf8');
+  const builds = [...text.matchAll(/```json\n([\s\S]*?)```/g)].map(match => JSON.parse(match[1]!) as Record<string, unknown>);
+  assert.ok(builds.length >= 2, 'campfire and waterfall');
+  for (const build of builds) {
+    const compiled = compileSceneBuild(z.strictObject(sceneBuildShape).parse(build) as SceneBuildInput, ref('Workspace', true) as unknown as Json);
+    const wire = validateCommandArgs('scene.build', compiled.args, session());
+    assert.equal(sceneBuildInstanceCount(wire), compiled.instances, String(build.name));
+  }
+  // Every emitter stays within the per-emitter budget the skill states (Rate x max Lifetime <= 200).
+  for (const [, rate, high] of text.matchAll(/"Rate": (\d+(?:\.\d+)?), "Lifetime": \[[\d.]+, ([\d.]+)\]/g)) assert.ok(Number(rate) * Number(high) <= 200, `${rate} x ${high}`);
+});

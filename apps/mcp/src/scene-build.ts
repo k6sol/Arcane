@@ -8,6 +8,7 @@ import { BUILD_GROUP_CLASSES, BUILD_PART_CLASSES, ENVIRONMENT_PROPERTIES, MATERI
 import { EFFECT_LIMITS } from '../../../packages/protocol/src/studio.js';
 import { BridgeError } from './daemon-client.js';
 import { id, ref } from './schemas.js';
+import { expandKits, KIT_TRIANGLE_BUDGET, PRIMITIVE_TRIANGLES, TEMPLATE_TRIANGLES, type KitReport } from './scene-kits.js';
 
 /** Compact model-facing build input. It is compiled locally into the strict scene.build wire
  * form (explicit prototypes and placements), so a forest is one short call, not hundreds. */
@@ -25,13 +26,18 @@ export const compactProps = z.strictObject({
   Material: z.enum(MATERIALS).optional(), Shape: z.enum(SHAPES).optional(), Anchored: z.boolean().optional(), CanCollide: z.boolean().optional(),
   CastShadow: z.boolean().optional(), Transparency: unit.optional(), Reflectance: unit.optional(),
 }).describe('Part properties. Vectors as [x,y,z]; Color as [r,g,b] or "#rrggbb". Anchored defaults true.');
-const buildClass = z.enum([...BUILD_GROUP_CLASSES, ...BUILD_PART_CLASSES, ...EFFECT_CLASSES, ...GUI_CLASSES]);
+const BUILD_CLASSES: readonly string[] = [...BUILD_GROUP_CLASSES, ...BUILD_PART_CLASSES, ...EFFECT_CLASSES, ...GUI_CLASSES];
+// Checked against the same class list, advertised as a string: the effect/GUI classes are already enumerated on scene_create.
+const buildClass = z.string().max(40).refine(value => BUILD_CLASSES.includes(value), `Use one of ${BUILD_CLASSES.join(', ')}.`);
 /** Compact effect properties; compileEffectProps converts them to the tagged wire form. */
 export const effectProps = z.record(z.string().regex(/^[A-Za-z0-9_]{1,40}$/), z.unknown())
   .describe('Effect props by class (see tool description). Colors [r,g,b]/"#hex"; NumberSequence as a number, evenly spaced numbers or [[t,v,env?],...]; ColorSequence as a color, evenly spaced colors or [[t,"#hex"],...]; NumberRange as n or [min,max]; Vector2/3 arrays; enums by name; Texture "rbxassetid://123" or "rbxasset://textures/..."; Attachment0/1 = key of an earlier Attachment item; Sound.SoundId "rbxassetid://<digits>" only (user-given or from studio_asset_search category Audio, never invented); Sound.SoundGroup = key of an earlier SoundGroup item.');
 /** One-line per-class property list for tool descriptions. */
 export function effectCatalog(): string {
-  return EFFECT_CLASSES.map(className => `${className}(${Object.keys(EFFECT_PROPERTIES[className]).join(',')})`).join('; ');
+  // Classes with the same key list share one entry (e.g. SpotLight/SurfaceLight).
+  const groups = new Map<string, string[]>();
+  for (const className of EFFECT_CLASSES) { const keys = Object.keys(EFFECT_PROPERTIES[className]).join(','); groups.set(keys, [...(groups.get(keys) ?? []), className]); }
+  return [...groups].map(([keys, classes]) => `${classes.join('/')}(${keys})`).join('; ');
 }
 function spread<T>(values: T[]): [number, T][] { return values.map((value, index) => [Number((index / (values.length - 1)).toFixed(4)), value]); }
 function rgb(value: unknown, label: string): number[] {
@@ -93,33 +99,44 @@ function compileValues(className: string, table: Record<string, EffectKind>, wha
 }
 const range = z.tuple([n, n]);
 const tint = z.tuple([z.number().min(0).max(2), z.number().min(0).max(2), z.number().min(0).max(2)]);
+const seed = z.number().int().min(0).max(2 ** 31).default(1);
+const clearingShape = z.strictObject({ center: z.tuple([n, n]).optional(), inner: z.number().min(0), outer: z.number().min(0) });
+const avoidCircles = z.array(z.strictObject({ at: z.tuple([n, n]), radius: z.number().positive() })).max(32);
+const avoidRoutes = z.array(z.strictObject({
+  points: z.array(z.tuple([n.min(-1_000_000).max(1_000_000), n.min(-1_000_000).max(1_000_000)])).min(2).max(32),
+  width: z.number().positive().max(512),
+})).max(8);
+const stone = z.enum(['Limestone', 'Marble', 'Granite', 'Sandstone', 'Slate', 'Basalt', 'Concrete', 'Cobblestone', 'Pavement']);
+const layer = z.strictObject({ use: z.string().max(64), share: z.number().positive().max(100).optional(), spacing: z.number().min(0.5).max(512),
+  tris: z.number().int().min(0).max(200000).optional() });
 
 export const sceneBuildShape = {
   name: name.describe('Name of the Model/Folder that holds the whole build.'),
   container: z.enum([...BUILD_GROUP_CLASSES, 'ScreenGui']).default('Model').describe('ScreenGui: parent = StarterGui root ref; GUI items only.'),
-  screen: guiProps.optional().describe('ScreenGui root props (default ResetOnSpawn false, ZIndexBehavior Sibling).'),
+  screen: guiProps.optional().describe('ScreenGui root props.'),
   defaults: compactProps.optional().describe('Properties applied to every part before its own props (Anchored:true is already implied).'),
   prototypes: z.record(z.string().regex(/^[A-Za-z0-9_-]{1,64}$/), z.strictObject({
     parts: z.array(z.strictObject({ name, className: z.enum(BUILD_PART_CLASSES).default('Part'), props: compactProps.optional(),
-      tint: z.boolean().default(true).describe('Whether placement tint multiplies this part Color.') })).min(1).max(SCENE_BUILD_LIMITS.prototypeParts).optional(),
-    weld: z.boolean().default(false).describe('WeldConstraint every part to the first (only useful when unanchored).'),
+      tint: z.boolean().default(true).describe('Placement tint applies.') })).min(1).max(SCENE_BUILD_LIMITS.prototypeParts).optional(),
+    weld: z.boolean().default(false).describe('Weld parts to the first (if unanchored).'),
     ui: z.array(z.strictObject({ name, className: z.string().max(40), in: name.optional().describe('Earlier element (default: root)'),
       ui: z.record(z.string(), z.unknown()).optional() })).min(1).max(SCENE_BUILD_LIMITS.prototypeParts).optional().describe('GUI element tree instead of parts; first = root.'),
-  })).optional().describe('Reusable templates. Part Position/Orientation are relative to the placement origin at ground level; Size scales with placement scale. ui trees are stamped by items with use.'),
+  })).optional().describe('Reusable parts; Position/Orientation relative to the ground-level origin, Size scales. ui trees are stamped by items use.'),
   templates: z.record(z.string().regex(/^[A-Za-z0-9_-]{1,64}$/), ref).optional()
     .refine(value => !value || Object.keys(value).length <= ASSET_PLACE_LIMITS.templates, `At most ${ASSET_PLACE_LIMITS.templates} templates.`)
-    .describe('Original Model/BasePart refs from assets_place_studio_import. Other templates need human Settings opt-in. Use by name; each placement is a full copy, scaled and yawed about its bottom pivot (tint does not apply).'),
+    .describe('Original Model/BasePart refs from assets_place_studio_import (others need Settings opt-in). Each use is a full copy scaled/yawed about its bottom pivot; no tint.'),
   items: z.array(z.strictObject({
     key: key.optional().describe('Local id; returned with a real ref, and usable as "in" for later items.'),
-    in: key.optional().describe('Key of an earlier group item (effects/GUI: also a part, Attachment or GUI host item); default is the build root.'),
-    name: name.optional(), className: buildClass.optional().describe('Model/Folder group, a part class (default Part when props are given), an effect class (fx) or GUI class (ui).'),
-    props: compactProps.optional(), fx: effectProps.optional(), ui: guiProps.optional(),
+    in: key.optional().describe('Key of an earlier group (effects/GUI: also part/Attachment/GUI host); default root.'),
+    name: name.optional(), className: buildClass.optional().describe('Model/Folder, part (default Part), or effect (fx)/GUI (ui) class as on scene_create.'),
+    props: compactProps.optional(), fx: effectProps.optional().describe('Effect props as scene_create fx; refs = earlier item keys.'),
+    ui: guiProps.optional().describe('GUI props as scene_create ui; stamp: root overrides.'),
     use: z.string().optional().describe('Prototype name to place or stamp.'),
     at: v3.optional(), yaw: z.number().min(-360).max(360).optional(), scale: z.number().min(0.1).max(20).optional(), tint: tint.optional(),
-    ground: z.boolean().optional().describe('Drop the placement onto the surface below (terrain or parts).'),
+    ground: z.boolean().optional().describe('Drop onto the surface below.'),
   })).max(SCENE_BUILD_LIMITS.items).default([]),
   scatter: z.array(z.strictObject({
-    use: z.union([z.string(), z.array(z.string()).min(1).max(16)]).describe('Prototype name(s); one is chosen per point (repeat a name to weight it).'),
+    use: z.union([z.string(), z.array(z.string()).min(1).max(16)]).describe('Prototype name(s), one per point (repeat to weight).'),
     in: key.optional(), name: name.optional(),
     count: z.number().int().min(1).max(SCENE_BUILD_LIMITS.items),
     center: v3.describe('Area centre; y is the ground height.'),
@@ -128,18 +145,25 @@ export const sceneBuildShape = {
     minSpacing: z.number().min(0.5).max(512).describe('Poisson-disk spacing at scale 1; also keeps clear of earlier scatter points.'),
     clusters: z.number().int().min(1).max(64).optional().describe('Group points into this many natural clumps.'),
     clusterSpread: z.number().positive().max(2048).optional(),
-    clearing: z.strictObject({ center: z.tuple([n, n]).optional(), inner: z.number().min(0), outer: z.number().min(0) }).optional()
-      .describe('Density falloff: no points within inner of the centre [x,z], ramping to full density at outer.'),
-    avoid: z.array(z.strictObject({ at: z.tuple([n, n]), radius: z.number().positive() })).max(32).optional().describe('Keep-out circles [x,z].'),
-    avoidPaths: z.array(z.strictObject({
-      points: z.array(z.tuple([n.min(-1_000_000).max(1_000_000), n.min(-1_000_000).max(1_000_000)])).min(2).max(32),
-      width: z.number().positive().max(512),
-    })).max(8).optional().describe('Full-width [x,z] path corridors, including endpoints.'),
+    clearing: clearingShape.optional().describe('None within inner of centre [x,z]; full density from outer.'),
+    avoid: avoidCircles.optional().describe('Keep-out circles [x,z].'),
+    avoidPaths: avoidRoutes.optional().describe('Full-width [x,z] path corridors, including endpoints.'),
     footprintRadius: z.number().min(0).max(512).optional().describe('Scale-1 canopy radius; pads clearing, avoid and avoidPaths.'),
     yaw: range.optional(), scale: range.optional().describe('Default [0.75, 1.25].'),
-    tint: z.strictObject({ min: tint, max: tint }).optional(), seed: z.number().int().min(0).max(2 ** 31).default(1),
+    tint: z.strictObject({ min: tint, max: tint }).optional(), seed,
     ground: z.boolean().default(false),
+    edge: z.number().min(0).max(512).optional().describe('Rim fade studs.'), tilt: z.number().min(0).max(25).optional().describe('Max lean degrees.'),
+    hug: unit.optional().describe('Share placed by earlier trunks.'),
   })).max(16).default([]),
+  kits: z.array(z.strictObject({ kind: z.enum(['plinth', 'forest']), key: key.optional(), in: key.optional(), name: name.optional(),
+    at: v3.describe('Ground centre.'), radius: z.number().min(3).max(2048).optional().describe('Plinth (default 10) or forest.'), seed,
+    style: z.enum(['fluted', 'smooth', 'platform']).optional(), tiers: z.number().int().min(1).max(6).optional(), height: z.number().min(4).max(120).optional(),
+    column: z.string().max(64).optional().describe('Template/prototype shaft; height = its height.'), material: stone.optional(), color: colorInput.optional(),
+    weathering: unit.optional(), spawn: z.boolean().optional(),
+    clearing: clearingShape.optional(), trees: z.number().int().min(0).max(1500).optional(), undergrowth: z.number().int().min(0).max(1500).optional(),
+    species: z.array(layer).min(1).max(8).optional(), cover: z.array(layer).min(1).max(8).optional(),
+    paths: avoidRoutes.optional(),
+  })).max(4).optional().describe('plinth: round stepped stone, trim, column (smooth; fluted only if classical), weathering, SpawnLocation on top. forest: species groves (pine/oak/birch, 80) + cover at trunks (bush/fern/rock/log, 2x), per-layer spacing, clearing/rim falloff, lean, ground drop. Undeclared use: templates <use>-1..n as variants, else blockout (reported).'),
 };
 export type SceneBuildInput = z.output<z.ZodObject<typeof sceneBuildShape>>;
 
@@ -179,21 +203,25 @@ function segmentDistanceSquared(x: number, z: number, a: readonly number[], b: r
 
 /** Shared occupancy across scatter groups: natural spacing with no grid or ring structure. */
 class Occupancy {
-  readonly cell = 8; readonly points = new Map<string, { x: number; z: number; r: number }[]>(); maxR = 0;
-  ok(x: number, z: number, r: number): boolean {
+  readonly cell = 8; readonly points = new Map<string, { x: number; z: number; r: number; group: number }[]>(); maxR = 0;
+  /** soft (hugging undergrowth): points of other scatter groups only reserve their trunk core, CORE x their radius. */
+  ok(x: number, z: number, r: number, group = -1, soft = false): boolean {
     const reach = Math.ceil((r + this.maxR) / this.cell), cx = Math.floor(x / this.cell), cz = Math.floor(z / this.cell);
     for (let i = cx - reach; i <= cx + reach; i++) for (let j = cz - reach; j <= cz + reach; j++)
-      for (const p of this.points.get(i + ',' + j) ?? []) if ((p.x - x) ** 2 + (p.z - z) ** 2 < (p.r + r) ** 2) return false;
+      for (const p of this.points.get(i + ',' + j) ?? []) if ((p.x - x) ** 2 + (p.z - z) ** 2 < ((soft && p.group !== group ? p.r * CORE : p.r) + r) ** 2) return false;
     return true;
   }
-  add(x: number, z: number, r: number): void {
+  add(x: number, z: number, r: number, group = -1): void {
     const k = Math.floor(x / this.cell) + ',' + Math.floor(z / this.cell);
-    (this.points.get(k) ?? this.points.set(k, []).get(k)!).push({ x, z, r }); this.maxR = Math.max(this.maxR, r);
+    (this.points.get(k) ?? this.points.set(k, []).get(k)!).push({ x, z, r, group }); this.maxR = Math.max(this.maxR, r);
   }
 }
+/** Share of a scatter point's spacing radius that hugging undergrowth still keeps clear (the trunk/rock core). */
+export const CORE = 0.3;
 
-export interface CompiledBuild { args: Record<string, Json>; scatter: { requested: number; placed: number }[]; instances: number }
-export function compileSceneBuild(input: SceneBuildInput, parent: Json): CompiledBuild {
+export interface CompiledBuild { args: Record<string, Json>; scatter: { requested: number; placed: number }[]; instances: number; kits: KitReport[] }
+export function compileSceneBuild(source: SceneBuildInput, parent: Json): CompiledBuild {
+  const { input, plans } = expandKits(source);
   const protoNames = Object.keys(input.prototypes ?? {});
   const guiRoots = new Map<number, GuiClass>(); // prototype index -> root class of a GUI prototype
   const prototypes: Json[] = protoNames.map((protoName, protoIndexZero) => {
@@ -311,8 +339,9 @@ export function compileSceneBuild(input: SceneBuildInput, parent: Json): Compile
       if (item.key) hosts.set(item.key, { index: items.length, kind: 'part' });
     }
   }
-  const report: CompiledBuild['scatter'] = [];
+  const report: CompiledBuild['scatter'] = [], ranges: [number, number][] = [], anchors: { x: number; z: number; r: number }[] = [];
   for (const spec of input.scatter) {
+    const first = items.length, hugAnchors = spec.hug ? anchors.slice() : [], group = report.length, soft = !!spec.hug;
     if ((spec.radius === undefined) === (spec.size === undefined)) throw new BridgeError('INPUT', 'Each scatter needs exactly one of radius or size.');
     const random = mulberry32(spec.seed), uses = (Array.isArray(spec.use) ? spec.use : [spec.use]).map(protoIndex);
     if (uses.some(use => guiRoots.has(use))) throw new BridgeError('INPUT', 'scatter places part prototypes only; stamp ui prototypes with items.');
@@ -337,9 +366,17 @@ export function compileSceneBuild(input: SceneBuildInput, parent: Json): Compile
     let placed = 0;
     for (let attempt = 0; attempt < spec.count * 60 && placed < spec.count; attempt++) {
       let x: number, z: number;
-      if (centres.length && random() < 0.85) { const c = centres[Math.floor(random() * centres.length)]!; x = c[0] + gauss() * spread * 0.5; z = c[1] + gauss() * spread * 0.5; }
+      if (hugAnchors.length && random() < spec.hug!) { // just outside an earlier point's spacing disc, e.g. ferns at a trunk
+        const a = hugAnchors[Math.floor(random() * hugAnchors.length)]!, d = a.r * CORE + spec.minSpacing / 2 * smax * (1.02 + random() * 1.5) + random() * a.r * 0.7, t = random() * Math.PI * 2;
+        x = a.x + d * Math.cos(t); z = a.z + d * Math.sin(t);
+      } else if (centres.length && random() < 0.85) { const c = centres[Math.floor(random() * centres.length)]!; x = c[0] + gauss() * spread * 0.5; z = c[1] + gauss() * spread * 0.5; }
       else [x, z] = uniform();
       if (!inArea(x, z) || spec.avoid?.some(a => (x - a.at[0]) ** 2 + (z - a.at[1]) ** 2 < a.radius ** 2)) continue;
+      if (spec.edge) { // soft outer rim instead of a hard circular/rectangular forest edge
+        const rim = spec.radius !== undefined ? spec.radius - Math.hypot(x - cx, z - cz) : Math.min(spec.size![0] / 2 - Math.abs(x - cx), spec.size![1] / 2 - Math.abs(z - cz));
+        const t = Math.max(0, Math.min(1, rim / spec.edge));
+        if (random() > t * t * (3 - 2 * t)) continue;
+      }
       if (spec.clearing) {
         const d = Math.hypot(x - fx, z - fz), { inner: c0, outer: c1 } = spec.clearing;
         if (d < c0 || (d < c1 && random() > (d - c0) / Math.max(1e-6, c1 - c0))) continue;
@@ -352,15 +389,15 @@ export function compileSceneBuild(input: SceneBuildInput, parent: Json): Compile
         if (spec.avoid?.some(a => Math.hypot(px - a.at[0], pz - a.at[1]) < a.radius + footprint)) continue;
         if (corridors.some(path => segmentDistanceSquared(px, pz, path.from, path.to) < (path.radius + footprint) ** 2)) continue;
       }
-      if (!occupancy.ok(x, z, r)) continue;
-      occupancy.add(x, z, r);
+      if (!occupancy.ok(x, z, r, group, soft)) continue;
+      occupancy.add(x, z, r, group); anchors.push({ x, z, r });
       const use = uses[Math.floor(random() * uses.length)]!;
       const t = spec.tint ? spec.tint.min.map((low, i) => round(low + random() * (spec.tint!.max[i]! - low), 3)) : null;
       items.push(placeItem(use, { name: spec.name ?? useName(use), parent, at: [round(x, 2), round(cy, 2), round(z, 2)],
         yaw: round(ymin + random() * (ymax - ymin), 1), scale: round(scale, 3), tint: t, ground: spec.ground }));
       placed++;
     }
-    report.push({ requested: spec.count, placed });
+    report.push({ requested: spec.count, placed }); ranges.push([first, items.length]);
   }
   if (!items.length) throw new BridgeError('INPUT', 'Add at least one item or scatter.');
   if (items.length > SCENE_BUILD_LIMITS.items) throw new BridgeError('BODY_LIMIT', `A build may contain at most ${SCENE_BUILD_LIMITS.items} items; split it into a few builds.`);
@@ -377,8 +414,22 @@ export function compileSceneBuild(input: SceneBuildInput, parent: Json): Compile
   }
   if (instances > SCENE_BUILD_LIMITS.instances) throw new BridgeError('BODY_LIMIT', `This build would create ${instances} instances (max ${SCENE_BUILD_LIMITS.instances}); split it into a few builds.`);
   if (Buffer.byteLength(JSON.stringify(args)) > 250 * 1024) throw new BridgeError('BODY_LIMIT', 'Compiled build exceeds 250 KiB; split it into a few builds.');
-  return { args, scatter: report, instances };
+  const kits = plans.map(plan => {
+    // Kit budgets: primitive triangle estimates per emitted part; template clones use the layer's tris or a default.
+    const kit = { ...plan.report, parts: 0, triangles: 0 };
+    const tally = (item: { kind: string; template?: number; className?: string; properties?: { Shape?: string } }) => {
+      if (item.kind === 'part') { kit.parts++; kit.triangles += partTriangles(item.className!, item.properties?.Shape); }
+      else if (item.kind === 'place') for (const p of (prototypes[item.template! - 1] as { parts: { className: string; properties: { Shape?: string } }[] }).parts) { kit.parts++; kit.triangles += partTriangles(p.className, p.properties.Shape); }
+      else if (item.kind === 'clone') kit.triangles += plan.tris.get(templateNames[item.template! - 1]!) ?? TEMPLATE_TRIANGLES;
+    };
+    for (let i = plan.items[0]; i < plan.items[1]; i++) tally(items[i] as never);
+    for (const si of plan.scatter) { for (let i = ranges[si]![0]; i < ranges[si]![1]; i++) tally(items[i] as never); kit.placed! += report[si]!.placed; }
+    if (kit.triangles > KIT_TRIANGLE_BUDGET) throw new BridgeError('BODY_LIMIT', `Kit "${kit.key}" is about ${kit.triangles} triangles (max ${KIT_TRIANGLE_BUDGET}); lower counts or template triangleBudget.`);
+    return kit;
+  });
+  return { args, scatter: report, instances, kits };
 }
+const partTriangles = (className: string, shape: string | undefined) => (className === 'Part' || className === 'SpawnLocation' ? PRIMITIVE_TRIANGLES[shape ?? 'Block'] : PRIMITIVE_TRIANGLES[className]) ?? 12;
 
 // environment_apply: compact colours, then the daemon/plugin enforce the same fixed allowlist.
 const sectionSchema = (spec: Record<string, readonly [number, number] | 'color' | 'boolean'>) => z.strictObject(Object.fromEntries(Object.entries(spec).map(([k, kind]) =>

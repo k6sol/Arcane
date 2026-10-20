@@ -70,11 +70,15 @@ const MESSAGES = Object.freeze({
   selection: 'Choose a model and effort offered by the installed Claude Code.',
   declined: 'Claude chat was not allowed to use Arcane project tools for this project.',
   credential: 'Arcane project tools could not be prepared for Claude chat. Check that the workspace is running, then try again.',
-  start: 'Claude Code could not be started.',
+  start: 'Claude Code could not be started. Check that it is still installed (provider setup), then retry this message.',
   stopped: 'Stopped.',
   timeout: 'The Claude reply took too long and was stopped.',
   noReply: 'Claude Code ended without a reply.',
-  exited: 'Claude Code stopped before finishing the reply.',
+  exited: 'Claude Code stopped unexpectedly before finishing the reply. Your message is saved; retry it when ready.',
+  authExpired: 'Your Claude sign-in expired or was rejected. Sign in to Claude again (provider setup), then retry this message.',
+  network: 'Claude could not be reached. Check your internet connection; if Claude is having an outage, retry this message in a few minutes.',
+  studioOffline: 'Roblox Studio disconnected, so this reply was stopped before sending more commands. Reconnect Studio, then retry this message.',
+  interrupted: 'Arcane services restarted, so this reply was interrupted. Nothing was sent again; retry this message when ready.',
   failed: 'Claude Code could not finish this reply.',
   output: 'Claude Code produced more output than Arcane accepts. The reply was stopped.',
   closed: 'The workspace closed, so the reply was stopped.',
@@ -93,11 +97,22 @@ const PREAMBLE = 'You are running inside the Arcane desktop chat through Claude 
 /**
  * The --append-system-prompt text. It is identical on every turn (no timestamps or per-turn settings), so Claude Code's
  * cached prefix (system prompt plus tools) is reused across turns; per-turn notes ride on the user message instead.
- * Task instructions that already describe the arcane-choices/plan blocks keep only the preamble's first line.
+ * Task instructions that already describe the arcane-choices/plan blocks keep only the preamble's first line, and their shared
+ * guidance block is left out because Claude Code already adds it from the arcane MCP server's instructions.
  */
 function appendedSystemPrompt(text, max = LIMITS.instructionsChars) {
   const preamble = String(text).includes('arcane-choices') ? PREAMBLE.slice(0, PREAMBLE.indexOf('\n')) : PREAMBLE;
-  return (preamble + '\n\n' + text).replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, ' ').slice(0, max);
+  return (preamble + '\n\n' + withoutSharedGuidance(String(text))).replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, ' ').slice(0, max);
+}
+/**
+ * The managed task instructions embed the canonical Arcane guidance (ARCANE_GUIDANCE in packages/protocol/src/arcane-tools.ts,
+ * from its start line up to the managed tail; a unit test pins both markers), which the MCP server's instructions also carry.
+ * A provider that already receives those server instructions gets the block once, from the server.
+ */
+const GUIDANCE_START = 'Arcane workflow:', MANAGED_TAIL_START = 'Optional Arcane buttons:';
+function withoutSharedGuidance(text) {
+  const start = text.indexOf('\n' + GUIDANCE_START), end = start < 0 ? -1 : text.indexOf('\n' + MANAGED_TAIL_START, start);
+  return end < 0 ? text : text.slice(0, start) + text.slice(end);
 }
 /** Fresh-session context after an edit: the kept transcript, newest text kept when it is long. */
 const SEED_CHARS = 48000;
@@ -279,6 +294,21 @@ const resetSeconds = value => {
 };
 // Usage/rate-limit outcomes are recognised from the CLI's own result; their raw text is never forwarded.
 const LIMIT_TEXT = /\b(?:usage|rate) limit\b|\bhit your (?:usage )?limit\b|\blimit reached\b|\bout of (?:extra )?usage\b/i;
+// Sign-in and reachability failures are recognised from the CLI's own result or error; their raw text is never forwarded.
+const AUTH_TEXT = /\b(?:oauth token (?:has )?expired|token (?:has )?expired|invalid api key|please run \/login|authentication[_ ](?:error|failed)|not logged in|unauthori[sz]ed|invalid bearer token|credentials? (?:expired|(?:are |is )?invalid))\b/i;
+const NETWORK_TEXT = /\b(?:overloaded(?:_error)?|ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|connection error|network error|fetch failed|socket hang up|service unavailable|internal server error|api error: 5\d\d)\b/i;
+/** Fixed sign-in/network classification of a stream-json error result or assistant error; null otherwise. */
+function providerFailure(status, text, error) {
+  if (status === 401 || status === 403 || error === 'authentication_failed' || AUTH_TEXT.test(text)) return 'authExpired';
+  if (Number.isInteger(status) && status >= 500 && status < 600 || error === 'server_error' || NETWORK_TEXT.test(text)) return 'network';
+  return null;
+}
+/** A Studio tool refusal for an offline session (the daemon's SESSION_OFFLINE code). */
+function studioOfflineResult(content) {
+  const text = typeof content === 'string' ? content : Array.isArray(content)
+    ? content.slice(0, 64).filter(block => block?.type === 'text' && typeof block.text === 'string').map(block => block.text.slice(0, 65536)).join('\n') : '';
+  return /"code"\s*:\s*"SESSION_OFFLINE"/.test(text);
+}
 /** Fixed usage-limit classification of a stream-json error result; null when it is not a usage/rate limit. */
 function usageLimitResult(event) {
   if (!event || event.type !== 'result' || event.is_error !== true && event.subtype === 'success') return null;
@@ -287,8 +317,8 @@ function usageLimitResult(event) {
   return { resetsAt: resetSeconds(/\|(\d{10})\b/.exec(text)?.[1]) };
 }
 
-/** Per-project transcript store: owned directory, atomic writes, fixed bounds, one serial write queue. */
-function createStore({ fs, p, directory, now, limits }) {
+/** Per-project transcript store: owned directory, atomic writes, fixed bounds, one serial write queue. `modelPattern` names valid saved model ids. */
+function createStore({ fs, p, directory, now, limits, modelPattern = CHOICE }) {
   const indexPath = p.join(directory, 'index.json'), conversationsDirectory = p.join(directory, 'conversations');
   let entries = null, queue = Promise.resolve();
   const transcripts = new Map();
@@ -310,7 +340,7 @@ function createStore({ fs, p, directory, now, limits }) {
       const v = plain(e, e && typeof e === 'object' && Object.hasOwn(e, 'rewound') ? [...keys, 'rewound'] : keys);
       if ('rewound' in v && typeof v.rewound !== 'boolean') return null;
       if (!isId(v.conversationId) || typeof v.title !== 'string' || v.title.length > 200 || CONTROL.test(v.title) || !ISO.test(v.createdAt) || !ISO.test(v.updatedAt) ||
-          typeof v.model !== 'string' || !CHOICE.test(v.model) || typeof v.effort !== 'string' || !CHOICE.test(v.effort) || !(v.sessionId === null || isId(v.sessionId))) return null;
+          typeof v.model !== 'string' || !modelPattern.test(v.model) || typeof v.effort !== 'string' || !CHOICE.test(v.effort) || !(v.sessionId === null || isId(v.sessionId))) return null;
       return { ...v };
     } catch { return null; }
   }
@@ -417,6 +447,8 @@ function createClaudeChat(options) {
   const turns = new Map(), byConversation = new Map();
   // Alias -> concrete model id reported by system/init events of this host's turns (in memory; display only).
   const observedModels = new Map();
+  let disposeReason = null;
+  const closedMessage = () => disposeReason === 'interrupted' ? MESSAGES.interrupted : MESSAGES.closed;
   let disposed = false, statusCache = null, approval = null, approved = false, credential = null, minting = null, instructions = null;
   const credentials = new Set();
 
@@ -705,15 +737,15 @@ function createClaudeChat(options) {
       if (!s.installed || !command) return finish(turn, false, s.message ?? MESSAGES.notInstalled);
       if (!s.signedIn) return finish(turn, false, s.message ?? MESSAGES.signedOut);
       if (!s.models.includes(turn.model) || !s.efforts.includes(turn.effort)) return finish(turn, false, MESSAGES.selection);
-      if (!await ensureApproval(s.cliVersion)) return finish(turn, false, disposed ? MESSAGES.closed : MESSAGES.declined);
-      if (turn.stopped || disposed) return finish(turn, false, disposed ? MESSAGES.closed : MESSAGES.stopped);
+      if (!await ensureApproval(s.cliVersion)) return finish(turn, false, disposed ? closedMessage() : MESSAGES.declined);
+      if (turn.stopped || disposed) return finish(turn, false, disposed ? closedMessage() : MESSAGES.stopped);
       turn.credential = await acquireCredential(turn.model, turn.effort);
-      if (turn.stopped || disposed) return finish(turn, false, disposed ? MESSAGES.closed : MESSAGES.stopped);
+      if (turn.stopped || disposed) return finish(turn, false, disposed ? closedMessage() : MESSAGES.stopped);
       if (!turn.credential) return finish(turn, false, MESSAGES.credential);
       // Stable system prompt (cacheable across turns); the per-turn Playtest note goes on the user message.
       // ARCANE.md rides after the static instructions, so the prompt stays byte-identical until that file changes.
       const prompt = (await loadInstructions()) + projectMemorySection(await loadProjectMemory()), input = text + playtestNote(turn.playtest);
-      if (turn.stopped || disposed) return finish(turn, false, disposed ? MESSAGES.closed : MESSAGES.stopped);
+      if (turn.stopped || disposed) return finish(turn, false, disposed ? closedMessage() : MESSAGES.stopped);
       // A turn with PNG references sends one stream-json user message; plain text turns keep the text input format.
       const images = turn.images; turn.images = [];
       const args = ['-p', '--input-format', images.length ? 'stream-json' : 'text', '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
@@ -760,13 +792,17 @@ function createClaudeChat(options) {
         if (!skipping && pending.length) line(Buffer.concat(pending));
         pending = [];
         const r = turn.result;
-        if (turn.stopped) return void finish(turn, false, disposed ? MESSAGES.closed : MESSAGES.stopped, r?.usage ?? null);
+        if (turn.stopped) return void finish(turn, false, disposed ? closedMessage() : MESSAGES.stopped, r?.usage ?? null);
+        // Studio went offline: the turn was stopped at the first refused command so no more commands are issued.
+        if (turn.studioOffline) return void finish(turn, false, MESSAGES.studioOffline, r?.usage ?? null);
         if (turn.timedOut) return void finish(turn, false, MESSAGES.timeout, r?.usage ?? null);
         if (turn.overflow) return void finish(turn, false, MESSAGES.output, r?.usage ?? null);
         if (r && !r.isError) return void finish(turn, true, null, r.usage);
         // A usage/rate limit (an error result or a rejected rate_limit_event) becomes one fixed message.
         const limit = r?.limit ?? turn.limit;
         if (limit) return void finish(turn, false, MESSAGES.usageLimit, r?.usage ?? null, limit);
+        const provider = r ? providerFailure(r.status, typeof r.text === 'string' ? r.text.slice(0, 2000) : '', null) ?? turn.failure : turn.failure;
+        if (provider) return void finish(turn, false, MESSAGES[provider], r?.usage ?? null);
         if (r) return void finish(turn, false, safeResultText(r.text) ?? MESSAGES.failed, r.usage);
         void finish(turn, false, code === 0 ? MESSAGES.noReply : MESSAGES.exited);
       });
@@ -794,6 +830,7 @@ function createClaudeChat(options) {
     }
     if (event.parent_tool_use_id !== null && event.parent_tool_use_id !== undefined) return; // subagent traffic
     if (event.type === 'assistant' && event.error === 'rate_limit' && !turn.limit) turn.limit = { resetsAt: null };
+    if (event.type === 'assistant' && typeof event.error === 'string' && !turn.failure) turn.failure = providerFailure(null, '', event.error);
     if (event.type === 'stream_event') {
       const e = event.event;
       if (e?.type === 'content_block_delta' && e.delta?.type === 'text_delta' && typeof e.delta.text === 'string' && e.delta.text && !leaksToken(e.delta.text))
@@ -819,6 +856,7 @@ function createClaudeChat(options) {
         if (!m || m.tool.status !== 'started') continue;
         const result = toolResultDetail(block.content, turn.credential?.env?.ARCANE_LOCAL_TOKEN);
         m.tool = { ...toolCopy(m.tool), status: block.is_error === true ? 'failed' : 'finished', ...(result ? { result } : {}) };
+        if (block.is_error === true && !turn.studioOffline && studioOfflineResult(block.content)) { turn.studioOffline = true; killTree(turn.child); }
         void store.put(turn.conversationId, { ...m, tool: toolCopy(m.tool) }).catch(() => {});
         emit({ ...base, type: 'tool', message: publicMessage(m) });
       }
@@ -827,6 +865,7 @@ function createClaudeChat(options) {
       const cost = typeof event.total_cost_usd === 'number' && Number.isFinite(event.total_cost_usd) && event.total_cost_usd >= 0 ? event.total_cost_usd : null;
       const limit = usageLimitResult(event);
       turn.result = { isError: event.is_error === true || event.subtype !== 'success', text: event.result,
+        status: Number.isInteger(event.api_error_status) ? event.api_error_status : null,
         limit: limit ? { resetsAt: limit.resetsAt ?? turn.limit?.resetsAt ?? null } : null,
         usage: u ? { inputTokens: count(u.input_tokens) + count(u.cache_creation_input_tokens) + count(u.cache_read_input_tokens), outputTokens: count(u.output_tokens), costUsd: cost } : null };
     }
@@ -860,8 +899,8 @@ function createClaudeChat(options) {
     return store.remove(conversationId);
   }
   /** App quit / project switch: stop every turn this host spawned and revoke the credentials it minted. */
-  async function dispose() {
-    if (disposed) return; disposed = true;
+  async function dispose(reason) {
+    if (disposed) return; disposed = true; disposeReason = reason === 'interrupted' ? 'interrupted' : null;
     for (const turn of turns.values()) { turn.stopped = true; killTree(turn.child); }
     const owned = [...credentials]; credential = null;
     for (const c of owned) c.retired = true;
@@ -900,4 +939,6 @@ function installClaudeChatIpc(ipcMain, { getSession, getHost }) {
   });
 }
 
-module.exports = { createClaudeChat, installClaudeChatIpc, parseChoices, sendInput, playtestNote, appendedSystemPrompt, projectMemorySection, PROJECT_MEMORY_GUIDANCE, streamJsonMessage, rewindSeed, resolveAliases, CLAUDE_ALIAS_MODELS: ALIAS_MODELS, safeResultText, usageLimitResult, CLAUDE_CHAT_LIMITS: LIMITS, CLAUDE_CHAT_MESSAGES: MESSAGES, CLAUDE_CHAT_EVENT: EVENT_CHANNEL };
+module.exports = { createClaudeChat, installClaudeChatIpc,
+  // Shared with the Arcane chat host (arcane-chat.cjs): the same transcript store and bounded display details.
+  createChatStore: createStore, toolDetail, toolResultDetail, toolCopy, boundedText: bounded, parseChoices, sendInput, playtestNote, appendedSystemPrompt, withoutSharedGuidance, GUIDANCE_START, MANAGED_TAIL_START, projectMemorySection, PROJECT_MEMORY_GUIDANCE, streamJsonMessage, rewindSeed, resolveAliases, CLAUDE_ALIAS_MODELS: ALIAS_MODELS, safeResultText, usageLimitResult, CLAUDE_CHAT_LIMITS: LIMITS, CLAUDE_CHAT_MESSAGES: MESSAGES, CLAUDE_CHAT_EVENT: EVENT_CHANNEL };

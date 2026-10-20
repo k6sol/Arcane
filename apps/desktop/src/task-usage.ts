@@ -179,11 +179,37 @@ export function readCostPreferences(value: unknown, fallbackCurrency = 'USD'): C
   const rate = typeof row.rate === 'number' && Number.isFinite(row.rate) && row.rate > 0 && row.rate <= 1_000_000 && currency !== 'USD' ? row.rate : null;
   return { show: row.show !== false, currency, rate };
 }
-/** '~$0.31' (or the converted local currency when a rate is set). Tiny amounts keep two significant digits instead of rounding to zero. */
+/**
+ * Approximate units of each listed currency per 1 USD. Used only to show a local-currency estimate until the user enters
+ * their own rate (Settings > General > Display). Presentation only: costs are estimates, never charges.
+ */
+export const REFERENCE_RATES_AS_OF = '2026-10-06';
+export const REFERENCE_USD_RATES: Readonly<Record<string, number>> = Object.freeze({ EUR: 0.92, GBP: 0.79, CAD: 1.37, AUD: 1.52, NZD: 1.66,
+  JPY: 150, CNY: 7.2, HKD: 7.8, SGD: 1.34, KRW: 1380, INR: 84, BRL: 5.5, MXN: 18.5, CHF: 0.88, SEK: 10.6, NOK: 10.8, DKK: 6.9, PLN: 3.95,
+  CZK: 23, ZAR: 18, TRY: 34, ILS: 3.7, AED: 3.67 });
+/** The currency and rate a cost is shown in: the user's own rate first, then the approximate reference rate, else USD. */
+export function costConversion(preferences: CostDisplayPreferences): { currency: string; rate: number; source: 'usd' | 'user' | 'reference' } {
+  if (preferences.currency === 'USD') return { currency: 'USD', rate: 1, source: 'usd' };
+  if (preferences.rate !== null) return { currency: preferences.currency, rate: preferences.rate, source: 'user' };
+  const reference = Object.hasOwn(REFERENCE_USD_RATES, preferences.currency) ? REFERENCE_USD_RATES[preferences.currency] : undefined;
+  return reference ? { currency: preferences.currency, rate: reference, source: 'reference' } : { currency: 'USD', rate: 1, source: 'usd' };
+}
+/** How a shown cost was converted, as one phrase ('' for US dollars), e.g. 'converted at your rate of 0.8 GBP per USD'. */
+export function costConversionPhrase(preferences: CostDisplayPreferences): string {
+  const c = costConversion(preferences);
+  return c.source === 'user' ? 'converted at your rate of ' + c.rate + ' ' + c.currency + ' per USD'
+    : c.source === 'reference' ? 'converted at an approximate rate of ' + c.rate + ' ' + c.currency + ' per USD (' + REFERENCE_RATES_AS_OF + '); set your own rate in Settings > General > Display' : '';
+}
+/** The conversion phrase as a tooltip sentence (' Converted at ….'), or ''. */
+export function costConversionNote(preferences: CostDisplayPreferences): string {
+  const phrase = costConversionPhrase(preferences);
+  return phrase ? ' C' + phrase.slice(1) + '.' : '';
+}
+/** '~$0.31', or the viewer's currency ('~£0.24') at their own or the approximate rate. Tiny amounts keep two significant digits instead of rounding to zero. */
 export function formatUsageCost(usd: number, preferences: CostDisplayPreferences = DEFAULT_COST_PREFERENCES, locale = 'en-US'): string {
-  const converted = preferences.currency !== 'USD' && preferences.rate !== null;
-  const currency = converted ? preferences.currency : 'USD', amount = Math.max(0, usd) * (converted ? preferences.rate! : 1);
-  const options: Intl.NumberFormatOptions = amount > 0 && amount < 0.01 ? { maximumSignificantDigits: 2 } : { minimumFractionDigits: 2, maximumFractionDigits: 2 };
+  const { currency, rate } = costConversion(preferences), amount = Math.max(0, usd) * rate;
+  // Currency-default fraction digits: two for $/£/€, none for ¥/₩.
+  const options: Intl.NumberFormatOptions = amount > 0 && amount < 0.01 ? { maximumSignificantDigits: 2 } : {};
   try { return '~' + new Intl.NumberFormat(costLocale(locale), { style: 'currency', currency, currencyDisplay: 'narrowSymbol', ...options }).format(amount); }
   catch { return '~' + amount.toFixed(amount > 0 && amount < 0.01 ? 4 : 2) + ' ' + currency; }
 }
@@ -219,9 +245,9 @@ export function taskUsageFooter(view: Omit<TaskUsageView, 'footer'>, display?: T
   if (view.lastRequest) details.push(`Last reported request ${view.lastRequest.totalTokens} tokens.`);
   if (view.modelContextWindow !== null) details.push(`Reported model context window ${view.modelContextWindow} tokens.`);
   if (money && display) {
-    const converted = display.preferences.currency !== 'USD' && display.preferences.rate !== null;
+    const converted = costConversionPhrase(display.preferences);
     details.push(`${money} is an ${view.cost.kind === 'included' ? 'estimated API-equivalent cost; your plan is not charged per token' : 'estimated API cost'}` +
-      ` (Arcane price table, ${USAGE_PRICES_AS_OF}${converted ? `; converted at your rate of ${display.preferences.rate} ${display.preferences.currency} per USD` : ''}).`);
+      ` (Arcane price table, ${USAGE_PRICES_AS_OF}${converted ? `; ${converted}` : ''}).`);
   }
   const detail = details.join(' ');
   return { visible, text: parts.join(' · '), accessibleLabel: `Task usage. ${parts.join('. ')}. ${detail}`, detail };

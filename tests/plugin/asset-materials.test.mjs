@@ -332,10 +332,19 @@ end
 `);
 });
 
-test('rejects MASK, BLEND, unsupported alpha and fractional opaque alpha', options, async () => {
+test('accepts glTF MASK cutout; rejects BLEND, unsupported alpha and fractional factor alpha', options, async () => {
   await vm('alpha', `
-for _,mode in ipairs({"MASK","BLEND","other"}) do local m=fixture(); m.alphaMode=mode; rejects(m,"UNSUPPORTED_MATERIAL","alphaMode") end
-for _,alpha in ipairs({0,0.5,0.999999999}) do local m=fixture(); m.baseColor[4]=alpha; rejects(m,"UNSUPPORTED_MATERIAL","alphaMode") end
+for _,mode in ipairs({"BLEND","other"}) do local m=fixture(); m.alphaMode=mode; rejects(m,"UNSUPPORTED_MATERIAL","alphaMode") end
+for _,mode in ipairs({"OPAQUE","MASK"}) do
+ for _,alpha in ipairs({0,0.5,0.999999999}) do local m=fixture(); m.alphaMode=mode; m.baseColor[4]=alpha; rejects(m,"UNSUPPORTED_MATERIAL","alphaMode") end
+end
+local m=fixture(); m.alphaMode="MASK"; m.alphaCutoff=0.25
+local p=AssetMaterials.plan(m)
+assert(p.alphaMode=="MASK" and p.source.alphaMode=="MASK" and p.source.alphaCutoff==0.25 and p.transparency==0)
+assert(AssetMaterials.plan(fixture()).alphaMode=="OPAQUE")
+-- Scalar MASK has factor alpha 1 >= cutoff, so it stays opaque: no AlphaMode write.
+local f,s=factories(); local r=AssetMaterials.create(m,f,alive)
+assert(r.meshPartProperties.Transparency==0 and #s.writes==1 and s.writes[1][1]=="EmissiveStrength")
 `);
 });
 

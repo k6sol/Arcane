@@ -42,6 +42,30 @@ test('script content search enforces literal UTF-8 limits, exact roots/refs and 
   assert.throws(() => validateCommandArgs('script.search', { root: 'Workspace', query: 'x' }, { ...readOnly, capabilities: readOnly.capabilities.filter(m => m !== 'script.search') }), { code: 'CAPABILITY' });
 });
 
+test('output reading is a closed read-only method with bounded levels, literal query, cursor and limit', () => {
+  const readOnly = { ...session, allowWrites: false };
+  for (const args of [{}, { levels: ['error', 'warning'], query: 'attempt to index nil', after: 0, limit: 100 }, { levels: ['output', 'info', 'warning', 'error'], after: 2_147_483_647 }, { query: '🧩'.repeat(25) }]) {
+    assert.deepEqual(validateCommandArgs('output.read', args, readOnly), args);
+  }
+  for (const patch of [{ levels: [] }, { levels: ['error', 'error'] }, { levels: ['debug'] }, { levels: 'error' }, { query: '' }, { query: 'x\n' }, { query: '\ud800' }, { query: 'x'.repeat(101) },
+    { after: -1 }, { after: 1.5 }, { after: 2_147_483_648 }, { limit: 0 }, { limit: 101 }, { root: 'Workspace' }, { source: 'print(1)' }]) {
+    assert.throws(() => validateCommandArgs('output.read', patch, readOnly), { code: 'INPUT' }, JSON.stringify(patch));
+  }
+  assert.throws(() => validateCommandArgs('output.read', {}, { ...readOnly, capabilities: readOnly.capabilities.filter(m => m !== 'output.read') }), { code: 'CAPABILITY' });
+});
+
+test('scene search filters by one class name only when the plugin advertises class search', () => {
+  const capable = { ...session, allowWrites: false, capabilities: [...session.capabilities, 'scene.search.class'] };
+  for (const args of [{ root: 'Workspace', className: 'BasePart' }, { root: 'Workspace', className: 'PointLight', query: 'lamp', limit: 200 }, { root: 'Workspace', query: 'Door' }]) {
+    assert.deepEqual(validateCommandArgs('scene.search', args, capable), args);
+  }
+  for (const patch of [{ className: 'basePart' }, { className: 'Base.Part' }, { className: 'A'.repeat(65) }, { className: 7 }, { className: 'Part', query: '' }])
+    assert.throws(() => validateCommandArgs('scene.search', { root: 'Workspace', ...patch }, capable), { code: 'INPUT' }, JSON.stringify(patch));
+  assert.throws(() => validateCommandArgs('scene.search', { root: 'Workspace' }, capable), { code: 'INPUT' });
+  assert.throws(() => validateCommandArgs('scene.search', { root: 'Workspace', className: 'Script' }, { ...capable, capabilities: session.capabilities }), { code: 'PLUGIN_UPDATE_REQUIRED' });
+  assert.deepEqual(validateCommandArgs('scene.search', { root: 'Workspace', query: 'Door' }, session), { root: 'Workspace', query: 'Door' }, 'name-only search stays available on older plugins');
+});
+
 test('all physical property fields including full twelve-property update fit the bounded schema/policy', () => {
   const full = { ...physical, Shape: 'Cylinder', Name: 'CircularSpawn' };
   assert.equal(Object.keys(full).length, 12);

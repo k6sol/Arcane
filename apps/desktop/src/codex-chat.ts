@@ -242,6 +242,20 @@ export function prepareCodexAction(state: ChatState | null, action: string, fiel
 export class CodexHttpError extends Error {
   constructor(message: string, readonly unknown: boolean) { super(message); }
 }
+/** Plain next steps for outages and stopped services; the technical receipt text still follows them. */
+export const CODEX_SERVICES_UNREACHABLE_TEXT='Arcane could not reach its local services (they may be restarting). Wait a moment, then try again.';
+export const CODEX_SERVICES_SLOW_TEXT='Arcane’s local services did not answer in time. Wait a moment, then try again.';
+const CODEX_FAILURE_HINTS:Readonly<Record<string,string>>=Object.freeze({
+  CLI_MISSING:'Codex was not found. Install or check it in provider setup, then try again.',
+  PROCESS_START:'Codex could not be started. Check it in provider setup, then try again.',
+  DISCONNECTED:'Codex disconnected. Reconnect, then send the message again.',
+  CLOSED:'Codex disconnected. Reconnect, then send the message again.',
+  TIMEOUT:'Codex did not answer in time. Check your internet connection, then try again.',
+  REMOTE_REJECTED:'ChatGPT did not accept the request. If your sign-in expired, sign in again in provider setup.',
+  DAEMON_RESTART:'Arcane services restarted before this finished. It was not sent again.',
+});
+/** A friendly first sentence for a recorded native error code; null when none applies. */
+export function codexFailureHint(code:string|null|undefined):string|null{return code&&Object.hasOwn(CODEX_FAILURE_HINTS,code)?CODEX_FAILURE_HINTS[code]!:null;}
 /** Exact public quota shape; raw provider account/configuration objects never enter the view. */
 function readRateLimits(value:unknown):void {
   const reasons=['rate_limit_reached','workspace_owner_credits_depleted','workspace_member_credits_depleted','workspace_owner_usage_limit_reached','workspace_member_usage_limit_reached'];
@@ -336,7 +350,11 @@ export class CodexChatApi {
       }
       if (!response.ok && !(mutable && object(result) && object(result.record))) throw new CodexHttpError('Native request refused (HTTP '+response.status+'). '+(object(result)&&typeof result.error==='string'?this.safe(result.error):'Inspect recorded state.'),mutable&&response.status>=500);
       return result;
-    } catch(error) {if(error instanceof CodexHttpError)throw error;throw new CodexHttpError(this.safe(error instanceof Error?error.message:'Native HTTP response unavailable.'),mutable);}
+    } catch(error) {if(error instanceof CodexHttpError)throw error;
+      // A refused connection (services stopped or restarting) or our own deadline: plain words, same uncertainty rules.
+      if(error instanceof TypeError&&/fetch|network/i.test(error.message))throw new CodexHttpError(CODEX_SERVICES_UNREACHABLE_TEXT,mutable);
+      if(error instanceof Error&&error.name==='AbortError'&&!signal?.aborted)throw new CodexHttpError(CODEX_SERVICES_SLOW_TEXT,mutable);
+      throw new CodexHttpError(this.safe(error instanceof Error?error.message:'Native HTTP response unavailable.'),mutable);}
     finally {clearTimeout(timer);signal?.removeEventListener('abort',abort);}
   }
   async state(signal?: AbortSignal) { const value=await this.request('/v1/codex/state',undefined,signal); if(!object(value))throw new Error('Missing native state envelope.');return readCodexState(value.state); }
@@ -605,6 +623,8 @@ export function appendWorkflowText(doc: Document, value: string): boolean {
 const SHARED_SURFACE_IDS=new Set(['codex-composer','codex-compose','codex-submit']);
 /** Model list width with the two provider columns, and the narrowest width that still fits them side by side. */
 export const MODEL_COLUMNS_WIDTH=500, MODEL_COLUMNS_MIN=420;
+/** The same for three provider columns (ChatGPT, Claude and Arcane Credits). */
+export const MODEL_THREE_COLUMNS_WIDTH=720, MODEL_THREE_COLUMNS_MIN=600;
 /** Shared model-picker placement: above or below the trigger, inside the visual viewport. */
 export function positionComposerPopover(doc:Document,popover:HTMLElement,trigger:HTMLElement,wide:boolean):void {
   const view = doc.defaultView;
@@ -613,12 +633,13 @@ export function positionComposerPopover(doc:Document,popover:HTMLElement,trigger
   const leftEdge = (viewport?.offsetLeft ?? 0) + margin, topEdge = (viewport?.offsetTop ?? 0) + margin;
   const width = Math.max(0, (viewport?.width ?? view.innerWidth) - margin * 2);
   const bottomEdge = topEdge + Math.max(0, (viewport?.height ?? view.innerHeight) - margin * 2);
-  // Two provider columns need room side by side; below MODEL_COLUMNS_MIN they stack (ChatGPT above Claude).
-  const columns = wide && !!popover.querySelector('#codex-model-options[data-layout=columns]');
-  const rect = trigger.getBoundingClientRect(), panelWidth = Math.min(columns?MODEL_COLUMNS_WIDTH:wide?300:240, width);
+  // Provider columns need room side by side; below the minimum they stack (ChatGPT above Claude above Arcane).
+  const options = popover.querySelector<HTMLElement>('#codex-model-options[data-layout=columns]'), columns = wide && !!options;
+  const three = columns && options!.dataset.columns === '3';
+  const rect = trigger.getBoundingClientRect(), panelWidth = Math.min(three?MODEL_THREE_COLUMNS_WIDTH:columns?MODEL_COLUMNS_WIDTH:wide?300:240, width);
   const above = Math.max(0, rect.top - topEdge - gap), below = Math.max(0, bottomEdge - rect.bottom - gap);
   const useAbove = above >= below;
-  if (columns) popover.dataset.columns = panelWidth < MODEL_COLUMNS_MIN ? 'stacked' : 'split'; else delete popover.dataset.columns;
+  if (columns) popover.dataset.columns = panelWidth < (three?MODEL_THREE_COLUMNS_MIN:MODEL_COLUMNS_MIN) ? 'stacked' : 'split'; else delete popover.dataset.columns;
   popover.style.width = panelWidth + 'px';
   popover.style.maxHeight = Math.min(480, useAbove ? above : below) + 'px';
   popover.style.left = Math.max(leftEdge, Math.min(rect.left, leftEdge + width - panelWidth)) + 'px';
@@ -1131,7 +1152,7 @@ export function studioRefPath(value:unknown):string|null {
 }
 const STUDIO_METHOD_TOOLS:Record<string,string>={'scene.children':'scene_children','scene.inspect':'scene_inspect','scene.search':'scene_search','selection.read':'selection_read',
   'script.read':'script_read','script.search':'script_search','script.update':'script_update','script.set_enabled':'script_set_enabled','scene.create':'scene_create',
-  'scene.update':'scene_update','scene.restore':'receipt_restore'};
+  'scene.update':'scene_update','scene.restore':'receipt_restore','output.read':'studio_output_read'};
 /** Arcane tool name without an MCP server prefix (mcp__arcane__scene_create -> scene_create). */
 export function arcaneToolName(name:string):string {
   const short=/^mcp__[A-Za-z0-9_-]+?__(.+)$/.exec(name)?.[1]??name;
@@ -1152,6 +1173,7 @@ function toolPhrase(tool:string,args:Record<string,unknown>|null):string {
     case 'scene_inspect':return 'Inspecting '+(ref??'an instance');
     case 'scene_search':return 'Searching '+(root??'Studio')+(query?' for '+quoted(query):'');
     case 'selection_read':return 'Reading the Studio selection';
+    case 'studio_output_read':return 'Reading Studio Output';
     case 'script_read':return 'Reading script '+(ref??'');
     case 'script_search':return 'Searching scripts'+(query?' for '+quoted(query):'');
     case 'script_update':return 'Updating script '+(ref??'');
@@ -1230,12 +1252,15 @@ function toolGroupInfo(tool:string,args:Record<string,unknown>|null):ToolGroupIn
   }
   return null;
 }
+export const STUDIO_OFFLINE_TOOL_TEXT='Studio is disconnected, so nothing was sent. Reconnect Studio, then try again.';
 function describeToolCall(name:string,input:unknown,result:unknown,state:ToolActivityState):ToolActivity {
   const tool=arcaneToolName(name),outcome=activityRecord(result),command=activityRecord(outcome?.command);
   const args=activityRecord(input)??activityRecord(command?.args);
   const phrase=toolPhrase(tool,args).trim();
   const text=state==='started'?phrase+'…':phrase;
   const receipt=activityText(outcome?.commandId,256);
+  // An offline Studio session refuses commands (SESSION_OFFLINE): say so plainly instead of a bare failure.
+  if(state==='failed'&&activityRecord(outcome?.error)?.code==='SESSION_OFFLINE')return {text:phrase+' — '+STUDIO_OFFLINE_TOOL_TEXT,change:null};
   if(state!=='finished'||!receipt||outcome?.state!=='succeeded'||!['scene_create','scene_update','script_update','script_set_enabled'].includes(tool))return {text,change:null};
   const ref=studioRefPath(args?.ref);
   if(tool==='scene_create'){
@@ -1642,24 +1667,33 @@ export function installComposerCommands(doc:Document):void {
 }
 /** True while the composer command/mention list is open: Enter picks from it and must not send. */
 export function composerMenuOpen(doc:Document):boolean {return composerCommands.get(doc)?.listOpen()??false;}
-export type ComposerProvider='codex'|'claude';
+/** 'arcane' is Arcane Credits: models through the user's Arcane account, shown only once that account is connected. */
+export type ComposerProvider='codex'|'claude'|'arcane';
 /** One provider's section of the shared composer model list (presentation data only). */
 export interface ComposerModelGroup {
   provider:ComposerProvider; label:string;
   /** False when the provider is not signed in: its section shows one disabled row with `hint`. */
   available:boolean; hint:string;
-  models:readonly {id:string;label:string;title?:string}[];
+  /** `detail`: a short second line on the row (e.g. its credit price). */
+  models:readonly {id:string;label:string;title?:string;detail?:string}[];
+  /** A short line under the column heading (e.g. the Arcane Credits balance). */
+  note?:string;
 }
-/** The other provider's section of the model list. Choosing from it switches provider explicitly; it never starts a turn. */
+/** The other providers' sections of the model list. Choosing from one switches provider explicitly; it never starts a turn. */
 export interface CrossProviderModels {
   group():ComposerModelGroup|null;
-  choose(model:string):void;
+  /** Every other provider's section in display order; when absent the list shows `group()` only. */
+  groups?():readonly ComposerModelGroup[];
+  /** `provider` names the section the row came from (absent: the only other provider). */
+  choose(model:string,provider?:ComposerProvider):void;
   /** The model list opened: the other provider may read its models lazily. */
   opened?():void;
 }
 /** Provider logo marks: monochrome inline SVG (currentColor), built from fixed path data with createElementNS only. */
 const PROVIDER_MARKS:Record<ComposerProvider,{name:string;path:string}>={
   codex:{name:'ChatGPT',path:'M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z'},
+  // The Arcane mark (studio.html wordmark) redrawn on the 24-unit grid.
+  arcane:{name:'Arcane',path:'M12 1.5 1.5 21.375h4.875L12 10.5l5.625 10.875h4.875L12 1.5ZM10.125 15l7.125 4.875-2.25-4.875Z'},
   claude:{name:'Claude',path:'M4.7144 15.9555l4.7174-2.6471.079-.2307-.079-.1275h-.2307l-.7893-.0486-2.6956-.0729-2.3375-.0971-2.2646-.1214-.5707-.1215-.5343-.7042.0546-.3522.4797-.3218.686.0608 1.5179.1032 2.2767.1578 1.6514.0972 2.4468.255h.3886l.0546-.1579-.1336-.0971-.1032-.0972L6.973 9.8356l-2.55-1.6879-1.3356-.9714-.7225-.4918-.3643-.4614-.1578-1.0078.6557-.7225.8803.0607.2246.0607.8925.686 1.9064 1.4754 2.4893 1.8336.3643.3035.1457-.1032.0182-.0728-.164-.2733-1.3539-2.4467-1.445-2.4893-.6435-1.032-.17-.6194c-.0607-.255-.1032-.4674-.1032-.7285L6.287.1335 6.6997 0l.9957.1336.419.3642.6192 1.4147 1.0018 2.2282 1.5543 3.0296.4553.8985.2429.8318.091.255h.1579v-.1457l.1275-1.706.2368-2.0947.2307-2.6957.0789-.7589.3764-.9107.7468-.4918.5828.2793.4797.686-.0668.4433-.2853 1.8517-.5586 2.9021-.3643 1.9429h.2125l.2429-.2429.9835-1.3053 1.6514-2.0643.7286-.8196.85-.9046.5464-.4311h1.0321l.759 1.1293-.34 1.1657-1.0625 1.3478-.8804 1.1414-1.2628 1.7-.7893 1.36.0729.1093.1882-.0183 2.8535-.607 1.5421-.2794 1.8396-.3157.8318.3886.091.3946-.3278.8075-1.967.4857-2.3072.4614-3.4364.8136-.0425.0304.0486.0607 1.5482.1457.6618.0364h1.621l3.0175.2247.7892.522.4736.6376-.079.4857-1.2142.6193-1.6393-.3886-3.825-.9107-1.3113-.3279h-.1822v.1093l1.0929 1.0686 2.0035 1.8092 2.5075 2.3314.1275.5768-.3218.4554-.34-.0486-2.2039-1.6575-.85-.7468-1.9246-1.621h-.1275v.17l.4432.6496 2.3436 3.5214.1214 1.0807-.17.3521-.6071.2125-.6679-.1214-1.3721-1.9246L14.38 17.959l-1.1414-1.9428-.1397.079-.674 7.2552-.3156.3703-.7286.2793-.6071-.4614-.3218-.7468.3218-1.4753.3886-1.9246.3157-1.53.2853-1.9004.17-.6314-.0121-.0425-.1397.0182-1.4328 1.9672-2.1796 2.9446-1.7243 1.8456-.4128.164-.7164-.3704.0667-.6618.4008-.5889 2.386-3.0357 1.4389-1.882.929-1.0868-.0062-.1579h-.0546l-6.3385 4.1164-1.1293.1457-.4857-.4554.0608-.7467.2307-.2429 1.9064-1.3114Z'},
 };
 /**
@@ -1689,18 +1723,19 @@ export function composerModelGroupHeading(doc:Document,label:string,provider:Com
   const name=doc.createElement('span');name.textContent=label;
   heading.append(providerLogo(doc,provider),name);return heading;
 }
-const GROUP_ORDER:Record<ComposerProvider,number>={codex:0,claude:1};
+const GROUP_ORDER:Record<ComposerProvider,number>={codex:0,claude:1,arcane:2};
 /**
  * Rows for the other provider's column: one option per matching model, or one disabled row with the sign-in hint. An
  * available provider without reported models offers one row that switches provider only (id '').
  */
 export function crossProviderRows(doc:Document,group:ComposerModelGroup,query:readonly string[],choose:(model:string)=>void):HTMLElement[] {
   const matches=(text:string)=>query.every(word=>text.toLocaleLowerCase().includes(word));
-  const row=(id:string,label:string,title:string,disabled:boolean)=>{
+  const row=(id:string,label:string,title:string,disabled:boolean,detail='')=>{
     const button=doc.createElement('button');button.type='button';button.className='picker-model-option';button.tabIndex=-1;
     button.dataset.pickerModel=id;button.dataset.pickerProvider=group.provider;button.setAttribute('role','option');button.setAttribute('aria-selected','false');
     button.disabled=disabled;button.title=title;
     const name=doc.createElement('span');name.textContent=label;if(disabled)name.className='hint';button.append(name);
+    if(detail){const line=doc.createElement('small');line.className='picker-model-detail';line.textContent=detail;button.append(line);}
     button.append(composerPickerCheck(doc,false));
     if(!disabled)button.addEventListener('click',()=>choose(id));
     return button;
@@ -1708,8 +1743,14 @@ export function crossProviderRows(doc:Document,group:ComposerModelGroup,query:re
   const rows:HTMLElement[]=[];
   if(!group.available||!group.models.length){
     if(matches(group.label+' '+group.hint))rows.push(row('',group.hint,group.label+' · '+group.hint,!group.available));
-  } else for(const model of group.models)if(matches(model.label+' '+model.id+' '+(model.title??'')+' '+group.label))rows.push(row(model.id,model.label,model.title??model.id,false));
+  } else for(const model of group.models)if(matches(model.label+' '+model.id+' '+(model.title??'')+' '+group.label))rows.push(row(model.id,model.label,model.title??model.id,false,model.detail??''));
   return rows;
+}
+/** Every other provider's column: its group and rows; choosing a row names that provider. */
+export function crossProviderColumns(doc:Document,cross:CrossProviderModels|null,query:readonly string[],choose:(model:string,provider:ComposerProvider)=>void):{group:ComposerModelGroup;rows:HTMLElement[]}[] {
+  let groups:readonly (ComposerModelGroup|null)[]=[];
+  try{groups=cross?(cross.groups?cross.groups():[cross.group()]):[];}catch{groups=[];}
+  return groups.filter((group):group is ComposerModelGroup=>!!group).slice(0,2).map(group=>({group,rows:crossProviderRows(doc,group,query,id=>choose(id,group.provider))}));
 }
 /** Search Enter target: the first enabled own-provider row, else the first enabled row of the other provider. */
 export function firstModelRow(host:HTMLElement):HTMLButtonElement|null {
@@ -1721,11 +1762,12 @@ function lastModelRow(host:HTMLElement):HTMLButtonElement|null {
   const rows=Array.from(host.querySelectorAll<HTMLButtonElement>('button:not(:disabled)'));
   return rows.filter(row=>!row.dataset.pickerProvider).at(-1)??rows.at(-1)??null;
 }
-/** One provider's column: logo heading, then its rows, or a short note when nothing matches. */
-function composerModelColumn(doc:Document,provider:ComposerProvider,label:string,rows:HTMLElement[],empty:string):HTMLElement {
+/** One provider's column: logo heading (and its note), then its rows, or a short note when nothing matches. */
+function composerModelColumn(doc:Document,provider:ComposerProvider,label:string,rows:HTMLElement[],empty:string,note?:string):HTMLElement {
   const column=doc.createElement('div');column.className='model-column';column.dataset.pickerGroup=provider;
   column.setAttribute('role','group');column.setAttribute('aria-label',label+' models');
   column.append(composerModelGroupHeading(doc,label,provider));
+  if(note){const line=doc.createElement('p');line.className='model-column-note hint';line.textContent=note;column.append(line);}
   if(rows.length)column.append(...rows);
   else{const note=doc.createElement('p');note.className='model-column-empty hint';note.textContent=empty;column.append(note);}
   return column;
@@ -1734,13 +1776,21 @@ function composerModelColumn(doc:Document,provider:ComposerProvider,label:string
  * Fills the shared model list. Without the other provider it is one plain list of the own rows. With it, two columns
  * side by side in a fixed order: ChatGPT on the left, Claude on the right (stacked ChatGPT above Claude when narrow).
  */
-export function fillModelOptions(doc:Document,host:HTMLElement,own:{provider:ComposerProvider;label:string;rows:HTMLElement[];empty:string},other:ComposerModelGroup|null,otherRows:HTMLElement[],query:readonly string[]):void {
+export function fillModelOptions(doc:Document,host:HTMLElement,own:{provider:ComposerProvider;label:string;rows:HTMLElement[];empty:string;note?:string},other:ComposerModelGroup|null,otherRows:HTMLElement[],query:readonly string[]):void {
+  fillModelColumns(doc,host,own,other?[{group:other,rows:otherRows}]:[],query);
+}
+/**
+ * The model list with any number of other providers: one column per provider in the fixed order ChatGPT, Claude,
+ * Arcane (three columns side by side when there is room, stacked when narrow; data-columns on the list says how many).
+ */
+export function fillModelColumns(doc:Document,host:HTMLElement,own:{provider:ComposerProvider;label:string;rows:HTMLElement[];empty:string;note?:string},others:readonly {group:ComposerModelGroup;rows:HTMLElement[]}[],query:readonly string[]):void {
   host.replaceChildren();
-  if(!other){delete host.dataset.layout;for(const row of own.rows)host.append(row);return;}
+  if(!others.length){delete host.dataset.layout;delete host.dataset.columns;for(const row of own.rows)host.append(row);return;}
   host.dataset.layout='columns';
-  const mine=composerModelColumn(doc,own.provider,own.label,own.rows,own.empty);
-  const theirs=composerModelColumn(doc,other.provider,other.label,otherRows,query.length?'No matching models':'No models reported');
-  if(GROUP_ORDER[own.provider]<GROUP_ORDER[other.provider])host.append(mine,theirs);else host.append(theirs,mine);
+  if(others.length>1)host.dataset.columns=String(others.length+1);else delete host.dataset.columns;
+  const columns=[{order:GROUP_ORDER[own.provider],element:composerModelColumn(doc,own.provider,own.label,own.rows,own.empty,own.note)},
+    ...others.map(({group,rows})=>({order:GROUP_ORDER[group.provider],element:composerModelColumn(doc,group.provider,group.label,rows,query.length?'No matching models':'No models reported',group.note)}))];
+  for(const column of columns.sort((a,b)=>a.order-b.order))host.append(column.element);
 }
 /**
  * Keyboard movement in the model list. Up/Down/Home/End stay within the focused column (wrapping); Left/Right move to
@@ -2703,7 +2753,9 @@ export class CodexChat {
     if (popover.hidden) return;
     const query = this.value('codex-model-search').trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
     const model = this.value('codex-model'), effort = this.value('codex-effort'), enabled = this.canSelectModel();
-    const cross = this.crossProvider?.group() ?? null;
+    let crossGroups: readonly (ComposerModelGroup | null)[] = [];
+    try { crossGroups = this.crossProvider ? (this.crossProvider.groups ? this.crossProvider.groups() : [this.crossProvider.group()]) : []; } catch { crossGroups = []; }
+    const cross = crossGroups.some(Boolean) ? crossGroups : null;
     const signature = JSON.stringify([snapshot?.models ?? [], query, model, effort, enabled, cross]);
     if (signature !== this.pickerSignature) {
       this.pickerSignature = signature;
@@ -2731,8 +2783,8 @@ export class CodexChat {
         }); own.push(row);
       }
       // The other provider's section: choosing there switches provider explicitly through the cross-provider link.
-      const other = cross ? crossProviderRows(this.doc, cross, query, id => { if (!this.surfaceYielded && !this.picker()!.hidden) { this.closePicker(); this.crossProvider?.choose(id); } }) : [];
-      fillModelOptions(this.doc, host, { provider: 'codex', label: 'ChatGPT', rows: own, empty: snapshot?.models.length ? 'No matching models' : 'No models reported' }, cross, other, query);
+      const others = crossProviderColumns(this.doc, this.crossProvider, query, (id, provider) => { if (!this.surfaceYielded && !this.picker()!.hidden) { this.closePicker(); this.crossProvider?.choose(id, provider); } });
+      fillModelColumns(this.doc, host, { provider: 'codex', label: 'ChatGPT', rows: own, empty: snapshot?.models.length ? 'No matching models' : 'No models reported' }, others, query);
       this.el('codex-model-empty').hidden = !!cross || models.length > 0;
       this.text('codex-model-empty', snapshot?.models.length ? 'No reported models match your search.' : 'No Codex models have been reported. Review connection setup.');
       const effortHost = this.el('codex-picker-efforts'); effortHost.replaceChildren();
@@ -2954,7 +3006,7 @@ export class CodexChat {
       if(!fenced){this.readVersion++;this.applyState(outcome.state);this.fresh=true;
         acknowledgedStateApplied=outcome.record.state==='acknowledged';
         const acknowledged:Record<string,string>={connect:'Connected. Choose a model to continue.',disconnect:'Disconnected.',select:'Model updated.','thread-start':'Conversation ready.','thread-resume':'Conversation opened.','turn-start':'Message accepted. Waiting for a response.','turn-interrupt':'Stop requested.','task-stop':'Task stopped.','grant-writes':'Workspace editing enabled for this conversation.','revoke-writes':'Workspace editing disabled.','grant-assets':'Asset jobs enabled for this conversation.','revoke-assets':'Asset jobs disabled.',approval:'Your review was recorded.','history-load':'History loaded.'};
-        this.text('codex-notice',outcome.record.state==='acknowledged'?(acknowledged[input.action]??'Request confirmed.'):input.action+' · native acknowledgement '+outcome.record.state+' · '+input.requestId+'. Review recorded state before continuing.');}
+        this.text('codex-notice',outcome.record.state==='acknowledged'?(acknowledged[input.action]??'Request confirmed.'):(codexFailureHint(outcome.record.errorCode)?codexFailureHint(outcome.record.errorCode)+' ':'')+input.action+' · native acknowledgement '+outcome.record.state+' · '+input.requestId+'. Review recorded state before continuing.');}
       if(['pending','unknown'].includes(outcome.record.state))this.uncertain.set(input.requestId,{input,read:false});
       else if(outcome.record.state==='rejected')restoreRejectedDraft();
       const message=this.transcript.messages.find(m=>m.key===input.requestId);if(message)message.acknowledgement='Native acknowledgement: '+outcome.record.state;

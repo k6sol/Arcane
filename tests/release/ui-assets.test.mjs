@@ -154,6 +154,7 @@ async function syntheticDaemon({ failWithCredentials = false, unsafePngHeaders =
     ['/provider-setup.js',['dist/apps/desktop/src/provider-setup.js','text/javascript; charset=utf-8']],
     ['/claude-chat.js',['dist/apps/desktop/src/claude-chat.js','text/javascript; charset=utf-8']],
     ['/claude-preferences.js',['dist/apps/desktop/src/claude-preferences.js','text/javascript; charset=utf-8']],
+    ['/arcane-chat.js',['dist/apps/desktop/src/arcane-chat.js','text/javascript; charset=utf-8']],
     ['/setup-checklist.js',['dist/apps/desktop/src/setup-checklist.js','text/javascript; charset=utf-8']],
     ['/arcane-dialog.js',['dist/apps/desktop/src/arcane-dialog.js','text/javascript; charset=utf-8']],
     ['/toolbox-policy.js',['dist/apps/desktop/src/toolbox-policy.js','text/javascript; charset=utf-8']],
@@ -161,13 +162,14 @@ async function syntheticDaemon({ failWithCredentials = false, unsafePngHeaders =
     ['/starter-gallery.js',['dist/apps/desktop/src/starter-gallery.js','text/javascript; charset=utf-8']],
     ['/starter-prompts.js',['dist/apps/desktop/src/starter-prompts.js','text/javascript; charset=utf-8']],
     ['/welcome-tour.js',['dist/apps/desktop/src/welcome-tour.js','text/javascript; charset=utf-8']],
-    ['/mesh-keep.js',['dist/apps/desktop/src/mesh-keep.js','text/javascript; charset=utf-8']],
     ['/editor-drafts.js',['dist/apps/desktop/src/editor-drafts.js','text/javascript; charset=utf-8']],
     ['/project-memory.js',['dist/apps/desktop/src/project-memory.js','text/javascript; charset=utf-8']],
+    ['/script-editor-drafts.js',['dist/apps/desktop/src/script-editor-drafts.js','text/javascript; charset=utf-8']],
     ['/script-sync.js',['dist/apps/desktop/src/script-sync.js','text/javascript; charset=utf-8']],
     ['/script-diff.js',['dist/apps/desktop/src/script-diff.js','text/javascript; charset=utf-8']],
     ['/plans.js',['dist/apps/desktop/src/plans.js','text/javascript; charset=utf-8']],
     ['/notifications.js',['dist/apps/desktop/src/notifications.js','text/javascript; charset=utf-8']],
+    ['/mesh-keep.js',['dist/apps/desktop/src/mesh-keep.js','text/javascript; charset=utf-8']],
     ['/brand/arcane-ridges.png', ['apps/desktop/public/brand/arcane-ridges.png', 'image/png']],
   ]);
   const server = createServer(async (request, response) => {

@@ -440,7 +440,7 @@ export interface ChatSwitchRow { key:string; label:string; current:boolean; sele
 export interface ChatSwitchActions { select(key:string):void; close(key:string):void; newChat():void; newDisabled:boolean }
 /** Saved chats summary. Wide layouts show "Saved chats"; on narrow layouts studio.css shows the current chat instead, so the
  * summary becomes the chat switcher and the accessible name still starts with the visible title. */
-export function chatSwitchSummary(doc:Document,current:string,provider:'codex'|'claude'):HTMLElement {
+export function chatSwitchSummary(doc:Document,current:string,provider:'codex'|'claude'|'arcane'):HTMLElement {
   const summary=doc.createElement('summary');
   const name=doc.createElement('span');name.className='chat-switch-current';name.textContent=current;prependProviderLogo(doc,name,provider);
   const label=doc.createElement('span');label.className='chat-switch-label';label.textContent='Saved chats';

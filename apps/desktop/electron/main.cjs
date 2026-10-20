@@ -30,6 +30,8 @@ let toolDrafts;
 let runtimeRecovery;
 let recoveryWindow = null, recoveryWindowFailure = null, deferWindowShow = false;
 let claudeChat;
+let arcaneChat;
+let billing;
 let studioPlugin;
 let projectPermissions;
 // Decisions (any question with more than one button: Claude tool consent, provider sign-in/terminal, plugin install,
@@ -55,7 +57,7 @@ const started = performance.now(); let daemonReadyMs = 0, firstReadyMs = 0;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function ownedDirectory(path) { await policy.directPath(path, 'directory', true); await mkdir(path, { recursive: true, mode: 0o700 }); return policy.directPath(path); }
 /** Stop every in-app Claude chat turn of the current project and revoke its scoped credentials (quit/switch/failure). */
-function stopClaudeChat(reason) { const chat = claudeChat; claudeChat = null; return chat ? chat.dispose(reason).catch(() => null) : Promise.resolve(null); }
+function stopClaudeChat(reason) { const chat = claudeChat, arcane = stopArcaneChat(); claudeChat = null; return chat ? Promise.all([chat.dispose(reason).catch(() => null), arcane]).then(() => null) : arcane; }
 // In-app Claude chat: headless installed Claude Code per turn, Arcane-only MCP config and a scoped credential from this
 // project's handoff broker. Bound to this project epoch; the transcript lives in an owned per-project directory.
 // Started after startDaemon, so the port/state host fixtures exercise only the daemon boundary.
@@ -70,6 +72,28 @@ async function startClaudeChat() {
     getWindow: () => closing || switching || !window || window.isDestroyed() || projectSession !== chatEpoch ? null : window,
     handoff: { prepare: selection => nativeHandoff === chatBroker && projectSession === chatEpoch ? chatBroker.prepareChat(selection) : null,
       release: handoffId => chatBroker.releaseChat(handoffId) },
+    instructions: async () => (await import(require('node:url').pathToFileURL(join(productRoot, 'dist/packages/protocol/src/arcane-tools.js')).href)).ARCANE_TASK_INSTRUCTIONS });
+  await startArcaneChat(permissions);
+}
+// In-app Arcane chat (Arcane Credits): models through the user's own Arcane gateway, a bounded tool loop in this process
+// and Arcane's MCP tools under a scoped credential from this project's handoff broker (the Claude chat scope and consent).
+// The gateway client exists only while an account is connected (billing.accountCredential); otherwise status reports
+// the chat unavailable and nothing is requested. The account token never leaves the main process.
+function stopArcaneChat() { const chat = arcaneChat; arcaneChat = null; return chat ? chat.dispose().catch(() => null) : Promise.resolve(null); }
+async function startArcaneChat(permissions) {
+  if (smoke || !projectSession || !nativeHandoff) return;
+  const chatDirectory = await ownedDirectory(join(projectSession.stateRoot, 'arcane-chat')), chatBroker = nativeHandoff, chatEpoch = projectSession;
+  void stopArcaneChat();
+  const credential = async () => (await billing?.accountCredential().catch(() => null)) ?? null;
+  arcaneChat = require('./arcane-chat.cjs').createArcaneChat({ projectPath: chatEpoch.projectPath, stateDirectory: chatDirectory, dialog, permissions,
+    getWindow: () => closing || switching || !window || window.isDestroyed() || projectSession !== chatEpoch ? null : window,
+    handoff: { prepare: selection => nativeHandoff === chatBroker && projectSession === chatEpoch ? chatBroker.prepareChat(selection) : null,
+      release: handoffId => chatBroker.releaseChat(handoffId) },
+    gateway: async () => {
+      if (!productRoot || !await credential()) return null;
+      const module = await import(require('node:url').pathToFileURL(join(productRoot, 'dist/apps/daemon/src/arcane-gateway.js')).href);
+      return module.createArcaneGateway({ config: null, vault: null, credential });
+    },
     instructions: async () => (await import(require('node:url').pathToFileURL(join(productRoot, 'dist/packages/protocol/src/arcane-tools.js')).href)).ARCANE_TASK_INSTRUCTIONS });
 }
 async function stopDaemon() {
@@ -413,6 +437,7 @@ async function checkSmoke() {
     const shaped = (bridge, names) => !!bridge && Object.isFrozen(bridge) && bridge.version === 1 && names.every(name => typeof bridge[name] === 'function');
     const settle = async call => { try { return { ok: true, value: await call() }; } catch (error) { return { ok: false, message: String(error && error.message || '') }; } };
     const chat = shaped(d.claudeChat, ['status','list','history','send','rewind','stop','remove','onEvent']) ? await settle(() => d.claudeChat.status()) : null;
+    const arcane = shaped(d.arcaneChat, ['status','list','history','send','rewind','stop','remove','onEvent']) ? await settle(() => d.arcaneChat.status()) : null;
     const plugin = shaped(d.studioPlugin, ['status','install']) ? await settle(() => d.studioPlugin.status()) : null;
     const project = shaped(d.workspaceProject, ['open']) ? await settle(() => d.workspaceProject.open()) : null;
     const permissions = shaped(d.projectPermissions, ['read','save']) ? await settle(() => d.projectPermissions.read()) : null;
@@ -422,6 +447,7 @@ async function checkSmoke() {
     const keep = shaped(d.meshKeep, ['keep']) ? await settle(() => d.meshKeep.keep({ digest: '0'.repeat(64), sessionId: 'arcane-smoke' })) : null;
     return JSON.stringify({
       claudeChat: !!chat && chat.ok === false,
+      arcaneChat: !!arcane && arcane.ok === false,
       studioPlugin: !!plugin && plugin.ok && plugin.value.state === 'unavailable' && plugin.value.message === 'Studio plugin setup is disabled in verification mode.',
       workspaceProject: !!project && project.ok === false && project.message === 'The project picker is unavailable.',
       dialogs: shaped(d.dialogs, ['attach','reply']),
@@ -491,6 +517,7 @@ async function checkSmoke() {
     conversationOnlyDefault:renderer.conversationOnly === true,providerSetupMounted:renderer.providerSetupMounted === true,
     nativeHandoffMounted: renderer.nativeHandoffMounted === true,
     claudeChatBridgeDisabledInSmoke: desktopBridges.claudeChat === true,
+    arcaneChatBridgeDisabledInSmoke: desktopBridges.arcaneChat === true,
     studioPluginBridgeDisabledInSmoke: desktopBridges.studioPlugin === true,
     workspaceProjectBridgeDisabledInSmoke: desktopBridges.workspaceProject === true,
     inAppDialogsBridgeMounted: desktopBridges.dialogs === true,
@@ -599,15 +626,16 @@ else {
           detail: lines.join('\n\n') + '\n\nYou can turn this off again in Settings > Permissions.', buttons: ['Cancel', 'Turn on'], defaultId: 0, cancelId: 0, noLink: true });
         return choice.response === 1 && !closing && !switching && window === owner;
       } });
-      // Switching Claude tools to "ask" revokes this session's consent and its shared credential immediately.
-      projectPermissions.subscribe(next => { if (!next.claudeTools) claudeChat?.revokeApproval?.(); });
+      // Switching Claude tools to "ask" revokes this session's consent and its shared credential immediately (Arcane chat too).
+      projectPermissions.subscribe(next => { if (!next.claudeTools) { claudeChat?.revokeApproval?.(); arcaneChat?.revokeApproval?.(); } });
       // Plans & credits checkout: one offer id in; the host builds the URL from the shipped plans config and the local
       // billing-service.json (billing.cjs), checks the exact https allowlist, confirms in an Arcane dialog, then opens the browser.
       // Connect Arcane account stays unavailable unless a gateway URL is allowlisted; its token is kept with safeStorage.
-      require('./billing.cjs').createBilling({ enabled: !smoke, dialog, shell, safeStorage, getWindow: () => closing || switching ? null : window,
+      billing = require('./billing.cjs').createBilling({ enabled: !smoke, dialog, shell, safeStorage, getWindow: () => closing || switching ? null : window,
         configDirectory: () => userRoot ?? null,
         loadPlans: async () => productRoot ? (await import(require('node:url').pathToFileURL(join(productRoot, 'dist/packages/protocol/src/plans.js')).href)).ARCANE_PLANS : null,
-      }).installIpc(ipcMain, { trusted: rendererEvent });
+      });
+      billing.installIpc(ipcMain, { trusted: rendererEvent });
       // Build-done notifications: fixed titles and a bounded body, only while the window is not focused; click focuses it.
       require('./build-notifications.cjs').createBuildNotifications({ enabled: !smoke, Notification,
         getWindow: () => closing || switching ? null : window }).installIpc(ipcMain, { trusted: rendererEvent });
@@ -642,6 +670,10 @@ else {
       require('./claude-chat.cjs').installClaudeChatIpc(ipcMain, {
         getSession: () => smoke || closing || switching || !window || !projectSession || !origin || !token || !claudeChat ? null : { window, origin, epoch: projectSession },
         getHost: () => claudeChat ?? null,
+      });
+      require('./arcane-chat.cjs').installArcaneChatIpc(ipcMain, {
+        getSession: () => smoke || closing || switching || !window || !projectSession || !origin || !token || !arcaneChat ? null : { window, origin, epoch: projectSession },
+        getHost: () => arcaneChat ?? null,
       });
       require('./native-handoff-ipc.cjs').installNativeHandoffIpc(ipcMain, {
         getSession: () => smoke || closing || switching || !window || !projectSession || !origin || !token || !nativeHandoff ? null :

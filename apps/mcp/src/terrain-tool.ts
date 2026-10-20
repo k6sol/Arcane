@@ -2,6 +2,7 @@ import { z } from 'zod';
 import type { Json } from '../../../packages/protocol/src/studio.js';
 import { TERRAIN_LIMITS as L } from '../../../packages/protocol/src/studio.js';
 import { TERRAIN_SURFACE_MATERIALS, TERRAIN_NOISE_TYPES } from '../../../packages/core/src/terrain-policy.js';
+import { BridgeError } from './daemon-client.js';
 
 /** terrain_generate: one seeded procedural heightfield written to Workspace.Terrain (plugin method terrain.generate). */
 export const TERRAIN_TOOL = 'terrain_generate';
@@ -14,7 +15,8 @@ const bump = z.strictObject({ kind: z.enum(['hill', 'mountain', 'valley', 'crate
   height: level.describe('Rise, or depth for valley/crater.'), roughness: n(0, 1).optional().describe('Mountain ridge detail.') });
 const pad = z.strictObject({ kind: z.enum(['plateau', 'flatten']), center: xz, radius: n(4, L.extent),
   level: level.optional().describe('Flat surface above floor; flatten defaults to ground at center.'),
-  blend: n(0, 512).optional().describe('Soft edge studs.'), material: material.optional() });
+  blend: n(0, 512).optional().describe('Soft edge studs.'), material: material.optional(),
+  base: n(1, 512).optional().describe('Landmark radius: adds Ground, Mud, Rock rings in to it (pad default LeafyGrass).') });
 const lake = z.strictObject({ kind: z.literal('lake'), center: xz, radius: n(8, 1024), level: level.describe('Water surface above floor.'),
   depth: n(1, 256).optional(), material: material.optional().describe('Bed (default Mud).') });
 const line = z.strictObject({ kind: z.enum(['river', 'path']), points: z.array(xz).min(2).max(L.points), width: n(2, 256),
@@ -41,7 +43,27 @@ export const terrainShape = {
 
 export const TERRAIN_DESCRIPTION = `Write: generate natural terrain in one undo step. Replaces all Terrain in the region box (snapped to the 4-stud grid; ≤${L.extent}x${L.extent} studs, height cap ${L.height}) with a seeded fBm/ridged heightfield plus ordered features: hill, mountain, valley, crater, plateau, flatten (clearing for a focal build), lake (water level), river/path (polyline carve, width, depth, material). Heights are studs above floor. Default materials: Sand at shores, Mud near water, Rock/Slate on steep slopes, Ground on mid slopes, Grass/LeafyGrass elsewhere, Snow above snowLine; materials.rules (height, slope, noise -1..1, nearWater) replace them. Same seed = same terrain. Written in chunks with yields. Revert with Studio Undo (receipt_restore is refused). Workspace grant; never auto-retry.`;
 
-/** Drops undefined keys; the daemon and plugin validate the same wire fields. */
+/**
+ * Drops undefined keys and expands a pad's `base` into ground-blend rings (later features override earlier materials):
+ * the pad's own surface (LeafyGrass), then Ground, Mud and Rock towards the landmark footprint. Rings at a known level
+ * are plateaus, whose noisy outlines avoid hard circles. The daemon and plugin validate the same wire fields.
+ */
 export function compileTerrain(input: Record<string, unknown>): Record<string, Json> {
-  return JSON.parse(JSON.stringify(input)) as Record<string, Json>;
+  const out = JSON.parse(JSON.stringify(input)) as Record<string, Json> & { features?: Record<string, Json>[]; baseHeight?: number };
+  if (!out.features?.some(feature => feature.base !== undefined)) return out;
+  out.features = out.features.flatMap(feature => {
+    if (feature.base === undefined) return [feature];
+    const { base, ...pad } = feature as Record<string, Json> & { base: number; radius: number; level?: number; kind: string; center: Json };
+    const rings: Record<string, Json>[] = [{ ...pad, material: pad.material ?? 'LeafyGrass' }];
+    let last = pad.radius;
+    for (const [material, radius] of [['Ground', base + (pad.radius - base) * 0.55], ['Mud', base + 4], ['Rock', base + 1.5]] as const) {
+      if (radius < 4 || radius > last - 1) continue;
+      last = radius;
+      rings.push(pad.level === undefined ? { kind: 'flatten', center: pad.center, radius: Number(radius.toFixed(2)), blend: 2, material }
+        : { kind: 'plateau', center: pad.center, radius: Number(radius.toFixed(2)), level: pad.level, blend: 2, material });
+    }
+    return rings;
+  });
+  if (out.features.length > L.features) throw new BridgeError('INPUT', `Ground rings expand features to ${out.features.length} (max ${L.features}); drop a feature or a base.`);
+  return out;
 }

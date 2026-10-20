@@ -187,7 +187,7 @@ test('MCP scene_build: one compact call, one HTTP command, compiled arguments ar
 
 test('instructions steer to batching, terrain, natural placement and DataStore safety', () => {
   const text = productInstructions();
-  for (const phrase of ['scene_build', 'environment_apply', 'Poisson-disk', 'Never lay out foliage in rings, grids', 'Do not re-read unchanged scene state', 'DataStore'])
+  for (const phrase of ['scene_build', 'environment_apply', 'Poisson-disk', 'never rings or grids', 'never re-read unchanged state', 'DataStore'])
     assert.ok(text.includes(phrase), phrase);
   assert.ok(text.slice(0, 512).includes('scene_build'));
 });

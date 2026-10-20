@@ -440,6 +440,112 @@ const claudeChat = Object.freeze({ version: 1,
     return () => { if (active) { active = false; ipcRenderer.removeListener('arcane:claude-chat-event', wrapped); } };
   },
 });
+// In-app Arcane chat (Arcane Credits, arcane-chat.cjs): the Claude chat bridge's shapes, text only (no images), gateway
+// model ids, and a status with the account's models (credit prices per million tokens) and balance. The account token,
+// gateway URL and project credential never cross this bridge.
+const ARCANE_CHAT_ERRORS = ['Arcane chat is unavailable.', 'Another Arcane chat reply is still running in this conversation.',
+  'Too many Arcane chat replies are running. Wait for one to finish.', 'This conversation no longer exists.', 'Message is empty or too long.',
+  'This message can no longer be edited.', 'Arcane Credits chat sends text only. Remove the attached images, then send.'];
+// The engine's one fixed out-of-credits message (arcane-chat.cjs MESSAGES.noCredits); only it may carry a usage limit.
+const ARCANE_CHAT_NO_CREDITS = "You're out of Arcane Credits. This message was not answered; buy credits to continue.";
+const arcaneChatUnavailable = () => { throw new Error(ARCANE_CHAT_ERRORS[0]); };
+const arcaneChatModel = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,95}$/.test(value);
+const arcaneChatCount = value => Number.isSafeInteger(value) && value >= 0 && value <= 1e12;
+const arcaneChatGuard = fn => { try { return fn(); } catch { return arcaneChatUnavailable(); } };
+const arcaneChatReply = (action, value) => arcaneChatGuard(() => {
+  if (!value || typeof value !== 'object') arcaneChatUnavailable();
+  if (action === 'status') {
+    if (typeof value.available !== 'boolean' || !['disabled', 'signed-out', 'error', 'ready'].includes(value.state) || !claudeChatList(value.models, 32) ||
+        !claudeChatList(value.efforts, 4) || !value.efforts.every(claudeChatChoice) || !(value.message === null || claudeChatText(value.message, 512))) arcaneChatUnavailable();
+    const models = value.models.map(m => {
+      if (!m || typeof m !== 'object' || !arcaneChatModel(m.id) || !claudeChatText(m.label, 64) || !m.label) arcaneChatUnavailable();
+      const p = m.pricing;
+      if (!(p === null || p && typeof p === 'object' && arcaneChatCount(p.inputPerMTok) && arcaneChatCount(p.outputPerMTok))) arcaneChatUnavailable();
+      return { id: m.id, label: m.label, pricing: p === null ? null : { inputPerMTok: p.inputPerMTok, outputPerMTok: p.outputPerMTok } };
+    });
+    if (!(value.defaultModel === null || models.some(m => m.id === value.defaultModel))) arcaneChatUnavailable();
+    const b = value.balance;
+    if (!(b === null || b && typeof b === 'object' && arcaneChatCount(b.credits) && (b.actionsRemaining === null || arcaneChatCount(b.actionsRemaining)) &&
+        (b.plan === null || claudeChatText(b.plan, 48)))) arcaneChatUnavailable();
+    return { available: value.available, state: value.state, models, efforts: [...value.efforts], defaultModel: value.defaultModel,
+      balance: b === null ? null : { credits: b.credits, actionsRemaining: b.actionsRemaining, plan: b.plan }, message: value.message };
+  }
+  if (action === 'list') {
+    if (!claudeChatList(value.conversations, 200)) arcaneChatUnavailable();
+    return { conversations: value.conversations.map(c => {
+      if (!c || !claudeChatId(c.conversationId) || !claudeChatText(c.title, 200) || !claudeChatTime(c.updatedAt) || !arcaneChatModel(c.model) || !claudeChatChoice(c.effort)) arcaneChatUnavailable();
+      return { conversationId: c.conversationId, title: c.title, updatedAt: c.updatedAt, model: c.model, effort: c.effort };
+    }) };
+  }
+  if (action === 'history') {
+    if (!claudeChatId(value.conversationId) || !claudeChatList(value.messages, 2000)) arcaneChatUnavailable();
+    return { conversationId: value.conversationId, messages: value.messages.map(claudeChatMessage) };
+  }
+  if (action === 'rewind') {
+    if (!claudeChatId(value.conversationId) || !Number.isSafeInteger(value.kept) || value.kept < 0 || value.kept > 2000) arcaneChatUnavailable();
+    return { conversationId: value.conversationId, kept: value.kept };
+  }
+  if (!claudeChatId(value.turnId) || !claudeChatId(value.conversationId) || value.messageId !== undefined && !claudeChatId(value.messageId)) arcaneChatUnavailable();
+  return { turnId: value.turnId, conversationId: value.conversationId, ...(value.messageId === undefined ? {} : { messageId: value.messageId }) };
+});
+const arcaneChatInvoke = async (action, args) => {
+  let input;
+  if (action === 'status' || action === 'list') { if (args.length) arcaneChatUnavailable(); }
+  else if (action === 'send') {
+    const value = args[0];
+    if (value && typeof value === 'object' && Object.hasOwn(value, 'images')) throw new Error(ARCANE_CHAT_ERRORS[6]);
+    const keys = ['conversationId', 'text', 'model', 'effort'];
+    if (value && typeof value === 'object' && Object.hasOwn(value, 'playtest')) keys.push('playtest');
+    if (args.length !== 1 || !value || Object.getPrototypeOf(value) !== Object.prototype || Reflect.ownKeys(value).length !== keys.length) arcaneChatUnavailable();
+    for (const key of keys) { const d = Object.getOwnPropertyDescriptor(value, key); if (!d?.enumerable || !Object.hasOwn(d, 'value')) arcaneChatUnavailable(); }
+    if (!(value.conversationId === null || claudeChatId(value.conversationId)) || !arcaneChatModel(value.model) || !claudeChatChoice(value.effort)) arcaneChatUnavailable();
+    if (typeof value.text !== 'string' || !value.text.trim() || value.text.length > 100000) throw new Error(ARCANE_CHAT_ERRORS[4]);
+    if (keys.includes('playtest') && typeof value.playtest !== 'boolean') arcaneChatUnavailable();
+    input = { conversationId: value.conversationId, text: value.text, model: value.model, effort: value.effort, ...(keys.includes('playtest') ? { playtest: value.playtest } : {}) };
+  } else if (action === 'rewind') {
+    const value = args[0];
+    if (args.length !== 1 || !value || Object.getPrototypeOf(value) !== Object.prototype || Reflect.ownKeys(value).length !== 2) arcaneChatUnavailable();
+    for (const key of ['conversationId', 'messageId']) { const d = Object.getOwnPropertyDescriptor(value, key); if (!d?.enumerable || !Object.hasOwn(d, 'value') || !claudeChatId(d.value)) arcaneChatUnavailable(); }
+    input = { conversationId: value.conversationId, messageId: value.messageId };
+  } else { if (args.length !== 1 || !claudeChatId(args[0])) arcaneChatUnavailable(); input = args[0]; }
+  let value;
+  try { value = await ipcRenderer.invoke('arcane:arcane-chat-' + action, ...(input === undefined ? [] : [input])); }
+  catch (error) { const text = String(error?.message ?? ''); throw new Error(ARCANE_CHAT_ERRORS.find(known => text.endsWith(known)) ?? ARCANE_CHAT_ERRORS[0]); }
+  if (action === 'stop' || action === 'remove') { if (typeof value !== 'boolean') arcaneChatUnavailable(); return value; }
+  return arcaneChatReply(action, value);
+};
+const arcaneChatEvent = value => {
+  if (!value || typeof value !== 'object' || !claudeChatId(value.turnId) || !claudeChatId(value.conversationId)) return null;
+  const base = { turnId: value.turnId, conversationId: value.conversationId };
+  try {
+    if (value.type === 'delta') return claudeChatText(value.text, 65536) ? { ...base, type: 'delta', text: value.text } : null;
+    if (value.type === 'message' || value.type === 'tool') return { ...base, type: value.type, message: claudeChatMessage(value.message) };
+    if (value.type === 'done') {
+      const u = value.usage;
+      if (typeof value.ok !== 'boolean' || !(value.error === null || claudeChatText(value.error, 512)) ||
+          !(u === null || u && typeof u === 'object' && arcaneChatCount(u.inputTokens) && arcaneChatCount(u.outputTokens) && u.costUsd === null && (u.credits === null || arcaneChatCount(u.credits)))) return null;
+      // A usage limit here means only "out of credits": the fixed engine message, never a reset time.
+      const l = value.usageLimit ?? null;
+      if (!(l === null || value.ok === false && value.error === ARCANE_CHAT_NO_CREDITS && l && typeof l === 'object' && l.resetsAt === null)) return null;
+      return { ...base, type: 'done', ok: value.ok, error: value.error, usage: u === null ? null : { inputTokens: u.inputTokens, outputTokens: u.outputTokens, costUsd: null, credits: u.credits },
+        usageLimit: l === null ? null : { resetsAt: null } };
+    }
+  } catch { return null; }
+  return null;
+};
+const arcaneChat = Object.freeze({ version: 1,
+  status: (...args) => arcaneChatInvoke('status', args), list: (...args) => arcaneChatInvoke('list', args),
+  history: (...args) => arcaneChatInvoke('history', args), send: (...args) => arcaneChatInvoke('send', args),
+  rewind: (...args) => arcaneChatInvoke('rewind', args),
+  stop: (...args) => arcaneChatInvoke('stop', args), remove: (...args) => arcaneChatInvoke('remove', args),
+  onEvent: listener => {
+    if (typeof listener !== 'function') arcaneChatUnavailable();
+    const wrapped = (_event, payload) => { const event = arcaneChatEvent(payload); if (event) { try { listener(event); } catch { /* renderer listener errors stay in the renderer */ } } };
+    ipcRenderer.on('arcane:arcane-chat-event', wrapped);
+    let active = true;
+    return () => { if (active) { active = false; ipcRenderer.removeListener('arcane:arcane-chat-event', wrapped); } };
+  },
+});
 // Studio plugin install: zero-argument intents. Paths, hashes and the confirm dialog stay in the native host;
 // only a fixed state, the bundled version and one of the host's fixed messages come back.
 const STUDIO_PLUGIN_UNAVAILABLE = 'Studio plugin setup is unavailable.';
@@ -655,4 +761,4 @@ const runtimeRecovery = Object.freeze({ version: 1,
   onState: listener => recoveryListen('arcane:runtime-recovery-state', listener),
   onCheckpoint: listener => recoveryListen('arcane:runtime-recovery-checkpoint', listener, true),
 });
-contextBridge.exposeInMainWorld('arcaneDesktop', Object.freeze({ version: '0.1.0', platform: 'win32', runtime: 'desktop', codeVerification, providerSetup, nativeHandoff, studioKeys, workspacePreferences, claudePreferences, toolDrafts, welcomeTour, setupChecklist, claudeChat, studioPlugin, workspaceProject, dialogs, projectPermissions, billing, notifications, meshKeep, updates, runtimeRecovery }));
+contextBridge.exposeInMainWorld('arcaneDesktop', Object.freeze({ version: '0.1.0', platform: 'win32', runtime: 'desktop', codeVerification, providerSetup, nativeHandoff, studioKeys, workspacePreferences, claudePreferences, toolDrafts, welcomeTour, setupChecklist, claudeChat, arcaneChat, studioPlugin, workspaceProject, dialogs, projectPermissions, billing, notifications, meshKeep, updates, runtimeRecovery }));

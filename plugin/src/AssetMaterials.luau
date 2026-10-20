@@ -1,6 +1,6 @@
 --!strict
 -- Scalar and privately admitted texture sidecar for the decoder's material manifest (not raw glTF JSON).
--- No services/globals are resolved; only injected factories create resources.
+-- No services are resolved (only Enum.AlphaMode, read for MASK); only injected factories create resources.
 -- Decoded RGBA8 pixels arrive only from a sealed receiver intake; no PNG decoding or uploads.
 -- Checked 2026-10-14 against primary docs:
 -- https://create.roblox.com/docs/reference/engine/classes/SurfaceAppearance
@@ -29,7 +29,7 @@ export type ScalarMap = {
 export type Plan = {
 	source: Material, baseColorLinear: {number}, metallic: number, roughness: number,
 	constantMaps: {MetalnessMap: ScalarMap, RoughnessMap: ScalarMap},
-	doubleSided: boolean, transparency: number, emissiveStrength: number?,
+	doubleSided: boolean, transparency: number, alphaMode: string, emissiveStrength: number?,
 	supported: boolean, emissionSupport: "zero-only", limitations: {string},
 	requiresSurfaceAppearance: boolean, engineVerification: "pending",
 }
@@ -61,7 +61,7 @@ local EMISSION_LIMITATION = "Nonzero additive glTF emission needs verified emiss
 local LIMITATIONS = table.freeze({
 	"Metallic and roughness use nearest RGBA8 values; original factors and quantization errors are preserved. Engine rendering is pending.",
 	EMISSION_LIMITATION,
-	"Texture delivery requires privately admitted RGBA8 maps; only UV0 repeat sampling and opaque alpha are supported. Engine sampling is pending.",
+	"Texture delivery requires privately admitted RGBA8 maps; only UV0 repeat sampling, opaque alpha and glTF MASK (host-thresholded ColorMap alpha 0/255, AlphaMode Transparency) are supported; BLEND is not. Engine sampling and cutout rendering are pending.",
 })
 local TEXTURE_LIMITS = table.freeze({width = 1024, height = 1024, maps = 4, bytes = 16 * 1024 * 1024})
 local AssetMaterials = {LIMITS = LIMITS, TEXTURE_LIMITS = TEXTURE_LIMITS}
@@ -157,9 +157,12 @@ function AssetMaterials.plan(material: Material?, textures: any?): Plan
 	local metallic = scalar(value.metallic, 1, "metallic")
 	local roughness = scalar(value.roughness, 1, "roughness")
 	local cutoff = scalar(value.alphaCutoff, 1, "alphaCutoff")
-	if value.alphaMode ~= "OPAQUE" or baseColor[4] ~= 1 then
-		fail("UNSUPPORTED_MATERIAL", "alphaMode", "Only OPAQUE alpha=1 is supported; transparency is not approximated.")
+	-- MASK is a binary cutout already thresholded by the host (alpha >= cutoff
+	-- becomes 255, else 0). BLEND and fractional factor alpha are never approximated.
+	if (value.alphaMode ~= "OPAQUE" and value.alphaMode ~= "MASK") or baseColor[4] ~= 1 then
+		fail("UNSUPPORTED_MATERIAL", "alphaMode", "Only OPAQUE or MASK with alpha=1 is supported; blending is not approximated.")
 	end
+	local alphaMode: string = value.alphaMode
 	if type(value.doubleSided) ~= "boolean" then fail("INPUT", "doubleSided", "Expected a boolean.") end
 	-- With no normal map, this factor has no visual effect. Preserve it as data.
 	local normalScale = value.normalScale
@@ -183,12 +186,12 @@ function AssetMaterials.plan(material: Material?, textures: any?): Plan
 		emission = table.freeze({factor = factor, strength = strength})
 	end
 	local source: Material = table.freeze({baseColor = baseColor, metallic = metallic, roughness = roughness,
-		alphaMode = "OPAQUE", alphaCutoff = cutoff, doubleSided = value.doubleSided,
+		alphaMode = alphaMode, alphaCutoff = cutoff, doubleSided = value.doubleSided,
 		normalScale = normalScale, emission = emission, sha256 = value.sha256,
 		colorMap = sourceMaps.colorMap, normalMap = sourceMaps.normalMap, roughnessMap = sourceMaps.roughnessMap, metalnessMap = sourceMaps.metalnessMap})
 	return table.freeze({source = source, baseColorLinear = if bundle ~= nil and bundle.maps.ColorMap ~= nil then table.freeze({1, 1, 1}) else table.freeze({baseColor[1], baseColor[2], baseColor[3]}),
 		constantMaps = table.freeze({MetalnessMap = constantMap(metallic), RoughnessMap = constantMap(roughness)}),
-		metallic = metallic, roughness = roughness, doubleSided = source.doubleSided, transparency = 0,
+		metallic = metallic, roughness = roughness, doubleSided = source.doubleSided, transparency = 0, alphaMode = alphaMode,
 		emissiveStrength = if emissionSupported then 0 else nil, supported = emissionSupported,
 		emissionSupport = "zero-only", limitations = LIMITATIONS, requiresSurfaceAppearance = true, engineVerification = "pending"})
 end
@@ -235,8 +238,11 @@ function AssetMaterials.admitTextures(material: any, maps: any, guard: () -> ())
 		if count > TEXTURE_LIMITS.maps or bytes > TEXTURE_LIMITS.bytes then fail("INPUT", field, "Texture bundle exceeds bounds.") end
 		local copy = buffer.create(width * height * 4)
 		buffer.copy(copy, 0, map.bytes, 0, buffer.len(copy))
+		-- Only a MASK ColorMap may carry binary cutout coverage; every other map stays opaque.
+		local cutout = slot == "ColorMap" and material.alphaMode == "MASK"
 		for index = 3, buffer.len(copy) - 1, 4 do
-			if buffer.readu8(copy, index) ~= 255 then fail("INPUT", field, "Delivered opaque map pixels require alpha 255.") end
+			local alpha = buffer.readu8(copy, index)
+			if alpha ~= 255 and not (cutout and alpha == 0) then fail("INPUT", field, "Delivered map pixels require alpha 255 (or 0/255 for a MASK ColorMap).") end
 			if index % 16384 == 16383 then check() end
 		end
 		owned[slot] = table.freeze({width = width, height = height, bytes = copy})
@@ -333,6 +339,10 @@ function AssetMaterials.create(material: Material?, factories: Factories, guard:
 		check()
 		appearance.EmissiveStrength = plan.emissiveStrength :: number
 		if bundle ~= nil and bundle.maps.ColorMap ~= nil then appearance.Color = color end
+		-- MASK ColorMap alpha is already binary; Transparency makes it cut out.
+		-- Without a ColorMap, factor alpha 1 always passes the cutoff (opaque).
+		-- MeshPart.Transparency stays 0. Native cutout rendering is pending.
+		if plan.alphaMode == "MASK" and bundle ~= nil and bundle.maps.ColorMap ~= nil then appearance.AlphaMode = (Enum :: any).AlphaMode.Transparency end
 		check()
 		return table.freeze({surfaceAppearance = appearance,
 			editableImages = table.freeze(images),
