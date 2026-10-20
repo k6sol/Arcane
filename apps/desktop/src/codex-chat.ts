@@ -558,6 +558,13 @@ export class CodexTranscript {
     while(this.messages.length>128||this.messages.reduce((n,m)=>n+utf8(m.text),0)>DISPLAY_BYTES){this.messages.shift();this.truncated=true;}
   }
 }
+/** Readiness copy follows acknowledged native state; it does not choose or connect a model. */
+export function codexConnectionNotice(snapshot:ChatSnapshot|null|undefined):string {
+  if(!snapshot?.connected)return 'Connect your local CLI when you\u2019re ready.';
+  if(!snapshot.ready)return 'Connected. Waiting for the model list.';
+  if(snapshot.thread?.configured)return 'Continue in this conversation.';
+  return snapshot.selection?'Start your conversation when you\u2019re ready.':'Choose a model to start this conversation.';
+}
 export function approvalFingerprint(a:Approval):string {
   return JSON.stringify([a.connectionId,a.threadId,a.turnId,a.handle,a.itemId,a.serverRequestId,a.method,a.command,a.cwd,a.changes,a.reason,a.canAccept,a.expiresAt]);
 }
@@ -2832,17 +2839,32 @@ export class CodexChat {
   }
   private scope(){const s=this.snapshot();return JSON.stringify([s?.connectionId,s?.thread?.threadId,s?.thread?.turnId,this.state?.projectPath,s?.thread?.selection.model,s?.thread?.selection.effort]);}
   private normal(){const s=this.snapshot();return !this.state?.displayLimited&&this.fresh&&!this.stopped&&!this.uncertain.size&&!this.pending.size&&!this.state?.busy&&!this.state?.connecting&&!this.state?.closing&&!!s?.connected&&s.ready;}
-  private canSelectModel() {
-    if(this.preparingMessage||!this.providerAllowsCodex())return false;
+  private modelBlockReason():string|null {
     const snapshot=this.snapshot(),active=this.tabs?.active(),thread=snapshot?.thread;
-    if(this.stopped||!this.fresh||this.tabTransition||this.uncertain.size||this.state?.displayLimited||this.state?.connecting||this.state?.closing||
-      !snapshot?.connected||!snapshot.ready||snapshot.account?.auth!=='subscription'||!snapshot.account.requiresOpenaiAuth)return false;
-    if(this.tabs&&(!active||active.kind==='native'&&!this.tabs.owns(active)))return false;
-    if(thread&&!thread.configured)return false;
-    if(!this.tabs)return this.normal()&&(!thread||IDLE.includes(thread.turnStatus));
+    if(this.preparingMessage)return 'Preparing this message. Your draft is retained.';
+    if(!this.providerAllowsCodex())return 'This conversation is using another provider.';
+    if(this.stopped)return 'The chat connection is paused. Reopen this conversation to continue.';
+    if(!this.fresh)return 'Conversation state is unavailable. Refresh state to continue.';
+    if(this.tabTransition)return 'Opening the conversation. Wait for its saved state.';
+    if(this.uncertain.size)return 'A previous request needs review before you can change models or send another message.';
+    if(this.state?.displayLimited)return 'The conversation response exceeded the display limit. Refresh and review the recorded request before continuing.';
+    if(this.state?.connecting)return 'Connecting to your chat provider.';
+    if(this.state?.closing)return 'The previous chat connection is closing.';
+    if(!snapshot?.connected)return 'The chat connection is closed. Reconnect from Conversation settings to continue.';
+    if(!snapshot.ready)return 'The chat provider has not finished loading its models. Refresh state to check again.';
+    if(snapshot.account?.auth!=='subscription'||!snapshot.account.requiresOpenaiAuth)return 'This connection has not confirmed your subscription sign-in. Check Native sign-in in Settings.';
+    if(this.tabs&&(!active||active.kind==='native'&&!this.tabs.owns(active)))return 'This saved conversation has not been confirmed for the current project. Reopen it from History.';
+    if(thread&&!thread.configured)return 'The native conversation setup did not finish. Refresh state and reopen the saved conversation.';
+    if(!this.tabs){
+      if(this.pending.size||this.state?.busy)return 'Waiting for the previous request to finish. Your next draft is retained.';
+      if(thread&&!IDLE.includes(thread.turnStatus))return 'A reply is still running. Stop it or wait for it to finish before changing models.';
+    }
+    return null;
+  }
+  private canSelectModel() {
     // During a task or before a saved chat is resumed, changes are advisory
     // preferences for the next user Send; no native operation starts here.
-    return true;
+    return this.modelBlockReason()===null;
   }
   private canStartConversation() {
     if(!this.providerAllowsCodex())return false;
@@ -3128,7 +3150,7 @@ export class CodexChat {
     trigger.setAttribute('aria-label', this.api.safe(selection ? 'Codex reported model: ' + selection.model + ', effort: ' + selection.effort : 'Choose Codex model and effort'));
     this.text('codex-model-picker-status', this.uncertain.size ? 'Native acknowledgement is uncertain. Review recorded actions.' :
       this.pending.size ? 'Awaiting native acknowledgement.' : !snapshot ? 'Connect Codex to read its reported models.' :
-      !this.fresh ? 'Native state is unavailable. Refresh before changing models.' : !this.canSelectModel() ? 'Model changes are unavailable in the current native state.' :
+      !this.canSelectModel() ? this.modelBlockReason()! :
       selection ? 'Reported selection: ' + selection.model + ' · ' + selection.effort : 'No model and effort selection acknowledged.');
     if (trigger.disabled && !popover.hidden) this.closePicker(popover.contains(this.doc.activeElement));
     if (popover.hidden) return;
@@ -3515,7 +3537,7 @@ export class CodexChat {
   private render() {
     const s=this.snapshot(),t=s?.thread;
     const notice=this.el('codex-notice').textContent??'';
-    if(['Connect your local CLI when you’re ready.','No connection or model request is started automatically.','Choose a model to start this conversation.'].includes(notice)) this.text('codex-notice',s?.connected?(t?'Continue in this conversation.':s.selection?'Start your conversation when you’re ready.':'Choose a model to start this conversation.'):'Connect your local CLI when you’re ready.');
+    if(this.fresh&&['Connect your local CLI when you’re ready.','No connection or model request is started automatically.','Choose a model to start this conversation.','Connected. Choose a model to continue.','Connected. Waiting for the model list.','Start your conversation when you’re ready.','Continue in this conversation.'].includes(notice))this.text('codex-notice',codexConnectionNotice(s));
     const welcome=this.surfaceYielded?null:this.doc.getElementById('welcome-connect');if(welcome){welcome.hidden=!!s?.connected;welcome.textContent='Connect your local CLI';}
     this.text('codex-status',this.state?.connecting?'Connecting':this.state?.closing?'Disconnecting':s?.connected?s.provenance==='spawned-node-fixture'?'Test connection':'Connected':s?'Disconnected':'Not connected');
     this.text('codex-scope',s?'Connection '+s.connectionId+(t?'\nThread '+t.threadId+'\nTurn '+(t.turnId??'Not started'):'\nNo thread started'):'No native connection selected.');
@@ -3603,6 +3625,7 @@ export class CodexChat {
     const ownedTask=this.currentTask();this.text('codex-interrupt',ownedTask?'Stop task':'Interrupt current turn');
     disable('codex-interrupt',this.stopped||(!ownedTask&&(!t?.turnId||!['starting','inProgress'].includes(t.turnStatus)))||pending('turn-interrupt')||pending('task-stop'));
     this.renderComposer();
+    this.renderReadiness();
     disable('codex-acknowledge',!this.canAcknowledge());
     for(const card of Array.from(this.el('codex-approvals').children)){const a=s?.approvals.find(a=>a.handle===(card as HTMLElement).dataset.handle);for(const b of Array.from(card.querySelectorAll<HTMLButtonElement>('button[data-decision]')))b.disabled=this.stopped||!a||a.connectionId!==s?.connectionId||a.threadId!==t?.threadId||a.turnId!==t?.turnId||a.expiresAt<=Date.now()||[...this.pending.values()].some(p=>p.action==='approval'&&p.handle===a.handle)||(b.dataset.decision==='accept'&&(!this.fresh||!!this.uncertain.size||!approvalEligible(this.state,a)));}
     this.renderPicker();
@@ -3611,6 +3634,29 @@ export class CodexChat {
     this.autoReview();
   }
   /** The input hot path only validates the composer; no tabs, catalogue or state notifications. */
+  private renderReadiness():void {
+    if(this.surfaceYielded)return;
+    const model=this.modelBlockReason(),snapshot=this.snapshot(),thread=snapshot?.thread;
+    const send=model??(this.pending.size||this.state?.busy?'Waiting for the previous request to finish. Your draft is retained.':
+      this.tabs?.persistenceStatus()==='native-loading'?'Loading saved conversation preferences. Your draft is retained.':
+      !this.messageTargetReady()&&thread&&IDLE.includes(thread.turnStatus)?'This saved conversation is not ready to send. Refresh state or reopen it from History.':null);
+    let root=this.doc.getElementById('codex-readiness');
+    if(!root&&send){const form=this.doc.getElementById('codex-compose');if(!form)return;root=this.make('div',undefined,'notice chat-readiness');root.id='codex-readiness';root.setAttribute('role','status');form.prepend(root);}
+    if(!root)return;
+    root.hidden=!send;if(!send){root.replaceChildren();delete root.dataset.signature;return;}
+    const signature=JSON.stringify([send,[...this.uncertain.keys()],this.canAcknowledge(),this.stopped,this.state?.actions.filter(row=>this.uncertain.has(row.requestId))]);
+    if(root.dataset.signature===signature)return;root.dataset.signature=signature;
+    root.replaceChildren(this.make('p',send));
+    const refresh=this.make('button','Refresh state','secondary');refresh.type='button';refresh.disabled=this.stopped;
+    refresh.addEventListener('click',()=>{void this.refresh();});root.append(refresh);
+    if(this.uncertain.size){
+      const details=this.make('details',undefined,'message-details');details.append(this.make('summary','Review the recorded request'));
+      const rows=[...this.uncertain].map(([id,value])=>{const action=this.state?.actions.find(row=>row.requestId===id);return `${value.input.action}\nStatus: ${action?.state??'Not yet reported'}\nError: ${action?.errorCode??'No error code reported'}\nRequest: ${id}`;});
+      details.append(this.make('pre',rows.join('\n\n'),'hint mono'));root.append(details);
+      const review=this.make('button','Acknowledge reviewed state','secondary');review.type='button';review.disabled=!this.canAcknowledge();
+      review.addEventListener('click',()=>{if(!this.canAcknowledge())return;this.uncertain.clear();this.text('codex-notice','Recorded request and current state reviewed. Your draft is retained.');this.render();this.publishState();});root.append(review);
+    }
+  }
   private renderComposer():void {
     if(this.surfaceYielded)return;
     const s=this.snapshot(),t=(!this.tabs||this.tabs.bound(this.state))?s?.thread:null;

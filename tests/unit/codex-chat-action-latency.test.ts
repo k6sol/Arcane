@@ -115,3 +115,29 @@ for(const mode of ['rejected','unknown','transport'] as const)test(mode+' turn r
   assert.deepEqual(f.posts.map(row=>row.action),['turn-start']);
   assert.equal(f.doc.getElementById('codex-composer').value,mode==='rejected'?draft:'',f.doc.getElementById('codex-notice').textContent);
 });
+
+test('fresh acknowledged chat state replaces the initial connect hint without clearing real failures',async t=>{
+  const f=await fixture(t);f.state.snapshot!.thread={threadId:'latency-thread',sessionId:null,configured:true,writeGranted:false,
+    selection:{model:'latency-fixture',effort:'low'},turnId:null,turnStatus:'idle'};
+  f.doc.getElementById('codex-notice').textContent='Connected. Choose a model to continue.';await f.chat.refresh();
+  assert.equal(f.doc.getElementById('codex-notice').textContent,'Continue in this conversation.');
+  f.doc.getElementById('codex-notice').textContent='Mesh export failed: invalid material assignment.';await f.chat.refresh();
+  assert.equal(f.doc.getElementById('codex-notice').textContent,'Mesh export failed: invalid material assignment.');
+  assert.equal(f.doc.getElementById('codex-model').disabled,false);assert.equal(f.posts.length,0);
+});
+
+test('an unresolved chat request shows its exact blocker and an explicit reviewed-state recovery without replaying it',async t=>{
+  const f=await fixture(t);const requestId=randomUUID(),snapshot=f.state.snapshot!;
+  snapshot.thread={threadId:'latency-thread',sessionId:null,configured:true,writeGranted:false,selection:{model:'latency-fixture',effort:'low'},turnId:null,turnStatus:'idle'};
+  const input={requestId,connectionId:snapshot.connectionId,action:'turn-start' as const,threadId:'latency-thread',text:'Original message'};
+  (f.chat as unknown as {uncertain:Map<string,unknown>}).uncertain.set(requestId,{input,read:false});
+  const at=new Date().toISOString();f.state.actions.push({requestId,connectionId:snapshot.connectionId,action:'turn-start',state:'unknown',errorCode:'TIMEOUT',threadId:'latency-thread',turnId:null,model:'latency-fixture',effort:'low',createdAt:at,finishedAt:at});
+  f.doc.getElementById('codex-composer').value='Retained next draft';await f.chat.refresh();
+  const readiness=f.doc.getElementById('codex-readiness');assert.match(readiness.textContent,/previous request needs review/);assert.match(readiness.textContent,/TIMEOUT/);
+  assert.equal(f.doc.getElementById('codex-model').disabled,true);assert.equal(f.doc.getElementById('codex-submit').disabled,true);
+  let review=readiness.children.find(child=>child.textContent==='Acknowledge reviewed state')!;assert.equal(review.disabled,true);
+  f.state.actions[0]!.state='rejected';f.state.actions[0]!.errorCode='REMOTE_REJECTED';await f.chat.refresh();
+  review=readiness.children.find(child=>child.textContent==='Acknowledge reviewed state')!;assert.equal(review.disabled,false);review.dispatchEvent(new Event('click'));
+  assert.equal(f.doc.getElementById('codex-model').disabled,false);assert.equal(f.doc.getElementById('codex-submit').disabled,false);
+  assert.equal(f.doc.getElementById('codex-composer').value,'Retained next draft');assert.equal(f.posts.length,0);
+});
