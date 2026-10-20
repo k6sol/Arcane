@@ -61,15 +61,22 @@ export interface CommandOutcome {
 
 export class DaemonClient {
   readonly url: string;
-  /** Trusted routing selection only. The daemon resolves authority from the existing bearer. */
+  /** Credential routing only. The daemon establishes authority from its issued bearers. */
   readonly assetAudience: AssetAudience;
   readonly #token: string;
+  readonly #assetToken: string | null;
   readonly #pollIntervalMs: number;
 
-  constructor(options: { url: string; token: string; pollIntervalMs?: number; assetAudience?: AssetAudience }) {
+  constructor(options: { url: string; token: string; pollIntervalMs?: number; assetAudience?: AssetAudience; assetToken?: string }) {
     this.url = validateDaemonUrl(options.url);
     this.#token = validateToken(options.token);
     this.assetAudience = validateAssetAudience(options.assetAudience);
+    const assetToken = options.assetToken;
+    if (assetToken !== undefined && (this.assetAudience !== 'native-session' || typeof assetToken !== 'string' ||
+        assetToken.length !== 64 || !/^[0-9a-f]{64}$/.test(assetToken) || assetToken === this.#token)) {
+      throw new BridgeError('CONFIG_ASSET_TOKEN', 'A separate asset bearer requires the native-session audience and a launcher-issued asset credential.');
+    }
+    this.#assetToken = assetToken ?? null;
     this.#pollIntervalMs = options.pollIntervalMs ?? 500;
     if (!Number.isInteger(this.#pollIntervalMs) || this.#pollIntervalMs < 5 || this.#pollIntervalMs > 2000) {
       throw new BridgeError('CONFIG_POLL', 'Polling interval must be 5–2000 milliseconds.');
@@ -78,15 +85,26 @@ export class DaemonClient {
 
   static fromEnvironment(env: NodeJS.ProcessEnv = process.env): DaemonClient {
     const audience = env.ARCANE_ASSET_AUDIENCE;
+    const assetToken = env.ARCANE_ASSET_TOKEN;
     if (audience !== undefined && audience !== 'native-session') {
       throw new BridgeError('CONFIG_ASSET_AUDIENCE', 'ARCANE_ASSET_AUDIENCE must be absent or exactly native-session.');
     }
     return new DaemonClient({ url: validateDaemonUrl(env.ARCANE_DAEMON_URL), token: validateToken(env.ARCANE_LOCAL_TOKEN),
-      assetAudience: audience === undefined ? 'generic' : 'native-session' });
+      assetAudience: audience === undefined ? 'generic' : 'native-session', ...(assetToken === undefined ? {} : { assetToken }) });
   }
 
   redact<T>(value: T): T {
-    return JSON.parse(JSON.stringify(value).replaceAll(this.#token, '[redacted]')) as T;
+    let text = JSON.stringify(value);
+    // Replace longer secrets first so a shared substring cannot expose a suffix.
+    for (const token of [this.#token, this.#assetToken].filter((value): value is string => value !== null).sort((a, b) => b.length - a.length)) {
+      text = text.replaceAll(token, '[redacted]');
+    }
+    return JSON.parse(text) as T;
+  }
+
+  private bearer(path: string): string {
+    return this.assetAudience === 'native-session' && path.startsWith('/v1/assets/native/') && this.#assetToken !== null
+      ? this.#assetToken : this.#token;
   }
 
   private deadline(options: WaitOptions): { signal: AbortSignal; dispose: () => void } {
@@ -107,7 +125,7 @@ export class DaemonClient {
     try {
       response = await fetch(this.url + path, {
         method: body ? 'POST' : 'GET', headers: {
-          Authorization: `Bearer ${this.#token}`, Accept: 'application/json', ...(body ? { 'Content-Type': 'application/json' } : {}),
+          Authorization: `Bearer ${this.bearer(path)}`, Accept: 'application/json', ...(body ? { 'Content-Type': 'application/json' } : {}),
         }, ...(body ? { body: JSON.stringify(body) } : {}), redirect: 'error', signal,
       });
     } catch {
@@ -401,7 +419,7 @@ export class DaemonClient {
     try {
       const route = (this.assetAudience === 'native-session' ? '/v1/assets/native/preview' : '/v1/assets/preview') + '?jobId=' + encodeURIComponent(jobId) + '&path=' + encodeURIComponent(path);
       let response: Response;
-      try { response = await fetch(this.url + route, { headers: { Authorization: `Bearer ${this.#token}`, Accept: 'image/png, application/json' }, redirect: 'error', signal: deadline.signal }); }
+      try { response = await fetch(this.url + route, { headers: { Authorization: `Bearer ${this.bearer(route)}`, Accept: 'image/png, application/json' }, redirect: 'error', signal: deadline.signal }); }
       catch { throw new BridgeError(deadline.signal.aborted ? 'WAIT_ABORTED' : 'DAEMON_UNREACHABLE', 'The asset preview could not be read from the local daemon.'); }
       if (Number(response.headers.get('content-length') ?? 0) > ASSET_PREVIEW_BYTES) { await response.body?.cancel(); throw new BridgeError('RESPONSE_LIMIT', 'Preview exceeds its byte bound; use a lower renderResolution.'); }
       const bytes = Buffer.from(await response.arrayBuffer());
