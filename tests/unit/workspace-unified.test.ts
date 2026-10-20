@@ -448,7 +448,8 @@ test('markup has one composer, closed advanced settings, live review notices and
   assert.doesNotMatch(shell, /\.innerHTML|\.outerHTML|\bfetch\s*\(|localStorage|sessionStorage|\.requestSubmit\s*\(|\.submit\s*\(/);
   const chat = await readFile(resolve('apps/desktop/src/codex-chat.ts'), 'utf8');
   assert.doesNotMatch(chat, /CODEX · PUBLIC MESSAGE|'eyebrow'/);
-  assert.match(chat, /card\.setAttribute\('aria-label',message\.role==='human'\?'Your message':'Assistant message'\)/);
+  assert.match(chat, /card\.setAttribute\('aria-label',steered\?'Your steering message':message\.role==='human'\?'Your message':'Assistant message'\)/);
+  assert.match(chat, /card\.setAttribute\('data-role',message\.role==='human'\?'user':'assistant'\)/);
   const workbench = await readFile(resolve('apps/desktop/src/studio.ts'), 'utf8');
   assert.doesNotMatch(workbench, /item\.className = 'badge '/);
   assert.match(workbench, /import\('\.\/chat-attachments\.js'\)/);

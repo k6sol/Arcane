@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
-import { CodexChat, CodexChatApi, CODEX_DRAFT_SAVE_DELAY_MS, CODEX_INPUT_BYTES, type ChatState } from '../../apps/desktop/src/codex-chat.js';
+import { CodexChat, CodexChatApi, CODEX_DRAFT_SAVE_DELAY_MS, CODEX_INPUT_BYTES, type ChatState, type ChatQueueRow } from '../../apps/desktop/src/codex-chat.js';
 import type { ChatTabs } from '../../apps/desktop/src/chat-tabs.js';
 
 // Deterministic work counts instead of machine-dependent timing thresholds.
@@ -120,6 +120,71 @@ test('typing in a saved chat copies its large draft only for the public active v
   }
   const unowned=structuredClone(initial);unowned.nativeThreads=[];tabs.sync(unowned);
   assert.equal(tabs.bound(initial),false);
+});
+
+for(const transition of ['remove','acknowledged','failed-empty-checkpoint'] as const)test('empty secure queue keeps typing cheap after '+transition+' and preserves empty-checkpoint fences',async t=>{
+  const initial=reportedState(),selection={model:'reported-fixture',effort:'low'};
+  initial.snapshot!.thread={threadId:'fixture-thread',sessionId:'fixture-session',configured:true,writeGranted:false,selection,turnId:null,turnStatus:'idle'};
+  initial.nativeThreads=[{provider:'codex',projectPath:initial.projectPath,threadId:'fixture-thread',sessionId:'fixture-session',selection}];
+  const f=await fixture(t,memoryStorage(),true,initial);t.mock.timers.enable({apis:['setTimeout']});
+  const writes:string[][]=[];let refuseEmpty=false;
+  await f.chat.setQueuePersistence({version:1,read:async()=>({available:true,projectPath:initial.projectPath,rows:[]}),save:async value=>{writes.push(value.rows.map(row=>row.text));if(refuseEmpty&&!value.rows.length)throw Error('Synthetic empty checkpoint failure');return{saved:true};}});
+  const queue=f.chat as unknown as {queue:ChatQueueRow[];queueScope():string|null;queueGesture():string;queueAction(action:'remove',row:ChatQueueRow,gesture:string):boolean;renderQueue():void};
+  const scope=queue.queueScope();assert.ok(scope);
+  const requestId=randomUUID(),item:ChatQueueRow={id:1,text:'Saved queued prompt',scope,state:transition==='acknowledged'?'unknown':'paused',notice:null,
+    ...(transition==='acknowledged'?{requestId}:{}),target:{id:1,localId:'fixture-local',conversationId:'fixture-thread',sessionId:'fixture-session',text:'Saved queued prompt',modelId:selection.model,effort:selection.effort,connectionId:null,requestId:null,createdAt:new Date().toISOString(),state:'pending',attachmentState:'none'}};
+  queue.queue.push(item);queue.renderQueue();for(let i=0;i<4;i++)await new Promise<void>(done=>setImmediate(done));
+  assert.deepEqual(writes,[['Saved queued prompt']]);assert.equal(f.doc.getElementById('codex-chat-queue').hidden,false);
+  if(transition==='acknowledged'){
+    const at=new Date().toISOString();initial.actions.push({requestId,connectionId:initial.snapshot!.connectionId,action:'turn-start',state:'acknowledged',errorCode:null,threadId:'fixture-thread',turnId:'fixture-turn',model:selection.model,effort:selection.effort,createdAt:at,finishedAt:at});
+    f.set(initial);await f.chat.refresh();
+  }else{refuseEmpty=transition==='failed-empty-checkpoint';assert.equal(queue.queueAction('remove',{...item},queue.queueGesture()),true);}
+  for(let i=0;i<4;i++)await new Promise<void>(done=>setImmediate(done));
+  assert.deepEqual(writes,[['Saved queued prompt'],[]]);assert.deepEqual(queue.queue,[]);
+  const host=f.doc.getElementById('codex-chat-queue');assert.equal(host.hidden,true);assert.equal(host.children.length,0);assert.equal(host.dataset.signature,undefined);
+  let serializations=0,copies=0;const originalStringify=JSON.stringify,originalClone=globalThis.structuredClone,requests=f.calls.length,persisted=f.storage.writes;
+  JSON.stringify=((...args:Parameters<typeof JSON.stringify>)=>{serializations++;return originalStringify(...args);}) as typeof JSON.stringify;
+  globalThis.structuredClone=((value:unknown,options?:StructuredSerializeOptions)=>{if(value&&typeof value==='object'&&'draft'in value&&typeof value.draft==='string')copies++;return originalClone(value,options);}) as typeof structuredClone;
+  try{for(let i=0;i<100;i++)f.input('Exact empty-queue draft '+i+'  ');}finally{JSON.stringify=originalStringify;globalThis.structuredClone=originalClone;}
+  assert.equal(serializations,0);assert.equal(copies,100);assert.equal(f.calls.length,requests);assert.equal(f.storage.writes,persisted);assert.deepEqual(writes,[['Saved queued prompt'],[]],'empty typing never retries a checkpoint');
+  if(refuseEmpty){
+    await assert.rejects(f.chat.prepareForRuntimeRecovery(),/Queued messages could not be saved/);
+    assert.deepEqual(writes,[['Saved queued prompt'],[],[]],'public recovery refuses the still-failing empty checkpoint');
+    refuseEmpty=false;await f.chat.prepareForRuntimeRecovery();
+    assert.deepEqual(writes,[['Saved queued prompt'],[],[],[]],'public recovery explicitly retries and confirms the empty checkpoint');
+  }
+  const returned:ChatQueueRow={...item,state:'paused'};delete returned.requestId;queue.queue.push(returned);queue.renderQueue();
+  assert.equal(host.hidden,false);assert.equal(host.children.some(child=>child.dataset.queueId==='1'),true,'returning rows render after the empty signature is cleared');
+  for(let i=0;i<4;i++)await new Promise<void>(done=>setImmediate(done));
+  assert.deepEqual(writes.at(-1),['Saved queued prompt']);
+});
+
+for(const recoveryProject of ['same','different'] as const)test('held '+recoveryProject+'-project queue reattachment cannot resurrect a removed last row',async t=>{
+  const initial=reportedState(),selection={model:'reported-fixture',effort:'low'};
+  initial.snapshot!.thread={threadId:'fixture-thread',sessionId:'fixture-session',configured:true,writeGranted:false,selection,turnId:null,turnStatus:'idle'};
+  initial.nativeThreads=[{provider:'codex',projectPath:initial.projectPath,threadId:'fixture-thread',sessionId:'fixture-session',selection}];
+  const f=await fixture(t,memoryStorage(),true,initial);t.mock.timers.enable({apis:['setTimeout']});
+  const writes:string[][]=[];let diskRows:NonNullable<ChatQueueRow['target']>[]=[];
+  let releaseFirstSave!:()=>void;const firstSaveGate=new Promise<void>(done=>releaseFirstSave=done);t.after(()=>releaseFirstSave());
+  await f.chat.setQueuePersistence({version:1,read:async()=>({available:true,projectPath:initial.projectPath,rows:[]}),save:async value=>{diskRows=structuredClone(value.rows);writes.push(value.rows.map(row=>row.text));await firstSaveGate;return{saved:true};}});
+  const queue=f.chat as unknown as {queue:ChatQueueRow[];queueScope():string|null;queueGesture():string;queueAction(action:'remove',row:ChatQueueRow,gesture:string):boolean;renderQueue():void};
+  const scope=queue.queueScope();assert.ok(scope);
+  const item:ChatQueueRow={id:1,text:'Persisted before reattachment',scope,state:'paused',notice:null,target:{id:1,localId:'fixture-local',conversationId:'fixture-thread',sessionId:'fixture-session',text:'Persisted before reattachment',modelId:selection.model,effort:selection.effort,connectionId:null,requestId:null,createdAt:new Date().toISOString(),state:'pending',attachmentState:'none'}};
+  queue.queue.push(item);queue.renderQueue();for(let i=0;i<4;i++)await new Promise<void>(done=>setImmediate(done));
+  const staleRows=structuredClone(diskRows);assert.equal(staleRows.length,1);
+  let release!:()=>void,readStarted=false;const gate=new Promise<void>(done=>release=done);t.after(()=>release());
+  const reattaching=f.chat.setQueuePersistence({version:1,read:async()=>{readStarted=true;await gate;return{available:true,projectPath:initial.projectPath+(recoveryProject==='different'?'-other':''),rows:staleRows};},save:async value=>{diskRows=structuredClone(value.rows);writes.push(value.rows.map(row=>row.text));return{saved:true};}});
+  for(let i=0;i<4;i++)await new Promise<void>(done=>setImmediate(done));assert.equal(readStarted,true);
+  assert.equal(queue.queueAction('remove',{...item},queue.queueGesture()),true);assert.deepEqual(writes,[['Persisted before reattachment']]);
+  releaseFirstSave();for(let i=0;i<4;i++)await new Promise<void>(done=>setImmediate(done));
+  assert.deepEqual(queue.queue,[],'the old bridge save acknowledgement cannot clear or resurrect the newer removal');
+  release();await reattaching;assert.deepEqual(queue.queue,[]);assert.equal(f.doc.getElementById('codex-chat-queue').hidden,true);assert.deepEqual(writes,[['Persisted before reattachment']],'finishing a read never overwrites the pending local removal');
+  if(recoveryProject==='different'){
+    await assert.rejects(f.chat.prepareForRuntimeRecovery(),/Queued messages could not be saved/);assert.deepEqual(writes,[['Persisted before reattachment']],'another project cannot receive the outgoing empty checkpoint');
+    await f.chat.setQueuePersistence({version:1,read:async()=>({available:true,projectPath:initial.projectPath,rows:staleRows}),save:async value=>{diskRows=structuredClone(value.rows);writes.push(value.rows.map(row=>row.text));return{saved:true};}});
+    assert.deepEqual(queue.queue,[]);
+  }
+  await f.chat.prepareForRuntimeRecovery();assert.deepEqual(writes,[['Persisted before reattachment'],[]]);assert.deepEqual(diskRows,[]);
 });
 
 test('an immediate chat switch and stop/reload preserve every draft byte before debounce fires',async t=>{
