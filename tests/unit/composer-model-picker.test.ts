@@ -51,6 +51,8 @@ class LegacyElement {
   replaceChildren(...children: LegacyElement[]) { this.content = ''; this.children = children; }
   getAttribute(name: string) { return this.attributes.get(name) ?? null; }
   setAttribute(name: string, value: string) { this.attributes.set(name, value); }
+  // This fixture reads presentation state and never dispatches user input.
+  addEventListener(_type: string, _listener: EventListener): void {}
   querySelectorAll() { return []; }
   close() { this.open = false; }
 }
