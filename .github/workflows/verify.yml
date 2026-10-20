@@ -76,7 +76,7 @@ jobs:
       - name: Test release contracts
         if: matrix.suite == 'release'
         run: node --test --test-concurrency=1 tests/release/*.test.mjs
-      - name: Verify desktop setup controls in Edge
+      - name: Verify desktop setup and model previews in Edge
         if: runner.os == 'Windows' && matrix.suite == 'release'
         shell: pwsh
         env:
@@ -91,6 +91,9 @@ jobs:
           if (-not $edgeExecutable) { throw 'Microsoft Edge is required for desktop key control verification.' }
           $env:ARCANE_UI_BROWSER_EXE = $edgeExecutable
           node --test --test-concurrency=1 dist/tests/unit/studio-key-onboarding-browser.test.js dist/tests/unit/studio-key-settings-ui.test.js dist/tests/unit/welcome-tour.test.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:ARCANE_VIEWER_BROWSER = $edgeExecutable
+          node --test --test-concurrency=1 tests/browser/asset-viewer-resize.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test --test-concurrency=1 services/gateway/test/account-routes.test.ts
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

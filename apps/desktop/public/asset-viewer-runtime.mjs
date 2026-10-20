@@ -197,6 +197,9 @@ export async function createAssetViewer({ host, bytes, label, signal, onStatus }
   let view = 'perspective', mode = 'rendered', selectedIndex = -1, speed = 1, loop = true, stoppedTime = 0;
   let clips = [], materialSlots = [], clayMaterials = new Map(), hemisphere, lights = [];
   let rejectPending, loadFailure, resolutionMedia, intersectionKnown = false, intersecting = false, lastVisible = false, width = 0, height = 0, fitNeeded = true, maxDimension = 8192;
+  // True once the user (or the orbit/pan/zoom API) moves the camera away from the
+  // automatic framing; a resize then keeps that camera instead of refitting.
+  let cameraEdited = false;
   let scene, camera, model, normalizedBox, metrics = { triangles: 0, meshes: 0, materials: 0, animations: 0, renderFrames: 0 };
   const status = message => { try { onStatus?.(message); } catch { /* Consumer status must not break ownership. */ } };
   const listen = (target, type, listener, options) => {
@@ -330,15 +333,24 @@ export async function createAssetViewer({ host, bytes, label, signal, onStatus }
           validateScene(gltf.scene);
           if (!loop && action.paused) playing = false;
         } else lastTime = null;
-        if (fitNeeded) { fitCamera(); fitNeeded = false; }
-        updateClip();
-        renderer.render(scene, camera);
-        metrics.renderFrames++;
-        if (renderer.info.render.calls > MAX_DRAWS) throw previewError('Asset exceeds the 256 draw-call preview limit.');
-        dirty = false;
+        draw();
         schedule();
       } catch (error) { status(`3D preview stopped: ${safeReason(error)}`); dispose(); }
     });
+  }
+  function draw() {
+    if (fitNeeded) { fitCamera(); fitNeeded = false; }
+    updateClip();
+    renderer.render(scene, camera);
+    metrics.renderFrames++;
+    if (renderer.info.render.calls > MAX_DRAWS) throw previewError('Asset exceeds the 256 draw-call preview limit.');
+    dirty = false;
+  }
+  function updateProjection() {
+    const aspect = width / height;
+    if (camera.isPerspectiveCamera) camera.aspect = aspect;
+    else { const half = (camera.top - camera.bottom) / 2; camera.left = -half * aspect; camera.right = half * aspect; }
+    camera.updateProjectionMatrix();
   }
   function updateClip() {
     const box = new THREE.Box3().setFromObject(model);
@@ -384,6 +396,7 @@ export async function createAssetViewer({ host, bytes, label, signal, onStatus }
     camera.position.copy(center).addScaledVector(direction, distance);
     controls.update();
     controls.saveState();
+    cameraEdited = false; // controls.update() above reported this fit as a change.
   }
   function measure() {
     if (disposed) return;
@@ -393,24 +406,35 @@ export async function createAssetViewer({ host, bytes, label, signal, onStatus }
     // A viewport-only rectangle must not wake a host clipped by overflow parents.
     if (!intersectionKnown) intersecting = bounds.bottom > 0 && bounds.right > 0 && bounds.top < window.innerHeight && bounds.left < window.innerWidth;
     if (nextWidth !== width || nextHeight !== height) {
-      if (width && height && nextWidth && nextHeight) fitNeeded = true;
+      // Refit only while the camera is still the automatic framing. A camera the
+      // user orbited, panned or zoomed is kept; only its projection follows the size.
+      if (width && height && nextWidth && nextHeight && !cameraEdited) fitNeeded = true;
       width = nextWidth; height = nextHeight;
     }
+    let resized = false;
     if (renderer && width > 0 && height > 0) {
       const dpr = Math.min(window.devicePixelRatio || 1, 1.5, Math.sqrt(MAX_PIXELS / (width * height)), maxDimension / width, maxDimension / height);
       const pixelWidth = Math.max(1, Math.floor(width * dpr)), pixelHeight = Math.max(1, Math.floor(height * dpr));
-      if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) { renderer.setSize(pixelWidth, pixelHeight, false); dirty = true; }
-      if (camera.isPerspectiveCamera) { camera.aspect = width / height; camera.updateProjectionMatrix(); }
+      if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) { renderer.setSize(pixelWidth, pixelHeight, false); dirty = true; resized = true; }
+      updateProjection();
+    }
+    // Resizing the backing store clears a presented image. ResizeObserver runs
+    // after layout and before paint, so redraw now; waiting for the next rAF
+    // shows one blank frame per resize step while the window edge is dragged.
+    if (resized && metrics.renderFrames > 0 && hostVisible()) {
+      try { draw(); lastVisible = true; }
+      catch (error) { status(`3D preview stopped: ${safeReason(error)}`); dispose(); return; }
     }
     schedule();
   }
   function reset() { if (!disposed && controls) { fitCamera(); fitNeeded = false; requestRender(); } }
+  function controlsChanged() { cameraEdited = true; requestRender(); }
   function configureControls() {
     controlsCleanup?.();
     controls = new OrbitControls(camera, canvas);
     const controlsRoot = canvas.getRootNode(), ownedControls = controls;
     controlsCleanup = () => {
-      ownedControls.removeEventListener('change', requestRender);
+      ownedControls.removeEventListener('change', controlsChanged);
       ownedControls.dispose();
       // Vendor disconnect resolves getRootNode again; also remove from the
       // original root when a host was detached or reparented.
@@ -421,7 +445,7 @@ export async function createAssetViewer({ host, bytes, label, signal, onStatus }
     controls.enablePan = true;
     controls.autoRotate = false;
     controls.cursorStyle = 'grab';
-    controls.addEventListener('change', requestRender);
+    controls.addEventListener('change', controlsChanged);
   }
   function setView(value) {
     if (disposed) return;
@@ -637,6 +661,11 @@ export async function createAssetViewer({ host, bytes, label, signal, onStatus }
     // Detect detachment without observing all attributes in the desktop document.
     mutationObserver.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'style', 'hidden'] });
     listen(document, 'visibilitychange', () => { dirty = true; stopFrame(); measure(); });
+    // An ancestor's opacity animation or transition (for example the preview
+    // panel's entrance) changes visibility without any resize, intersection or
+    // attribute change. Re-check when one ends, or the canvas stays undrawn.
+    const settled = event => { if (event.target instanceof Node && event.target.contains(host)) measure(); };
+    for (const type of ['animationend', 'animationcancel', 'transitionend', 'transitioncancel']) listen(document, type, settled, { capture: true, passive: true });
     listen(motion, 'change', () => { stopFrame(); requestRender(); });
     listen(window, 'resize', measure);
     listen(window, 'scroll', measure, { passive: true, capture: true });
