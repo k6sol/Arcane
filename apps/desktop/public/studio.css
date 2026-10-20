@@ -2430,7 +2430,7 @@ body.arcane-app{background:var(--vignette),var(--canvas);background-color:var(--
 .arcane-app .workspace-topbar .icon{width:18px;height:18px;stroke-width:1.75}
 .arcane-app .workspace-chat-tabs [role=tab]{min-height:36px;height:36px;padding:0 12px;border-radius:var(--r-1)}
 .arcane-app .chat-tab>button[aria-label^="Close "]{min-height:36px;height:36px;border-radius:var(--r-1)}
-.arcane-app .chat-tabs-history>summary{min-height:36px;border-radius:var(--r-1)}
+.arcane-app .chat-tabs-history>summary{display:flex;align-items:center;min-height:36px;height:36px;padding-block:0;border-radius:var(--r-1)}
 .arcane-app .workspace-search{min-height:36px;height:36px;border-radius:var(--r-1);background:var(--glass);border-color:var(--glass-line)}
 .arcane-app .workspace-search input[type=search]{min-height:34px;padding-block:0}
 .arcane-app .workspace-search kbd{min-height:20px;padding:1px 6px;border-radius:var(--r-row);font-size:12px;line-height:16px}
