@@ -298,7 +298,28 @@ export function codexRateLimitDisplay(snapshot:ChatSnapshot|null):{status:string
   return{status:(live?'Last reported ':'Disconnected · last reported ')+observed+'. '+availability,rows};
 }
 /** Presentation-only usage-limit evidence for the composer notice; never authority to send, retry or switch. */
-export interface ProviderUsageLimit { resetsAt:number|null }
+export interface ProviderUsageLimit {
+  /** Reported reset (Unix seconds), or null when the provider named none. */
+  resetsAt:number|null;
+  /** Which window ran out, only when the provider said so: the short (5-hour) session window or the weekly one. */
+  window?:'session'|'weekly';
+}
+/** A reset time in the viewer's locale: the time alone today, weekday and time otherwise. */
+export function formatUsageReset(resetsAt:number,now=Date.now()):string {
+  const at=new Date(resetsAt*1000),today=new Date(now).toDateString()===at.toDateString();
+  return at.toLocaleString(undefined,today?{hour:'numeric',minute:'2-digit'}:{weekday:'short',hour:'numeric',minute:'2-digit'});
+}
+/** Whether a limit still applies: no reported reset, or a reset still in the future. */
+export function usageLimitActive(limit:ProviderUsageLimit|null|undefined,now=Date.now()):boolean {
+  return !!limit&&(limit.resetsAt===null||limit.resetsAt*1000>now);
+}
+/** The model list's line under an exhausted provider's heading; null once the reported reset has passed. */
+export function usageLimitPickerNote(limit:ProviderUsageLimit|null|undefined,now=Date.now()):string|null {
+  if(!limit||!usageLimitActive(limit,now))return null;
+  return 'Usage limit reached'+(limit.resetsAt===null?'':' · resets '+formatUsageReset(limit.resetsAt,now));
+}
+/** Native turn errors the client classified as the account's usage limit (packages/codex-client session error codes). */
+const USAGE_LIMIT_EVENT_CODES=/^(?:USAGE_LIMIT_EXCEEDED)$/;
 /** Turn rejections that name a usage or rate limit (the native client's recorded error code). */
 const USAGE_LIMIT_CODES=/^(?:USAGE_LIMIT(?:_EXCEEDED|_REACHED)?|RATE_LIMIT(?:_EXCEEDED|_REACHED)|QUOTA_EXCEEDED|CREDITS_DEPLETED)$/;
 /**
@@ -310,7 +331,16 @@ const USAGE_LIMIT_CODES=/^(?:USAGE_LIMIT(?:_EXCEEDED|_REACHED)?|RATE_LIMIT(?:_EX
 export function codexUsageLimit(snapshot:ChatSnapshot|null|undefined,actions:readonly ChatActionRecord[]=[]):ProviderUsageLimit|null {
   if(!snapshot||snapshot.account?.auth!=='subscription')return null;
   const turn=actions.findLast(row=>row.action==='turn-start'&&row.connectionId===snapshot.connectionId&&row.state!=='pending');
-  const rejected=turn?.state==='rejected'&&!!turn.errorCode&&USAGE_LIMIT_CODES.test(turn.errorCode);
+  let rejected=turn?.state==='rejected'&&!!turn.errorCode&&USAGE_LIMIT_CODES.test(turn.errorCode);
+  // A turn that started and then failed at the usage limit (live error event), unless a later turn completed.
+  const events=Array.isArray(snapshot.events)?snapshot.events:[];
+  const failedAt=events.findLastIndex(event=>event.type==='error'&&typeof (event as {code?:unknown}).code==='string'&&USAGE_LIMIT_EVENT_CODES.test((event as {code:string}).code));
+  if(failedAt>=0){
+    const failed=(events[failedAt] as {turnId?:unknown}).turnId;
+    const laterCompleted=events.slice(failedAt+1).some(event=>event.type==='turn'&&(event as {status?:unknown}).status==='completed'&&(event as {turnId?:unknown}).turnId!==failed);
+    const newerTurn=turn?.state==='acknowledged'&&!!turn.turnId&&turn.turnId!==failed;
+    if(!laterCompleted&&!newerTurn)rejected=true;
+  }
   const report=snapshot.rateLimits;
   let buckets:NonNullable<ChatSnapshot['rateLimits']>['buckets']=[];
   if(report){
@@ -321,8 +351,11 @@ export function codexUsageLimit(snapshot:ChatSnapshot|null|undefined,actions:rea
     if(report.ordinaryUsageAllowed===false&&buckets.some(blocked))buckets=buckets.filter(blocked);
   }
   if(!buckets.length&&!rejected)return null;
-  const resets=buckets.flatMap(b=>[b.primary,b.secondary]).filter(w=>!!w&&w.usedPercent>=100&&w.resetsAt!==null).map(w=>w!.resetsAt!);
-  return{resetsAt:resets.length?Math.max(...resets):null};
+  const full=buckets.flatMap(b=>[b.primary,b.secondary]).filter(w=>!!w&&w.usedPercent>=100&&w.resetsAt!==null).map(w=>w!);
+  if(!full.length)return{resetsAt:null};
+  const latest=full.reduce((a,b)=>b.resetsAt!>a.resetsAt!?b:a),mins=latest.windowDurationMins;
+  const window=mins===null?null:mins>=7*1440?'weekly':mins<=360?'session':null;
+  return{resetsAt:latest.resetsAt!,...(window?{window}:{})};
 }
 export class CodexChatApi {
   readonly #token: string;
@@ -1691,7 +1724,8 @@ export function groupBuildProgress(container:HTMLElement,open:ReadonlySet<string
   const segments:Segment[]=[{rows:[],tops:[],groups:[]}];
   for(const child of [...container.children]){
     const segment=segments.at(-1)!;
-    if(child.classList.contains('human')){segments.push({rows:[],tops:[],groups:[]});continue;}
+    // A steered message joins the running turn, so its group continues past it.
+    if(child.classList.contains('human')&&!child.classList.contains('steered')){segments.push({rows:[],tops:[],groups:[]});continue;}
     if(isBuildGroup(child)){segment.groups.push(child as HTMLElement);segment.tops.push(child);segment.rows.push(...(child.querySelector('.build-progress-items')?.children??[]));}
     else if(isToolArticle(child)||child.classList.contains('tool-group')){segment.rows.push(child);segment.tops.push(child);}
   }
@@ -1882,7 +1916,7 @@ export const COMPOSER_TIPS=Object.freeze([
   'Enter sends. Shift+Enter starts a new line.',
   'Type / for commands: /new, /clear-draft, /model and /help.',
   'Type @selection to refer to what is selected in Studio; the assistant reads it with selection_read.',
-  'While Claude is replying, press Enter to queue your next message. It is sent when the reply finishes.',
+  'While Claude is replying, press Enter to steer the reply now, or Alt+Enter to queue your next message for after it finishes.',
   'Studio changes appear in a card after each reply. Restore writes a restore request you can review before sending.',
   'Be specific: name the style, scale and mood. Turn on Playtest to let the assistant check gameplay.',
 ]);
@@ -2330,7 +2364,8 @@ export class CodexChat {
   modelGroup():ComposerModelGroup {
     const s=this.snapshot(),signedIn=!!this.state&&this.fresh&&!this.stopped&&s?.account?.auth==='subscription';
     const models=signedIn&&s?.connected&&s.ready?s.models.map(row=>({id:row.model,label:this.api.safe(row.displayName),title:this.api.safe(row.model)})):[];
-    return {provider:'codex',label:'ChatGPT',available:signedIn,hint:signedIn?'Connect to choose a model':'Sign in to use',models};
+    const note=signedIn?usageLimitPickerNote(this.usageLimit()):null;
+    return {provider:'codex',label:'ChatGPT',available:signedIn,hint:signedIn?'Connect to choose a model':'Sign in to use',models,...(note?{note}:{})};
   }
   /** Fresh evidence that the signed-in ChatGPT account is out of usage (presentation only; see codexUsageLimit). */
   /** Shows a '12k tokens (~$0.31)' line under each finished reply, as the Claude chat does. Presentation only. */
@@ -3130,7 +3165,8 @@ export class CodexChat {
       }
       // The other provider's section: choosing there switches provider explicitly through the cross-provider link.
       const others = crossProviderColumns(this.doc, this.crossProvider, query, (id, provider) => { if (!this.surfaceYielded && !this.picker()!.hidden) { this.closePicker(); this.crossProvider?.choose(id, provider); } });
-      fillModelColumns(this.doc, host, { provider: 'codex', label: 'ChatGPT', rows: own, empty: snapshot?.models.length ? 'No matching models' : 'No models reported' }, others, query);
+      const limitNote = usageLimitPickerNote(this.usageLimit());
+      fillModelColumns(this.doc, host, { provider: 'codex', label: 'ChatGPT', rows: own, empty: snapshot?.models.length ? 'No matching models' : 'No models reported', ...(limitNote ? { note: limitNote } : {}) }, others, query);
       this.el('codex-model-empty').hidden = !!cross || models.length > 0;
       this.text('codex-model-empty', snapshot?.models.length ? 'No reported models match your search.' : 'No Codex models have been reported. Review connection setup.');
       const effortHost = this.el('codex-picker-efforts'); effortHost.replaceChildren();

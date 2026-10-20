@@ -36,13 +36,23 @@ const result = (extra: Record<string, unknown> = {}) => line({ type: 'result', s
   usage: { input_tokens: 2, cache_creation_input_tokens: 2933, cache_read_input_tokens: 649, output_tokens: 4 }, ...extra });
 
 class FakeChild extends EventEmitter {
-  stdout = new EventEmitter(); stderr = new EventEmitter(); pid = 4242; exitCode: number | null = null; signalCode: string | null = null; killed = 0; input = '';
+  stdout = new EventEmitter(); stderr = new EventEmitter(); pid = 4242; exitCode: number | null = null; signalCode: string | null = null; killed = 0; input = ''; ended = false; lines: any[] = [];
   stdin: any;
   readonly onInput: (child: FakeChild) => void;
   constructor(onInput: (child: FakeChild) => void) {
     super(); this.onInput = onInput;
-    this.stdin = { on() {}, end: (text: string) => { this.input = text; setImmediate(() => this.onInput(this)); } };
+    // stdin stays open for steering: the first write starts the script; end() (after the result) only marks it closed.
+    this.stdin = Object.assign(new EventEmitter(), {
+      write: (text: string, _encoding?: string, callback?: (error?: Error | null) => void) => {
+        const first = !this.input; this.input += text; this.lines.push(JSON.parse(text));
+        if (first) setImmediate(() => this.onInput(this));
+        if (callback) setImmediate(callback);
+        return true;
+      }, end: () => { this.ended = true; },
+    });
   }
+  /** The text of the turn's first stream-json user message. */
+  get prompt(): string { return this.lines[0]?.message?.content?.at(-1)?.text ?? ''; }
   write(text: string | Buffer) { this.stdout.emit('data', Buffer.isBuffer(text) ? text : Buffer.from(text)); }
   close(code: number | null = 0) { if (this.exitCode !== null || this.signalCode) return; this.exitCode = code; this.emit('close', code, null); }
   kill() { this.killed++; setImmediate(() => { if (this.exitCode === null) { this.signalCode = 'SIGTERM'; this.emit('close', null, 'SIGTERM'); } }); return true; }
@@ -167,12 +177,14 @@ test('turn lifecycle: exact argv, stdin prompt, scoped env, streamed events, too
   assert.deepEqual(done, { turnId: reply.turnId, conversationId: reply.conversationId, type: 'done', ok: true, error: null, usage: { inputTokens: 3584, outputTokens: 4, costUsd: 0.0119654 }, usageLimit: null });
   const [run] = f.turns();
   assert.equal(run!.command, f.command); assert.equal(run!.options.cwd, f.project);
-  assert.deepEqual(run!.args.slice(0, -2), ['-p', '--input-format', 'text', '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
+  assert.deepEqual(run!.args.slice(0, -2), ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
     '--mcp-config', join(f.root, 'arcane.mcp.json'), '--strict-mcp-config', '--setting-sources', 'user', '--model', 'sonnet', '--effort', 'high', '--permission-mode', 'default',
     '--tools', '', '--allowedTools', 'mcp__arcane']);
   assert.equal(run!.args.at(-2), '--append-system-prompt'); assert.match(run!.args.at(-1)!, /Arcane desktop chat[\s\S]*ARCANE TASK INSTRUCTIONS FIXTURE/);
   assert.ok(!run!.args.includes('--resume')); assert.ok(!run!.args.some(a => a.includes(CREDENTIAL)));
-  assert.equal(run!.child.input, 'Build a red door in the lobby please');
+  assert.equal(run!.child.prompt, 'Build a red door in the lobby please');
+  assert.deepEqual(run!.child.lines, [{ type: 'user', message: { role: 'user', content: [{ type: 'text', text: 'Build a red door in the lobby please' }] } }]);
+  assert.equal(run!.child.ended, true, 'stdin closes at the result so Claude Code exits');
   assert.equal(run!.options.env.ARCANE_LOCAL_TOKEN, CREDENTIAL); assert.equal(run!.options.env.ARCANE_DAEMON_URL, ORIGIN);
   assert.ok(!('ANTHROPIC_API_KEY' in run!.options.env)); assert.equal(run!.options.shell, false); assert.equal(run!.options.windowsHide, true);
   assert.equal(f.dialogs.length, 1); assert.match(f.dialogs[0].message, /Arcane project tools/); assert.ok(f.dialogs[0].detail.includes(f.project));
@@ -316,7 +328,9 @@ test('stderr and unsafe result text never reach events or transcripts; short pla
   assert.deepEqual([done.ok, done.error], [false, 'Claude Code could not finish this reply.']);
   f.scripts.push(replay(init(), result({ subtype: 'success', is_error: true, result: 'Claude usage limit reached · resets 3pm' })));
   const b = await f.host.send(turnInput('go', a.conversationId));
-  assert.deepEqual([(await f.done(b.turnId)).error, (await f.done(b.turnId)).usageLimit], [chat.CLAUDE_CHAT_MESSAGES.usageLimit, { resetsAt: null }], 'a usage-limit sentence maps to the fixed message');
+  const bDone = await f.done(b.turnId);
+  assert.equal(bDone.error, chat.CLAUDE_CHAT_MESSAGES.usageLimit, 'a usage-limit sentence maps to the fixed message');
+  assert.ok(Number.isSafeInteger(bDone.usageLimit.resetsAt) && bDone.usageLimit.resetsAt * 1000 > Date.now() - 60000 && bDone.usageLimit.resetsAt * 1000 <= Date.now() + 86400000, 'its clock time becomes the next 3pm');
   f.scripts.push(replay(init(), result({ subtype: 'success', is_error: true, result: 'Credit balance is too low' })));
   const c = await f.host.send(turnInput('go', a.conversationId));
   assert.equal((await f.done(c.turnId)).error, 'Credit balance is too low', 'other short plain CLI errors still pass through');
@@ -370,7 +384,7 @@ test('IPC accepts only the trusted main frame and exact argument shapes', async 
     history: async (id: string) => { calls.push('history:' + id); return {}; }, send: async (input: any) => { calls.push('send'); assert.ok(Object.isFrozen(input)); return f.host.send(input); },
     stop: async () => { calls.push('stop'); return false; }, remove: async () => { calls.push('remove'); return false; } });
   chat.installClaudeChatIpc({ handle: (channel: string, handler: any) => handlers.set(channel, handler) }, { getSession: () => session.current, getHost: () => host });
-  assert.deepEqual([...handlers.keys()].sort(), ['history', 'list', 'remove', 'rewind', 'send', 'status', 'stop'].map(a => 'arcane:claude-chat-' + a));
+  assert.deepEqual([...handlers.keys()].sort(), ['history', 'list', 'remove', 'rewind', 'send', 'status', 'steer', 'stop'].map(a => 'arcane:claude-chat-' + a));
   const event = { sender: contents, senderFrame: frame };
   const invoke = (action: string, ...args: any[]) => handlers.get('arcane:claude-chat-' + action)!(event, ...args);
   assert.deepEqual(await invoke('status'), { ok: 1 });
@@ -442,11 +456,11 @@ test('usage and rate limits map to one fixed message with a bounded reset time; 
   f.scripts.push(replay(init(), rejected(1792104000), result({ subtype: 'success', is_error: true, result: raw })));
   const a = await f.host.send(turnInput('go'));
   const done = await f.done(a.turnId);
-  assert.deepEqual([done.ok, done.error, done.usageLimit], [false, chat.CLAUDE_CHAT_MESSAGES.usageLimit, { resetsAt: 1792104000 }]);
+  assert.deepEqual([done.ok, done.error, done.usageLimit], [false, chat.CLAUDE_CHAT_MESSAGES.usageLimit, { resetsAt: 1792104000, window: 'session' }], 'the structured reset wins over the sentence; five_hour is the session window');
   // A rejected rate_limit_event alone (the CLI exits without a result) is still the usage limit; unsafe reset values are dropped.
   f.scripts.push(child => { child.write(init()); child.write(rejected('soon; see https://example.invalid')); child.close(1); });
   const b = await f.host.send(turnInput('go', a.conversationId));
-  assert.deepEqual([(await f.done(b.turnId)).error, (await f.done(b.turnId)).usageLimit], [chat.CLAUDE_CHAT_MESSAGES.usageLimit, { resetsAt: null }]);
+  assert.deepEqual([(await f.done(b.turnId)).error, (await f.done(b.turnId)).usageLimit], [chat.CLAUDE_CHAT_MESSAGES.usageLimit, { resetsAt: null, window: 'session' }]);
   // Legacy result sentence with an embedded epoch, and an HTTP 429 result.
   f.scripts.push(replay(init(), result({ subtype: 'success', is_error: true, result: 'Claude AI usage limit reached|1792107600' })));
   const c = await f.host.send(turnInput('go', a.conversationId));
@@ -465,6 +479,36 @@ test('usage and rate limits map to one fixed message with a bounded reset time; 
   assert.equal(chat.usageLimitResult({ type: 'result', subtype: 'success', is_error: false, result: 'usage limit reached' }), null);
 });
 
+test('Claude Code limit sentences: session and weekly limits, reset clock times, dates and time zones parse; anything else is null', () => {
+  const now = Date.parse('2026-10-20T10:00:00Z'), iso = (text: unknown) => { const at = chat.parseUsageReset(text, now); return at === null ? null : new Date(at * 1000).toISOString(); };
+  // Time only, in a named zone: today when still ahead, otherwise tomorrow.
+  assert.equal(iso('You’ve hit your session limit · resets 2:50pm (Europe/London)'), '2026-10-20T13:50:00.000Z');
+  assert.equal(iso('resets 9am (Europe/London)'), '2026-10-21T08:00:00.000Z', 'a time already passed today is tomorrow');
+  assert.equal(iso('resets at 14:00 (UTC)'), '2026-10-20T14:00:00.000Z');
+  assert.equal(iso('resets 3pm UTC'), '2026-10-20T15:00:00.000Z');
+  assert.equal(iso('resets 11:30 p.m. (America/New_York)'), '2026-10-21T03:30:00.000Z');
+  // Date and time; an explicit year; a daylight-saving zone on either side of its change.
+  assert.equal(iso('You’ve hit your weekly limit · resets Oct 27, 4am (Europe/London)'), '2026-10-27T04:00:00.000Z', 'GMT after the clocks change');
+  assert.equal(iso('resets Oct 24, 4am (Europe/London)'), '2026-10-24T03:00:00.000Z', 'BST before the change');
+  assert.equal(iso('resets Jan 3, 2027 at 9:15 am (UTC)'), '2027-01-03T09:15:00.000Z');
+  assert.equal(iso('resets January 2nd, 6pm (Asia/Tokyo)'), '2027-01-02T09:00:00.000Z', 'a date without a year is the next one');
+  assert.equal(iso('resets in 3 hours'), '2026-10-20T13:00:00.000Z');
+  assert.equal(iso('resets in 2h 30m'), '2026-10-20T12:30:00.000Z');
+  assert.equal(iso('Claude AI usage limit reached|1792107600'), new Date(1792107600 * 1000).toISOString(), 'legacy epoch suffix');
+  // An unknown zone reads as local time rather than failing.
+  const local = chat.parseUsageReset('resets 3pm (Mars/Olympus_Mons)', now), expect = new Date(now); expect.setHours(15, 0, 0, 0);
+  if (expect.getTime() <= now - 60000) expect.setDate(expect.getDate() + 1);
+  assert.equal(local, expect.getTime() / 1000);
+  for (const bad of ['resets 13pm', 'resets 25:00', 'resets 4 (Europe/London)', 'resets soon', 'resets Foo 12, 4am', 'resets 10:75', '', null, undefined, 42, {}, 'x'.repeat(5000)])
+    assert.equal(chat.parseUsageReset(bad, now), null, String(bad).slice(0, 40));
+  assert.equal(chat.parseUsageReset('resets 3pm', Number.NaN) === null || Number.isSafeInteger(chat.parseUsageReset('resets 3pm', Number.NaN)), true, 'never throws on a bad clock');
+  assert.deepEqual(['You’ve hit your session limit', 'You’ve hit your weekly limit', 'Opus weekly limit reached', 'usage limit reached'].map(text => chat.usageWindow(text)), ['session', 'weekly', 'weekly', null]);
+  assert.deepEqual(['five_hour', 'seven_day', 'seven_day_opus', 'other'].map(type => chat.usageWindow('', type)), ['session', 'weekly', 'weekly', null]);
+  // The result classification keeps the window and the parsed clock time apart from a structured reset.
+  assert.deepEqual(chat.usageLimitResult({ type: 'result', subtype: 'success', is_error: true, result: 'You’ve hit your session limit · resets 2:50pm (Europe/London)' }, now),
+    { resetsAt: null, window: 'session', parsed: Date.parse('2026-10-20T13:50:00Z') / 1000 });
+});
+
 test('preload forwards a usage limit only as the fixed engine message with a bounded reset time', async () => {
   const vm = await import('node:vm');
   const source = await readFile(join(process.cwd(), 'apps/desktop/electron/preload.cjs'), 'utf8');
@@ -476,6 +520,8 @@ test('preload forwards a usage limit only as the fixed engine message with a bou
   const send = (value: unknown) => { seen.length = 0; listeners[0]!({}, value); return seen[0] ? JSON.parse(JSON.stringify(seen[0])) : null; };
   const message = chat.CLAUDE_CHAT_MESSAGES.usageLimit;
   assert.deepEqual(send({ ...base, error: message, usageLimit: { resetsAt: 1792104000, extra: 'x' } }).usageLimit, { resetsAt: 1792104000 });
+  assert.deepEqual(send({ ...base, error: message, usageLimit: { resetsAt: 1792104000, window: 'weekly' } }).usageLimit, { resetsAt: 1792104000, window: 'weekly' });
+  assert.deepEqual(send({ ...base, error: message, usageLimit: { resetsAt: null, window: 'see https://example.invalid' } }).usageLimit, { resetsAt: null }, 'only the two fixed window words cross');
   assert.deepEqual(send({ ...base, error: message, usageLimit: null }).usageLimit, null);
   assert.equal(send({ ...base, error: 'Failed', usageLimit: undefined }).usageLimit, null, 'older events without the field still pass');
   assert.equal(send({ ...base, error: 'see https://example.invalid', usageLimit: { resetsAt: null } }), null, 'a limit never carries another text');
@@ -561,13 +607,13 @@ test('edit rewind: the edited message and everything after it are removed and pe
   const edited = await again.host.send(turnInput('Add a blue door', first.conversationId)); await again.done(edited.turnId);
   const [run] = again.turns();
   assert.ok(!run!.args.includes('--resume') && !run!.args.includes('--fork-session'));
-  assert.equal(run!.child.input, chat.rewindSeed([{ role: 'user', text: 'Make a lobby' }, { role: 'assistant', text: 'Plan A ready' }]) + 'Add a blue door');
-  assert.match(run!.child.input, /fresh Claude Code session[\s\S]*User: Make a lobby\n\nAssistant: Plan A ready\n<\/earlier-conversation>[\s\S]*Add a blue door$/);
-  assert.ok(!run!.child.input.includes('red door'), 'discarded turns never reach the model');
+  assert.equal(run!.child.prompt, chat.rewindSeed([{ role: 'user', text: 'Make a lobby' }, { role: 'assistant', text: 'Plan A ready' }]) + 'Add a blue door');
+  assert.match(run!.child.prompt, /fresh Claude Code session[\s\S]*User: Make a lobby\n\nAssistant: Plan A ready\n<\/earlier-conversation>[\s\S]*Add a blue door$/);
+  assert.ok(!run!.child.prompt.includes('red door'), 'discarded turns never reach the model');
   assert.deepEqual((await again.host.history(first.conversationId)).messages.map((m: any) => m.text), ['Make a lobby', 'Plan A ready', 'Add a blue door', 'Blue door built']);
   // Later turns resume the new session without a seed.
   const next = await again.host.send(turnInput('Thanks', first.conversationId)); await again.done(next.turnId);
-  assert.deepEqual(again.turns()[1]!.args.slice(-2), ['--resume', fresh]); assert.equal(again.turns()[1]!.child.input, 'Thanks');
+  assert.deepEqual(again.turns()[1]!.args.slice(-2), ['--resume', fresh]); assert.equal(again.turns()[1]!.child.prompt, 'Thanks');
   // A running reply blocks a rewind of the same conversation.
   again.scripts.push(child => { child.write(init(fresh)); });
   const running = await again.host.send(turnInput('One more', first.conversationId));
@@ -634,10 +680,10 @@ test('PNG references go to Claude Code as one stream-json user message; the tran
   await walk(f.state);
   assert.ok(files.length > 0);
   for (const file of files) assert.ok(!(await readFile(file, 'utf8')).includes(PNG_1X1.slice(0, 40)), file);
-  // A plain text turn after it keeps the text input format.
+  // A plain text turn after it is one stream-json text message.
   f.scripts.push(replay(init(), result()));
   await f.done((await f.host.send(turnInput('Thanks', reply.conversationId))).turnId);
-  assert.deepEqual(f.turns()[1]!.args.slice(0, 3), ['-p', '--input-format', 'text']); assert.equal(f.turns()[1]!.child.input, 'Thanks');
+  assert.deepEqual(f.turns()[1]!.args.slice(0, 3), ['-p', '--input-format', 'stream-json']); assert.equal(f.turns()[1]!.child.prompt, 'Thanks');
 });
 
 test('image references are validated in the main process: PNG signature, canonical base64, count and the 512 KiB total', async t => {
@@ -734,7 +780,7 @@ test('the appended system prompt is identical on every turn; the Playtest switch
   const prompts = f.turns().map(run => run.args[run.args.indexOf('--append-system-prompt') + 1]);
   assert.equal(prompts.length, 3); assert.equal(new Set(prompts).size, 1, 'one cacheable system prompt');
   assert.doesNotMatch(prompts[0]!, /Playtest is|\d{4}-\d{2}-\d{2}T\d{2}:/);
-  assert.deepEqual(f.turns().map(run => run.child.input), ['Build a hut' + chat.playtestNote(true), 'Now a fence' + chat.playtestNote(false), 'And a gate']);
+  assert.deepEqual(f.turns().map(run => run.child.prompt), ['Build a hut' + chat.playtestNote(true), 'Now a fence' + chat.playtestNote(false), 'And a gate']);
   // Project memory guidance always follows the static instructions; ARCANE.md changes the prompt only when the file changes.
   assert.ok(prompts[0]!.endsWith(chat.projectMemorySection('')), 'memory section comes last');
   assert.ok(prompts[0]!.indexOf('ARCANE TASK INSTRUCTIONS FIXTURE') < prompts[0]!.indexOf('arcane-memory'));
@@ -834,4 +880,174 @@ test('preload forwards a tool image only on a finished live tool event, as a bou
   historyReply = vm.runInContext('(' + JSON.stringify({ conversationId: randomUUID(), messages: [{ id: randomUUID(), role: 'tool', text: 'x', at: '2026-10-20T00:00:00.000Z', tool: { name: 'studio_viewport_capture', status: 'finished', image: png } }] }) + ')', context);
   const history = await exposed.claudeChat.history(randomUUID());
   assert.equal('image' in history.messages[0].tool, false, 'saved history never carries an image');
+});
+
+// ---- Steering: a message sent into the running reply joins it on the still-open stream-json stdin. ----
+// Recorded with the installed Claude Code 2.1.302: a user message written mid-turn was read after the running tool call
+// finished, in the same turn (one result, no interrupt), and a message still queued when stdin ends runs before exit.
+test('steering writes one more stream-json user message into the running turn; tool calls run once and the transcript marks it', async t => {
+  const f = await fixture(t);
+  let proc: FakeChild | null = null;
+  f.scripts.push(child => { proc = child; child.write(init()); child.write(assistant([{ type: 'tool_use', id: 'toolu_1', name: 'mcp__arcane__scene_create', input: { name: 'Door' } }])); });
+  const reply = await f.host.send(turnInput('Build a red door'));
+  await waitFor(() => f.events.find(e => e.turnId === reply.turnId && e.type === 'tool'));
+  // Steered while the scene_create call (a tool that may be waiting on an approval or a capture) is still running, twice quickly.
+  const [a, b] = await Promise.all([f.host.steer({ turnId: reply.turnId, text: 'Make it blue instead' }), f.host.steer({ turnId: reply.turnId, text: 'And taller' })]);
+  assert.ok(Object.isFrozen(a)); assert.match(a.messageId, /^[0-9a-f-]{36}$/); assert.notEqual(a.messageId, b.messageId);
+  const child = proc as unknown as FakeChild;
+  assert.equal(child.ended, false, 'stdin stays open while the turn runs');
+  assert.deepEqual(child.lines.slice(1), [
+    { type: 'user', uuid: a.messageId, message: { role: 'user', content: [{ type: 'text', text: 'Make it blue instead' }] }, parent_tool_use_id: null },
+    { type: 'user', uuid: b.messageId, message: { role: 'user', content: [{ type: 'text', text: 'And taller' }] }, parent_tool_use_id: null }]);
+  assert.ok(child.lines.every(l => !('priority' in l)), 'default priority: read after the running tool calls finish, never an interrupt');
+  // Claude Code finishes the running call, reads the guidance, and continues in the same turn.
+  child.write(toolResult('toolu_1'));
+  child.write(assistant([{ type: 'text', text: 'Switching to a tall blue door.' }]));
+  child.write(assistant([{ type: 'tool_use', id: 'toolu_2', name: 'mcp__arcane__scene_update', input: { color: 'blue' } }]));
+  child.write(toolResult('toolu_2'));
+  child.write(result()); child.close(0);
+  const done = await f.done(reply.turnId);
+  assert.equal(done.ok, true); assert.equal(child.ended, true, 'the result closes stdin');
+  assert.equal(f.turns().length, 1, 'no second process, no resume: nothing is replayed');
+  assert.equal(child.killed, 0, 'never interrupted or killed');
+  const tools = f.events.filter(e => e.turnId === reply.turnId && e.type === 'tool').map(e => e.message.tool.name + ':' + e.message.tool.status);
+  assert.deepEqual(tools, ['scene_create:started', 'scene_create:finished', 'scene_update:started', 'scene_update:finished'], 'each call once');
+  const history = (await f.host.history(reply.conversationId)).messages;
+  assert.deepEqual(history.map((m: any) => m.role + ':' + m.text + (m.steered ? ':steered' : '')), ['user:Build a red door', 'tool:scene_create', 'user:Make it blue instead:steered',
+    'user:And taller:steered', 'assistant:Switching to a tall blue door.', 'tool:scene_update']);
+  assert.deepEqual(history.filter((m: any) => m.steered).map((m: any) => m.id), [a.messageId, b.messageId]);
+  // The turn is over: further guidance is refused (the renderer queues it instead).
+  assert.equal(await f.host.steer({ turnId: reply.turnId, text: 'late' }), false);
+});
+
+test('a steering message that arrives as the reply ends runs as one more turn in the same process; the outcome is the last result', async t => {
+  const f = await fixture(t);
+  let proc: FakeChild | null = null;
+  f.scripts.push(child => { proc = child; child.write(init()); child.write(assistant([{ type: 'text', text: 'Door built.' }])); });
+  const reply = await f.host.send(turnInput('Build a door'));
+  await waitFor(() => f.events.find(e => e.turnId === reply.turnId && e.type === 'message'));
+  assert.ok(await f.host.steer({ turnId: reply.turnId, text: 'Add a handle' }));
+  const child = proc as unknown as FakeChild;
+  // The first result was already on its way: Claude Code holds the message and runs it after that result, before exiting.
+  child.write(result());
+  assert.equal(child.ended, true);
+  assert.equal(await f.host.steer({ turnId: reply.turnId, text: 'too late' }), false, 'no guidance after a result');
+  child.write(assistant([{ type: 'text', text: 'Handle added.' }]));
+  child.write(result({ total_cost_usd: 0.02, usage: { input_tokens: 10, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 6 } })); child.close(0);
+  const done = await f.done(reply.turnId);
+  assert.deepEqual([done.ok, done.usage], [true, { inputTokens: 3584 + 10, outputTokens: 4 + 6, costUsd: 0.02 }], 'tokens sum; the cost is the process total');
+  assert.equal(child.lines.length, 2, 'only the steering message after the prompt; nothing re-sent');
+  assert.deepEqual((await f.host.history(reply.conversationId)).messages.map((m: any) => m.text), ['Build a door', 'Door built.', 'Add a handle', 'Handle added.']);
+});
+
+test('steering waits for write completion even under backpressure before acknowledging or saving the message', async t => {
+  const f = await fixture(t);
+  f.scripts.push(child => child.write(init()));
+  const reply = await f.host.send(turnInput('Build a door'));
+  const child = await waitFor(() => f.turns()[0]?.child.lines.length ? f.turns()[0]!.child : undefined);
+  let complete: ((error?: Error | null) => void) | null = null, settled = false;
+  child.stdin.write = (_text: string, _encoding: string, callback: (error?: Error | null) => void) => { complete = callback; return false; };
+  const pending = f.host.steer({ turnId: reply.turnId, text: 'Make it blue' });
+  void pending.then(() => { settled = true; }, () => { settled = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(settled, false, 'write returning false is backpressure, not a delivery acknowledgment');
+  assert.deepEqual((await f.host.history(reply.conversationId)).messages.filter((m: any) => m.steered), []);
+  assert.equal(typeof complete, 'function'); (complete as unknown as (error?: Error | null) => void)();
+  const accepted = await pending;
+  assert.match(accepted.messageId, /^[0-9a-f-]{36}$/);
+  assert.deepEqual((await f.host.history(reply.conversationId)).messages.filter((m: any) => m.steered).map((m: any) => m.text), ['Make it blue']);
+  assert.equal(child.stdin.listenerCount('close'), 0, 'per-write listeners are released');
+  child.write(result()); child.close(0); await f.done(reply.turnId);
+});
+
+test('a delayed steering pipe failure or close rejects without an acknowledgment, transcript line or automatic resend', async t => {
+  for (const mode of ['callback', 'stream-error', 'stream-close', 'child-close'] as const) await t.test(mode, async t => {
+    const f = await fixture(t);
+    f.scripts.push(child => child.write(init()));
+    const reply = await f.host.send(turnInput('Build a door'));
+    const child = await waitFor(() => f.turns()[0]?.child.lines.length ? f.turns()[0]!.child : undefined);
+    let complete: ((error?: Error | null) => void) | null = null, settled = false;
+    child.stdin.write = (_text: string, _encoding: string, callback: (error?: Error | null) => void) => { complete = callback; return true; };
+    const pending = f.host.steer({ turnId: reply.turnId, text: 'Make it blue' });
+    void pending.then(() => { settled = true; }, () => { settled = true; });
+    const rejected = assert.rejects(pending, { message: chat.CLAUDE_CHAT_MESSAGES.unavailable });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(settled, false, 'a queued write alone must not be marked sent');
+    const failure = Object.assign(new Error('private native pipe details'), { code: 'EPIPE' });
+    const callback = complete as unknown as (error?: Error | null) => void;
+    if (mode === 'callback') callback(failure);
+    else if (mode === 'stream-error') child.stdin.emit('error', failure);
+    else if (mode === 'stream-close') child.stdin.emit('close');
+    else child.close(1);
+    await rejected;
+    callback(); child.stdin.emit('error', failure); // Late callbacks/errors cannot turn the refusal into success.
+    assert.deepEqual((await f.host.history(reply.conversationId)).messages.filter((m: any) => m.steered), []);
+    assert.equal(await f.host.steer({ turnId: reply.turnId, text: 'Try again' }), false, 'the broken input is closed');
+    assert.equal(f.turns().length, 1, 'the failed write never starts another reply');
+    assert.equal(child.stdin.listenerCount('close'), 0, 'per-write listeners are released');
+    if (mode !== 'child-close') { child.write(result()); child.close(0); }
+    await f.done(reply.turnId);
+    assert.ok(!JSON.stringify(f.events).includes('private native pipe details'));
+  });
+});
+
+test('steering is refused (false) when the reply cannot take it: unknown, at a usage limit, stopped; envelopes are exact', async t => {
+  const f = await fixture(t);
+  assert.equal(await f.host.steer({ turnId: randomUUID(), text: 'x' }), false);
+  for (const bad of [null, {}, { turnId: 'x', text: 'y' }, { turnId: randomUUID(), text: 'y', extra: 1 }]) await assert.rejects(f.host.steer(bad), { message: chat.CLAUDE_CHAT_MESSAGES.unavailable });
+  for (const text of ['', '   ', 'x'.repeat(100001)]) await assert.rejects(f.host.steer({ turnId: randomUUID(), text }), { message: chat.CLAUDE_CHAT_MESSAGES.text });
+  // A usage limit reported mid-turn: the turn is ending, so steering is refused (the renderer queues the message).
+  let limited: FakeChild | null = null;
+  f.scripts.push(child => { limited = child; child.write(init()); child.write(line({ type: 'rate_limit_event', rate_limit_info: { status: 'rejected', resetsAt: 1792107600, rateLimitType: 'five_hour' }, session_id: SESSION })); });
+  const one = await f.host.send(turnInput('Build'));
+  await waitFor(() => limited ? (limited as FakeChild).lines.length : 0);
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(await f.host.steer({ turnId: one.turnId, text: 'faster' }), false);
+  const capped = limited as unknown as FakeChild;
+  capped.write(result({ subtype: 'error_during_execution', is_error: true, result: 'Claude usage limit reached|1792107600' })); capped.close(1);
+  assert.equal((await f.done(one.turnId)).error, chat.CLAUDE_CHAT_MESSAGES.usageLimit);
+  assert.equal(capped.lines.length, 1, 'nothing was written after the limit');
+  // Stopped: no more guidance.
+  f.scripts.push(child => { child.write(init()); });
+  const two = await f.host.send(turnInput('Again', one.conversationId));
+  await waitFor(() => f.turns()[1]?.child.lines.length);
+  assert.equal(await f.host.stop(two.turnId), true);
+  assert.equal(await f.host.steer({ turnId: two.turnId, text: 'wait' }), false);
+  await f.done(two.turnId);
+  // The IPC boundary forwards the exact envelope and the host's false.
+  const handlers = new Map<string, (event: any, ...args: any[]) => Promise<any>>();
+  const frame = { url: ORIGIN + '/studio' }, contents = { isDestroyed: () => false, mainFrame: frame }, window = { isDestroyed: () => false, webContents: contents }, session = { window, origin: ORIGIN, epoch: {} };
+  chat.installClaudeChatIpc({ handle: (channel: string, handler: any) => handlers.set(channel, handler) }, { getSession: () => session, getHost: () => f.host });
+  const steer = (...args: unknown[]) => handlers.get('arcane:claude-chat-steer')!({ sender: contents, senderFrame: frame }, ...args);
+  assert.equal(await steer({ turnId: two.turnId, text: 'x' }), false);
+  await assert.rejects(steer({ turnId: two.turnId }), { message: chat.CLAUDE_CHAT_MESSAGES.unavailable });
+  await assert.rejects(steer({ turnId: two.turnId, text: 'x' }, 1), { message: chat.CLAUDE_CHAT_MESSAGES.unavailable });
+});
+
+test('preload forwards steer as an exact {turnId, text} envelope and passes back only a message id or false; steered history survives', async () => {
+  const vm = await import('node:vm');
+  const source = await readFile(join(process.cwd(), 'apps/desktop/electron/preload.cjs'), 'utf8');
+  let exposed: any, reply: unknown = null; const invoked: unknown[][] = [];
+  const context = vm.createContext({ require: () => ({ contextBridge: { exposeInMainWorld: (_name: string, value: unknown) => { exposed = value; } },
+    ipcRenderer: { on() {}, removeListener() {}, invoke: async (...args: unknown[]) => { invoked.push(args); return vm.runInContext('JSON.parse(' + JSON.stringify(JSON.stringify(reply)) + ')', context); } } }) });
+  vm.runInContext(source, context);
+  const inner = (value: unknown) => vm.runInContext('(' + JSON.stringify(value) + ')', context);
+  const turnId = randomUUID(), messageId = randomUUID();
+  assert.equal(typeof exposed.claudeChat.steer, 'function');
+  reply = { messageId };
+  assert.deepEqual(JSON.parse(JSON.stringify(await exposed.claudeChat.steer(inner({ turnId, text: 'Make it blue' })))), { messageId });
+  assert.deepEqual(JSON.parse(JSON.stringify(invoked.at(-1))), ['arcane:claude-chat-steer', { turnId, text: 'Make it blue' }]);
+  reply = false;
+  assert.equal(await exposed.claudeChat.steer(inner({ turnId, text: 'Make it blue' })), false);
+  const count = invoked.length;
+  for (const bad of [[], [inner({ turnId })], [inner({ turnId: 'x', text: 'y' })], [inner({ turnId, text: 'y', images: [] })], [inner({ turnId, text: 'y' }), 1]])
+    await assert.rejects(exposed.claudeChat.steer(...bad), /unavailable/);
+  await assert.rejects(exposed.claudeChat.steer(inner({ turnId, text: '  ' })), /empty or too long/);
+  assert.equal(invoked.length, count, 'malformed steering never reaches the main process');
+  for (const bad of [{ messageId: 'x' }, true, { turnId }]) { reply = bad; await assert.rejects(exposed.claudeChat.steer(inner({ turnId, text: 'y' })), /unavailable/); }
+  const at = '2026-10-20T00:00:00.000Z', conversationId = randomUUID();
+  reply = { conversationId, messages: [{ id: messageId, role: 'user', text: 'Make it blue', at, steered: true }] };
+  assert.equal((await exposed.claudeChat.history(conversationId)).messages[0].steered, true);
+  reply = { conversationId, messages: [{ id: messageId, role: 'assistant', text: 'x', at, steered: true }] };
+  await assert.rejects(exposed.claudeChat.history(conversationId), /unavailable/, 'only a user message can be steered');
 });

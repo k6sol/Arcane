@@ -1124,7 +1124,11 @@ export class CodexSession {
       const tool = item.type === 'mcpToolCall' ? summarizeMcpToolCall(item) : null;
       this.#event({ type: 'item', threadId: thread.threadId, turnId, itemId: str(item.id), itemType: str(item.type, 64), status: optionalText(item.status, 64), ...(tool ? { tool } : {}) });
     } else if (method === 'error') {
-      this.#event({ type: 'error', threadId: thread.threadId, turnId, code: 'TURN_ERROR' });
+      // Only the provider's classified usage limit is distinguished (a fixed code); its message never crosses.
+      const info = params.error && typeof params.error === 'object' ? (params.error as Record<string, unknown>).codexErrorInfo : undefined;
+      const usageLimit = info === 'usageLimitExceeded' || info === 'usage_limit_exceeded' ||
+        !!info && typeof info === 'object' && !Array.isArray(info) && (Object.hasOwn(info, 'usageLimitExceeded') || Object.hasOwn(info, 'usage_limit_exceeded'));
+      this.#event({ type: 'error', threadId: thread.threadId, turnId, code: usageLimit ? 'USAGE_LIMIT_EXCEEDED' : 'TURN_ERROR' });
     }
   }
   #scopeActive(threadId: string, turnId: string | null): boolean {

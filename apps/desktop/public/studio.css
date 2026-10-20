@@ -456,6 +456,8 @@ body.arcane-app {
 .arcane-app .workspace-stage .codex-message .eyebrow {font-family:inherit;font-size:12px;font-weight:600;letter-spacing:0;color:var(--muted)}
 .arcane-app .workspace-stage .codex-message .hint {font-size:12px;line-height:1.6;color:var(--muted)}
 .arcane-app .message-acknowledgement {margin-top:8px;font-size:12px;color:var(--muted);overflow-wrap:anywhere}
+.arcane-app .codex-message.steered .message-steer-label {margin:0 0 4px;font-size:11px;font-weight:600;letter-spacing:.3px;color:var(--muted)}
+.arcane-app .codex-message.steered[data-steer-state="sending"] {opacity:.72}
 .arcane-app .message-details {margin-top:12px;max-width:100%;color:var(--muted)}
 .arcane-app .message-details>summary {width:fit-content;min-height:36px;padding:7px 0;font-size:12px;color:var(--muted)}
 .arcane-app .message-details[open] {border-top:1px solid var(--line);padding-top:6px}
@@ -1946,6 +1948,10 @@ body.arcane-app.shell-compact .workspace-topbar .icon-button{min-height:36px;min
 .arcane-app .composer-controls #codex-submit{grid-column:5}
 .arcane-app .usage-limit-notice{gap:12px;padding:10px 10px 10px 14px;border:1px solid var(--accent-line);border-left:3px solid var(--accent);border-radius:12px;background:var(--grad-tint),var(--glass-solid);box-shadow:var(--card-shadow)}
 .arcane-app .usage-limit-notice button{min-height:var(--control-sm);font-size:var(--fs-meta)}
+/* Usage limit: several quick actions wrap under the sentence on narrow windows; the transcript line matches the notice. */
+.arcane-app .usage-limit-notice{flex-wrap:wrap}
+.arcane-app .usage-limit-notice > p{flex:1 1 240px}
+.arcane-app .workspace-stage .codex-message.chat-usage-limit{border-left:3px solid var(--accent);background:var(--grad-tint),var(--glass-solid)}
 /* Message details sit snug under the text, so bubbles carry no dead space. */
 .arcane-app .workspace-stage .codex-message .message-details>summary{min-height:28px;padding:5px 0;line-height:18px}
 .arcane-app .workspace-stage .codex-message.human pre.message-text{margin:0}

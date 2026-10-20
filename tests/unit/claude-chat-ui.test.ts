@@ -12,7 +12,7 @@ import { workflowNativeModel } from '../../apps/daemon/src/workflow-native-model
 import {
   ClaudeChat, CLAUDE_CHAT_CHOICE_KEY, CLAUDE_CHAT_EMPTY_TEXT, CLAUDE_CHAT_NO_BRIDGE_TEXT, CLAUDE_CHAT_TABS_KEY,
   claudeEffortLabel, claudeModelLabel, claudeModelName, linkChatProviders, readClaudeChatStatus, readClaudeChatBridge,
-  CLAUDE_CHAT_QUEUE_RETURNED_TEXT, CLAUDE_CHAT_USAGE_KEY, compactTokens, usageMeterText,
+  CLAUDE_CHAT_QUEUE_RETURNED_TEXT, CLAUDE_CHAT_USAGE_KEY, compactTokens, usageMeterText, CLAUDE_CHAT_STEER_HINT, CLAUDE_CHAT_STEER_QUEUED_TEXT,
 } from '../../apps/desktop/src/claude-chat.js';
 import { changeSummary, CodexTranscript, describeToolActivity, readToolResultText, renderChangeCard, restoreRequestText,
   CHOICE_BLOCK_LIMITS, parseChoiceBlock, PLAN_APPROVE_TEXT, PLAN_CHANGE_TEXT, renderMessageText } from '../../apps/desktop/src/codex-chat.js';
@@ -40,6 +40,7 @@ class Element extends EventTarget {
   removeAttribute(name: string) { this.attributes.delete(name); }
   prepend(child: Element) { this.append(child); this.children.unshift(this.children.pop()!); }
   replaceWith(next: Element) { const parent = this.parent!; next.parent = parent; parent.children[parent.children.indexOf(this)] = next; this.ownerDocument.register(next); }
+  remove() { const parent = this.parent; if (parent) { parent.children.splice(parent.children.indexOf(this), 1); this.parent = null; } }
   focus() { this.focused++; this.ownerDocument.activeElement = this; }
   click() { this.dispatchEvent(new Event('click', { cancelable: true })); }
   contains(node: unknown): boolean { return node === this || this.children.some(child => child.contains(node)); }
@@ -69,9 +70,9 @@ class DocumentFixture extends EventTarget {
   getElementById(id: string) { return this.nodes.get(id) ?? null; }
 }
 
-function key(target: Element, value: string, shiftKey = false) {
+function key(target: Element, value: string, shiftKey = false, altKey = false) {
   const event = new Event('keydown', { cancelable: true });
-  Object.defineProperties(event, { key: { value }, shiftKey: { value: shiftKey }, isComposing: { value: false } });
+  Object.defineProperties(event, { key: { value }, shiftKey: { value: shiftKey }, altKey: { value: altKey }, isComposing: { value: false } });
   target.dispatchEvent(event); return event;
 }
 const click = (target: Element) => target.dispatchEvent(new Event('click', { cancelable: true }));
@@ -93,7 +94,7 @@ function surface() {
   const root = make('main', 'root', '', make('div', 'claude-chat-tabs', 'workspace-chat-tabs'), make('details', 'claude-saved-chats', 'chat-tabs-history'),
     make('button', 'workspace-new-chat'), make('span', 'claude-chat-status'), make('p', 'claude-chat-notice'), make('div', 'codex-messages', 'codex-messages'),
     make('button', 'welcome-connect'), make('button', 'codex-conversation-start'),
-    make('div', 'usage-limit-notice', 'notice usage-limit-notice', make('p', 'usage-limit-message'), make('button', 'usage-limit-action')), form, popover);
+    make('div', 'usage-limit-notice', 'notice usage-limit-notice', make('p', 'usage-limit-message'), make('button', 'usage-limit-retry'), make('button', 'usage-limit-action'), make('button', 'usage-limit-credits')), form, popover);
   doc.register(root);
   const el = (id: string) => doc.getElementById(id)!;
   el('codex-messages').clientHeight = 300;
@@ -571,7 +572,7 @@ function linked(initial: 'codex' | 'claude', codexGroup = chatgpt(), bridge: unk
     f.el('codex-model-popover').dispatchEvent(event); return f.doc.activeElement?.textContent;
   };
   const setCodexLimit = (value: { resetsAt: number | null } | null) => { codexLimit = value; for (const fn of [...codexListeners]) fn(); };
-  const usage = { root: f.el('usage-limit-notice'), message: f.el('usage-limit-message'), action: f.el('usage-limit-action') };
+  const usage = { root: f.el('usage-limit-notice'), message: f.el('usage-limit-message'), action: f.el('usage-limit-action'), retry: f.el('usage-limit-retry'), credits: f.el('usage-limit-credits') };
   return { ...f, calls, requests, setSurface, link, layout, columns, row, press, codexSource: () => source!, codexYielded: () => yielded, setCodexLimit, usage };
 }
 
@@ -756,6 +757,43 @@ test('Claude usage limit: the done event shows the mapped notice, restores the u
   b.emit({ type: 'done', ok: false, error: 'Claude usage limit reached. This message was not answered; try again after the limit resets.', usage: null });
   assert.match(f.usage.message.textContent, /^Claude usage limit reached\. /);
   f.link.stop(); assert.equal(f.usage.root.hidden, true, 'a stopped link shows no notice');
+});
+
+test('usage limit: window wording, no-reset advice, Retry only after the reset, the transcript line and the model list mark', async t => {
+  const b = fakeBridge(), f = linked('claude', chatgpt(), b.bridge); t.after(() => f.chat.stop());
+  await tick(); await tick();
+  const LIMIT = 'Claude usage limit reached. This message was not answered; try again after the limit resets.';
+  // Weekly limit with a future reset: the transcript line and the notice name the window; Retry stays hidden.
+  f.type('Add a spawn pad'); key(f.input, 'Enter'); await tick(); await tick();
+  b.emit({ type: 'done', ok: false, error: LIMIT, usage: null, usageLimit: { resetsAt: RESET, window: 'weekly' } });
+  assert.match(f.usage.message.textContent, /^Claude weekly limit reached — resets at .+\. Your draft moves with you\.$/);
+  const line = f.messages.querySelectorAll('.codex-message').at(-1)!;
+  assert.match(line.className, /chat-usage-limit/);
+  assert.match(f.bubbles().at(-1)!.text, /^Claude weekly limit reached — resets at .+\. This message was not answered\.$/);
+  assert.deepEqual([f.usage.retry.hidden, f.usage.action.hidden, f.usage.credits.hidden], [true, false, true], 'no Retry before the reset; no Arcane Credits offer without them');
+  assert.equal(f.usage.root.dataset.state, 'limited');
+  // The model list marks the exhausted provider's column until the reset.
+  click(f.trigger); click(f.el('codex-picker-current-model'));
+  assert.match(f.el('codex-model-options').textContent, /Usage limit reached · resets /);
+  click(f.trigger);
+  // Unknown reset time: plain advice, still no Retry.
+  f.type('second'); key(f.input, 'Enter'); await tick(); await tick();
+  b.emit({ type: 'done', ok: false, error: LIMIT, usage: null, usageLimit: { resetsAt: null } });
+  assert.equal(f.usage.message.textContent, 'Claude usage limit reached. Try again later or switch model. Your draft moves with you.');
+  assert.equal(f.usage.retry.hidden, true);
+  // The reported reset has passed: Retry appears (it never fires by itself), the model list mark goes away.
+  f.type('third'); key(f.input, 'Enter'); await tick(); await tick();
+  const sent = sends(b).length;
+  b.emit({ type: 'done', ok: false, error: LIMIT, usage: null, usageLimit: { resetsAt: Math.floor(Date.now() / 1000) - 60, window: 'session' } });
+  assert.match(f.usage.message.textContent, /^Claude session limit should have reset by now\. Retry when you’re ready\./);
+  assert.deepEqual([f.usage.retry.hidden, f.usage.retry.disabled, f.usage.root.dataset.state, f.usage.action.className], [false, false, 'reset', 'secondary']);
+  click(f.trigger); click(f.el('codex-picker-current-model'));
+  assert.doesNotMatch(f.el('codex-model-options').textContent, /Usage limit reached/);
+  click(f.trigger);
+  await tick(); assert.equal(sends(b).length, sent, 'nothing was resent automatically');
+  click(f.usage.retry);
+  assert.equal(f.usage.root.hidden, true, 'Retry forgets the expired evidence');
+  assert.equal(f.chat.usageLimit(), null);
 });
 
 test('provider setup requestProvider is an explicit, persisted choice that still waits for a signed-in Claude status', async t => {
@@ -1104,7 +1142,7 @@ test('Edge: usage-limit notice offers the other provider in both directions and 
   const notice = page.locator('#usage-limit-notice'), action = page.locator('#usage-limit-action');
   await notice.waitFor({ state: 'visible' });
   await page.waitForFunction(() => document.getElementById('usage-limit-action')!.textContent === 'Switch to Claude');
-  assert.match(await page.locator('#usage-limit-message').innerText(), /^ChatGPT usage limit reached \u2014 resets at .+\. Your draft moves with you\.$/);
+  assert.match(await page.locator('#usage-limit-message').innerText(), /^ChatGPT session limit reached \u2014 resets at .+\. Your draft moves with you\.$/, 'the exhausted 5-hour window is named');
   const above = await page.evaluate(() => document.getElementById('usage-limit-notice')!.getBoundingClientRect().bottom <= document.getElementById('codex-compose')!.getBoundingClientRect().top + 1);
   assert.equal(above, true, 'the notice is above the composer');
   await page.screenshot({ path: join(shots, 'usage-chatgpt-limit-notice.png') });
@@ -1139,6 +1177,133 @@ test('Edge: usage-limit notice offers the other provider in both directions and 
   assert.deepEqual(errors, []);
 });
 
+test('Edge: switching between signed-in ChatGPT and Claude never shows the sign-in card; a limit shows its notice, model mark and Retry', { skip: !browserModule, timeout: 90000 }, async t => {
+  const build = process.env.ARCANE_UI_BUILD_DIR ?? 'dist', shots = resolve(process.env.ARCANE_UI_SCREENSHOT ?? 'runtime/claude-codex-team/claude-audit/usage');
+  await mkdir(shots, { recursive: true });
+  const modules = ['codex-chat', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat', 'claude-preferences', 'task-usage', 'task-usage-ui'];
+  // Native status answers slowly (like the real CLI), so a gate shown while status is re-read would be caught.
+  const fixture = `import {CodexChat,CodexChatApi} from '/codex-chat.js';
+    import {startProviderSetup} from '/provider-setup.js';
+    import {startWorkspaceShell} from '/workspace-shell.js';
+    import {ClaudeChat, linkChatProviders} from '/claude-chat.js';
+    const f = window.fx = { calls: [], listener: null, status: [], auth: { codex: 'subscription', claude: 'subscription' }, gate: [] };
+    const chat = new CodexChat(document, new CodexChatApi('${'a'.repeat(64)}'));
+    const native = Object.freeze({ version: 1, ...Object.fromEntries(['status','login','install','launch'].map(action => [action, async provider => {
+      f.status.push(provider); await new Promise(done => setTimeout(done, 350));
+      return { version: 1, provider, installed: true, auth: f.auth[provider], cliVersion: '2.1.177', busy: false, message: null }; }])) });
+    const setup = startProviderSetup(document, { chat, nativeBridge: native });
+    const bridge = Object.freeze({ version: 1,
+      status: async () => ({ installed: true, signedIn: true, cliVersion: '2.1.177', models: ['opus', 'sonnet', 'haiku'], efforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultModel: 'sonnet', resolved: { opus: 'claude-opus-5-5', sonnet: 'claude-sonnet-5-5', haiku: 'claude-haiku-5-5' }, message: null }),
+      list: async () => ({ conversations: [] }), history: async id => ({ conversationId: id, messages: [] }),
+      send: async request => { f.calls.push(request); return { turnId: 'turn-' + f.calls.length, conversationId: 'conv-1' }; },
+      stop: async () => true, remove: async () => true, onEvent: fn => { f.listener = fn; return () => {}; } });
+    const claude = new ClaudeChat(document, { bridge, storage: null });
+    f.emit = event => f.listener(event);
+    linkChatProviders({ codex: chat, claude, provider: setup });
+    startWorkspaceShell(document);
+    await chat.start(); f.ready = true;
+    // Records every moment the sign-in card is on screen (attribute changes and the initial state).
+    const gate = document.getElementById('provider-login-gate');
+    f.watch = () => { f.gate = []; new MutationObserver(() => { if (!gate.hidden) f.gate.push(setup.selectedProvider() + '@' + Math.round(performance.now())); }).observe(gate, { attributes: true, attributeFilter: ['hidden'] });
+      new MutationObserver(() => { if (document.getElementById('workspace-stage')?.classList.contains('provider-required')) f.gate.push('stage@' + Math.round(performance.now())); })
+        .observe(document.getElementById('workspace-stage'), { attributes: true, attributeFilter: ['class'] }); };`;
+  const server = createServer((request, response) => { void (async () => {
+    const url = request.url?.split('?')[0] ?? '';
+    if (url === '/v1/codex/state') { response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify({ state: codexState() })); return; }
+    if (url === '/studio.js') { response.writeHead(200, { 'content-type': 'text/javascript' }); response.end(fixture); return; }
+    const file = url === '/studio' ? 'apps/desktop/public/studio.html' : url === '/studio.css' ? 'apps/desktop/public/studio.css'
+      : url.endsWith('.js') && modules.includes(url.slice(1, -3)) ? join(build, 'apps/desktop/src', url.slice(1)) : null;
+    if (!file) { response.writeHead(404); response.end(); return; }
+    response.writeHead(200, { 'content-type': url === '/studio' ? 'text/html' : url.endsWith('.css') ? 'text/css' : 'text/javascript' });
+    response.end(await readFile(resolve(file)));
+  })().catch(() => { response.writeHead(500); response.end(); }); });
+  await new Promise<void>(done => server.listen(0, '127.0.0.1', done));
+  t.after(async () => { server.closeAllConnections(); await new Promise<void>(done => server.close(() => done())); });
+  const { chromium } = await import(pathToFileURL(resolve(browserModule!)).href) as typeof import('playwright-core');
+  const browser = await chromium.launch({ headless: true, args: ['--disable-gpu'], executablePath: process.env.ARCANE_UI_BROWSER_EXE ?? 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe' });
+  t.after(() => browser.close());
+  const page = await browser.newPage({ viewport: { width: 1280, height: 860 } }); page.setDefaultTimeout(8000);
+  const errors: string[] = []; page.on('pageerror', error => errors.push(error.message));
+  await page.goto('http://127.0.0.1:' + (server.address() as { port: number }).port + '/studio');
+  await page.waitForFunction(() => (window as any).fx?.ready === true);
+  await page.waitForFunction(() => document.getElementById('provider-login-gate')?.hidden === true);
+  await page.waitForTimeout(450); // the startup status read settles
+  await page.evaluate(() => (window as any).fx.watch());
+  const draft = 'make the lobby brighter';
+  await page.locator('#codex-composer').fill(draft);
+  const pick = async (model: string) => {
+    await page.locator('#codex-model-trigger').click(); await page.locator('#codex-picker-current-model').click();
+    await page.locator('#codex-model-options [data-picker-model="' + model + '"]').click();
+  };
+  const top = () => page.evaluate(() => Math.round(document.getElementById('codex-compose')!.getBoundingClientRect().top));
+  const composerTop = await top();
+  for (let round = 0; round < 3; round++) {
+    await pick('opus');
+    if (round === 0) await page.screenshot({ path: join(shots, 'switch-to-claude-mid.png') });
+    await page.waitForFunction(() => !document.getElementById('claude-chat-tabs')!.hidden);
+    await page.waitForTimeout(450); // the background status re-read completes
+    assert.equal(await page.locator('#codex-composer').inputValue(), draft);
+    await pick('gpt-6.1-sol');
+    if (round === 0) await page.screenshot({ path: join(shots, 'switch-to-chatgpt-mid.png') });
+    await page.waitForFunction(() => document.getElementById('claude-chat-tabs')!.hidden);
+    await page.waitForTimeout(450);
+    assert.equal(await page.locator('#codex-composer').inputValue(), draft);
+    assert.equal(await top(), composerTop, 'the composer never moves while switching');
+  }
+  assert.deepEqual(await page.evaluate(() => (window as any).fx.gate), [], 'the sign-in card never appeared for signed-in providers');
+  assert.ok((await page.evaluate(() => (window as any).fx.status.length)) >= 7, 'every switch still re-read native status in the background');
+  assert.deepEqual(await page.evaluate(() => (window as any).fx.calls), [], 'switching never sends');
+  // On Claude: a weekly limit shows the inline transcript line, the notice and the model list mark.
+  await pick('opus');
+  await page.waitForFunction(() => !document.getElementById('claude-chat-tabs')!.hidden);
+  await page.waitForTimeout(450);
+  await page.screenshot({ path: join(shots, 'switch-claude-settled.png') });
+  await page.locator('#codex-composer').press('Enter');
+  await page.waitForFunction(() => (window as any).fx.calls.length === 1);
+  const reset = Math.floor(Date.now() / 1000) + 2 * 3600;
+  await page.evaluate(at => (window as any).fx.emit({ turnId: 'turn-1', conversationId: 'conv-1', type: 'done', ok: false,
+    error: 'Claude usage limit reached. This message was not answered; try again after the limit resets.', usage: null, usageLimit: { resetsAt: at, window: 'weekly' } }), reset);
+  await page.locator('#usage-limit-notice').waitFor({ state: 'visible' });
+  assert.match(await page.locator('#usage-limit-message').innerText(), /^Claude weekly limit reached \u2014 resets at .+\. Your draft moves with you\.$/);
+  assert.equal(await page.locator('.codex-message.chat-usage-limit').count(), 1);
+  assert.equal(await page.locator('#usage-limit-retry').isVisible(), false, 'no Retry before the reset');
+  assert.equal(await page.locator('#codex-composer').inputValue(), draft, 'the unanswered draft is back in the composer');
+  await page.screenshot({ path: join(shots, 'usage-claude-weekly-notice.png') });
+  await page.locator('#codex-model-trigger').click(); await page.locator('#codex-picker-current-model').click();
+  await page.waitForFunction(() => /Usage limit reached/.test(document.getElementById('codex-model-options')!.textContent ?? ''));
+  await page.screenshot({ path: join(shots, 'usage-picker-mark.png') });
+  await page.keyboard.press('Escape');
+  if (await page.locator('#codex-model-popover').isVisible()) await page.locator('#codex-model-trigger').click();
+  // Unknown reset: plain advice; a reset already past: Retry appears and sends the visible draft only on click.
+  await page.locator('#codex-composer').press('Enter');
+  await page.waitForFunction(() => (window as any).fx.calls.length === 2);
+  await page.evaluate(() => (window as any).fx.emit({ turnId: 'turn-2', conversationId: 'conv-1', type: 'done', ok: false,
+    error: 'Claude usage limit reached. This message was not answered; try again after the limit resets.', usage: null, usageLimit: { resetsAt: null } }));
+  await page.waitForFunction(() => /Try again later or switch model\./.test(document.getElementById('usage-limit-message')!.textContent ?? ''));
+  await page.screenshot({ path: join(shots, 'usage-claude-no-reset.png') });
+  await page.locator('#codex-composer').press('Enter');
+  await page.waitForFunction(() => (window as any).fx.calls.length === 3);
+  await page.evaluate(at => (window as any).fx.emit({ turnId: 'turn-3', conversationId: 'conv-1', type: 'done', ok: false,
+    error: 'Claude usage limit reached. This message was not answered; try again after the limit resets.', usage: null, usageLimit: { resetsAt: at, window: 'session' } }), Math.floor(Date.now() / 1000) - 30);
+  await page.locator('#usage-limit-retry').waitFor({ state: 'visible' });
+  await page.screenshot({ path: join(shots, 'usage-claude-retry.png') });
+  await page.waitForTimeout(300);
+  assert.equal(await page.evaluate(() => (window as any).fx.calls.length), 3, 'nothing is resent by itself');
+  await page.locator('#usage-limit-retry').click();
+  await page.waitForFunction(() => (window as any).fx.calls.length === 4);
+  await page.locator('#usage-limit-notice').waitFor({ state: 'hidden' });
+  // A provider that really is signed out still shows the sign-in card after its status re-read.
+  await page.evaluate(() => { (window as any).fx.auth.claude = 'signed-out'; });
+  await page.evaluate(() => (window as any).fx.emit({ turnId: 'turn-4', conversationId: 'conv-1', type: 'done', ok: true, error: null, usage: null }));
+  await pick('gpt-6.1-sol');
+  await page.waitForFunction(() => document.getElementById('claude-chat-tabs')!.hidden);
+  await page.waitForTimeout(450);
+  await pick('opus');
+  await page.waitForFunction(() => document.getElementById('provider-login-gate')!.hidden === false);
+  await page.screenshot({ path: join(shots, 'switch-signed-out-gate.png') });
+  assert.deepEqual(errors, []);
+});
+
 test('codexUsageLimit reads exhaustion from the account report or a usage-limit turn rejection only', async () => {
   const { codexUsageLimit } = await import('../../apps/desktop/src/codex-chat.js');
   const window = (usedPercent: number, resetsAt: number | null) => ({ usedPercent, windowDurationMins: 300, resetsAt });
@@ -1149,15 +1314,23 @@ test('codexUsageLimit reads exhaustion from the account report or a usage-limit 
   assert.equal(codexUsageLimit(snap(null)), null);
   assert.equal(codexUsageLimit(snap(report(true, [bucket()]))), null);
   assert.equal(codexUsageLimit(snap(report(null, [bucket()]))), null);
-  assert.deepEqual(codexUsageLimit(snap(report(false, [bucket({ primary: window(100, 1792104000), secondary: window(100, 1792190400) })]))), { resetsAt: 1792190400 });
+  assert.deepEqual(codexUsageLimit(snap(report(false, [bucket({ primary: window(100, 1792104000), secondary: window(100, 1792190400) })]))), { resetsAt: 1792190400, window: 'session' });
   assert.deepEqual(codexUsageLimit(snap(report(false, [bucket()]))), { resetsAt: null }, 'blocked without a full window: reset unknown');
-  assert.deepEqual(codexUsageLimit(snap(report(null, [bucket({ rateLimitReachedType: 'rate_limit_reached', primary: window(100, 1792104000) })]))), { resetsAt: 1792104000 });
+  assert.deepEqual(codexUsageLimit(snap(report(null, [bucket({ rateLimitReachedType: 'rate_limit_reached', primary: window(100, 1792104000) })]))), { resetsAt: 1792104000, window: 'session' });
   assert.equal(codexUsageLimit(snap(report(null, [bucket({ normalModelSlug: 'gpt-6.1-spark', primary: window(100, 1792104000) })]))), null, 'one model-specific bucket is not the account');
   assert.equal(codexUsageLimit(snap(report(false, [bucket()]), 'apiKey')), null, 'only the signed-in subscription account');
   const s = snap(null), turn = (state: string, errorCode: string | null) => ({ requestId: randomUUID(), action: 'turn-start', connectionId: s.connectionId, state, errorCode }) as any;
   assert.deepEqual(codexUsageLimit(s, [turn('rejected', 'USAGE_LIMIT_EXCEEDED')]), { resetsAt: null });
   assert.equal(codexUsageLimit(s, [turn('rejected', 'USAGE_LIMIT_EXCEEDED'), turn('acknowledged', null)]), null, 'a later accepted turn clears it');
   assert.equal(codexUsageLimit(s, [turn('rejected', 'REMOTE_REJECTED')]), null);
+  // The weekly window is named when it is the one that ran out last.
+  assert.deepEqual(codexUsageLimit(snap(report(false, [bucket({ primary: window(100, 1792104000), secondary: { usedPercent: 100, windowDurationMins: 10080, resetsAt: 1792600000 } })]))), { resetsAt: 1792600000, window: 'weekly' });
+  // A started turn that failed at the usage limit (the client's classified error event) counts until a newer turn starts.
+  const failed = { ...snap(null), events: [{ seq: 1, type: 'error', threadId: 't', turnId: 'turn-a', code: 'USAGE_LIMIT_EXCEEDED' }] } as any;
+  assert.deepEqual(codexUsageLimit(failed, []), { resetsAt: null });
+  assert.equal(codexUsageLimit({ ...failed, events: [{ ...failed.events[0], code: 'TURN_ERROR' }] }, []), null, 'other turn errors are not a limit');
+  assert.equal(codexUsageLimit(failed, [{ ...turn('acknowledged', null), turnId: 'turn-b' }]), null, 'a newer accepted turn clears it');
+  assert.equal(codexUsageLimit({ ...failed, events: [...failed.events, { seq: 2, type: 'turn', threadId: 't', turnId: 'turn-b', status: 'completed' }] }, []), null);
 });
 
 // ---- Chat activity: plain-language tool lines, change cards, queue, usage meter and composer commands. ----
@@ -1309,6 +1482,93 @@ test('Claude queue: Enter during a reply queues a removable chip; it sends after
   f.type(''); f.type('Sixth'); key(f.input, 'Enter'); await tick(); f.type('Seventh'); key(f.input, 'Enter');
   b.emit({ type: 'done', ok: false, error: 'Claude usage limit reached. This message was not answered; try again after the limit resets.', usageLimit: { resetsAt: null }, usage: null }); await tick();
   assert.equal(sends(b).length, 4); assert.equal(f.input.value, 'Sixth\n\nSeventh');
+});
+
+test('Claude steer: Enter during a reply steers it inline, twice quickly; Alt+Enter queues; an ending reply queues the steer instead', async t => {
+  const steers: unknown[] = []; let steerReply: () => Promise<unknown> = async () => ({ messageId: randomUUID() });
+  const b = fakeBridge({ steer: (request: unknown) => { steers.push(request); return steerReply(); } });
+  const f = mount(b.bridge); t.after(() => f.chat.stop()); await f.chat.refresh();
+  const chips = () => f.el('claude-chat-queue').querySelectorAll('.composer-queue-chip').map(node => node.querySelector('.composer-queue-text')!.textContent);
+  const steered = () => f.messages.querySelectorAll('.steered');
+  assert.equal(f.chat.canSteer(), false, 'nothing to steer before a reply runs');
+  f.type('Build a red door'); key(f.input, 'Enter'); await tick();
+  assert.equal(f.chat.canSteer(), true);
+  assert.match(f.notice.textContent, /is working… Enter to steer · Alt\+Enter to queue\.$/);
+  assert.equal((f.input as unknown as { placeholder: string }).placeholder, CLAUDE_CHAT_STEER_HINT, 'the empty composer names both keys');
+  b.emit({ type: 'tool', message: { id: 'tool-1', role: 'tool', text: 'scene_create', at: '', tool: { name: 'scene_create', status: 'started' } } }); await tick();
+  // Enter while the tool call runs (it may be waiting on an approval or a capture): the reply is steered, not queued.
+  f.type('Make it blue'); const enter = key(f.input, 'Enter'); assert.equal(enter.defaultPrevented, true); await tick(); await tick();
+  assert.deepEqual(steers, [{ turnId: 'turn-1', text: 'Make it blue' }]);
+  assert.equal(sends(b).length, 1, 'steering never starts a second reply'); assert.deepEqual(chips(), []); assert.equal(f.input.value, '');
+  const line = steered()[0]!;
+  assert.equal(line.getAttribute('data-role'), 'user'); assert.equal(line.getAttribute('aria-label'), 'Your steering message');
+  assert.equal(line.dataset.steerState, 'sent'); assert.equal(line.querySelector('.message-steer-label')!.textContent, 'Steered');
+  assert.equal(line.querySelector('.message-text')!.textContent, 'Make it blue'); assert.equal(line.querySelector('.chat-message-edit'), null, 'a steered line is not editable');
+  // Twice quickly: both go to the running reply in order.
+  f.type('Taller'); key(f.input, 'Enter'); f.type('And wider'); key(f.input, 'Enter'); await tick(); await tick();
+  assert.deepEqual(steers.map(row => (row as { text: string }).text), ['Make it blue', 'Taller', 'And wider']); assert.equal(steered().length, 3);
+  // Alt+Enter queues for after the reply instead.
+  f.type('After this, add a handle'); const alt = key(f.input, 'Enter', false, true); assert.equal(alt.defaultPrevented, true); await tick();
+  assert.deepEqual(chips(), ['After this, add a handle']); assert.equal(steers.length, 3);
+  // The tool line keeps updating in place after the steering lines.
+  b.emit({ type: 'tool', message: { id: 'tool-1', role: 'tool', text: 'scene_create', at: '', tool: { name: 'scene_create', status: 'finished' } } }); await tick();
+  assert.equal(f.messages.querySelectorAll('[data-role=tool]').length, 1);
+  // The reply was already ending (or hit its limit): the host says no, so the line goes and the text waits in the queue.
+  steerReply = async () => false;
+  f.type('One more thing'); key(f.input, 'Enter'); await tick(); await tick();
+  assert.deepEqual(chips(), ['After this, add a handle', 'One more thing']); assert.equal(f.notice.textContent, CLAUDE_CHAT_STEER_QUEUED_TEXT);
+  assert.equal(steered().length, 3, 'the undelivered line is removed');
+  b.emit({ type: 'done', ok: true, error: null, usage: null }); await tick();
+  assert.deepEqual(sends(b).map(row => (row as { text: string }).text), ['Build a red door', 'After this, add a handle'], 'the queue continues after the reply');
+  // A bridge failure puts the text back in the message box; Stop ends steering.
+  steerReply = async () => { throw new Error('Claude chat is unavailable.'); };
+  f.type('Broken'); key(f.input, 'Enter'); await tick(); await tick();
+  assert.equal(f.input.value, 'Broken'); assert.match(f.notice.textContent, /could not take this message now/);
+  click(f.submit); await tick();
+  assert.equal(f.chat.canSteer(), false, 'a stopping reply takes no guidance');
+  b.emit({ type: 'done', ok: false, error: null, usage: null }); await tick();
+  assert.equal(f.chat.canSteer(), false); assert.notEqual((f.input as unknown as { placeholder: string }).placeholder, CLAUDE_CHAT_STEER_HINT);
+});
+
+test('Claude steer: a delayed failure after a provider switch restores only its own draft', async t => {
+  let rejectSteer: ((error: Error) => void) | null = null;
+  const b = fakeBridge({ steer: () => new Promise((_resolve, reject) => { rejectSteer = reject; }) });
+  const native = nativeClaudePreferences(), f = mount(b.bridge, memory(), true, native.bridge);
+  t.after(() => f.chat.stop()); await f.chat.refresh(); await tick();
+  f.type('Build a door'); key(f.input, 'Enter'); await tick();
+  f.type('Make it blue'); const pending = f.chat.steer();
+  assert.equal(f.input.value, '', 'the steering text appears immediately in the transcript');
+  assert.equal(typeof rejectSteer, 'function');
+  f.type('Claude draft while waiting'); f.chat.deactivate();
+  f.input.value = 'ChatGPT draft'; f.messages.replaceChildren();
+  const otherMessage = f.doc.createElement('p'); otherMessage.textContent = 'ChatGPT reply'; f.messages.append(otherMessage);
+  (rejectSteer as unknown as (error: Error) => void)(new Error('Claude chat is unavailable.'));
+  assert.equal(await pending, false);
+  assert.equal(f.input.value, 'ChatGPT draft', 'a failed Claude write cannot overwrite the active provider composer');
+  assert.equal(f.messages.textContent, 'ChatGPT reply', 'the active provider transcript stays untouched');
+  assert.equal(sends(b).length, 1, 'the uncertain steering outcome is never retried automatically');
+  await f.chat.prepareForRuntimeRecovery();
+  assert.equal((native.saved as { tabs: { draft: string }[] }).tabs[0]!.draft, 'Claude draft while waiting\n\nMake it blue', 'the inactive provider draft can be saved without taking over the surface');
+  assert.equal(f.input.value, 'ChatGPT draft');
+  f.chat.activate();
+  assert.equal(f.input.value, 'Claude draft while waiting\n\nMake it blue', 'the failed message returns to its original provider draft');
+});
+
+test('Claude steer: saved steered messages render inline without Edit; a bridge without steer keeps Enter as queue', async t => {
+  const b = fakeBridge(); const f = mount(b.bridge); t.after(() => f.chat.stop()); await f.chat.refresh();
+  b.histories.set('conv-s', { conversationId: 'conv-s', messages: [
+    { id: randomUUID(), role: 'user', text: 'Build a door', at: '2026-10-20T00:00:00.000Z' },
+    { id: randomUUID(), role: 'user', text: 'Make it blue', at: '2026-10-20T00:00:01.000Z', steered: true },
+    { id: randomUUID(), role: 'assistant', text: 'Done.', at: '2026-10-20T00:00:02.000Z', steered: true }] });
+  b.setList([{ conversationId: 'conv-s', title: 'Door', updatedAt: '2026-10-20T00:00:02.000Z', model: 'sonnet', effort: 'high' }]);
+  await f.chat.open('conv-s'); await tick();
+  const rows = f.messages.querySelectorAll('.codex-message');
+  assert.deepEqual(rows.map(node => node.className), ['codex-message human', 'codex-message human steered', 'codex-message codex'], 'only a user message can be steered');
+  assert.equal(rows[1]!.querySelector('.message-steer-label')!.textContent, 'Steered');
+  f.type('Next'); key(f.input, 'Enter'); await tick();
+  assert.equal(f.chat.canSteer(), false); assert.match(f.notice.textContent, /Press Enter to queue your next message\./);
+  f.type('Queued'); key(f.input, 'Enter'); await tick();
+  assert.deepEqual(f.chat.queued().map(row => row.text), ['Queued']);
 });
 
 test('Claude usage meter: tokens from finished replies accumulate per conversation with a ring, count and tooltip', async t => {
@@ -2010,4 +2270,97 @@ test('runtime recovery preserves raw composer text and queued messages without r
  if(interrupted){backend.emit({type:'done',ok:false,error:'Local services stopped.',usage:null});await tick();}
  await f.chat.prepareForRuntimeRecovery();assert.equal(f.input.value,draft+'\n\nQueued follow-up');assert.equal(f.chat.queued().length,0);assert.equal((native.saved as {tabs:{draft:string}[]}).tabs[0]!.draft,f.input.value);assert.equal(sends(backend).length,before);
  }
+});
+
+test('Edge: Enter steers a running Claude reply inline and the build progress group continues; Alt+Enter queues', { skip: !browserModule, timeout: 60000 }, async t => {
+  const build = process.env.ARCANE_UI_BUILD_DIR ?? 'dist', shots = resolve(process.env.ARCANE_UI_SCREENSHOT ?? 'runtime/claude-codex-team/claude-audit/steer/shots');
+  await mkdir(shots, { recursive: true });
+  const modules = ['codex-chat', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat', 'claude-preferences', 'task-usage', 'task-usage-ui'];
+  const fixture = `import {CodexChat,CodexChatApi} from '/codex-chat.js';
+    import {startProviderSetup} from '/provider-setup.js';
+    import {startWorkspaceShell} from '/workspace-shell.js';
+    import {ClaudeChat} from '/claude-chat.js';
+    const f = window.fx = { calls: [], steers: [], steerReply: 'ok' };
+    const chat = new CodexChat(document, new CodexChatApi('${'a'.repeat(64)}'));
+    const native = Object.freeze({ version: 1, ...Object.fromEntries(['status','login','install','launch'].map(action => [action, async provider =>
+      ({ version: 1, provider, installed: true, auth: 'subscription', cliVersion: '2.1.302', busy: false, message: null })])) });
+    const setup = startProviderSetup(document, { chat, nativeBridge: native });
+    const bridge = Object.freeze({ version: 1,
+      status: async () => ({ installed: true, signedIn: true, cliVersion: '2.1.302', models: ['opus', 'sonnet'], efforts: ['low', 'medium', 'high'], defaultModel: 'sonnet', resolved: { opus: 'claude-opus-5-5', sonnet: 'claude-sonnet-5-5' }, message: null }),
+      list: async () => ({ conversations: [] }),
+      history: async id => ({ conversationId: id, messages: [] }),
+      send: async request => { f.calls.push(request); return { turnId: 'turn-' + f.calls.length, conversationId: 'conv-steer' }; },
+      steer: async request => { f.steers.push(request); return f.steerReply === 'ok' ? { messageId: crypto.randomUUID() } : false; },
+      stop: async () => true, remove: async () => true, onEvent: listener => { f.emit = listener; return () => {}; } });
+    const claude = new ClaudeChat(document, { bridge, storage: null });
+    f.claude = claude;
+    const sync = () => {
+      if (setup.chatSurface() === 'claude') { chat.yieldSurface(true); claude.activate(); f.refreshed = claude.refresh(); }
+      else { claude.deactivate(); chat.yieldSurface(false); }
+    };
+    setup.subscribeChatSurface(sync); sync();
+    startWorkspaceShell(document);
+    await chat.start(); f.ready = true;`;
+  const server = createServer((request, response) => { void (async () => {
+    const url = request.url?.split('?')[0] ?? '';
+    if (url === '/v1/codex/state') { response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify({ state: codexState() })); return; }
+    if (url === '/studio.js') { response.writeHead(200, { 'content-type': 'text/javascript' }); response.end(fixture); return; }
+    const file = url === '/studio' ? 'apps/desktop/public/studio.html' : url === '/studio.css' ? 'apps/desktop/public/studio.css'
+      : url.endsWith('.js') && modules.includes(url.slice(1, -3)) ? join(build, 'apps/desktop/src', url.slice(1)) : null;
+    if (!file) { response.writeHead(404); response.end(); return; }
+    response.writeHead(200, { 'content-type': url === '/studio' ? 'text/html' : url.endsWith('.css') ? 'text/css' : 'text/javascript' });
+    response.end(await readFile(resolve(file)));
+  })().catch(() => { response.writeHead(500); response.end(); }); });
+  await new Promise<void>(done => server.listen(0, '127.0.0.1', done));
+  t.after(async () => { server.closeAllConnections(); await new Promise<void>(done => server.close(() => done())); });
+  const { chromium } = await import(pathToFileURL(resolve(browserModule!)).href) as typeof import('playwright-core');
+  const browser = await chromium.launch({ headless: true, args: ['--disable-gpu'], executablePath: process.env.ARCANE_UI_BROWSER_EXE ?? 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe' });
+  t.after(() => browser.close());
+  const page = await browser.newPage({ viewport: { width: 1280, height: 860 } }); page.setDefaultTimeout(8000);
+  const errors: string[] = []; page.on('pageerror', error => errors.push(error.message));
+  await page.goto('http://127.0.0.1:' + (server.address() as { port: number }).port + '/studio');
+  await page.waitForFunction(() => (window as any).fx?.ready === true);
+  await page.evaluate(() => document.dispatchEvent(new CustomEvent('workspace:providerpreference', { detail: { provider: 'claude' } })));
+  await page.waitForFunction(() => !document.getElementById('claude-chat-tabs')!.hidden);
+  await page.evaluate(() => (window as any).fx.refreshed);
+  const composer = page.locator('#codex-composer');
+  await composer.fill('Build a red door in the lobby'); await composer.press('Enter');
+  await page.waitForFunction(() => (window as any).fx.calls.length === 1);
+  const tool = (id: string, name: string, status: string) => page.evaluate(([id, name, status]) => (window as any).fx.emit({ turnId: 'turn-1', conversationId: 'conv-steer', type: 'tool',
+    message: { id, role: 'tool', text: name, at: new Date().toISOString(), tool: { name, status } } }), [id, name, status]);
+  await tool('t1', 'scene_create', 'started'); await tool('t1', 'scene_create', 'finished'); await tool('t2', 'scene_update', 'started');
+  await page.locator('#codex-messages .build-progress').waitFor();
+  assert.equal(await composer.getAttribute('placeholder'), 'Enter to steer · Alt+Enter to queue');
+  assert.match(await page.locator('#claude-chat-notice').innerText(), /Enter to steer · Alt\+Enter to queue/);
+  // Enter while a step runs: steered into the reply, shown inline, nothing new sent.
+  await composer.fill('Make it blue instead'); await composer.press('Enter');
+  await page.waitForFunction(() => (window as any).fx.steers.length === 1);
+  const line = page.locator('#codex-messages .codex-message.steered');
+  await line.waitFor();
+  assert.equal(await line.locator('.message-steer-label').innerText(), 'Steered');
+  assert.equal(await line.locator('.message-text').innerText(), 'Make it blue instead');
+  assert.deepEqual(await page.evaluate(() => (window as any).fx.steers[0]), { turnId: 'turn-1', text: 'Make it blue instead' });
+  assert.equal(await page.evaluate(() => (window as any).fx.calls.length), 1, 'steering does not start a second reply');
+  assert.equal(await composer.inputValue(), '');
+  // The turn's build progress group continues past the steering line: one live group with every step.
+  await tool('t2', 'scene_update', 'finished'); await tool('t3', 'scene_update', 'started');
+  await page.waitForFunction(() => document.querySelectorAll('#codex-messages .build-progress .codex-message.tool').length === 3);
+  assert.equal(await page.locator('#codex-messages .build-progress').count(), 1);
+  assert.equal(await page.locator('#codex-messages .build-progress').getAttribute('data-live'), 'true');
+  // Alt+Enter queues for after the reply instead.
+  await composer.fill('Then add a handle'); await composer.press('Alt+Enter');
+  await page.locator('#claude-chat-queue .composer-queue-chip').waitFor();
+  assert.deepEqual(await page.locator('#claude-chat-queue .composer-queue-text').allInnerTexts(), ['Then add a handle']);
+  assert.equal(await page.evaluate(() => (window as any).fx.steers.length), 1);
+  await page.screenshot({ path: join(shots, 'claude-steer.png') });
+  // A reply that was already ending queues the steering message instead.
+  await page.evaluate(() => { (window as any).fx.steerReply = 'ended'; });
+  await composer.fill('Also a window'); await composer.press('Enter');
+  await page.waitForFunction(() => document.querySelectorAll('#claude-chat-queue .composer-queue-chip').length === 2);
+  assert.equal(await page.locator('#codex-messages .codex-message.steered').count(), 1);
+  await tool('t3', 'scene_update', 'finished');
+  await page.evaluate(() => (window as any).fx.emit({ turnId: 'turn-1', conversationId: 'conv-steer', type: 'done', ok: true, error: null, usage: null }));
+  await page.waitForFunction(() => (window as any).fx.calls.length === 2);
+  assert.equal(await page.evaluate(() => (window as any).fx.calls[1].text), 'Then add a handle', 'the queue continues after the reply');
+  assert.deepEqual(errors, []);
 });

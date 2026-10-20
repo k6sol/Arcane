@@ -6,7 +6,7 @@
 import {
   closeChoiceBlocks, composerMenuOpen, composerPickerCheck, crossProviderColumns, describeToolActivity, fillModelColumns, firstModelRow, installComposerCommands, loopPickerFocus, modelListEntry,
   modelListMove, parseToolDetail, patchMessageText, positionComposerPopover, prefillComposer, prependProviderLogo, renderChangeCard, renderEarlierButton, renderMessageText, renderToolActivity,
-  restoreRequestText, revealEarlier, toolDetailText, toolResultImage, transcriptWindowStart,
+  restoreRequestText, revealEarlier, toolDetailText, toolResultImage, transcriptWindowStart, formatUsageReset, usageLimitActive, usageLimitPickerNote,
 } from './codex-chat.js';
 import type { ChoiceBlockOptions, ComposerModelGroup, ComposerProvider, CrossProviderModels, ProviderUsageLimit, ToolChange } from './codex-chat.js';
 import type { ChatAttachmentsController, ChatAttachmentsOwner } from './chat-attachments.js';
@@ -20,7 +20,8 @@ export type ClaudeToolStatus = 'started' | 'finished' | 'failed';
 /** input/result are the engine's bounded display details (JSON or a short excerpt); older engines omit them. */
 /** `image`: a live tool event's capture (PNG/JPEG data: URL from the host's Arcane tools); saved history never has one. */
 export interface ClaudeChatTool { name: string; status: ClaudeToolStatus; input?: string; result?: string; image?: string }
-export interface ClaudeChatMessage { id: string; role: ClaudeChatRole; text: string; at: string; tool?: ClaudeChatTool }
+/** `steered`: a user message sent into a running reply (it joined that reply instead of starting a new one). */
+export interface ClaudeChatMessage { id: string; role: ClaudeChatRole; text: string; at: string; tool?: ClaudeChatTool; steered?: true }
 export interface ClaudeChatStatus {
   installed: boolean; signedIn: boolean; cliVersion: string | null; models: string[]; efforts: string[];
   defaultModel: string | null; message: string | null;
@@ -39,6 +40,11 @@ export interface ClaudeChatBridge {
   send(request: { conversationId: string | null; text: string; model: string; effort: string; images?: readonly ClaudeChatImage[]; playtest?: boolean }): Promise<unknown>;
   /** Removes a saved user message and everything after it (edit and rewind). Older bridges lack it; Edit is then hidden. */
   rewind?(request: { conversationId: string; messageId: string }): Promise<unknown>;
+  /**
+   * Steers the running reply: Claude reads the text after the tool calls already running finish, in the same reply.
+   * Resolves { messageId } when delivered, false when the reply can no longer take guidance. Older bridges lack it; Enter then queues.
+   */
+  steer?(request: { turnId: string; text: string }): Promise<unknown>;
   stop(turnId: string): Promise<unknown>;
   remove(conversationId: string): Promise<unknown>;
   onEvent(listener: (event: unknown) => void): () => void;
@@ -148,6 +154,7 @@ export function readClaudeChatMessage(value: unknown): ClaudeChatMessage | null 
   const message = record(value);
   if (!message || typeof message.role !== 'string' || !ROLES.includes(message.role as ClaudeChatRole)) return null;
   const output: ClaudeChatMessage = { id: text(message.id, 256), role: message.role as ClaudeChatRole, text: text(message.text), at: text(message.at, 64) };
+  if (message.steered === true && output.role === 'user') output.steered = true;
   const tool = record(message.tool);
   if (tool && typeof tool.status === 'string' && TOOL_STATES.includes(tool.status as ClaudeToolStatus)) {
     output.tool = { name: text(tool.name, 256) || 'Tool', status: tool.status as ClaudeToolStatus };
@@ -175,7 +182,10 @@ const finite = (value: unknown) => typeof value === 'number' && Number.isFinite(
 /** A done event's usage-limit evidence: the engine's structured field, or its fixed message. */
 function readUsageLimit(value: unknown, error: string | null, fixed = CLAUDE_CHAT_USAGE_LIMIT_TEXT): ProviderUsageLimit | null {
   const limit = record(value), reset = limit?.resetsAt;
-  if (limit) return { resetsAt: typeof reset === 'number' && Number.isSafeInteger(reset) && reset >= 1e9 && reset < 1e11 ? reset : null };
+  if (limit) {
+    const resetsAt = typeof reset === 'number' && Number.isSafeInteger(reset) && reset >= 1e9 && reset < 1e11 ? reset : null, window = limit.window;
+    return window === 'session' || window === 'weekly' ? { resetsAt, window } : { resetsAt };
+  }
   return error === fixed ? { resetsAt: null } : null;
 }
 /** One finished reply's tokens and cost: Claude Code's reported cost, else the maintained price table for the model, else none. */
@@ -225,6 +235,10 @@ export function usageMeterText(usage: ClaudeConversationUsage, display: TaskUsag
 /** Per-conversation usage totals kept on this device (bounded). */
 export const CLAUDE_CHAT_USAGE_KEY = 'arcane.claude-chat.usage.v1';
 const USAGE_ROWS = 200;
+/** The composer hint while a reply that can be steered runs (Enter steers, Alt+Enter queues). */
+export const CLAUDE_CHAT_STEER_HINT = 'Enter to steer · Alt+Enter to queue';
+/** Shown when a steering message arrived as the reply ended: it waits in the queue instead. */
+export const CLAUDE_CHAT_STEER_QUEUED_TEXT = 'The reply was already finishing, so your message is queued and sent next.';
 /** At most this many messages wait in the queue while a reply runs. */
 export const CLAUDE_CHAT_QUEUE_LIMIT = 5;
 export const CLAUDE_CHAT_QUEUE_RETURNED_TEXT = 'Queued messages were not sent because the reply did not finish. They are back in the message box.';
@@ -280,7 +294,7 @@ interface Turn {
 }
 /** The transcript's lightweight marker for sent PNG references (claude-chat.cjs imageMarkers). */
 export const claudeImageMarkers = (images: readonly { name: string }[]): string => images.map(image => '[image: ' + image.name + ']').join(' ');
-const editable = (message: ClaudeChatMessage) => message.role === 'user' && !!message.id;
+const editable = (message: ClaudeChatMessage) => message.role === 'user' && !!message.id && !message.steered;
 interface Tab { key: string; conversationId: string | null; model: string; effort: string; draft: string; title?:string }
 type El = HTMLElement;
 /** Claude-only composer nodes created on first activation (studio.html stays provider-neutral). */
@@ -416,9 +430,11 @@ export class ClaudeChat {
     listen(this.el('codex-submit'), 'click', event => { if (this.turnOwnsActiveTab()) { event.preventDefault(); void this.stopTurn(); } });
     listen(input, 'keydown', event => {
       const key = event as KeyboardEvent;
-      if (key.key !== 'Enter' || key.shiftKey || key.isComposing || key.altKey || key.ctrlKey || key.metaKey) return;
+      if (key.key !== 'Enter' || key.shiftKey || key.isComposing || key.ctrlKey || key.metaKey) return;
       // While the "/" or "@" menu is open, Enter picks from it instead of sending.
       if (event.defaultPrevented || composerMenuOpen(this.doc)) return;
+      // Alt+Enter queues the message for after the running reply; with no reply running it does nothing.
+      if (key.altKey) { if (this.turn) { event.preventDefault(); if (!this.rewinding) this.enqueue(); } return; }
       event.preventDefault(); this.submit();
     });
     listen(input, 'input', () => { const tab = this.activeTab(); if (tab && input) {tab.draft = input.value;this.preferenceEdits++;if(this.preferenceStore)this.persistTabs();} this.renderControls(); });
@@ -500,6 +516,7 @@ export class ClaudeChat {
     const attach = this.el('workspace-add-context'); if (attach && this.restoreAttach !== null) attach.hidden = this.restoreAttach;
     this.restoreAttach = null;
     this.el('codex-messages')?.removeAttribute('aria-busy');
+    this.steerHint(false);
     for (const id of [QUEUE_ID, METER_ID]) { const node = this.el(id); if (node) node.hidden = true; }
     this.active = false; this.tools.clear(); this.messageCount = 0; this.turnChanges = []; this.shown = [];
     this.cancelStream();
@@ -572,7 +589,7 @@ export class ClaudeChat {
   modelGroup(): ComposerModelGroup | null {
     if (!this.bridge || this.state && !this.state.installed) return null;
     const ready = this.ready();
-    const note = this.groupNote();
+    const note = this.columnNote();
     return { provider: this.profile.provider, label: this.profile.name, available: ready, hint: !this.state ? (this.refreshing ? 'Checking ' + this.profile.engine + '…' : 'Sign in to use') : ready ? 'Choose a model' : 'Sign in to use',
       models: ready ? this.models().map(id => { const name = this.modelLabel(id), detail = this.modelDetail(id); return { id, label: name.short, title: name.id === id ? id : id + ' → ' + name.id, ...(detail ? { detail } : {}) }; }) : [],
       ...(note ? { note } : {}) };
@@ -581,6 +598,10 @@ export class ClaudeChat {
   protected modelDetail(_model: string): string | null { return null; }
   /** A short line under this provider's model column heading (e.g. a balance); none for Claude. */
   protected groupNote(): string | null { return null; }
+  /** The column line: 'Usage limit reached' (with the reset) while a subscription provider is exhausted, else groupNote. */
+  private columnNote(): string | null {
+    return (this.profile.provider === 'arcane' ? null : usageLimitPickerNote(this.limit)) ?? this.groupNote();
+  }
   /** The done notice for a finished reply's usage. */
   protected replyNotice(usage: unknown, model: string | null, display: TaskUsageCostDisplay): string | null { return formatClaudeUsage(usage, model, display); }
   /** A reply finished (any outcome); the Arcane chat refreshes its balance here. */
@@ -595,10 +616,14 @@ export class ClaudeChat {
   usageLimit(): ProviderUsageLimit | null { return this.limit ? { ...this.limit } : null; }
   /** Usage-limit evidence changed. */
   subscribeUsageLimit(listener: () => void): () => void { this.usageListeners.add(listener); return () => { this.usageListeners.delete(listener); }; }
+  /** Forgets usage-limit evidence whose reported reset has passed (the notice's Retry). Presentation only. */
+  clearUsageLimit(): void { this.setUsageLimit(null); }
   private setUsageLimit(next: ProviderUsageLimit | null): void {
     if (JSON.stringify(next) === JSON.stringify(this.limit)) return;
     this.limit = next;
     for (const listener of [...this.usageListeners]) { try { listener(); } catch { /* Observers cannot break the chat. */ } }
+    // The model list marks this provider's column while it is exhausted.
+    for (const listener of [...this.modelListeners]) { try { listener(); } catch { /* Observers cannot break the chat. */ } }
   }
   /** Effort of the active Claude tab, carried to the other provider when the user switches from the model list. */
   currentEffort(): string | null { return this.activeTab()?.effort || null; }
@@ -676,10 +701,63 @@ export class ClaudeChat {
     else { this.persistTabs(); this.render(); }
   }
 
-  /** Enter or Send: sends now, or queues the message while a reply is running. */
+  /** Enter or Send: sends now; while a reply runs it steers that reply (or queues it when the reply cannot be steered). */
   submit(): void {
     if (this.rewinding) return;
-    if (this.turn) this.enqueue(); else void this.send();
+    if (this.turn) { if (this.canSteer()) void this.steer(); else this.enqueue(); } else void this.send();
+  }
+  /** The visible running reply takes steering messages: the bridge supports it and the reply has started and is not stopping. */
+  canSteer(): boolean {
+    const turn = this.turn;
+    return this.active && !!turn && typeof this.bridge?.steer === 'function' && turn.turnId !== null && !turn.stopping && this.turnOwnsActiveTab() && this.ready();
+  }
+  /** While a steerable reply runs, the empty composer says what Enter and Alt+Enter do; the shared placeholder returns after. */
+  private steerHint(on: boolean): void {
+    const input = this.input(); if (!input?.dataset) return;
+    if (on && input.dataset.steerHint !== 'true') { input.dataset.placeholder = input.placeholder ?? ''; input.placeholder = CLAUDE_CHAT_STEER_HINT; input.dataset.steerHint = 'true'; }
+    else if (!on && input.dataset.steerHint === 'true') { input.placeholder = input.dataset.placeholder ?? ''; delete input.dataset.steerHint; delete input.dataset.placeholder; }
+  }
+  /**
+   * Sends the composer text into the running reply. It shows at once as a steered message in the transcript (the build
+   * progress group keeps going); Claude reads it after the step it is running. A reply that was already ending gets it
+   * queued instead, so nothing is lost and nothing runs twice. Attachments wait for the next message.
+   */
+  async steer(): Promise<boolean> {
+    const bridge = this.bridge, input = this.input(), tab = this.activeTab(), turn = this.turn;
+    if (!this.active || !bridge?.steer || !input || !tab || !turn?.turnId || !this.canSteer()) return false;
+    const message = input.value.trim();
+    if (!message) return false;
+    if (message.length > MAX_INPUT) { this.notice = 'This message is too long for ' + this.profile.name + '. Shorten it to 100,000 characters.'; this.render(); return false; }
+    let pending: unknown = null; try { pending = this.takeAttachments(message); } catch { pending = true; }
+    if (pending) { this.notice = CLAUDE_CHAT_QUEUE_ATTACHMENTS_TEXT; this.render(); return false; }
+    input.value = ''; tab.draft = ''; this.notice = '';
+    const echo: ClaudeChatMessage = { id: '', role: 'user', text: message, at: new Date().toISOString(), steered: true };
+    const article = this.appendMessage(echo, true), epoch = this.viewEpoch;
+    article.dataset.steerState = 'sending';
+    this.render();
+    let reply: unknown = null, failed = false;
+    try { reply = await bridge.steer({ turnId: turn.turnId, text: message }); } catch { failed = true; }
+    const id = text(record(reply)?.messageId, 256), shown = this.active && epoch === this.viewEpoch;
+    if (id) {
+      echo.id = id;
+      if (shown) article.dataset.steerState = 'sent';
+      this.render(); return true;
+    }
+    // Not delivered: the transcript line goes away and the text waits in the queue (reply still running) or the draft.
+    if (shown) { article.remove(); this.shown = this.shown.filter(item => item !== echo); }
+    if (!failed && this.turn === turn && this.queue.length < CLAUDE_CHAT_QUEUE_LIMIT) {
+      this.queue.push({ id: ++this.queueSeq, text: message, tabKey: tab.key }); this.notice = CLAUDE_CHAT_STEER_QUEUED_TEXT;
+    } else if (!failed && !this.turn && this.tabs.includes(tab) && tab.key === this.activeKey && !input.value.trim() && this.canSend()) {
+      // The reply finished meanwhile: the message simply starts the next one.
+      input.value = message; tab.draft = message; this.render(); void this.send(); return false;
+    } else {
+      const ownsComposer = this.active && tab.key === this.activeKey;
+      const current = ownsComposer ? input.value : tab.draft, next = current.trim() ? current + '\n\n' + message : message;
+      tab.draft = next; if (ownsComposer) input.value = next;
+      this.preferenceEdits++; this.queueNativePreferences();
+      this.notice = this.profile.name + ' could not take this message now. It is back in the message box.';
+    }
+    this.render(); return false;
   }
 
   /** Queues the composer text to send after the running reply finishes successfully. */
@@ -936,7 +1014,10 @@ export class ClaudeChat {
         }
         if (visible) this.flushChanges();
         if (visible && !ok && !(turn.stopping && !error)) {
-          const failed = this.appendMessage({ id: '', role: 'error', text: error ?? this.profile.name + ' stopped before finishing.', at: '' }, true);
+          // At a subscription usage limit the line says which limit and when it resets, in the notice's own words.
+          const limitText = limited && this.profile.provider !== 'arcane' ? usageLimitNoticeText(this.profile.provider, limited) + ' This message was not answered.' : null;
+          const failed = this.appendMessage({ id: '', role: 'error', text: limitText ?? error ?? this.profile.name + ' stopped before finishing.', at: '' }, true);
+          if (limitText) failed.className += ' chat-usage-limit';
           // A crash, expired sign-in, outage or offline Studio: the same message can be sent again, only on click.
           if (!limited && !turn.stopping && turn.retry) this.offerRetry(failed, turn.retry, turn.tabKey);
         }
@@ -1062,9 +1143,11 @@ export class ClaudeChat {
       if (message.id) this.tools.set(message.id, { article, tool, text: extra });
       return article;
     }
-    const article = this.make('article', undefined, 'codex-message ' + role);
+    const article = this.make('article', undefined, 'codex-message ' + role + (message.steered ? ' steered' : ''));
     article.setAttribute('data-role', message.role);
-    article.setAttribute('aria-label', message.role === 'user' ? 'Your message' : message.role === 'assistant' ? 'Assistant message' : 'Error');
+    article.setAttribute('aria-label', message.steered ? 'Your steering message' : message.role === 'user' ? 'Your message' : message.role === 'assistant' ? 'Assistant message' : 'Error');
+    // Steered into the running reply: a small label above the text (the build progress group continues past it).
+    if (message.steered) { article.dataset.steered = 'true'; article.append(this.make('p', 'Steered', 'message-steer-label')); }
     const body = this.make('pre', undefined, 'message-text');
     article.append(message.role === 'assistant' ? renderMessageText(this.doc, message.text, restored ? { restored: true } : this.choiceOptions()) : Object.assign(body, { textContent: message.text }));
     if (message.role === 'error') article.append(this.make('p', 'Not completed', 'message-acknowledgement'));
@@ -1261,7 +1344,7 @@ export class ClaudeChat {
     }
     const box = this.el('codex-messages');
     // A new user message starts a new turn: the previous turn's changes are summarised first, and earlier choice buttons close.
-    if (message.role === 'user') { this.flushChanges(); closeChoiceBlocks(box, message.text); }
+    if (message.role === 'user' && !message.steered) { this.flushChanges(); closeChoiceBlocks(box, message.text); }
     if (this.active) this.shown.push(message);
     const element = this.messageElement(message, restored);
     if (!box) return element;
@@ -1431,7 +1514,7 @@ export class ClaudeChat {
       }
       // The other provider's section: choosing there switches provider explicitly through the cross-provider link.
       const others = crossProviderColumns(this.doc, this.crossProvider, query, (id, provider) => { if (this.active && this.pickerOpen()) { this.closePicker(); this.crossProvider?.choose(id, provider); } });
-      const note = this.groupNote();
+      const note = this.columnNote();
       fillModelColumns(this.doc, host, { provider: p.provider, label: p.name, rows: own, empty: models.length ? 'No matching models' : 'No models reported', ...(note ? { note } : {}) }, others, query);
       const empty = this.el('codex-model-empty');
       if (empty) { empty.hidden = others.length > 0 || rows.length > 0; empty.textContent = models.length ? 'No ' + p.name + ' models match your search.' : p.engine + ' reported no models.'; }
@@ -1629,7 +1712,8 @@ export class ClaudeChat {
     if (this.turn && this.notice && this.turn.turnId !== null && !this.turn.stopping) return this.notice;
     if (this.turn) {
       const waiting = this.queue.filter(item => item.tabKey === this.activeKey).length;
-      const queued = waiting ? ' ' + waiting + (waiting === 1 ? ' message' : ' messages') + ' queued.' : ' Press Enter to queue your next message.';
+      const queued = (waiting ? ' ' + waiting + (waiting === 1 ? ' message' : ' messages') + ' queued.' : '') +
+        (this.canSteer() ? ' ' + CLAUDE_CHAT_STEER_HINT + '.' : waiting ? '' : ' Press Enter to queue your next message.');
       return this.turn.turnId === null ? 'Sending…' : this.turn.stopping ? 'Stopping…' : (this.turnOwnsActiveTab() ? name + ' is working…' : name + ' is replying in another chat.') + queued;
     }
     return this.notice || 'Continue in this conversation.';
@@ -1639,6 +1723,7 @@ export class ClaudeChat {
     const input = this.input(), submit = this.el<HTMLButtonElement>('codex-submit');
     const ready = this.ready(), turn = this.turn, stopMode = this.turnOwnsActiveTab();
     if (input) input.disabled = !ready||this.nativeHydrating;
+    this.steerHint(this.canSteer());
     if (submit) {
       submit.type = stopMode ? 'button' : 'submit';
       const state = stopMode ? 'active' : 'idle';
@@ -1742,7 +1827,8 @@ export interface CodexComposerPeer {
 export interface ChatProviderSwitch {
   chatSurface(): ComposerProvider;
   subscribeChatSurface(listener: () => void): () => void;
-  requestProvider(next: ComposerProvider): boolean;
+  /** `hint.signedIn`: the chosen provider's own fresh status lists models (presentation only; see provider-setup). */
+  requestProvider(next: ComposerProvider, hint?: { signedIn?: boolean }): boolean;
 }
 export interface ChatProviderLink {
   /** Applies the current surface owner: Codex yields and Claude activates, or the reverse. Idempotent. */
@@ -1754,20 +1840,18 @@ export interface ChatProviderLink {
 const HANDOFF_MS = 120000;
 const PROVIDER_NAMES: Record<ComposerProvider, string> = { codex: 'ChatGPT', claude: 'Claude', arcane: 'Arcane Credits' };
 /** Reported reset time in the viewer's locale: time only today, weekday and time otherwise. */
-export function formatUsageReset(resetsAt: number, now = Date.now()): string {
-  const at = new Date(resetsAt * 1000), today = new Date(now).toDateString() === at.toDateString();
-  return at.toLocaleString(undefined, today ? { hour: 'numeric', minute: '2-digit' } : { weekday: 'short', hour: 'numeric', minute: '2-digit' });
-}
+export { formatUsageReset };
 /** The composer notice sentence for one provider's usage limit (for Arcane Credits: the balance ran out). */
 export function usageLimitNoticeText(provider: ComposerProvider, limit: ProviderUsageLimit, now = Date.now()): string {
   if (provider === 'arcane') return 'You’re out of Arcane Credits.';
-  const name = PROVIDER_NAMES[provider];
-  if (limit.resetsAt === null) return name + ' usage limit reached.';
-  if (limit.resetsAt * 1000 <= now) return name + ' reported a usage limit; its reported reset time has passed.';
-  return name + ' usage limit reached — resets at ' + formatUsageReset(limit.resetsAt, now) + '.';
+  const name = PROVIDER_NAMES[provider], kind = limit.window === 'weekly' ? ' weekly limit' : limit.window === 'session' ? ' session limit' : ' usage limit';
+  if (limit.resetsAt === null) return name + kind + ' reached. Try again later or switch model.';
+  if (!usageLimitActive(limit, now)) return name + kind + ' should have reset by now. Retry when you’re ready.';
+  return name + kind + ' reached — resets at ' + formatUsageReset(limit.resetsAt, now) + '.';
 }
-/** Ids of the inline usage-limit notice above the shared composer (studio.html). */
-export const USAGE_LIMIT_NOTICE_IDS = Object.freeze({ root: 'usage-limit-notice', message: 'usage-limit-message', action: 'usage-limit-action' });
+/** Ids of the inline usage-limit notice above the shared composer (studio.html): one main action, Arcane Credits, Retry. */
+export const USAGE_LIMIT_NOTICE_IDS = Object.freeze({ root: 'usage-limit-notice', message: 'usage-limit-message', action: 'usage-limit-action',
+  credits: 'usage-limit-credits', retry: 'usage-limit-retry' });
 /** Settings section the out-of-credits notice opens (plans.ts PLANS_SECTION_ID). */
 const PLANS_SECTION = 'settings-plans';
 /**
@@ -1789,7 +1873,9 @@ export function linkChatProviders(options: { codex: CodexComposerPeer; claude: C
     if (stopped) return;
     pending = { target, model: model || null, effort, at: Date.now() };
     if (provider.chatSurface() === target) { sync(); return; }
-    if (!provider.requestProvider(target)) pending = null;
+    let signedIn = false;
+    try { signedIn = !!(target === 'codex' ? codex.modelGroup() : chatOf(target)?.modelGroup())?.available; } catch { signedIn = false; }
+    if (!(signedIn ? provider.requestProvider(target, { signedIn: true }) : provider.requestProvider(target))) pending = null;
   };
   /** Every provider's section except the owner's, in display order; Arcane only while its chat reports one. */
   const groupsFor = (owner: ComposerProvider): ComposerModelGroup[] => [owner === 'codex' ? null : codex.modelGroup(), owner === 'claude' ? null : claude.modelGroup(),
@@ -1839,56 +1925,85 @@ export function linkChatProviders(options: { codex: CodexComposerPeer; claude: C
   };
   // ---- Usage-limit notice: one inline notice above the composer for the provider that owns the surface. ----
   // It offers another provider in one click (the same explicit, draft-carrying switch as the model list), its sign-in,
-  // or, when Arcane Credits ran out, Buy credits (opens Settings > Plans & credits); it never retries, resends or
-  // switches by itself.
+  // Arcane Credits when they are set up, or, when Arcane Credits ran out, Buy credits (opens Settings > Plans & credits).
+  // Retry appears only once the reported reset time has passed and sends the visible draft on that click. Nothing here
+  // retries, resends or switches by itself.
   const doc = claude.doc;
-  let action: { kind: 'switch' | 'setup' | 'buy'; target: ComposerProvider } | null = null, claudeStatusRequested = false;
+  type NoticeAction = { kind: 'switch' | 'setup' | 'buy'; target: ComposerProvider };
+  let action: NoticeAction | null = null, credits = false, retry = false, claudeStatusRequested = false;
+  let resetTimer: ReturnType<typeof setTimeout> | null = null;
   const node = (id: string) => { try { return doc?.getElementById?.(id) ?? null; } catch { return null; } };
+  const limitOf = (owner: ComposerProvider): ProviderUsageLimit | null => owner === 'codex' ? codex.usageLimit?.() ?? null : chatOf(owner)?.usageLimit() ?? null;
   const renderNotice = () => {
     const root = node(USAGE_LIMIT_NOTICE_IDS.root), message = node(USAGE_LIMIT_NOTICE_IDS.message), button = node(USAGE_LIMIT_NOTICE_IDS.action) as HTMLButtonElement | null;
+    if (resetTimer !== null) { clearTimeout(resetTimer); resetTimer = null; }
     if (!root) return;
-    let text = '', next: typeof action = null, label = '';
+    let text = '', next: NoticeAction | null = null, label = '', offerCredits = false, offerRetry = false, resetsAt: number | null = null;
     try {
       const live = !stopped && (options.enabled?.() ?? true), owner: ComposerProvider = live && current ? current : 'codex';
-      const limit = live ? owner === 'codex' ? codex.usageLimit?.() ?? null : chatOf(owner)?.usageLimit() ?? null : null;
+      const limit = live ? limitOf(owner) : null, now = Date.now();
       if (limit) {
-        text = usageLimitNoticeText(owner, limit);
-        const arcaneGroup = arcane?.modelGroup() ?? null;
+        text = usageLimitNoticeText(owner, limit, now);
+        const arcaneGroup = arcane?.modelGroup() ?? null, waiting = usageLimitActive(limit, now);
+        if (waiting && limit.resetsAt !== null) resetsAt = limit.resetsAt;
+        // Retry only after the reported reset: the account should have usage again.
+        offerRetry = owner !== 'arcane' && !waiting;
         if (owner === 'arcane') { next = { kind: 'buy', target: 'arcane' }; label = 'Buy credits'; text += ' This message was not answered; your draft stays here.'; }
         else if (owner === 'codex') {
-          const group = claude.modelGroup();
+          const group = claude.modelGroup(), claudeLimited = usageLimitActive(claude.usageLimit());
           // Claude's sign-in is read once so the notice can offer the switch instead of the sign-in.
           if (group && !group.available && !claudeStatusRequested) { claudeStatusRequested = true; void claude.loadModels().catch(() => {}); }
-          if (group?.available) { next = { kind: 'switch', target: 'claude' }; label = 'Switch to Claude'; text += ' Your draft moves with you.'; }
-          else if (arcaneGroup?.available) { next = { kind: 'switch', target: 'arcane' }; label = 'Use Arcane Credits'; text += ' Your draft moves with you.'; }
+          if (group?.available && !claudeLimited) { next = { kind: 'switch', target: 'claude' }; label = 'Switch to Claude'; text += ' Your draft moves with you.'; offerCredits = !!arcaneGroup?.available; }
+          else if (arcaneGroup?.available) { next = { kind: 'switch', target: 'arcane' }; label = 'Use Arcane Credits'; text += claudeLimited ? ' Claude is also at its usage limit. Your draft moves with you.' : ' Your draft moves with you.'; }
+          else if (claudeLimited) text += ' Claude is also at its usage limit.';
           else if (claude.available()) { next = { kind: 'setup', target: 'claude' }; label = 'Sign in to Claude'; text += ' Your draft stays here.'; }
         } else {
-          const group = codex.modelGroup(), codexLimited = !!codex.usageLimit?.();
-          if (group.available && !codexLimited) { next = { kind: 'switch', target: 'codex' }; label = 'Switch to ChatGPT'; text += ' Your draft moves with you.'; }
+          const group = codex.modelGroup(), codexLimited = usageLimitActive(codex.usageLimit?.());
+          if (group.available && !codexLimited) { next = { kind: 'switch', target: 'codex' }; label = 'Switch to ChatGPT'; text += ' Your draft moves with you.'; offerCredits = !!arcaneGroup?.available; }
           else if (arcaneGroup?.available) { next = { kind: 'switch', target: 'arcane' }; label = 'Use Arcane Credits'; text += codexLimited ? ' ChatGPT is also at its usage limit. Your draft moves with you.' : ' Your draft moves with you.'; }
           else text += codexLimited ? ' ChatGPT is also at its usage limit.' : ' Your draft stays here.';
         }
+        // Past the reset Retry leads; a sign-in offer is no longer needed.
+        if (offerRetry && next?.kind === 'setup') next = null;
       }
-    } catch { text = ''; next = null; }
-    action = next;
+    } catch { text = ''; next = null; offerCredits = false; offerRetry = false; resetsAt = null; }
+    action = next; credits = offerCredits; retry = offerRetry;
     root.hidden = !text; root.dataset.provider = text ? (current ?? 'codex') : '';
+    if (text) root.dataset.state = retry ? 'reset' : 'limited'; else delete root.dataset.state;
     if (message && message.textContent !== text) message.textContent = text;
-    if (button) { button.hidden = !next; button.disabled = !next; if (button.textContent !== label) button.textContent = label; button.className = next?.kind === 'setup' ? 'secondary' : ''; }
+    if (button) { button.hidden = !next; button.disabled = !next; if (button.textContent !== label) button.textContent = label; button.className = next?.kind === 'setup' || retry ? 'secondary' : ''; }
+    const creditsButton = node(USAGE_LIMIT_NOTICE_IDS.credits) as HTMLButtonElement | null;
+    if (creditsButton) { creditsButton.hidden = !credits; creditsButton.disabled = !credits; }
+    const retryButton = node(USAGE_LIMIT_NOTICE_IDS.retry) as HTMLButtonElement | null;
+    if (retryButton) { retryButton.hidden = !retry; retryButton.disabled = !retry; }
+    // Redraw once at the reported reset so Retry appears then; the redraw never sends anything.
+    if (resetsAt !== null && !stopped) resetTimer = setTimeout(() => { resetTimer = null; renderNotice(); }, Math.min(2147483000, Math.max(1000, resetsAt * 1000 - Date.now() + 1000)));
   };
-  const actionButton = node(USAGE_LIMIT_NOTICE_IDS.action);
-  if (actionButton) {
-    const press = () => {
-      const chosen = action; if (!chosen || stopped) return;
-      const Event = doc?.defaultView?.CustomEvent;
-      if (chosen.kind === 'buy') { if (Event) doc.dispatchEvent(new Event('workspace:settingsrequest', { detail: { target: PLANS_SECTION } })); return; }
-      if (chosen.kind === 'switch') { request(chosen.target, '', current === 'codex' || !current ? codex.currentEffort() : chatOf(current)?.currentEffort() ?? null); return; }
-      // Sign-in: choose Claude explicitly (so a later switch still carries the draft) and open provider setup.
-      request(chosen.target, '', null);
-      if (Event) doc.dispatchEvent(new Event('workspace:providersetup', { detail: { provider: chosen.target } }));
-    };
-    actionButton.addEventListener('click', press);
-    removers.push(() => actionButton.removeEventListener('click', press));
-  }
+  const effortNow = () => current === 'codex' || !current ? codex.currentEffort() : chatOf(current)?.currentEffort() ?? null;
+  const bind = (id: string, press: () => void) => {
+    const button = node(id); if (!button) return;
+    const handler = () => { if (!stopped) press(); };
+    button.addEventListener('click', handler);
+    removers.push(() => button.removeEventListener('click', handler));
+  };
+  bind(USAGE_LIMIT_NOTICE_IDS.action, () => {
+    const chosen = action; if (!chosen) return;
+    const Event = doc?.defaultView?.CustomEvent;
+    if (chosen.kind === 'buy') { if (Event) doc.dispatchEvent(new Event('workspace:settingsrequest', { detail: { target: PLANS_SECTION } })); return; }
+    if (chosen.kind === 'switch') { request(chosen.target, '', effortNow()); return; }
+    // Sign-in: choose Claude explicitly (so a later switch still carries the draft) and open provider setup.
+    request(chosen.target, '', null);
+    if (Event) doc.dispatchEvent(new Event('workspace:providersetup', { detail: { provider: chosen.target } }));
+  });
+  bind(USAGE_LIMIT_NOTICE_IDS.credits, () => { if (credits && arcane?.modelGroup()?.available) request('arcane', '', effortNow()); });
+  bind(USAGE_LIMIT_NOTICE_IDS.retry, () => {
+    if (!retry) return;
+    const owner = current ?? 'codex', input = node('codex-composer') as HTMLTextAreaElement | null, form = node('codex-compose') as HTMLFormElement | null;
+    // The reset passed, so the old evidence no longer applies. The visible draft is sent only by this click.
+    chatOf(owner)?.clearUsageLimit();
+    renderNotice();
+    try { if (input?.value.trim() && typeof form?.requestSubmit === 'function') form.requestSubmit(); else if (typeof input?.focus === 'function') input.focus(); } catch { /* The draft stays for a manual send. */ }
+  });
   removers.push(claude.subscribeUsageLimit(renderNotice), claude.subscribeModels(renderNotice));
   if (codex.subscribeStateChange) removers.push(codex.subscribeStateChange(renderNotice));
   removers.push(provider.subscribeChatSurface(sync));

@@ -39,6 +39,12 @@ export interface ProviderSetupOptions {
   };
   nativeBridge?: unknown;
 }
+/**
+ * What the chat already knows about the chosen provider: `signedIn` when its own fresh status lists models for a signed-in
+ * account (the model list only offers those). Presentation only: it keeps that chat on screen instead of flashing the
+ * sign-in card while native status is read again; a signed-out reply still shows the card. It grants no authority.
+ */
+export interface ProviderChoiceHint { signedIn?: boolean }
 export interface ProviderSetupController {
   /** Selected provider's fresh native sign-in evidence; grants no native authority. */
   isSignedIn(): boolean;
@@ -55,7 +61,7 @@ export interface ProviderSetupController {
    * startup auto-selection and reads that provider's native status. It grants no authority; the Claude surface still
    * waits for a signed-in Claude status. Returns false when setup is stopped.
    */
-  requestProvider(next: SetupProvider | 'arcane'): boolean;
+  requestProvider(next: SetupProvider | 'arcane', hint?: ProviderChoiceHint): boolean;
   /**
    * The Arcane Credits chat reports whether it can be used (gateway configured, account connected, models listed).
    * Until it says true, choosing Arcane is refused and the surface never becomes 'arcane'.
@@ -170,7 +176,7 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
     isSignedIn: () => false, subscribeSignInChange: (_listener: () => void) => () => {},
     handoffChoices: () => null, subscribeHandoffChoices: (_listener: () => void) => () => {},
     chatSurface: () => 'codex', subscribeChatSurface: (_listener: () => void) => () => {},
-    requestProvider: (_next: SetupProvider | 'arcane') => false, selectedProvider: () => 'codex', setArcaneAvailable: (_available: boolean) => {}, setArcaneSetup: (_state: ArcaneCreditsSetup) => {},
+    requestProvider: (_next: SetupProvider | 'arcane', _hint?: ProviderChoiceHint) => false, selectedProvider: () => 'codex', setArcaneAvailable: (_available: boolean) => {}, setArcaneSetup: (_state: ArcaneCreditsSetup) => {},
     stop() {}, resume() {}, cleanup() {},
   };
   const native = bridge(doc, options), storage = presentationStorage(doc);
@@ -195,8 +201,13 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
   let lastChoices = '';
   // Claude chat evidence: a non-busy subscription status ACK for the selected Claude provider.
   // Unlike isSignedIn() it does not expire on the 60s presentation clock (an open chat must not
-  // re-lock mid-conversation); any non-subscription status, failure, provider change or stop clears it.
+  // re-lock mid-conversation); any non-subscription status, failure or stop clears it.
   let codexChatEvidence = false, claudeChatEvidence = false, surface: ChatSurface = 'codex';
+  // Last-known chat evidence per provider for this session. A provider change restores it, so a provider already seen
+  // signed in keeps its chat (no sign-in gate flash) while its status is read again in the background; only a refresh
+  // that reports signed out, a failure, a disconnect or a stop clears it. Presentation only: never native or task authority.
+  const knownSignedIn: Record<SetupProvider, boolean> = { codex: false, claude: false };
+  const rememberEvidence = () => { knownSignedIn[provider] = provider === 'codex' ? codexChatEvidence : claudeChatEvidence; };
   const surfaceListeners = new Set<() => void>();
   const claudeChatActive = () => provider === 'claude' && claudeChatEvidence && !!native && !stopped && !disposed;
   // Arcane Credits chat: the user's explicit choice plus the chat's own availability report (no native CLI involved).
@@ -293,6 +304,7 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
       else if(connection?.fresh&&(connection.auth==='signed-out'||connection.auth==='unsupported'))codexChatEvidence=false;
       else if(!connection?.connected&&(state?.auth==='signed-out'||state?.auth==='api-or-cloud'))codexChatEvidence=false;
     }
+    rememberEvidence();
     gate.hidden = (provider==='codex'&&codexChatEvidence&&reconnectAllowed) || claudeChatActive() || arcaneChatActive(); el('workspace-stage')?.classList.toggle('provider-required', !gate.hidden);
     const checking = busy && activeAction === 'status' || pendingStatus;
     const text = connected() ? 'Codex connected.' : checking ? 'Checking ' + name + ' sign-in…' : connectingSavedLogin ? 'Connecting Codex…' : state?.auth === 'subscription' && !state.busy ? name + ' signed in.' :
@@ -348,7 +360,7 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
     // An explicit ChatGPT/Claude choice leaves the Arcane chat; a restored preference (publish false) does not.
     if (publish) chooseArcane(false);
     const changed = next !== provider;
-    if (changed) { clearRecovery();recoveryAttempt=0;savedLoginObserved=false;savedLoginConnections.clear(); provider = next; codexChatEvidence=false; epoch++; actionError = null; states.delete(next); claudeChatEvidence = false; if (next === 'claude') claudeSignInObserved = null; }
+    if (changed) { clearRecovery();recoveryAttempt=0;savedLoginObserved=false;savedLoginConnections.clear(); rememberEvidence(); provider = next; codexChatEvidence = next === 'codex' && knownSignedIn.codex; epoch++; actionError = null; states.delete(next); claudeChatEvidence = next === 'claude' && knownSignedIn.claude; if (next === 'claude') claudeSignInObserved = null; }
     try { storage?.setItem(PROVIDER_PRESENTATION_KEY, JSON.stringify({ version: 1, provider })); } catch { /* Only presentation is lost. */ }
     render();
     const Event = doc.defaultView?.CustomEvent;
@@ -467,7 +479,7 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
   };
   listen(doc,'visibilitychange',checkOnReturn);
   if(typeof doc.defaultView?.addEventListener==='function')listen(doc.defaultView,'focus',checkOnReturn);
-  const disconnectIntent = () => { reconnectAllowed=false;codexChatEvidence=false;clearRecovery();render(); };
+  const disconnectIntent = () => { reconnectAllowed=false;codexChatEvidence=false;knownSignedIn.codex=false;clearRecovery();render(); };
   const disconnect = button('codex-disconnect');
   if(disconnect)listen(disconnect,'click',event=>{if(trusted(event)&&!disconnect.disabled)disconnectIntent();},true);
   const connect = button('codex-connect');
@@ -521,8 +533,9 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
       return () => { choiceListeners.delete(listener); };
     },
     chatSurface: () => surface,
-    requestProvider(next: SetupProvider | 'arcane') {
+    requestProvider(next: SetupProvider | 'arcane', hint?: ProviderChoiceHint) {
       if (stopped || disposed) return false;
+      if (providers(next) && hint?.signedIn === true && next !== provider) knownSignedIn[next] = true;
       if (next === 'arcane') {
         if (!arcaneAvailable) return false;
         autoSelect = false; chooseArcane(true); render();
@@ -554,8 +567,8 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
       signInListeners.add(listener);
       return () => { signInListeners.delete(listener); };
     },
-    stop() { clearRecovery();savedLoginObserved=false;savedLoginConnections.clear();recoveryAttempt=0; stopped = true; epoch++; pendingStatus = false; cancelStatus?.(); clearLoginWatch(); states.clear(); claudeSignInObserved = null; claudeChatEvidence = false; codexChatEvidence=false; awaitingStatus.clear(); render(); },
+    stop() { clearRecovery();savedLoginObserved=false;savedLoginConnections.clear();recoveryAttempt=0; stopped = true; epoch++; pendingStatus = false; cancelStatus?.(); clearLoginWatch(); states.clear(); claudeSignInObserved = null; claudeChatEvidence = false; codexChatEvidence=false; knownSignedIn.codex = knownSignedIn.claude = false; awaitingStatus.clear(); render(); },
     resume() { if (disposed || !stopped) return; stopped = false; epoch++; render(); requestStatus(); },
-    cleanup() { if (disposed) return; clearRecovery();savedLoginObserved=false;savedLoginConnections.clear(); disposed = true; stopped = true; epoch++; pendingStatus = false; cancelStatus?.(); clearLoginWatch(); clearSignInTimer(); states.clear(); claudeSignInObserved = null; claudeChatEvidence = false; awaitingStatus.clear(); notifySignInChange(); notifyChoices(); applySurface(); signInListeners.clear(); choiceListeners.clear(); surfaceListeners.clear(); for (const remove of removers.splice(0)) remove(); },
+    cleanup() { if (disposed) return; clearRecovery();savedLoginObserved=false;savedLoginConnections.clear(); disposed = true; stopped = true; epoch++; pendingStatus = false; cancelStatus?.(); clearLoginWatch(); clearSignInTimer(); states.clear(); claudeSignInObserved = null; claudeChatEvidence = false; codexChatEvidence = false; knownSignedIn.codex = knownSignedIn.claude = false; awaitingStatus.clear(); notifySignInChange(); notifyChoices(); applySurface(); signInListeners.clear(); choiceListeners.clear(); surfaceListeners.clear(); for (const remove of removers.splice(0)) remove(); },
   };
 }

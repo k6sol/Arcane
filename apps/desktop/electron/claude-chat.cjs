@@ -286,6 +286,22 @@ function streamJsonMessage(images, text) {
   return JSON.stringify({ type: 'user', message: { role: 'user', content: [
     ...images.map(image => ({ type: 'image', source: { type: 'base64', media_type: 'image/png', data: image.dataUrl.slice(DATA_URL_PREFIX.length) } })), { type: 'text', text }] } }) + '\n';
 }
+/**
+ * A steering message for the running turn: one more stream-json user message on the still-open stdin. With no `priority`
+ * field Claude Code delivers it in the same turn as soon as the tool calls already running finish (Agent SDK reference,
+ * SDKUserMessage `priority`: "'next', or no priority field"); a turn that ends first runs it as the next turn. Calls already
+ * made are never repeated. `uuid` is the saved transcript message id.
+ */
+function steerJsonMessage(text, uuid) {
+  return JSON.stringify({ type: 'user', uuid, message: { role: 'user', content: [{ type: 'text', text }] }, parent_tool_use_id: null }) + '\n';
+}
+/** Exact `steer` envelope: the running turn and the plain-text guidance for it. */
+function steerInput(value) {
+  const v = plain(value, ['turnId', 'text']);
+  if (!isId(v.turnId)) fail('unavailable');
+  if (typeof v.text !== 'string' || !v.text.trim() || v.text.length > LIMITS.textChars || !v.text.isWellFormed()) fail('text');
+  return Object.freeze({ turnId: v.turnId, text: v.text });
+}
 /** Exact `rewind` envelope: the conversation and the user message the edit replaces (it and everything after are removed). */
 function rewindInput(value) {
   const v = plain(value, ['conversationId', 'messageId']);
@@ -319,7 +335,7 @@ const resetSeconds = value => {
   return Number.isSafeInteger(n) && n >= 1e9 && n < 1e11 ? n : null;
 };
 // Usage/rate-limit outcomes are recognised from the CLI's own result; their raw text is never forwarded.
-const LIMIT_TEXT = /\b(?:usage|rate) limit\b|\bhit your (?:usage )?limit\b|\blimit reached\b|\bout of (?:extra )?usage\b/i;
+const LIMIT_TEXT = /\b(?:usage|rate|session|weekly) limit\b|\bhit your (?:[a-z-]+ ){0,2}limit\b|\blimit reached\b|\bout of (?:extra )?usage\b/i;
 // Sign-in and reachability failures are recognised from the CLI's own result or error; their raw text is never forwarded.
 const AUTH_TEXT = /\b(?:oauth token (?:has )?expired|token (?:has )?expired|invalid api key|please run \/login|authentication[_ ](?:error|failed)|not logged in|unauthori[sz]ed|invalid bearer token|credentials? (?:expired|(?:are |is )?invalid))\b/i;
 const NETWORK_TEXT = /\b(?:overloaded(?:_error)?|ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|connection error|network error|fetch failed|socket hang up|service unavailable|internal server error|api error: 5\d\d)\b/i;
@@ -335,12 +351,77 @@ function studioOfflineResult(content) {
     ? content.slice(0, 64).filter(block => block?.type === 'text' && typeof block.text === 'string').map(block => block.text.slice(0, 65536)).join('\n') : '';
   return /"code"\s*:\s*"SESSION_OFFLINE"/.test(text);
 }
+const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+/** Wall-clock parts (year, month 0-11, day, hour, minute) of an instant in an IANA zone, or local time without one. */
+function zonedParts(at, zone) {
+  if (!zone) { const d = new Date(at); return [d.getFullYear(), d.getMonth(), d.getDate(), d.getHours(), d.getMinutes()]; }
+  const parts = new Intl.DateTimeFormat('en-US', { timeZone: zone, hourCycle: 'h23', year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric' }).formatToParts(new Date(at));
+  const get = type => Number(parts.find(part => part.type === type)?.value);
+  return [get('year'), get('month') - 1, get('day'), get('hour') % 24, get('minute')];
+}
+/** The instant (ms) of a wall-clock time in an IANA zone (local time without one); day/month overflow rolls over. */
+function zonedInstant(year, month, day, hour, minute, zone) {
+  if (!zone) return new Date(year, month, day, hour, minute).getTime();
+  const wall = Date.UTC(year, month, day, hour, minute);
+  let at = wall;
+  for (let pass = 0; pass < 3; pass++) { const p = zonedParts(at, zone); at += wall - Date.UTC(p[0], p[1], p[2], p[3], p[4]); }
+  return at;
+}
+/**
+ * The reset instant (Unix seconds) named by a Claude Code limit sentence, e.g. "resets 2:50pm (Europe/London)",
+ * "resets Oct 20, 4am", "resets at 14:00 (UTC)", "resets in 3 hours" or a legacy "|1792107600" suffix. The next
+ * occurrence after `nowMs` is chosen for a time without a date. Null for anything it cannot read; it never throws.
+ */
+function parseUsageReset(text, nowMs = Date.now()) {
+  try {
+    if (typeof text !== 'string' || !text) return null;
+    const value = text.slice(0, 2000), now = Number.isFinite(nowMs) ? nowMs : Date.now();
+    const epoch = resetSeconds(/\|(\d{10})\b/.exec(value)?.[1]);
+    if (epoch !== null) return epoch;
+    const relative = /\bresets?\s+in\s+(?:(\d{1,3})\s*(?:h|hrs?|hours?))?\s*(?:(\d{1,4})\s*(?:m|mins?|minutes?))?\b/i.exec(value);
+    if (relative && (relative[1] || relative[2])) return resetSeconds(Math.round((now + ((Number(relative[1] ?? 0) * 60) + Number(relative[2] ?? 0)) * 60000) / 1000));
+    const match = /\bresets?\s+(?:at\s+|on\s+)?(?:([a-z]{3,9})\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(?:(\d{4}),?\s+)?(?:at\s+)?)?(\d{1,2})(?::(\d{2}))?\s*([ap])?\.?m?\.?(?:\s*\(([A-Za-z][A-Za-z0-9_+\-]*(?:\/[A-Za-z0-9_+\-]+){0,2})\)|\s+(UTC|GMT)\b)?/i.exec(value);
+    if (!match) return null;
+    const [, monthName, dayText, yearText, hourText, minuteText, meridiem, zoneName, utcName] = match;
+    let hour = Number(hourText); const minute = minuteText === undefined ? 0 : Number(minuteText);
+    if (minute > 59) return null;
+    if (meridiem) { if (hour < 1 || hour > 12) return null; hour = hour % 12 + (meridiem.toLowerCase() === 'p' ? 12 : 0); }
+    else if (minuteText === undefined || hour > 23) return null; // a bare number is not a time
+    let zone = zoneName || utcName ? (zoneName ?? 'UTC') : null;
+    if (zone) { try { new Intl.DateTimeFormat('en-US', { timeZone: zone }); } catch { zone = null; } } // unknown zones read as local time
+    const today = zonedParts(now, zone);
+    let at;
+    if (monthName) {
+      const month = MONTHS.indexOf(monthName.slice(0, 3).toLowerCase()), day = Number(dayText);
+      if (month < 0 || day < 1 || day > 31) return null;
+      const year = yearText ? Number(yearText) : today[0];
+      at = zonedInstant(year, month, day, hour, minute, zone);
+      if (!yearText && at < now - 86400000) at = zonedInstant(year + 1, month, day, hour, minute, zone);
+    } else {
+      at = zonedInstant(today[0], today[1], today[2], hour, minute, zone);
+      if (at <= now - 60000) at = zonedInstant(today[0], today[1], today[2] + 1, hour, minute, zone);
+    }
+    // A reported reset is soon: anything far in the past or more than ~13 months away is a misread.
+    if (!Number.isFinite(at) || at < now - 86400000 || at > now + 400 * 86400000) return null;
+    return resetSeconds(Math.round(at / 1000));
+  } catch { return null; }
+}
+/** Which limit window a sentence or rate_limit_info names: 'session' (the 5-hour window), 'weekly', or null. */
+function usageWindow(text, type) {
+  const value = (typeof type === 'string' ? type : '') + ' ' + (typeof text === 'string' ? text.slice(0, 2000) : '');
+  if (/\bseven_day|\bweekly\b|\bweek\b/i.test(value)) return 'weekly';
+  if (/\bfive_hour|\bsession limit\b|\b5-hour\b/i.test(value)) return 'session';
+  return null;
+}
+/** A limit record: the reset time and, only when known, the window. */
+const limitOf = (resetsAt, window) => window ? { resetsAt, window } : { resetsAt };
 /** Fixed usage-limit classification of a stream-json error result; null when it is not a usage/rate limit. */
-function usageLimitResult(event) {
+function usageLimitResult(event, nowMs = Date.now()) {
   if (!event || event.type !== 'result' || event.is_error !== true && event.subtype === 'success') return null;
   const text = typeof event.result === 'string' ? event.result.slice(0, 2000) : '';
   if (event.api_error_status !== 429 && !LIMIT_TEXT.test(text)) return null;
-  return { resetsAt: resetSeconds(/\|(\d{10})\b/.exec(text)?.[1]) };
+  const epoch = resetSeconds(/\|(\d{10})\b/.exec(text)?.[1]);
+  return { ...limitOf(epoch, usageWindow(text)), parsed: epoch === null ? parseUsageReset(text, nowMs) : null };
 }
 
 /** Per-project transcript store: owned directory, atomic writes, fixed bounds, one serial write queue. `modelPattern` names valid saved model ids. */
@@ -372,11 +453,14 @@ function createStore({ fs, p, directory, now, limits, modelPattern = CHOICE }) {
   }
   function validMessage(m) {
     try {
-      const keys = m && typeof m === 'object' && Object.hasOwn(m, 'tool') ? ['id', 'role', 'text', 'at', 'tool'] : ['id', 'role', 'text', 'at'];
+      // `steered: true` marks a user message sent into a running reply (steer); it is never on any other role.
+      const steered = !!m && typeof m === 'object' && Object.hasOwn(m, 'steered');
+      const keys = m && typeof m === 'object' && Object.hasOwn(m, 'tool') ? ['id', 'role', 'text', 'at', 'tool'] : ['id', 'role', 'text', 'at', ...(steered ? ['steered'] : [])];
       const v = plain(m, keys);
       if (!isId(v.id) || !ROLES.includes(v.role) || typeof v.text !== 'string' || Buffer.byteLength(v.text) > limits.messageBytes || !ISO.test(v.at)) return null;
-      const out = { id: v.id, role: v.role, text: v.text, at: v.at };
-      if (keys.length === 5) {
+      if (steered && (v.steered !== true || v.role !== 'user')) return null;
+      const out = { id: v.id, role: v.role, text: v.text, at: v.at, ...(steered ? { steered: true } : {}) };
+      if (keys.includes('tool')) {
         const raw = v.tool && typeof v.tool === 'object' ? v.tool : null;
         const t = plain(v.tool, ['name', 'status', ...['input', 'result'].filter(key => raw && Object.hasOwn(raw, key))]);
         if (v.role !== 'tool' || typeof t.name !== 'string' || !t.name || t.name.length > limits.toolName || CONTROL.test(t.name) || !TOOL_STATES.includes(t.status)) return null;
@@ -693,7 +777,7 @@ function createClaudeChat(options) {
     try { child.kill(); } catch { /* closed */ }
   }
   const message = (role, text, tool) => ({ id: randomUUID(), role, text: bounded(text, limits.messageBytes), at: isoNow(now), ...(tool ? { tool: { ...tool } } : {}) });
-  const publicMessage = m => ({ id: m.id, role: m.role, text: m.text, at: m.at, ...(m.tool ? { tool: toolCopy(m.tool) } : {}) });
+  const publicMessage = m => ({ id: m.id, role: m.role, text: m.text, at: m.at, ...(m.steered === true && m.role === 'user' ? { steered: true } : {}), ...(m.tool ? { tool: toolCopy(m.tool) } : {}) });
   const toolName = name => { const short = name.startsWith('mcp__' + MCP_SERVER + '__') ? name.slice(MCP_SERVER.length + 7) : name; return (short.replace(/[^A-Za-z0-9._:-]/g, '_') || 'tool').slice(0, limits.toolName); };
 
   async function send(input) {
@@ -753,7 +837,7 @@ function createClaudeChat(options) {
     } catch { /* the done event still reports the outcome */ }
     turns.delete(turn.turnId); if (byConversation.get(turn.conversationId) === turn) byConversation.delete(turn.conversationId);
     emit({ turnId: turn.turnId, conversationId: turn.conversationId, type: 'done', ok, error: ok ? null : error ?? MESSAGES.failed, usage,
-      usageLimit: ok || !limit ? null : { resetsAt: limit.resetsAt } });
+      usageLimit: ok || !limit ? null : limitOf(limit.resetsAt ?? null, limit.window ?? null) });
   }
 
   async function runTurn(turn, text) {
@@ -772,9 +856,10 @@ function createClaudeChat(options) {
       // ARCANE.md rides after the static instructions, so the prompt stays byte-identical until that file changes.
       const prompt = (await loadInstructions()) + projectMemorySection(await loadProjectMemory()), input = text + playtestNote(turn.playtest);
       if (turn.stopped || disposed) return finish(turn, false, disposed ? closedMessage() : MESSAGES.stopped);
-      // A turn with PNG references sends one stream-json user message; plain text turns keep the text input format.
+      // Every turn sends its message as one stream-json user message (PNG references first) and keeps stdin open until the
+      // turn's result, so steering messages can join the running turn (steer). Ending stdin then lets Claude Code exit.
       const images = turn.images; turn.images = [];
-      const args = ['-p', '--input-format', images.length ? 'stream-json' : 'text', '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
+      const args = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
         // Only the user's own Claude Code settings load: a project's .claude/settings*.json (hooks, apiKeyHelper, env such as
         // a base URL) must never run or redirect anything just because that folder was opened in Arcane.
         '--mcp-config', turn.credential.configPath, '--strict-mcp-config', '--setting-sources', 'user', '--model', turn.model, '--effort', turn.effort,
@@ -812,9 +897,11 @@ function createClaudeChat(options) {
       });
       // stderr may contain account details or secrets: it is drained and discarded, never stored or forwarded.
       child.stderr.on('data', () => {});
-      for (const stream of [child.stdout, child.stderr, child.stdin]) stream?.on?.('error', () => {});
+      for (const stream of [child.stdout, child.stderr]) stream?.on?.('error', () => {});
+      child.stdin.on('error', () => { turn.inputOpen = false; });
       child.once('error', () => { void finish(turn, false, turn.stopped ? MESSAGES.stopped : MESSAGES.start); });
       child.once('close', code => {
+        turn.inputOpen = false;
         if (!skipping && pending.length) line(Buffer.concat(pending));
         pending = [];
         const r = turn.result;
@@ -832,7 +919,8 @@ function createClaudeChat(options) {
         if (r) return void finish(turn, false, safeResultText(r.text) ?? MESSAGES.failed, r.usage);
         void finish(turn, false, code === 0 ? MESSAGES.noReply : MESSAGES.exited);
       });
-      child.stdin.end(images.length ? streamJsonMessage(images, input) : input, 'utf8');
+      turn.inputOpen = true;
+      child.stdin.write(streamJsonMessage(images, input), 'utf8');
     } catch { await finish(turn, false, MESSAGES.failed); }
   }
 
@@ -851,7 +939,7 @@ function createClaudeChat(options) {
     }
     if (event.type === 'rate_limit_event') {
       const info = event.rate_limit_info;
-      if (info && typeof info === 'object' && info.status === 'rejected') turn.limit = { resetsAt: resetSeconds(info.resetsAt) };
+      if (info && typeof info === 'object' && info.status === 'rejected') turn.limit = limitOf(resetSeconds(info.resetsAt), usageWindow('', info.rateLimitType));
       return;
     }
     if (event.parent_tool_use_id !== null && event.parent_tool_use_id !== undefined) return; // subagent traffic
@@ -894,11 +982,54 @@ function createClaudeChat(options) {
       const u = event.usage && typeof event.usage === 'object' ? event.usage : null;
       const cost = typeof event.total_cost_usd === 'number' && Number.isFinite(event.total_cost_usd) && event.total_cost_usd >= 0 ? event.total_cost_usd : null;
       const limit = usageLimitResult(event);
+      // A steering message that arrived as the turn ended runs as one more turn in the same process: the reply's outcome is
+      // the last result, its tokens are the sum, and its cost is the last (Claude Code reports the process total).
+      const before = turn.result?.usage ?? null;
+      const usage = u ? { inputTokens: count(u.input_tokens) + count(u.cache_creation_input_tokens) + count(u.cache_read_input_tokens), outputTokens: count(u.output_tokens), costUsd: cost } : null;
       turn.result = { isError: event.is_error === true || event.subtype !== 'success', text: event.result,
         status: Number.isInteger(event.api_error_status) ? event.api_error_status : null,
-        limit: limit ? { resetsAt: limit.resetsAt ?? turn.limit?.resetsAt ?? null } : null,
-        usage: u ? { inputTokens: count(u.input_tokens) + count(u.cache_creation_input_tokens) + count(u.cache_read_input_tokens), outputTokens: count(u.output_tokens), costUsd: cost } : null };
+        // Structured reset times win: the result's epoch, then the rejected rate_limit_event, then the sentence's clock time.
+        limit: limit ? limitOf(limit.resetsAt ?? turn.limit?.resetsAt ?? limit.parsed ?? null, limit.window ?? turn.limit?.window ?? null) : null,
+        usage: before && usage ? { inputTokens: before.inputTokens + usage.inputTokens, outputTokens: before.outputTokens + usage.outputTokens, costUsd: usage.costUsd ?? before.costUsd } : usage ?? before };
+      // The turn is over: no more steering. Messages Claude Code already holds still run before it exits.
+      closeInput(turn);
     }
+  }
+
+  function closeInput(turn) {
+    if (!turn.inputOpen) return;
+    turn.inputOpen = false;
+    try { turn.child?.stdin?.end(); } catch { /* already closed */ }
+  }
+  /**
+   * Steer the running reply: the text joins the turn on the open stdin and Claude reads it after the tool calls already
+   * running finish (no interrupt, nothing repeated). Saved in the transcript as a steered user message at once. Returns
+   * false when the turn can no longer take guidance (not started yet, ended, stopped or at a limit): the renderer then
+   * queues the message instead.
+   */
+  async function steer(input) {
+    if (disposed) fail('unavailable');
+    const v = steerInput(input);
+    const turn = turns.get(v.turnId);
+    if (!turn || turn.finished || turn.stopped || !turn.inputOpen || !turn.child || turn.result || turn.limit) return false;
+    const m = { ...message('user', v.text), steered: true };
+    // Start the write before awaiting. A successful callback confirms the pipe accepted it, not that the CLI acted on it.
+    // An attempted write that fails has an uncertain outcome: reject instead of returning false (which queues a resend).
+    await new Promise((resolve, reject) => {
+      const child = turn.child, stream = child.stdin;
+      let settled = false;
+      const failed = () => settle(false);
+      const settle = ok => {
+        if (settled) return; settled = true;
+        for (const target of [stream, child]) { target.removeListener('error', failed); target.removeListener('close', failed); }
+        if (ok) resolve();
+        else { turn.inputOpen = false; reject(new ClaudeChatError('unavailable')); }
+      };
+      for (const target of [stream, child]) { target.once('error', failed); target.once('close', failed); }
+      try { stream.write(steerJsonMessage(v.text, m.id), 'utf8', error => settle(!error)); } catch { settle(false); }
+    });
+    try { await store.put(turn.conversationId, m); } catch { /* The pipe accepted it; do not send it twice. */ }
+    return Object.freeze({ messageId: m.id });
   }
 
   async function list() {
@@ -918,7 +1049,7 @@ function createClaudeChat(options) {
     if (!isId(turnId)) fail('unavailable');
     const turn = turns.get(turnId);
     if (!turn || turn.finished) return Promise.resolve(false);
-    turn.stopped = true; killTree(turn.child);
+    turn.stopped = true; turn.inputOpen = false; killTree(turn.child);
     return Promise.resolve(true);
   }
   async function remove(conversationId) {
@@ -936,7 +1067,7 @@ function createClaudeChat(options) {
     for (const c of owned) c.retired = true;
     await Promise.all(owned.map(retire));
   }
-  const host = { version: 1, status: () => status(), list, history, send, rewind, stop, remove };
+  const host = { version: 1, status: () => status(), list, history, send, steer, rewind, stop, remove };
   Object.defineProperties(host, { dispose: { value: dispose }, activeTurns: { value: () => turns.size }, revokeApproval: { value: revokeApproval } });
   return Object.freeze(host);
 }
@@ -950,7 +1081,7 @@ function installClaudeChatIpc(ipcMain, { getSession, getHost }) {
         !policy.validOrigin(session.origin) || !policy.navigationAllowed(session.origin, frame.url) || new URL(frame.url).href !== frame.url) fail('unavailable');
     return session;
   }
-  for (const action of ['status', 'list', 'history', 'send', 'rewind', 'stop', 'remove']) ipcMain.handle('arcane:claude-chat-' + action, async (event, ...args) => {
+  for (const action of ['status', 'list', 'history', 'send', 'steer', 'rewind', 'stop', 'remove']) ipcMain.handle('arcane:claude-chat-' + action, async (event, ...args) => {
     try {
       const before = scope(event), host = getHost();
       if (!host) fail('unavailable');
@@ -958,6 +1089,7 @@ function installClaudeChatIpc(ipcMain, { getSession, getHost }) {
       if (action === 'status' || action === 'list') { if (args.length) fail('unavailable'); }
       else if (action === 'send') { if (args.length !== 1) fail('unavailable'); input = sendInput(args[0]); }
       else if (action === 'rewind') { if (args.length !== 1) fail('unavailable'); input = rewindInput(args[0]); }
+      else if (action === 'steer') { if (args.length !== 1) fail('unavailable'); input = steerInput(args[0]); }
       else { if (args.length !== 1 || !isId(args[0])) fail('unavailable'); input = args[0]; }
       const response = input === undefined ? await host[action]() : await host[action](input);
       const after = getSession();
@@ -971,4 +1103,4 @@ function installClaudeChatIpc(ipcMain, { getSession, getHost }) {
 
 module.exports = { createClaudeChat, installClaudeChatIpc,
   // Shared with the Arcane chat host (arcane-chat.cjs): the same transcript store and bounded display details.
-  createChatStore: createStore, toolDetail, toolResultDetail, toolResultImage, withToolImage, TOOL_IMAGE_LIMITS, toolCopy, boundedText: bounded, parseChoices, sendInput, playtestNote, appendedSystemPrompt, withoutSharedGuidance, GUIDANCE_START, MANAGED_TAIL_START, projectMemorySection, PROJECT_MEMORY_GUIDANCE, streamJsonMessage, rewindSeed, resolveAliases, CLAUDE_ALIAS_MODELS: ALIAS_MODELS, safeResultText, usageLimitResult, CLAUDE_CHAT_LIMITS: LIMITS, CLAUDE_CHAT_MESSAGES: MESSAGES, CLAUDE_CHAT_EVENT: EVENT_CHANNEL };
+  createChatStore: createStore, toolDetail, toolResultDetail, toolResultImage, withToolImage, TOOL_IMAGE_LIMITS, toolCopy, boundedText: bounded, parseChoices, sendInput, playtestNote, steerInput, steerJsonMessage, appendedSystemPrompt, withoutSharedGuidance, GUIDANCE_START, MANAGED_TAIL_START, projectMemorySection, PROJECT_MEMORY_GUIDANCE, streamJsonMessage, rewindSeed, resolveAliases, CLAUDE_ALIAS_MODELS: ALIAS_MODELS, safeResultText, usageLimitResult, parseUsageReset, usageWindow, CLAUDE_CHAT_LIMITS: LIMITS, CLAUDE_CHAT_MESSAGES: MESSAGES, CLAUDE_CHAT_EVENT: EVENT_CHANNEL };

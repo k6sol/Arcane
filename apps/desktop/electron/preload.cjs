@@ -330,6 +330,8 @@ const claudeChatMessage = (value, live = false) => {
   if (!value || typeof value !== 'object' || !claudeChatId(value.id) || !['user', 'assistant', 'tool', 'error'].includes(value.role) ||
       !claudeChatText(value.text, 65536) || !claudeChatTime(value.at)) claudeChatUnavailable();
   const out = { id: value.id, role: value.role, text: value.text, at: value.at };
+  // A user message sent into a running reply (steer) carries steered: true; nothing else may.
+  if (value.steered !== undefined) { if (value.steered !== true || value.role !== 'user') claudeChatUnavailable(); out.steered = true; }
   if (value.tool !== undefined) {
     if (!value.tool || typeof value.tool !== 'object' || !claudeChatText(value.tool.name, 128) || !value.tool.name ||
         !['started', 'finished', 'failed'].includes(value.tool.status)) claudeChatUnavailable();
@@ -359,6 +361,10 @@ const claudeChatResolved = (value, models) => {
 };
 const claudeChatReply = (action, value) => {
   if (!value || typeof value !== 'object') claudeChatUnavailable();
+  if (action === 'steer') {
+    if (!claudeChatId(value.messageId)) claudeChatUnavailable();
+    return { messageId: value.messageId };
+  }
   if (action === 'status') {
     if (typeof value.installed !== 'boolean' || typeof value.signedIn !== 'boolean' || !(value.cliVersion === null || claudeChatText(value.cliVersion, 64)) ||
         !claudeChatList(value.models, 32) || !value.models.every(claudeChatChoice) || !claudeChatList(value.efforts, 16) || !value.efforts.every(claudeChatChoice) ||
@@ -407,11 +413,21 @@ const claudeChatInvoke = async (action, args) => {
     if (args.length !== 1 || !value || Object.getPrototypeOf(value) !== Object.prototype || Reflect.ownKeys(value).length !== 2) claudeChatUnavailable();
     for (const key of ['conversationId', 'messageId']) { const d = Object.getOwnPropertyDescriptor(value, key); if (!d?.enumerable || !Object.hasOwn(d, 'value') || !claudeChatId(d.value)) claudeChatUnavailable(); }
     input = { conversationId: value.conversationId, messageId: value.messageId };
+  } else if (action === 'steer') {
+    // Guidance for the running reply: its turn id and plain text only (attachments wait for the next message).
+    const value = args[0];
+    if (args.length !== 1 || !value || Object.getPrototypeOf(value) !== Object.prototype || Reflect.ownKeys(value).length !== 2) claudeChatUnavailable();
+    for (const key of ['turnId', 'text']) { const d = Object.getOwnPropertyDescriptor(value, key); if (!d?.enumerable || !Object.hasOwn(d, 'value')) claudeChatUnavailable(); }
+    if (!claudeChatId(value.turnId)) claudeChatUnavailable();
+    if (typeof value.text !== 'string' || !value.text.trim() || value.text.length > 100000) throw new Error(CLAUDE_CHAT_ERRORS[4]);
+    input = { turnId: value.turnId, text: value.text };
   } else { if (args.length !== 1 || !claudeChatId(args[0])) claudeChatUnavailable(); input = args[0]; }
   let value;
   try { value = await ipcRenderer.invoke('arcane:claude-chat-' + action, ...(input === undefined ? [] : [input])); }
   catch (error) { const text = String(error?.message ?? ''); throw new Error(CLAUDE_CHAT_ERRORS.find(known => text.endsWith(known)) ?? CLAUDE_CHAT_ERRORS[0]); }
   if (action === 'stop' || action === 'remove') { if (typeof value !== 'boolean') claudeChatUnavailable(); return value; }
+  // false: the reply can no longer take guidance (the renderer queues the message instead).
+  if (action === 'steer' && value === false) return false;
   return claudeChatReply(action, value);
 };
 const claudeChatEvent = value => {
@@ -424,12 +440,13 @@ const claudeChatEvent = value => {
       const u = value.usage, number = n => Number.isSafeInteger(n) && n >= 0;
       if (typeof value.ok !== 'boolean' || !(value.error === null || claudeChatText(value.error, 512)) ||
           !(u === null || u && typeof u === 'object' && number(u.inputTokens) && number(u.outputTokens) && (u.costUsd === null || typeof u.costUsd === 'number' && Number.isFinite(u.costUsd) && u.costUsd >= 0))) return null;
-      // A usage limit is only the fixed engine message plus an optional bounded reset time (Unix seconds).
+      // A usage limit is only the fixed engine message plus an optional bounded reset time (Unix seconds) and window.
       const l = value.usageLimit ?? null;
       if (!(l === null || value.ok === false && value.error === CLAUDE_CHAT_USAGE_LIMIT && l && typeof l === 'object' &&
           (l.resetsAt === null || Number.isSafeInteger(l.resetsAt) && l.resetsAt >= 1e9 && l.resetsAt < 1e11))) return null;
       return { ...base, type: 'done', ok: value.ok, error: value.error, usage: u === null ? null : { inputTokens: u.inputTokens, outputTokens: u.outputTokens, costUsd: u.costUsd },
-        usageLimit: l === null ? null : { resetsAt: l.resetsAt } };
+        // The limit window ('session' or 'weekly') rides along only as one of those two fixed words.
+        usageLimit: l === null ? null : l.window === 'session' || l.window === 'weekly' ? { resetsAt: l.resetsAt, window: l.window } : { resetsAt: l.resetsAt } };
     }
   } catch { return null; }
   return null;
@@ -437,7 +454,7 @@ const claudeChatEvent = value => {
 const claudeChat = Object.freeze({ version: 1,
   status: (...args) => claudeChatInvoke('status', args), list: (...args) => claudeChatInvoke('list', args),
   history: (...args) => claudeChatInvoke('history', args), send: (...args) => claudeChatInvoke('send', args),
-  rewind: (...args) => claudeChatInvoke('rewind', args),
+  steer: (...args) => claudeChatInvoke('steer', args), rewind: (...args) => claudeChatInvoke('rewind', args),
   stop: (...args) => claudeChatInvoke('stop', args), remove: (...args) => claudeChatInvoke('remove', args),
   onEvent: listener => {
     if (typeof listener !== 'function') claudeChatUnavailable();
