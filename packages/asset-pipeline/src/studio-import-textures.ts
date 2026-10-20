@@ -88,6 +88,9 @@ export function materialStudioTexturePixels(material: StudioImportManifest['mate
     projectedBytes += image.width * image.height * 4;
     if (projectedBytes > maximumRgbaBytes) fail('BUDGET', 'Converted material maps exceed the remaining aggregate RGBA8 budget.');
   }
+  if (material.alphaMode !== 'OPAQUE' && material.alphaMode !== 'MASK') fail('UNSUPPORTED_TEXTURE', 'Only OPAQUE and MASK alpha are delivered; BLEND is not approximated.');
+  if (!Number.isFinite(material.alphaCutoff) || material.alphaCutoff < 0 || material.alphaCutoff > 1) fail('UNSUPPORTED_TEXTURE', 'alphaCutoff must be finite within [0,1].');
+  const mask = material.alphaMode === 'MASK', cutoff = material.alphaCutoff;
   const output: StudioTexturePixels[] = [];
   for (const [semantic, use] of slots) {
     if (!use) continue;
@@ -99,7 +102,9 @@ export function materialStudioTexturePixels(material: StudioImportManifest['mate
     for (let i = 0; i < pixels.length; i += 4) {
       if (semantic === 'ColorMap') for (let c = 0; c < 3; c++) pixels[i + c] = factors[c] === 1 ? pixels[i + c]! : srgbByte(linear(pixels[i + c]!) * factors[c]!);
       else if (semantic !== 'NormalMap') { const value = Math.floor(pixels[i]! * factors[0]! + 0.5); pixels.fill(value, i, i + 3); }
-      pixels[i + 3] = 255; // glTF OPAQUE ignores source image alpha.
+      // glTF OPAQUE ignores source alpha; MASK is an exact binary cutout of
+      // ColorMap coverage (alpha/255 >= alphaCutoff). Data maps stay opaque.
+      pixels[i + 3] = mask && semantic === 'ColorMap' ? (pixels[i + 3]! / 255 >= cutoff ? 255 : 0) : 255;
     }
     const metadata = { materialSha256: material.sha256, semantic, sourceSha256: image.sourceSha256, sourceRgbaSha256: image.rgbaSha256,
       channel: use.channel, factors, width: image.width, height: image.height, colorSpace: semantic === 'ColorMap' ? 'srgb' as const : 'linear' as const,
