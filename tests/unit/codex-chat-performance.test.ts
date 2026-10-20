@@ -140,7 +140,7 @@ for(const transition of ['remove','acknowledged','failed-empty-checkpoint'] as c
     f.set(initial);await f.chat.refresh();
   }else{refuseEmpty=transition==='failed-empty-checkpoint';assert.equal(queue.queueAction('remove',{...item},queue.queueGesture()),true);}
   for(let i=0;i<4;i++)await new Promise<void>(done=>setImmediate(done));
-  assert.deepEqual(writes,[['Saved queued prompt'],[]]);assert.deepEqual(queue.queue,[]);
+  assert.deepEqual(writes,[['Saved queued prompt'],[]]);assert.deepEqual([...queue.queue],[]);
   const host=f.doc.getElementById('codex-chat-queue');assert.equal(host.hidden,true);assert.equal(host.children.length,0);assert.equal(host.dataset.signature,undefined);
   let serializations=0,copies=0;const originalStringify=JSON.stringify,originalClone=globalThis.structuredClone,requests=f.calls.length,persisted=f.storage.writes;
   JSON.stringify=((...args:Parameters<typeof JSON.stringify>)=>{serializations++;return originalStringify(...args);}) as typeof JSON.stringify;
@@ -178,11 +178,11 @@ for(const recoveryProject of ['same','different'] as const)test('held '+recovery
   assert.equal(queue.queueAction('remove',{...item},queue.queueGesture()),true);assert.deepEqual(writes,[['Persisted before reattachment']]);
   releaseFirstSave();for(let i=0;i<4;i++)await new Promise<void>(done=>setImmediate(done));
   assert.deepEqual(queue.queue,[],'the old bridge save acknowledgement cannot clear or resurrect the newer removal');
-  release();await reattaching;assert.deepEqual(queue.queue,[]);assert.equal(f.doc.getElementById('codex-chat-queue').hidden,true);assert.deepEqual(writes,[['Persisted before reattachment']],'finishing a read never overwrites the pending local removal');
+  release();await reattaching;assert.deepEqual([...queue.queue],[]);assert.equal(f.doc.getElementById('codex-chat-queue').hidden,true);assert.deepEqual(writes,[['Persisted before reattachment']],'finishing a read never overwrites the pending local removal');
   if(recoveryProject==='different'){
     await assert.rejects(f.chat.prepareForRuntimeRecovery(),/Queued messages could not be saved/);assert.deepEqual(writes,[['Persisted before reattachment']],'another project cannot receive the outgoing empty checkpoint');
     await f.chat.setQueuePersistence({version:1,read:async()=>({available:true,projectPath:initial.projectPath,rows:staleRows}),save:async value=>{diskRows=structuredClone(value.rows);writes.push(value.rows.map(row=>row.text));return{saved:true};}});
-    assert.deepEqual(queue.queue,[]);
+    assert.deepEqual([...queue.queue],[]);
   }
   await f.chat.prepareForRuntimeRecovery();assert.deepEqual(writes,[['Persisted before reattachment'],[]]);assert.deepEqual(diskRows,[]);
 });
