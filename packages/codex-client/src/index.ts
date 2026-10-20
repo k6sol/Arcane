@@ -18,6 +18,7 @@ export { MCP_TOOL_SUMMARY_LIMITS, summarizeMcpToolCall } from './tool-call.js';
 export type CodexClient = CodexSession;
 export type { NativeRateLimits, NativeRateLimitBucket, NativeRateLimitWindow, NativeLimitReason } from './rate-limits.js';
 export type { NativeTaskContinuation, ManagedTaskStart, NativeIncorporationChain, NativeIncorporationPermit } from './types.js';
+export type { SteerTurnAction, SteerTurnAck } from './types.js';
 
 export interface ProposalWorker {
   snapshot(): Snapshot;

@@ -5,6 +5,8 @@ export type SubmittedChatProvider = 'codex' | 'claude' | 'arcane';
 export type SubmittedChatState = 'pending' | 'acknowledged' | 'rejected' | 'unknown';
 /** A local Send receipt, never a native history item or permission to replay it. */
 export interface SubmittedChatMessage {
+  /** Absent means a legacy new-turn Send. Steering receipts are keyed by requestId, never turnId. */
+  kind?: 'steer';
   requestId: string; turnId: string | null; text: string;
   model: string | null; effort: string | null; state: SubmittedChatState;
   createdAt: string; finishedAt: string | null; errorCode: string | null;
@@ -29,7 +31,8 @@ export class SubmittedChatStore {
   }
   put(binding: { threadId: string; sessionId: string | null }, message: SubmittedChatMessage): void {
     if (!identifier(binding.threadId) || binding.sessionId !== null && !identifier(binding.sessionId) ||
-        !identifier(message.requestId) || Buffer.byteLength(message.text) > 131072 || message.state !== 'pending')
+        !identifier(message.requestId) || Buffer.byteLength(message.text) > 131072 || message.state !== 'pending' ||
+        message.kind !== undefined && message.kind !== 'steer')
       throw new Error('Invalid submitted chat message.');
     const safe: SubmittedChatMessage = { ...message, text: redactNativeHistoryText(message.text) };
     this.db.prepare('INSERT INTO submitted_chat_messages(request_id,provider,project_path,thread_id,session_id,payload) VALUES(?,?,?,?,?,?)')

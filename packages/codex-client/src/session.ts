@@ -11,6 +11,7 @@ import { CodexClientError, validateNativeAssetHooks, type Account, type Approval
 import { exact, fail, human, object, optionalText, str } from './validation.js';
 import type { NativeTokenUsage, TokenUsageBreakdown, TokenUsageReport } from './types.js';
 import type { NativeTaskContinuation, ManagedTaskStart, NativeIncorporationChain, NativeIncorporationPermit } from './types.js';
+import type { SteerTurnAction, SteerTurnAck } from './types.js';
 import { summarizeMcpToolCall } from './tool-call.js';
 import { snapshotReferenceImages, type ReferenceImage } from './reference-images.js';
 import { parseNativeRateLimits, mergeNativeRateLimitUpdate, type NativeRateLimits } from './rate-limits.js';
@@ -224,6 +225,8 @@ export class CodexSession {
   #failureCode: string | null = null;
   #threadOperation: Operation | null = null;
   #turnOperation: Operation | null = null;
+  #steerOperation: Operation | null = null;
+  #steerMessageIds = new Set<string>();
   #automaticWriteOperation: Operation | null = null;
   #automaticWriteStarts = new WeakSet<Operation>();
   #taskContinuation: { token: NativeTaskContinuation; thread: ThreadState; operation: Operation;
@@ -656,6 +659,48 @@ export class CodexSession {
       else if (!TERMINAL.has(thread.turnStatus)) thread.turnStatus = 'unknown';
       throw error;
     } finally { this.#turnOperation = null; }
+  }
+  async steerTurn(action: SteerTurnAction): Promise<SteerTurnAck> {
+    const input=ownData(action,['initiatedBy','threadId','expectedTurnId','text','clientUserMessageId']);
+    human({initiatedBy:input.initiatedBy as HumanAction['initiatedBy']});
+    if(this.mcpPolicy==='proposal')fail('PROPOSAL_READ_ONLY','Proposal workers cannot steer a parent turn.');
+    const thread=this.#requireThread(str(input.threadId)),expectedTurnId=str(input.expectedTurnId),text=str(input.text,this.bounds.maxInputBytes);
+    const clientUserMessageId=str(input.clientUserMessageId,36);
+    if(!/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}(?![\s\S])/.test(clientUserMessageId))fail('ARGUMENTS','A unique steering request UUID is required.');
+    if(this.#steerMessageIds.has(clientUserMessageId))fail('STEER_REPLAY','This steering request was already admitted. Inspect its original receipt; do not resend it.');
+    if(this.#steerOperation||this.#turnPreflight||this.#threadOperation||this.#turnOperation||
+      this.#operations.some(operation=>operation.state==='pending'||operation.state==='unknown'))fail('BUSY','Wait for the original turn acknowledgement and reconcile pending operations before steering.');
+    const sessionId=thread.sessionId,selection={...thread.selection},revision=this.#accountRevision,assetIntent=this.#assetIntent;
+    const check=()=>{
+      const current=this.#requireThread(thread.threadId);
+      if(current!==thread||current.sessionId!==sessionId||current.turnId!==expectedTurnId||current.turnStatus!=='inProgress'||
+        current.selection.model!==selection.model||current.selection.effort!==selection.effort||this.#accountRevision!==revision||this.#assetIntent!==assetIntent)
+        fail('STEER_SCOPE_CHANGED','The exact active turn changed before steering was acknowledged.');
+    };
+    check();
+    const params={threadId:thread.threadId,expectedTurnId,clientUserMessageId,input:[{type:'text',text,text_elements:[]}]};
+    if(Buffer.byteLength(JSON.stringify({id:Number.MAX_SAFE_INTEGER,method:'turn/steer',params})+'\n')>this.bounds.maxFrameBytes)
+      fail('FRAME_LIMIT','The complete steering message exceeds the native frame limit.');
+    if(this.#operations.length>=this.bounds.maxOperations)fail('OPERATION_LIMIT','Steering operation history is full. The original turn remains active; do not replay this request.');
+    const operation=this.#newOperation('turn/steer',thread.threadId,expectedTurnId);this.#steerOperation=operation;
+    this.#steerMessageIds.add(clientUserMessageId); // At most one per bounded retained operation.
+    let responseReceived=false;
+    try{
+      // Recheck at the synchronous write boundary without opening a new task or
+      // asset intent, changing automatic writes, or clearing existing approvals.
+      const result=await this.#transport.request('turn/steer',params,id=>{check();operation.requestId=id;});responseReceived=true;
+      const ack=ownData(result,['turnId']),turnId=str(ack.turnId);
+      if(turnId!==expectedTurnId)fail('PROTOCOL','Steering acknowledgement changed the exact turn ID.');
+      check();operation.state='acknowledged';return {turnId};
+    }catch(error){
+      const raw=error instanceof CodexClientError?error:new CodexClientError('PROTOCOL','Invalid steering acknowledgement.',responseReceived);
+      const native=responseReceived?new CodexClientError(raw.code==='ARGUMENTS'?'PROTOCOL':raw.code,'Steering outcome requires review of the retained request.',true,raw.remoteCode):raw;
+      operation.errorCode=native.code;
+      operation.state=native.code==='REMOTE_REJECTED'?'rejected':native.dispatched||operation.state==='unknown'?'unknown':'not-sent';
+      // An uncertain amendment fences later admissions through operation history;
+      // it never retires, cancels or regrants the original accepted work.
+      throw native;
+    }finally{this.#steerOperation=null;}
   }
   async interruptTurn(action: HumanAction & { threadId: string; turnId: string }): Promise<void> {
     exact(action, ['initiatedBy','threadId','turnId']); human({ initiatedBy: action.initiatedBy });
