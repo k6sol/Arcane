@@ -297,7 +297,7 @@ test('fresh native operation and advanced epoch append a CPU run and witnessed p
   assert.deepEqual(f.studio.readStageRun(f.scope.projectId, JOB, first.runId), original);
   assert.deepEqual(await readFile(join(f.root, 'preparations', preparationId + '.json')), oldBytes);
   const prepared = await f.ledger.get(fresh, JOB, f.guard, latest.intent.preparationAttemptId);
-  assert.equal(prepared?.schemaVersion, 2); assert.equal(prepared?.preparationAttempt?.previousId, preparationId);
+  assert.equal(prepared?.schemaVersion, 4); assert.equal(prepared?.preparationAttempt?.previousId, preparationId);
   assert.equal(prepared?.witness.playEpoch, 1);
   assert.equal((await f.status()).stage?.receiptScope, 'historical-cpu');
   assert.equal((await f.status()).stage?.currentBuffers, 'unobserved');

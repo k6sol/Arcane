@@ -46,7 +46,7 @@ test('only a genuine listener bind conflict is classified as a port conflict', a
 test('real newer-schema store refusals give version guidance', async t => {
   const root = await scratch(t);
   const studio = join(root, 'studio'), work = join(root, 'work');
-  for (const [directory, file, version] of [[studio, 'studio.sqlite', 7], [work, 'work.sqlite', 3]] as const) {
+  for (const [directory, file, version] of [[studio, 'studio.sqlite', 8], [work, 'work.sqlite', 3]] as const) {
     await import('node:fs/promises').then(fs => fs.mkdir(directory, { recursive: true }));
     const db = new DatabaseSync(join(directory, file)); db.exec('PRAGMA user_version=' + version); db.close();
   }

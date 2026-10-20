@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import {mkdtempSync,lstatSync,realpathSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join,resolve,relative,isAbsolute,sep} from 'node:path';
-import {createNativeAssetRegistry,assertNativeAssetActor,nativeAssetActorScope,assertNativeAssetStageOperationAvailable,claimNativeAssetStageOperation,type NativeAssetActor} from '../../apps/daemon/src/native-asset-authority.js';
+import {createNativeAssetRegistry,assertNativeAssetActor,nativeAssetActorScope,nativeAssetOperationSignal,assertNativeAssetStageOperationAvailable,claimNativeAssetStageOperation,type NativeAssetActor} from '../../apps/daemon/src/native-asset-authority.js';
+import type {AppAssetConversationBinding} from '../../packages/protocol/src/asset-conversation.js';
 const refused={code:'NATIVE_ASSET_AUTHORITY'};
 function fixture(t:test.TestContext) {
   const directory=realpathSync(mkdtempSync(join(tmpdir(),'arcane-native-assets-'))),registry=createNativeAssetRegistry({projectPath:directory});
@@ -14,6 +15,48 @@ function fixture(t:test.TestContext) {
   const ready=()=>{incarnation.seal(seal);incarnation.grant(bound);incarnation.dispatched({...bound,operationId:'intent-a'});};
   return {directory,registry,incarnation,token,seal,bound,ready};
 }
+
+function appBinding(provider:'claude-code'|'arcane'):AppAssetConversationBinding {
+  const anchor={kind:'app-conversation' as const,connectionId:'connection-app',conversationId:'11111111-1111-4111-8111-111111111111'};
+  return provider==='claude-code'?{...anchor,provider,transport:{kind:'claude-code-process',incarnationId:'owned-process',nativeSessionId:'observed-session'}}
+    :{...anchor,provider,transport:{kind:'arcane-gateway-loop',incarnationId:'owned-loop'}};
+}
+for(const provider of ['claude-code','arcane'] as const)test(provider+' app binding retains the actual provider and independent dispatch, human grant and cancellation fences',t=>{
+  const f=fixture(t),value=appBinding(provider),bound={connectionId:value.connectionId,threadId:'app:'+value.conversationId};
+  assert.throws(()=>f.registry.capture(f.token,'read'),refused);
+  f.incarnation.bindAppConversation(value);
+  const read=f.registry.capture(f.token,'read');
+  assert.deepEqual(nativeAssetActorScope(read).conversation,{provider,threadId:bound.threadId,sessionId:null});
+  assert.equal(JSON.stringify(nativeAssetActorScope(read)).includes(value.transport.incarnationId),false);
+  f.incarnation.dispatched({...bound,operationId:'no-human-send'});assert.throws(()=>f.registry.capture(f.token,'mutate'),refused);f.incarnation.ended('no-human-send');
+  f.incarnation.grantNextIntent({...bound,sessionId:null});f.incarnation.dispatched({...bound,operationId:'human-send'});
+  const actor=f.registry.capture(f.token,'mutate'),signal=nativeAssetOperationSignal(actor);
+  f.incarnation.bindAppConversation(structuredClone(value));assertNativeAssetActor(actor,'mutate');
+  claimNativeAssetStageOperation(actor,'22222222-2222-4222-8222-222222222222');
+  assert.throws(()=>claimNativeAssetStageOperation(actor,'22222222-2222-4222-8222-222222222222'),refused);
+  f.incarnation.ended('human-send');assert.throws(()=>assertNativeAssetActor(actor,'mutate'),refused);assert.equal(signal.aborted,false);
+  f.incarnation.retire();assert.equal(signal.aborted,false);assert.throws(()=>f.registry.capture(f.token,'read'),refused);
+  f.incarnation.cancelWork('incarnation');assert.equal(signal.aborted,true);
+});
+test('app transport binding cannot impersonate a Codex seal, cross providers or overwrite an observed binding',t=>{
+  const f=fixture(t),value=appBinding('claude-code');let reads=0;
+  assert.ok(value.provider==='claude-code');
+  for(const bad of [{...value,provider:'codex'},{...value,provider:'arcane'},
+    {...value,conversationId:value.conversationId+'\n'},{...value,transport:{...value.transport,extra:true}},
+    Object.defineProperty({...value},'transport',{enumerable:true,get(){reads++;return value.transport;}}),
+    new Proxy(value,{get(){reads++;throw Error('Never inspect a proxy.');}})])
+    assert.throws(()=>f.incarnation.bindAppConversation(bad as never),refused);
+  assert.equal(reads,0);assert.equal(f.incarnation.status().sealed,false);
+  assert.throws(()=>f.incarnation.seal({...f.seal,provider:'claude-code'} as never),refused);
+  f.incarnation.bindAppConversation(value);const actor=f.registry.capture(f.token,'read');
+  assert.throws(()=>f.incarnation.bindAppConversation({...value,transport:{...value.transport,incarnationId:'different-process'}}),refused);
+  assert.equal(f.incarnation.status().retired,true);assert.throws(()=>assertNativeAssetActor(actor,'read'),refused);
+});
+test('an app binding cannot replace an exact Codex acknowledgement',t=>{
+  const f=fixture(t);f.ready();const actor=f.registry.capture(f.token,'mutate');
+  assert.throws(()=>f.incarnation.bindAppConversation(appBinding('arcane')),refused);
+  assert.throws(()=>assertNativeAssetActor(actor,'mutate'),refused);assert.equal(f.incarnation.status().retired,true);
+});
 
 test('stage claims require whole bounded job IDs and retain per-operation/per-job one-use ownership',t=>{
   const f=fixture(t);f.ready();const actor=f.registry.capture(f.token,'mutate');

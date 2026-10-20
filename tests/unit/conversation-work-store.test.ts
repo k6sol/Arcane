@@ -98,7 +98,7 @@ test('canonical project hash/path and exact bindings survive restart without bac
   assert.equal(f.store.binding('workflow', 'old-draft'), null);
   assert.deepEqual(f.store.list(native).items, [expected]);
   database(f, db => {
-    assert.equal(db.prepare('PRAGMA user_version').get()?.user_version, 1);
+    assert.equal(db.prepare('PRAGMA user_version').get()?.user_version, 2);
     assert.equal(db.prepare('PRAGMA journal_mode').get()?.journal_mode, 'wal');
     assert.equal(db.prepare('SELECT count(*) AS n FROM conversation_work_bindings').get()?.n, 1);
   });
@@ -119,6 +119,38 @@ test('provider, thread, session, case and namespace are all exact independent ke
   assert.equal(f.store.binding('asset-job', 'work-0')?.conversation.provider, 'claude-code');
   assert.equal(f.store.binding('workflow', 'WORK-0'), null);
   assert.equal(f.store.list({ ...native, sessionId: 'unobserved' }).items.length, 0);
+});
+
+const legacyBindingsSql="CREATE TABLE conversation_work_bindings (sequence INTEGER PRIMARY KEY CHECK(sequence>0),kind TEXT NOT NULL CHECK(kind IN ('workflow','asset-job')),work_id TEXT NOT NULL,provider TEXT NOT NULL CHECK(provider IN ('codex','claude-code')),thread_id TEXT NOT NULL,session_id TEXT,UNIQUE(kind,work_id)) STRICT";
+function makeLegacyBindings(f:Fixture):void {
+  f.store.close();database(f,db=>db.exec('BEGIN IMMEDIATE; DROP INDEX conversation_work_by_native; ALTER TABLE conversation_work_bindings RENAME TO fixture_bindings; '+legacyBindingsSql+'; INSERT INTO conversation_work_bindings SELECT * FROM fixture_bindings; DROP TABLE fixture_bindings; CREATE INDEX conversation_work_by_native ON conversation_work_bindings(provider,thread_id,session_id,sequence); PRAGMA user_version=1; COMMIT;'));
+}
+test('exact v1 migration preserves every association, sequence and nullable session before enabling app asset attribution',t=>{
+  const f=fixture(t);bind(f,'old-work');bind(f,'old-asset',{...native,provider:'claude-code',sessionId:'old-session'},'asset-job');
+  makeLegacyBindings(f);let before:unknown;
+  database(f,db=>{before=db.prepare('SELECT * FROM conversation_work_bindings ORDER BY sequence').all();});
+  f.reopen();database(f,db=>{assert.equal(db.prepare('PRAGMA user_version').get()?.user_version,2);assert.deepEqual(db.prepare('SELECT * FROM conversation_work_bindings ORDER BY sequence').all(),before);});
+  const app:NativeConversation={provider:'arcane',threadId:'app:11111111-1111-4111-8111-111111111111',sessionId:null};
+  const asset=bind(f,'new-asset',app,'asset-job');assert.deepEqual(f.store.list(app).items,[asset]);
+  assert.throws(()=>bind(f,'not-a-workflow',app,'workflow'),code('INPUT'));
+  assert.throws(()=>f.store.list(app,'workflow'),code('INPUT'));
+  f.reopen();assert.deepEqual(f.store.binding('asset-job','new-asset'),asset);assert.equal(f.store.binding('workflow','old-work')?.conversation.provider,'codex');
+});
+test('v1 migration DDL failure rolls back the legacy schema, version and association rows',t=>{
+  const f=fixture(t);bind(f);makeLegacyBindings(f);let before:unknown;
+  database(f,db=>{before={schema:db.prepare("SELECT name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY name").all(),rows:db.prepare('SELECT * FROM conversation_work_bindings').all()};});
+  const original=DatabaseSync.prototype.exec;
+  const fault=t.mock.method(DatabaseSync.prototype,'exec',function(this:DatabaseSync,sql:string){
+    if(sql==='CREATE INDEX conversation_work_by_native ON conversation_work_bindings(provider,thread_id,session_id,sequence)')throw Error('Synthetic migration index fault.');
+    return original.call(this,sql);
+  });
+  try{assert.throws(()=>f.open(),code('CORRUPT'));}finally{fault.mock.restore();}
+  database(f,db=>{assert.equal(db.prepare('PRAGMA user_version').get()?.user_version,1);assert.deepEqual({schema:db.prepare("SELECT name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY name").all(),rows:db.prepare('SELECT * FROM conversation_work_bindings').all()},before);});
+  f.reopen();assert.equal(f.store.binding('workflow','work-1')?.id,'work-1');
+});
+test('Arcane workflow rows injected outside the store fail closed rather than expanding workflow authority',t=>{
+  const f=fixture(t);bind(f);f.store.close();database(f,db=>db.exec("PRAGMA ignore_check_constraints=ON; UPDATE conversation_work_bindings SET provider='arcane';"));
+  assert.throws(()=>f.open(),code('CORRUPT'));
 });
 
 test('identical replay is detached; changed native identity conflicts and cannot overwrite', t => {
@@ -400,7 +432,7 @@ test('live schema/version corruption blocks reads and binds, preserving existing
   assert.throws(() => bind(f, 'not-inserted'), code('CORRUPT'));
   database(f, db => {
     assert.equal(db.prepare('SELECT count(*) AS n FROM conversation_work_bindings').get()?.n, 1);
-    db.exec('DROP TABLE unexpected; PRAGMA user_version=2');
+    db.exec('DROP TABLE unexpected; PRAGMA user_version=3');
   });
   assert.throws(() => f.store.list(native), code('MIGRATION'));
 });

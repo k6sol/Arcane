@@ -11,6 +11,7 @@ import { StudioStore } from '../../../packages/storage/src/studio-store.js';
 import { NATIVE_STUDIO_IMPORT_RESPONSE_BYTES, parseNativeStudioImportResponse } from '../../../packages/asset-pipeline/src/studio-import-wire.js';
 import type { PreparedStudioImport } from '../../../packages/asset-pipeline/src/studio-import-manifest.js';
 import { assertNativeAssetActor, nativeAssetActorScope, type NativeAssetActor, type NativeAssetOperation } from './native-asset-authority.js';
+import { ASSET_CONVERSATION_PROVIDERS, type AssetConversation } from '../../../packages/protocol/src/asset-conversation.js';
 
 export const STUDIO_IMPORT_PREPARATION_LIMITS = Object.freeze({ records: 64, recordBytes: NATIVE_STUDIO_IMPORT_RESPONSE_BYTES + 4096, totalBytes: 64 * 1024 * 1024 });
 /** Trusted host witness only. These identifiers are resolved in the real StudioStore. */
@@ -20,9 +21,9 @@ export interface StudioImportPreparationWitness {
 }
 type Immutable<T> = T extends object ? { readonly [K in keyof T]: Immutable<T[K]> } : T;
 export type StudioImportPreparationRecord = Immutable<{
-  schemaVersion: 1 | 2; kind: 'studio-import-preparation' | 'studio-import-preparation-attempt'; projectId: string; jobId: string;
+  schemaVersion: 1 | 2 | 3 | 4; kind: 'studio-import-preparation' | 'studio-import-preparation-attempt'; projectId: string; jobId: string;
   preparationAttempt?: { id: string; previousId: string | null };
-  conversation: { provider: 'codex'; threadId: string; sessionId: string | null };
+  conversation: AssetConversation;
   engineVerification: 'pending'; recordedAt: string; prepared: PreparedStudioImport;
   witness: StudioImportPreparationWitness;
   contextReads: { method: 'scene.import_context'; mode: 'Edit'; modeProvenance: 'StudioTestService.EditModeActive';
@@ -59,14 +60,22 @@ const witnessSchema = z.strictObject({ initialContextReceiptId: z.string().lengt
   pluginArtifactHash: hashSchema, clientLifetimeId: opaque, playEpoch: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER) })
   .refine(w => w.initialContextReceiptId !== w.confirmedContextReceiptId);
 const readSchema = z.strictObject({ requestId: opaque, finishedAt: time });
-const recordSchema = z.strictObject({ schemaVersion: z.union([z.literal(1), z.literal(2)]), kind: z.enum(['studio-import-preparation', 'studio-import-preparation-attempt']), projectId: hashSchema,
+const recordFields = { kind: z.enum(['studio-import-preparation', 'studio-import-preparation-attempt']), projectId: hashSchema,
   preparationAttempt: z.strictObject({ id: z.string().regex(UUID), previousId: z.string().regex(UUID).nullable() }).optional(),
-  jobId: z.string().length(36).regex(UUID), conversation: z.strictObject({ provider: z.literal('codex'), threadId: opaque, sessionId: opaque.nullable() }),
+  jobId: z.string().length(36).regex(UUID),
   engineVerification: z.literal('pending'), recordedAt: time, prepared: z.unknown(), witness: witnessSchema,
   contextReads: z.strictObject({ method: z.literal('scene.import_context'), mode: z.literal('Edit'), modeProvenance: z.literal('StudioTestService.EditModeActive'),
-    creatorProvenance: z.enum(['game.CreatorType/CreatorId', 'StudioService:GetUserId']), initial: readSchema, confirmed: readSchema }), recordSha256: hashSchema })
+    creatorProvenance: z.enum(['game.CreatorType/CreatorId', 'StudioService:GetUserId']), initial: readSchema, confirmed: readSchema }), recordSha256: hashSchema };
+// Historical files remain immutable and keep the exact old provider/version contract.
+const legacyRecordSchema = z.strictObject({ ...recordFields, schemaVersion: z.union([z.literal(1),z.literal(2)]),
+  conversation:z.strictObject({provider:z.literal('codex'),threadId:opaque,sessionId:opaque.nullable()}) })
   .refine(r => r.schemaVersion === 1 ? r.kind === 'studio-import-preparation' && r.preparationAttempt === undefined
     : r.kind === 'studio-import-preparation-attempt' && r.preparationAttempt !== undefined);
+const providerRecordSchema = z.strictObject({ ...recordFields, schemaVersion:z.union([z.literal(3),z.literal(4)]),
+  conversation:z.strictObject({provider:z.enum(ASSET_CONVERSATION_PROVIDERS),threadId:opaque,sessionId:opaque.nullable()}) })
+  .refine(r=>r.schemaVersion===3?r.kind==='studio-import-preparation'&&r.preparationAttempt===undefined
+    :r.kind==='studio-import-preparation-attempt'&&r.preparationAttempt!==undefined);
+const recordSchema=z.union([legacyRecordSchema,providerRecordSchema]);
 function fail(code: string): never { throw new ArcaneError('STUDIO_IMPORT_PREPARATION_' + code, 'Studio import preparation storage is refused, changed or unavailable.'); }
 function errno(error: unknown): unknown { return error && typeof error === 'object' && 'code' in error ? error.code : null; }
 function fields(value: unknown, required: readonly string[], optional: readonly string[] = []): Record<string, unknown> {
@@ -347,10 +356,10 @@ export async function createStudioImportPreparationStore(options: {
                 (record.witness.playEpoch > witness.playEpoch || (record.witness.playEpoch === witness.playEpoch && stagedHere))) fail('CONTINUITY');
           }
         }
-        const content = { schemaVersion: attemptId === undefined ? 1 as const : 2 as const,
+        const content = { schemaVersion: attemptId === undefined ? 3 as const : 4 as const,
           kind: attemptId === undefined ? 'studio-import-preparation' as const : 'studio-import-preparation-attempt' as const,
           ...(attemptId === undefined ? {} : {preparationAttempt: {id: attemptId, previousId}}), projectId, jobId: id,
-          conversation: { ...binding.conversation, provider: 'codex' as const }, engineVerification: 'pending' as const,
+          conversation: { ...binding.conversation }, engineVerification: 'pending' as const,
           recordedAt: new Date(clock()).toISOString(), prepared, witness, contextReads };
         const record = { ...content, recordSha256: digest(content) }, text = JSON.stringify(record), bytes = Buffer.byteLength(text);
         if (bytes > limits.recordBytes || [...records.values()].reduce((n, r) => n + r.pin.bytes.length, 0) + bytes > limits.totalBytes) fail('LIMIT');

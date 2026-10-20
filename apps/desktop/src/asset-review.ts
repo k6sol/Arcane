@@ -6,7 +6,7 @@ const RESPONSE_LIMIT = 32 * 1024;
 type Decision = 'approved' | 'rejected';
 export interface ViewedAsset { readonly jobId: string; readonly sha256: string; readonly bytes: number }
 interface Subject {
-  schemaVersion: 1; projectId: string; conversation: { provider: 'codex' | 'claude-code'; threadId: string; sessionId: string | null };
+  schemaVersion: 1; projectId: string; conversation: { provider: 'codex' | 'claude-code' | 'arcane'; threadId: string; sessionId: string | null };
   jobId: string; manifestSha256: string; sourceRequestSha256: string;
   artifacts: { path: 'asset.glb' | 'collision.glb'; sha256: string; bytes: number }[];
 }
@@ -42,7 +42,7 @@ function subject(value: unknown, viewed: ViewedAsset): Subject {
   const s = record(value, ['schemaVersion', 'projectId', 'conversation', 'jobId', 'manifestSha256', 'sourceRequestSha256', 'artifacts']);
   const c = record(s.conversation, ['provider', 'threadId', 'sessionId']);
   if (s.schemaVersion !== 1 || s.jobId !== viewed.jobId || !UUID.test(viewed.jobId) || !HASH.test(viewed.sha256) ||
-      c.provider !== 'codex' && c.provider !== 'claude-code' || !Array.isArray(s.artifacts) || s.artifacts.length !== 2) return invalid();
+      c.provider !== 'codex' && c.provider !== 'claude-code' && c.provider !== 'arcane' || !Array.isArray(s.artifacts) || s.artifacts.length !== 2) return invalid();
   const artifacts: Subject['artifacts'] = s.artifacts.map((value, index) => {
     const a = record(value, ['path', 'sha256', 'bytes']), path = index === 0 ? 'asset.glb' : 'collision.glb';
     if (a.path !== path) return invalid();

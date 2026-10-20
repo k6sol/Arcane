@@ -5,12 +5,9 @@ import { closeSync, lstatSync, mkdirSync, openSync, realpathSync } from 'node:fs
 import { dirname, isAbsolute, join, parse, resolve } from 'node:path';
 import { types } from 'node:util';
 import { ArcaneError } from '../../protocol/src/providers.js';
+import type { AssetConversation } from '../../protocol/src/asset-conversation.js';
 
-export interface NativeConversation {
-  provider: 'codex' | 'claude-code';
-  threadId: string;
-  sessionId: string | null;
-}
+export type NativeConversation = AssetConversation;
 export type ConversationWorkKind = 'workflow' | 'asset-job';
 export interface ConversationWorkBinding {
   projectId: string;
@@ -34,12 +31,16 @@ export const CONVERSATION_WORK_LIMITS = Object.freeze({
 type Row = Record<string, unknown>;
 const PREFIX = 'CONVERSATION_WORK_';
 const APPLICATION_ID = 0x41524357; // Arcane conversation work (ARCW).
-const VERSION = 1;
+const VERSION = 2;
 const HASH = /^[a-f0-9]{64}$/;
-const TABLES = [
+const LEGACY_TABLES = [
   'CREATE TABLE conversation_work_meta (singleton INTEGER PRIMARY KEY CHECK(singleton=1),project_id TEXT NOT NULL,project_path TEXT NOT NULL) STRICT',
   "CREATE TABLE conversation_work_bindings (sequence INTEGER PRIMARY KEY CHECK(sequence>0),kind TEXT NOT NULL CHECK(kind IN ('workflow','asset-job')),work_id TEXT NOT NULL,provider TEXT NOT NULL CHECK(provider IN ('codex','claude-code')),thread_id TEXT NOT NULL,session_id TEXT,UNIQUE(kind,work_id)) STRICT",
   'CREATE INDEX conversation_work_by_native ON conversation_work_bindings(provider,thread_id,session_id,sequence)',
+];
+const TABLES = [LEGACY_TABLES[0]!,
+  "CREATE TABLE conversation_work_bindings (sequence INTEGER PRIMARY KEY CHECK(sequence>0),kind TEXT NOT NULL CHECK(kind IN ('workflow','asset-job')),work_id TEXT NOT NULL,provider TEXT NOT NULL CHECK(provider IN ('codex','claude-code','arcane') AND (provider<>'arcane' OR kind='asset-job')),thread_id TEXT NOT NULL,session_id TEXT,UNIQUE(kind,work_id)) STRICT",
+  LEGACY_TABLES[2]!,
 ];
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 const samePath = (a: string, b: string) => process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
@@ -86,7 +87,7 @@ function nativeId(value: unknown): string {
 }
 function conversation(value: unknown): NativeConversation {
   const a = fields(value, ['provider', 'threadId', 'sessionId']);
-  if (a.provider !== 'codex' && a.provider !== 'claude-code') fail('INPUT', 'Expected a supported native provider.');
+  if (a.provider !== 'codex' && a.provider !== 'claude-code' && a.provider !== 'arcane') fail('INPUT', 'Expected a supported native provider.');
   return { provider: a.provider, threadId: nativeId(a.threadId), sessionId: a.sessionId === null ? null : nativeId(a.sessionId) };
 }
 function directPath(value: unknown): string {
@@ -177,7 +178,7 @@ export class ConversationWorkStore {
       this.#transaction(true, () => {
         const version = this.#version();
         if (version > VERSION) fail('MIGRATION', 'Conversation work schema is newer than this build.');
-        if (version !== 0 && version !== VERSION) fail('CORRUPT', 'Invalid conversation work schema version.');
+        if (version !== 0 && version !== 1 && version !== VERSION) fail('CORRUPT', 'Invalid conversation work schema version.');
         if (this.#db.prepare('PRAGMA quick_check').get()?.quick_check !== 'ok') fail('CORRUPT', 'Conversation work database failed integrity checks.');
         if (version === 0) {
           if (this.#db.prepare("SELECT name FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' LIMIT 1").get() ||
@@ -185,6 +186,15 @@ export class ConversationWorkStore {
           for (const ddl of TABLES) this.#db.exec(ddl);
           this.#db.prepare('INSERT INTO conversation_work_meta VALUES(1,?,?)').run(this.#projectId, this.#projectPath);
           this.#db.exec(`PRAGMA application_id=${APPLICATION_ID}; PRAGMA user_version=${VERSION};`);
+        } else if (version === 1) {
+          // Validate the exact legacy schema and every bounded row before DDL. All
+          // table/index changes and version publication share this transaction.
+          this.#validate(1);
+          this.#db.exec('DROP INDEX conversation_work_by_native; ALTER TABLE conversation_work_bindings RENAME TO conversation_work_bindings_v1;');
+          this.#db.exec(TABLES[1]!);
+          this.#db.exec('INSERT INTO conversation_work_bindings SELECT sequence,kind,work_id,provider,thread_id,session_id FROM conversation_work_bindings_v1; DROP TABLE conversation_work_bindings_v1;');
+          this.#db.exec(TABLES[2]!);
+          this.#db.exec(`PRAGMA user_version=${VERSION};`);
         }
         this.#validate();
       });
@@ -245,13 +255,14 @@ export class ConversationWorkStore {
     } catch (error) { return this.#error(error); }
   }
   #version(): number { return Number(this.#db.prepare('PRAGMA user_version').get()?.user_version); }
-  #validate(): void {
-    if (this.#version() !== VERSION) fail('MIGRATION', 'Conversation work schema changed; close and inspect storage.');
+  #validate(expectedVersion = VERSION): void {
+    if (this.#version() !== expectedVersion) fail('MIGRATION', 'Conversation work schema changed; close and inspect storage.');
+    const tables = expectedVersion === 1 ? LEGACY_TABLES : TABLES;
     if (this.#db.prepare('PRAGMA application_id').get()?.application_id !== APPLICATION_ID) fail('CORRUPT', 'SQLite application identity changed.');
     const schemaSize = this.#db.prepare("SELECT count(*) AS n,coalesce(max(length(CAST(sql AS BLOB))),0) AS largest FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'").get() as Row;
-    if (schemaSize.n !== TABLES.length || Number(schemaSize.largest) > CONVERSATION_WORK_LIMITS.recordBytes) fail('CORRUPT', 'Conversation work schema exceeds its bounds.');
+    if (schemaSize.n !== tables.length || Number(schemaSize.largest) > CONVERSATION_WORK_LIMITS.recordBytes) fail('CORRUPT', 'Conversation work schema exceeds its bounds.');
     const schema = this.#db.prepare("SELECT type,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY name").all() as Row[];
-    if (schema.length !== TABLES.length || schema.some(row => !TABLES.includes(row.sql as string) || !['table', 'index'].includes(row.type as string))) fail('CORRUPT', 'Conversation work schema does not match this version.');
+    if (schema.length !== tables.length || schema.some(row => !tables.includes(row.sql as string) || !['table', 'index'].includes(row.type as string))) fail('CORRUPT', 'Conversation work schema does not match this version.');
     const metaSize = this.#db.prepare('SELECT count(*) AS n,coalesce(max(length(CAST(project_id AS BLOB))),0) AS id_bytes,coalesce(max(length(CAST(project_path AS BLOB))),0) AS path_bytes FROM conversation_work_meta').get() as Row;
     if (metaSize.n !== 1 || Number(metaSize.id_bytes) !== 64 || Number(metaSize.path_bytes) > 4096) fail('CORRUPT', 'Project metadata exceeds its bounds.');
     const meta = this.#db.prepare('SELECT * FROM conversation_work_meta').get() as Row;
@@ -259,13 +270,17 @@ export class ConversationWorkStore {
     if (meta.project_id !== this.#projectId || !samePath(meta.project_path, this.#projectPath)) fail('PROJECT', 'Conversation work storage belongs to another canonical project.');
     const sizes = this.#db.prepare(`SELECT count(*) AS n,coalesce(sum(${RECORD_SIZE}),0) AS total,coalesce(max(${RECORD_SIZE}),0) AS largest FROM conversation_work_bindings`).get() as Row;
     if (Number(sizes.n) > CONVERSATION_WORK_LIMITS.bindings || Number(sizes.total) > CONVERSATION_WORK_LIMITS.totalBytes || Number(sizes.largest) > CONVERSATION_WORK_LIMITS.recordBytes) fail('CORRUPT', 'Stored association metadata exceeds its bounds.');
-    for (const row of this.#db.prepare('SELECT * FROM conversation_work_bindings').iterate()) this.#decode(row as Row);
+    for (const row of this.#db.prepare('SELECT * FROM conversation_work_bindings').iterate()) {
+      if (expectedVersion === 1 && row.provider !== 'codex' && row.provider !== 'claude-code') fail('CORRUPT', 'Legacy provider metadata is invalid.');
+      this.#decode(row as Row);
+    }
   }
   #decode(row: Row): ConversationWorkBinding {
     try {
       if (!Number.isSafeInteger(row.sequence) || Number(row.sequence) < 1) throw new Error();
-      return { projectId: this.#projectId, kind: kind(row.kind), id: workId(row.work_id),
-        conversation: conversation({ provider: row.provider, threadId: row.thread_id, sessionId: row.session_id }) };
+      const namespace=kind(row.kind),native=conversation({provider:row.provider,threadId:row.thread_id,sessionId:row.session_id});
+      if(namespace==='workflow'&&native.provider==='arcane')throw new Error();
+      return { projectId: this.#projectId, kind: namespace, id: workId(row.work_id), conversation:native };
     } catch { return fail('CORRUPT', 'Stored association metadata is invalid.'); }
   }
   #binding(kind: ConversationWorkKind, id: string): ConversationWorkBinding | null {
@@ -276,6 +291,7 @@ export class ConversationWorkStore {
   bind(input: { conversation: NativeConversation; kind: ConversationWorkKind; id: string }): ConversationWorkBinding {
     const a = fields(input, ['conversation', 'kind', 'id']);
     const native = conversation(a.conversation), namespace = kind(a.kind), id = workId(a.id);
+    if(namespace==='workflow'&&native.provider==='arcane')fail('INPUT','Arcane asset attribution does not grant workflow association.');
     return this.#access(true, () => {
       const previous = this.#binding(namespace, id);
       if (previous) {
@@ -359,6 +375,7 @@ export class ConversationWorkStore {
   }
   list(nativeConversation: NativeConversation, workKind?: ConversationWorkKind, pagination?: ConversationWorkPagination): ConversationWorkPage {
     const native = conversation(nativeConversation), namespace = workKind === undefined ? undefined : kind(workKind);
+    if(namespace==='workflow'&&native.provider==='arcane')fail('INPUT','Arcane asset attribution does not grant workflow association.');
     const page = pagination === undefined ? {} : fields(pagination, [], ['limit', 'after']);
     const limit = Object.hasOwn(page, 'limit') ? page.limit : CONVERSATION_WORK_LIMITS.pageItems;
     if (typeof limit !== 'number' || !Number.isSafeInteger(limit) || limit < 1 || limit > CONVERSATION_WORK_LIMITS.pageItems) fail('INPUT', 'Page size must be an integer from 1 to 100.');

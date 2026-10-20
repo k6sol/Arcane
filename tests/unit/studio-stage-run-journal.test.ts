@@ -5,7 +5,7 @@ import {tmpdir} from 'node:os';
 import {join,resolve,sep} from 'node:path';
 import {createHash,randomUUID} from 'node:crypto';
 import {DatabaseSync} from 'node:sqlite';
-import {StudioStore,type StageRunIntent} from '../../packages/storage/src/studio-store.js';
+import {StudioStore,type StageRunIntent,type AssetUploadIntent} from '../../packages/storage/src/studio-store.js';
 import {STUDIO_ASSET_TRANSFER_LIMITS} from '../../packages/protocol/src/studio.js';
 import type {StudioAssetStageArgs,Json} from '../../packages/protocol/src/studio.js';
 
@@ -123,14 +123,88 @@ test('attempt migration preserves original stage rows and associations',t=>{
   try{
     db.exec('INSERT INTO asset_stage_runs SELECT run_id,project_id,job_id,intent_sha256,payload FROM asset_stage_attempts; INSERT INTO asset_stage_commands SELECT * FROM asset_stage_attempt_commands;');
     oldPayload=db.prepare('SELECT payload FROM asset_stage_runs').get()?.payload;
-    db.exec('DROP TABLE asset_stage_attempt_commands; DROP TABLE asset_stage_attempts; PRAGMA user_version=3;');
+    db.exec('DROP TABLE studio_test_commands; DROP TABLE studio_test_reservations; DROP TABLE asset_stage_reconstructions; DROP TABLE asset_stage_attempt_commands; DROP TABLE asset_stage_attempts; PRAGMA application_id=0; PRAGMA user_version=3;');
   }finally{db.close();}
   f.restart();const migrated=f.store.readStageRun(projectId,jobId)!;
   assert.equal(migrated.runId,original.runId);assert.deepEqual(migrated.commands,original.commands);assert.deepEqual(migrated.intent,original.intent);
   const check=new DatabaseSync(join(f.directory,'studio.sqlite'));
-  try{assert.equal(check.prepare('SELECT payload FROM asset_stage_runs').get()?.payload,oldPayload);assert.equal(check.prepare('PRAGMA user_version').get()?.user_version,6);}finally{check.close();}
+  try{assert.equal(check.prepare('SELECT payload FROM asset_stage_runs').get()?.payload,oldPayload);assert.equal(check.prepare('PRAGMA user_version').get()?.user_version,7);}finally{check.close();}
 });
 
+for(const provider of ['claude-code','arcane'] as const)test(provider+' stage journals preserve app attribution across restart without creating write authority',t=>{
+  const f=fixture(t),intent={...f.intent,conversation:{provider,threadId:'app:11111111-1111-4111-8111-111111111111',sessionId:null}};
+  const run=f.store.beginStageRun(intent,guard);assert.ok(run.created);f.store.closeStageRun(run.handle);
+  f.restart();assert.deepEqual(f.store.readStageRun(projectId,jobId)?.intent.conversation,intent.conversation);
+  assert.equal(f.store.commands().length,0);assert.throws(()=>f.store.enqueueStagePacket(run.handle,0,f.args[0]!,guard),{code:'STUDIO_STAGE_HANDLE'});
+});
+function legacyStudioSchema(db:DatabaseSync,version:2|3|4|5|6,uploads=true):void {
+  if(version<6)db.exec('DROP TABLE studio_test_commands; DROP TABLE studio_test_reservations;');
+  if(version<5)db.exec('DROP TABLE asset_stage_reconstructions;');
+  if(version<4)db.exec('DROP TABLE asset_stage_attempt_commands; DROP TABLE asset_stage_attempts;');
+  if(version<3)db.exec('DROP TABLE asset_stage_commands; DROP TABLE asset_stage_runs; DROP TABLE asset_upload_context_pins;');
+  if(version===2&&!uploads)db.exec('DROP TABLE asset_uploads;');
+  db.exec('PRAGMA application_id=0; PRAGMA user_version='+version);
+}
+for(const [version,uploads]of [[2,false],[2,true],[3,true],[4,true],[5,true],[6,true]] as const)
+  test('source-backed Studio v'+version+(uploads?' with uploads':' before uploads')+' migrates as one verified known schema',t=>{
+    const f=fixture(t);f.store.close();const db=new DatabaseSync(join(f.directory,'studio.sqlite'));
+    try{legacyStudioSchema(db,version,uploads);}finally{db.close();}
+    f.restart();const check=new DatabaseSync(join(f.directory,'studio.sqlite'));
+    try{assert.equal(check.prepare('PRAGMA user_version').get()?.user_version,7);assert.equal(check.prepare('PRAGMA application_id').get()?.application_id,0x41525354);assert.equal(check.prepare('SELECT count(*) AS n FROM asset_uploads').get()?.n,0);}finally{check.close();}
+  });
+test('v6 to v7 preserves closed stage bytes, original associations and successful protocol-v2 Image upload facts',t=>{
+  const f=fixture(t),run=f.store.beginStageRun(f.intent,guard);assert.ok(run.created);
+  const command=f.store.enqueueStagePacket(run.handle,0,f.args[0]!,guard);f.ack(command.id,0);f.store.closeStageRun(run.handle);
+  const upload:AssetUploadIntent={projectId,jobId,sourceId:'atlas-basecolor',sourceSha256:'1'.repeat(64),assetType:'Image',
+    sessionId:f.pair.sessionId,clientLifetimeId:'fixture-client',pluginArtifactHash:'b'.repeat(64),playEpoch:0,placeId:12,universeId:34,
+    creator:{kind:'group',id:56},uploaderId:78,rightsGrantId:'synthetic-human-grant',name:'Synthetic atlas',description:''};
+  // Journaling synthetic facts is not an engine upload or an upload permission.
+  const started=f.store.beginAssetUpload('33333333-3333-4333-8333-333333333333',upload,guard);assert.ok(started.ticket);
+  f.store.finishAssetUpload(started.ticket,{state:'succeeded',assetId:12345});f.store.close();
+  const filename=join(f.directory,'studio.sqlite');let db=new DatabaseSync(filename),before:unknown;
+  const snapshot=(value:DatabaseSync)=>({runs:value.prepare('SELECT * FROM asset_stage_attempts').all(),commands:value.prepare('SELECT * FROM asset_stage_attempt_commands').all(),uploads:value.prepare('SELECT * FROM asset_uploads').all()});
+  try{legacyStudioSchema(db,6);before=snapshot(db);}finally{db.close();}
+  f.restart();assert.deepEqual(f.store.readStageRun(projectId,jobId)?.commands[0]?.commandId,command.id);
+  assert.equal(f.store.assetUpload(started.record.attemptId).intent.assetType,'Image');
+  db=new DatabaseSync(filename);try{assert.deepEqual(snapshot(db),before);assert.equal(db.prepare('PRAGMA user_version').get()?.user_version,7);}finally{db.close();}
+});
+test('Studio migration failure rolls back version, application identity and original payloads together',t=>{
+  const f=fixture(t),run=f.store.beginStageRun(f.intent,guard);assert.ok(run.created);f.store.closeStageRun(run.handle);f.store.close();
+  const filename=join(f.directory,'studio.sqlite');let db=new DatabaseSync(filename),before:unknown;
+  try{legacyStudioSchema(db,6);before=db.prepare('SELECT * FROM asset_stage_attempts').all();}finally{db.close();}
+  const original=DatabaseSync.prototype.exec;
+  const fault=t.mock.method(DatabaseSync.prototype,'exec',function(this:DatabaseSync,sql:string){
+    const result=original.call(this,sql);if(sql==='PRAGMA application_id=1095914324; PRAGMA user_version=7;')throw Error('Synthetic migration publish fault.');return result;
+  });
+  try{assert.throws(()=>new StudioStore({directory:f.directory}),/Synthetic migration publish fault/);}finally{fault.mock.restore();}
+  db=new DatabaseSync(filename);try{assert.equal(db.prepare('PRAGMA user_version').get()?.user_version,6);assert.equal(db.prepare('PRAGMA application_id').get()?.application_id,0);assert.deepEqual(db.prepare('SELECT * FROM asset_stage_attempts').all(),before);}finally{db.close();}
+  f.restart();assert.equal(f.store.readStageRun(projectId,jobId)?.runId,run.runId);
+});
+for(const fault of ['unexpected-table','unexpected-trigger','foreign-identity','populated-v0','unknown-v1','future-v8'] as const)
+  test('Studio migration refuses '+fault+' without adopting or rewriting the database',t=>{
+    const f=fixture(t),run=f.store.beginStageRun(f.intent,guard);assert.ok(run.created);f.store.closeStageRun(run.handle);f.store.close();
+    const filename=join(f.directory,'studio.sqlite');let db=new DatabaseSync(filename),before:unknown;
+    const snapshot=(value:DatabaseSync)=>({version:value.prepare('PRAGMA user_version').get(),identity:value.prepare('PRAGMA application_id').get(),schema:value.prepare("SELECT type,name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY name").all(),runs:value.prepare('SELECT * FROM asset_stage_attempts').all()});
+    try{
+      legacyStudioSchema(db,6);
+      if(fault==='unexpected-table')db.exec('CREATE TABLE foreign_data (value TEXT) STRICT;');
+      else if(fault==='unexpected-trigger')db.exec("CREATE TRIGGER foreign_trigger AFTER INSERT ON events BEGIN SELECT 1; END;");
+      else if(fault==='foreign-identity')db.exec('PRAGMA application_id=1;');
+      else db.exec('PRAGMA user_version='+(fault==='populated-v0'?0:fault==='unknown-v1'?1:8));
+      before=snapshot(db);
+    }finally{db.close();}
+    assert.throws(()=>new StudioStore({directory:f.directory}),{code:'MIGRATION'});
+    db=new DatabaseSync(filename);try{assert.deepEqual(snapshot(db),before);}finally{db.close();}
+  });
+for(const journal of ['sessions','commands'] as const)test('malformed '+journal+' recovery data cannot commit Studio migration or partial session revocation',t=>{
+  const f=fixture(t),run=f.store.beginStageRun(f.intent,guard);assert.ok(run.created);
+  f.store.enqueueStagePacket(run.handle,0,f.args[0]!,guard);f.store.close();
+  const filename=join(f.directory,'studio.sqlite');let db=new DatabaseSync(filename),before:unknown;
+  const snapshot=(value:DatabaseSync)=>({version:value.prepare('PRAGMA user_version').get(),identity:value.prepare('PRAGMA application_id').get(),sessions:value.prepare('SELECT * FROM sessions').all(),commands:value.prepare('SELECT * FROM commands').all(),runs:value.prepare('SELECT * FROM asset_stage_attempts').all()});
+  try{legacyStudioSchema(db,6);db.exec("UPDATE "+journal+" SET payload='not json';");before=snapshot(db);}finally{db.close();}
+  assert.throws(()=>new StudioStore({directory:f.directory}));
+  db=new DatabaseSync(filename);try{assert.deepEqual(snapshot(db),before);}finally{db.close();}
+});
 test('fresh paired session admits a CPU attempt at the same actual plugin lifetime and epoch',t=>{
   const f=fixture(t),first=f.store.beginStageRun({...f.intent,preparationAttemptId:randomUUID()},guard);assert.ok(first.created);
   f.store.closeStageRun(first.handle);const original=f.store.readStageRun(projectId,jobId)!;

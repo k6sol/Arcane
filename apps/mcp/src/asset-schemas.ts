@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { ASSET_CONVERSATION_PROVIDERS } from '../../../packages/protocol/src/asset-conversation.js';
 import { isDeepStrictEqual } from 'node:util';
 import { createHash } from 'node:crypto';
 import { isAbsolute } from 'node:path';
@@ -98,7 +99,7 @@ const nativeScope = {
   projectId: z.string().length(64).regex(/^[a-f0-9]{64}$/),
   projectPath: path.refine(value => isAbsolute(value) && !/[\x00-\x1f\x7f]/.test(value)
     && Buffer.byteLength(value) <= 4096, 'Expected a bounded absolute project path.'),
-  conversation: z.strictObject({ provider: z.literal('codex'), threadId: nativeId, sessionId: nativeId.nullable() }),
+  conversation: z.strictObject({ provider: z.enum(ASSET_CONVERSATION_PROVIDERS), threadId: nativeId, sessionId: nativeId.nullable() }),
 };
 export const nativeAssetCursor = z.string().min(66).max(81).regex(/^[a-f0-9]{64}:[1-9][0-9]{0,15}(?![\s\S])/)
   .refine(value => Number.isSafeInteger(Number(value.slice(65))), 'Cursor sequence exceeds its bounds.');

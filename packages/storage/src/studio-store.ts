@@ -16,6 +16,7 @@ import { guiEditReceiptMatches } from '../../core/src/gui-property-outcomes.js';
 import type { ScriptSourceVerifier, ScriptSourceVerification } from '../../core/src/script-source-verifier.js';
 import type { StudioAssetStageArgs, StudioAssetStageReceipt, StudioAssetReconstructArgs, StudioAssetReconstructReceipt } from '../../protocol/src/studio.js';
 import type { NativeConversation } from './conversation-work-store.js';
+import { ASSET_CONVERSATION_PROVIDERS } from '../../protocol/src/asset-conversation.js';
 
 type Row = Record<string, string | number | bigint | Uint8Array | null>;
 interface Options { directory: string; now?: () => number }
@@ -158,7 +159,7 @@ const stageReceiptSchema=z.strictObject({transferDigest:stageHash,packetCount:z.
 const stageIntentSchema=z.strictObject({projectId:stageHash,jobId:stageJob,
   preparationAttemptId:stageJob.optional(),
   modelReview:z.strictObject({reviewId:stageJob,subjectDigest:stageHash,revision:z.number().int().min(1).max(4096)}).optional(),
-  conversation:z.strictObject({provider:z.literal('codex'),threadId:stageId,sessionId:stageId.nullable()}),
+  conversation:z.strictObject({provider:z.enum(ASSET_CONVERSATION_PROVIDERS),threadId:stageId,sessionId:stageId.nullable()}),
   transferDigest:stageHash,payloadDigest:stageHash,manifestDigest:stageHash,preparedDigest:stageHash,
   target:z.strictObject({sessionId:stageId,placeId:stageNumber,universeId:stageNumber,root:z.literal('Workspace'),parentRef:stageId,
     creator:z.strictObject({kind:z.enum(['user','group']),id:z.string().regex(/^[1-9][0-9]{0,15}(?![\s\S])/).refine(v=>Number.isSafeInteger(Number(v)))})}),
@@ -205,6 +206,69 @@ function stageIntent(value:unknown):StageRunIntent {
 }
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 const stageContinuityKey = (intent:StageRunIntent) => hash(canonical({sessionId:intent.target.sessionId,clientLifetimeId:intent.continuity.clientLifetimeId,playEpoch:intent.continuity.playEpoch}));
+const STUDIO_DATABASE_VERSION=7,STUDIO_APPLICATION_ID=0x41525354;
+// Exact source-backed v2..v6 shapes. Version2 existed both before and after
+// asset_uploads was introduced; populated v0/v1 has no supported provenance.
+const STUDIO_SCHEMA=[
+ 'CREATE TABLE grants (hash TEXT PRIMARY KEY, payload TEXT NOT NULL, expires INTEGER NOT NULL, used INTEGER NOT NULL DEFAULT 0) STRICT',
+ 'CREATE TABLE sessions (id TEXT PRIMARY KEY, payload TEXT NOT NULL, token_hash TEXT NOT NULL, epoch INTEGER NOT NULL DEFAULT 0, key_id TEXT) STRICT',
+ 'CREATE TABLE commands (id TEXT PRIMARY KEY, request_id TEXT NOT NULL UNIQUE, session_id TEXT NOT NULL REFERENCES sessions(id), fingerprint TEXT NOT NULL, state TEXT NOT NULL, payload TEXT NOT NULL, created INTEGER NOT NULL) STRICT',
+ 'CREATE INDEX commands_session ON commands(session_id,created)',
+ 'CREATE TABLE events (sequence INTEGER PRIMARY KEY, occurred_at TEXT NOT NULL, kind TEXT NOT NULL, entity_id TEXT NOT NULL, detail TEXT NOT NULL) STRICT',
+ 'CREATE TABLE api_keys (id TEXT PRIMARY KEY,hash TEXT NOT NULL UNIQUE,payload TEXT NOT NULL) STRICT',
+ 'CREATE TABLE asset_uploads (attempt_id TEXT PRIMARY KEY,resource_key TEXT NOT NULL UNIQUE,payload TEXT NOT NULL) STRICT',
+ 'CREATE TABLE asset_upload_context_pins (command_id TEXT PRIMARY KEY REFERENCES commands(id),request_id TEXT NOT NULL,lease_epoch INTEGER NOT NULL,fingerprint TEXT NOT NULL,payload TEXT NOT NULL) STRICT',
+ 'CREATE TABLE asset_stage_runs (run_id TEXT PRIMARY KEY,project_id TEXT NOT NULL,job_id TEXT NOT NULL,intent_sha256 TEXT NOT NULL,payload TEXT NOT NULL,UNIQUE(project_id,job_id)) STRICT',
+ 'CREATE TABLE asset_stage_commands (run_id TEXT NOT NULL REFERENCES asset_stage_runs(run_id),ordinal INTEGER NOT NULL CHECK(ordinal>=0 AND ordinal<512),command_id TEXT NOT NULL UNIQUE REFERENCES commands(id),request_id TEXT NOT NULL,lease_epoch INTEGER NOT NULL,fingerprint TEXT NOT NULL,PRIMARY KEY(run_id,ordinal)) STRICT',
+ 'CREATE TABLE asset_stage_attempts (run_id TEXT PRIMARY KEY,project_id TEXT NOT NULL,job_id TEXT NOT NULL,intent_sha256 TEXT NOT NULL,payload TEXT NOT NULL,attempt_no INTEGER NOT NULL CHECK(attempt_no>0),previous_run_id TEXT REFERENCES asset_stage_attempts(run_id),continuity_key TEXT NOT NULL,UNIQUE(project_id,job_id,attempt_no),UNIQUE(project_id,job_id,continuity_key)) STRICT',
+ 'CREATE TABLE asset_stage_attempt_commands (run_id TEXT NOT NULL REFERENCES asset_stage_attempts(run_id),ordinal INTEGER NOT NULL CHECK(ordinal>=0 AND ordinal<512),command_id TEXT NOT NULL UNIQUE REFERENCES commands(id),request_id TEXT NOT NULL,lease_epoch INTEGER NOT NULL,fingerprint TEXT NOT NULL,PRIMARY KEY(run_id,ordinal)) STRICT',
+ 'CREATE TABLE asset_stage_reconstructions (run_id TEXT PRIMARY KEY REFERENCES asset_stage_attempts(run_id),command_id TEXT NOT NULL UNIQUE REFERENCES commands(id),request_id TEXT NOT NULL,lease_epoch INTEGER NOT NULL,fingerprint TEXT NOT NULL) STRICT',
+ "CREATE TABLE studio_test_reservations (id TEXT PRIMARY KEY,session_id TEXT NOT NULL REFERENCES sessions(id),job_id TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('active','released')),setup_closed INTEGER NOT NULL DEFAULT 0 CHECK(setup_closed IN (0,1)),payload TEXT NOT NULL) STRICT",
+ 'CREATE INDEX studio_test_reservations_state ON studio_test_reservations(state)',
+ "CREATE TABLE studio_test_commands (reservation_id TEXT NOT NULL REFERENCES studio_test_reservations(id),edit_id TEXT NOT NULL,role TEXT NOT NULL CHECK(role IN ('setup','restore')),command_id TEXT NOT NULL UNIQUE REFERENCES commands(id),request_id TEXT NOT NULL UNIQUE,lease_epoch INTEGER NOT NULL,fingerprint TEXT NOT NULL,PRIMARY KEY(reservation_id,edit_id,role)) STRICT",
+] as const;
+const schemaSql=(sql:string)=>sql.replace(/\bIF NOT EXISTS\s+/g,'').replace(/\s+/g,' ').replace(/\s*([(),=<>])\s*/g,'$1').trim();
+function verifyStudioSchema(db:DatabaseSync,version:number):Set<string>{
+ function fail():never {throw new ArcaneError('MIGRATION','Studio database schema or journal is not a supported Arcane version.');}
+ if(version>STUDIO_DATABASE_VERSION)throw new ArcaneError('MIGRATION','Studio database is newer than this Arcane build.');
+ const application=Number(db.prepare('PRAGMA application_id').get()?.application_id);
+ if(!Number.isSafeInteger(version)||version<0||version===1||version>STUDIO_DATABASE_VERSION||application!==(version===7?STUDIO_APPLICATION_ID:0))fail();
+ if(db.prepare('PRAGMA quick_check').get()?.quick_check!=='ok')fail();
+ const size=db.prepare("SELECT count(*) AS n,coalesce(max(length(CAST(sql AS BLOB))),0) AS largest FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'").get() as Row;
+ if(Number(size.n)>STUDIO_SCHEMA.length||Number(size.largest)>8192)fail();
+ const rows=db.prepare("SELECT type,name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'").all() as Row[];
+ if(version===0){if(rows.length)fail();return new Set();}
+ const count=version===2?6:version===3?10:version===4?12:version===5?13:16;
+ const expected=new Set<string>(STUDIO_SCHEMA.slice(0,count).map(schemaSql));
+ const actual=new Set<string>();const names=new Set<string>();
+ for(const row of rows){if(!['table','index'].includes(String(row.type))||typeof row.sql!=='string')fail();actual.add(schemaSql(row.sql));names.add(String(row.name));}
+ if(version===2&&actual.has(schemaSql(STUDIO_SCHEMA[6])))expected.add(schemaSql(STUDIO_SCHEMA[6]));
+ if(actual.size!==rows.length||actual.size!==expected.size||[...expected].some(sql=>!actual.has(sql)))fail();
+ if(db.prepare('PRAGMA foreign_key_check').get())fail();
+ for(const table of ['asset_stage_runs','asset_stage_attempts'])if(names.has(table)){
+   const budget=db.prepare(`SELECT count(*) AS n,coalesce(max(length(CAST(payload AS BLOB))),0) AS largest FROM ${table}`).get() as Row;
+   if(Number(budget.n)>STUDIO_STAGE_RUN_LIMITS.runs||Number(budget.largest)>4*1024*1024)fail();
+   for(const row of db.prepare(`SELECT * FROM ${table}`).iterate()){
+     if(typeof row.payload!=='string')fail();let record:StageRunStored;
+     try{record=JSON.parse(row.payload) as StageRunStored;const intent=stageIntent(record.intent);
+       if(record.runId!==row.run_id||intent.projectId!==row.project_id||intent.jobId!==row.job_id||record.intentSha256!==row.intent_sha256||hash(canonical(intent))!==record.intentSha256||version<7&&intent.conversation.provider!=='codex')fail();
+     }catch{fail();}
+   }
+ }
+ if(names.has('asset_uploads')){
+   const budget=db.prepare('SELECT count(*) AS n,coalesce(max(length(CAST(payload AS BLOB))),0) AS largest FROM asset_uploads').get() as Row;
+   if(Number(budget.n)>8192||Number(budget.largest)>16384)fail();
+   for(const row of db.prepare('SELECT * FROM asset_uploads').iterate()){
+     if(typeof row.payload!=='string')fail();try{const parsed=uploadJournalSchema.safeParse(JSON.parse(row.payload));
+       if(!parsed.success)fail();
+       const record=parsed.data,intent=record.intent;
+       if(record.attemptId!==row.attempt_id||record.resourceKey!==row.resource_key||hash(canonical(intent))!==record.intentSha256||
+         hash(canonical({projectId:intent.projectId,jobId:intent.jobId,sourceId:intent.sourceId,sourceSha256:intent.sourceSha256,assetType:intent.assetType}))!==record.resourceKey)fail();
+     }catch{fail();}
+   }
+ }
+ return names;
+}
 const equal = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 // Paths are display metadata: a rename is not a different opaque Instance.
 // Both references still require valid bounded paths and exact scope/class/ID.
@@ -345,27 +409,14 @@ export class StudioStore {
     writeFileSync(this.lockFd, JSON.stringify({ pid: process.pid, openedAt: this.iso() }));
     try {
       this.db = new DatabaseSync(sqliteTransportPath(join(options.directory, 'studio.sqlite')), { timeout: 2000, allowExtension: false });
-      const version = this.db.prepare('PRAGMA user_version').get() as Row;
-      if (Number(version.user_version) > 6) throw new ArcaneError('MIGRATION', 'Database is newer than this Arcane build; refusing to overwrite.');
-      this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
-        CREATE TABLE IF NOT EXISTS grants (hash TEXT PRIMARY KEY, payload TEXT NOT NULL, expires INTEGER NOT NULL, used INTEGER NOT NULL DEFAULT 0) STRICT;
-        CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, payload TEXT NOT NULL, token_hash TEXT NOT NULL, epoch INTEGER NOT NULL DEFAULT 0) STRICT;
-        CREATE TABLE IF NOT EXISTS commands (id TEXT PRIMARY KEY, request_id TEXT NOT NULL UNIQUE, session_id TEXT NOT NULL REFERENCES sessions(id), fingerprint TEXT NOT NULL, state TEXT NOT NULL, payload TEXT NOT NULL, created INTEGER NOT NULL) STRICT;
-        CREATE INDEX IF NOT EXISTS commands_session ON commands(session_id,created);
-        CREATE TABLE IF NOT EXISTS events (sequence INTEGER PRIMARY KEY, occurred_at TEXT NOT NULL, kind TEXT NOT NULL, entity_id TEXT NOT NULL, detail TEXT NOT NULL) STRICT;
-        CREATE TABLE IF NOT EXISTS api_keys (id TEXT PRIMARY KEY,hash TEXT NOT NULL UNIQUE,payload TEXT NOT NULL) STRICT;
-        CREATE TABLE IF NOT EXISTS asset_uploads (attempt_id TEXT PRIMARY KEY,resource_key TEXT NOT NULL UNIQUE,payload TEXT NOT NULL) STRICT;
-        CREATE TABLE IF NOT EXISTS asset_upload_context_pins (command_id TEXT PRIMARY KEY REFERENCES commands(id),request_id TEXT NOT NULL,lease_epoch INTEGER NOT NULL,fingerprint TEXT NOT NULL,payload TEXT NOT NULL) STRICT;
-        CREATE TABLE IF NOT EXISTS asset_stage_runs (run_id TEXT PRIMARY KEY,project_id TEXT NOT NULL,job_id TEXT NOT NULL,intent_sha256 TEXT NOT NULL,payload TEXT NOT NULL,UNIQUE(project_id,job_id)) STRICT;
-        CREATE TABLE IF NOT EXISTS asset_stage_commands (run_id TEXT NOT NULL REFERENCES asset_stage_runs(run_id),ordinal INTEGER NOT NULL CHECK(ordinal>=0 AND ordinal<512),command_id TEXT NOT NULL UNIQUE REFERENCES commands(id),request_id TEXT NOT NULL,lease_epoch INTEGER NOT NULL,fingerprint TEXT NOT NULL,PRIMARY KEY(run_id,ordinal)) STRICT;
-        CREATE TABLE IF NOT EXISTS asset_stage_attempts (run_id TEXT PRIMARY KEY,project_id TEXT NOT NULL,job_id TEXT NOT NULL,intent_sha256 TEXT NOT NULL,payload TEXT NOT NULL,attempt_no INTEGER NOT NULL CHECK(attempt_no>0),previous_run_id TEXT REFERENCES asset_stage_attempts(run_id),continuity_key TEXT NOT NULL,UNIQUE(project_id,job_id,attempt_no),UNIQUE(project_id,job_id,continuity_key)) STRICT;
-        CREATE TABLE IF NOT EXISTS asset_stage_attempt_commands (run_id TEXT NOT NULL REFERENCES asset_stage_attempts(run_id),ordinal INTEGER NOT NULL CHECK(ordinal>=0 AND ordinal<512),command_id TEXT NOT NULL UNIQUE REFERENCES commands(id),request_id TEXT NOT NULL,lease_epoch INTEGER NOT NULL,fingerprint TEXT NOT NULL,PRIMARY KEY(run_id,ordinal)) STRICT;
-        CREATE TABLE IF NOT EXISTS asset_stage_reconstructions (run_id TEXT PRIMARY KEY REFERENCES asset_stage_attempts(run_id),command_id TEXT NOT NULL UNIQUE REFERENCES commands(id),request_id TEXT NOT NULL,lease_epoch INTEGER NOT NULL,fingerprint TEXT NOT NULL) STRICT;
-        CREATE TABLE IF NOT EXISTS studio_test_reservations (id TEXT PRIMARY KEY,session_id TEXT NOT NULL REFERENCES sessions(id),job_id TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('active','released')),setup_closed INTEGER NOT NULL DEFAULT 0 CHECK(setup_closed IN (0,1)),payload TEXT NOT NULL) STRICT;
-        CREATE INDEX IF NOT EXISTS studio_test_reservations_state ON studio_test_reservations(state);
-        CREATE TABLE IF NOT EXISTS studio_test_commands (reservation_id TEXT NOT NULL REFERENCES studio_test_reservations(id),edit_id TEXT NOT NULL,role TEXT NOT NULL CHECK(role IN ('setup','restore')),command_id TEXT NOT NULL UNIQUE REFERENCES commands(id),request_id TEXT NOT NULL UNIQUE,lease_epoch INTEGER NOT NULL,fingerprint TEXT NOT NULL,PRIMARY KEY(reservation_id,edit_id,role)) STRICT;`);
       this.transaction(() => {
-        if (Number(version.user_version) < 4) {
+        const version=Number(this.db.prepare('PRAGMA user_version').get()?.user_version);
+        const present=verifyStudioSchema(this.db,version);
+        // No DDL/version adoption precedes full known-schema and journal validation.
+        // New tables, old-stage copying, application identity and version publish
+        // commit together, with rollback on every validation/write failure.
+        for(const sql of STUDIO_SCHEMA){const name=/^CREATE (?:TABLE|INDEX) ([a-z_]+)/.exec(sql)![1]!;if(!present.has(name))this.db.exec(sql);}
+        if (version > 0 && version < 4) {
           const old = this.db.prepare('SELECT * FROM asset_stage_runs LIMIT 65').all() as Row[];
           if (old.length > STUDIO_STAGE_RUN_LIMITS.runs) throw new ArcaneError('STUDIO_STAGE_BUDGET','Retained stage history exceeds its cap.');
           for (const row of old) {
@@ -375,11 +426,11 @@ export class StudioStore {
           }
           this.db.exec('INSERT INTO asset_stage_attempt_commands SELECT * FROM asset_stage_commands;');
         }
-        this.db.exec('PRAGMA user_version=6;');
-      });
-      const columns = this.db.prepare('PRAGMA table_info(sessions)').all() as Row[];
-      if (!columns.some(c=>c.name==='key_id')) this.db.exec('ALTER TABLE sessions ADD COLUMN key_id TEXT');
-      this.transaction(() => {
+        this.db.exec(`PRAGMA application_id=${STUDIO_APPLICATION_ID}; PRAGMA user_version=${STUDIO_DATABASE_VERSION};`);
+        verifyStudioSchema(this.db,STUDIO_DATABASE_VERSION);
+        // Recovery consumes the original session/command journals too. Keep it
+        // in the migration transaction so malformed retained JSON or a failed
+        // recovery write cannot adopt the new version or partially revoke data.
         for (const row of this.db.prepare('SELECT payload FROM sessions').all() as Row[]) { const session=JSON.parse(row.payload as string) as StudioSession; if (!session.revokedAt) this.revoke(session.id, 'daemon_restart'); }
         this.db.prepare('DELETE FROM grants').run();
         for (const row of this.db.prepare('SELECT payload FROM asset_uploads').all() as Row[]) {
@@ -395,6 +446,7 @@ export class StudioStore {
         }
         this.event('daemon_started', 'local', { protocolVersion: STUDIO_PROTOCOL });
       });
+      this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;');
     } catch (error) { try { this.db!.close(); } catch {} closeSync(this.lockFd); unlinkSync(this.lockPath); throw error; }
   }
   private iso(): string { return new Date(this.now()).toISOString(); }

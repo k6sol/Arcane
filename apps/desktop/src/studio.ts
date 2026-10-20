@@ -238,7 +238,7 @@ export function prepareAssetInput(value: unknown): AssetInput {
 }
 
 export const ASSET_CONVERSATION_BYTES = 524288;
-export interface AssetConversation { provider: 'codex' | 'claude-code'; threadId: string; sessionId: string | null }
+export interface AssetConversation { provider: 'codex' | 'claude-code' | 'arcane'; threadId: string; sessionId: string | null }
 export interface AssetConversationPage {
   projectId: string; projectPath: string; conversation: AssetConversation;
   jobs: AssetJobRecord[]; nextCursor: string | null; byteLimit: 524288;
@@ -267,7 +267,7 @@ const assetText = (value: unknown, maximum: number): value is string => typeof v
 const assetId = (value: unknown): value is string => assetText(value, 64) && /^[A-Za-z0-9_-]+$/.test(value);
 function readAssetConversation(value: unknown): AssetConversation {
   const r = assetFields(value, ['provider', 'threadId', 'sessionId']);
-  if (!['codex', 'claude-code'].includes(String(r.provider)) || !assetText(r.threadId, 256) || !(r.sessionId === null || assetText(r.sessionId, 256))) throw new Error('Invalid exact asset conversation.');
+  if (!['codex', 'claude-code', 'arcane'].includes(String(r.provider)) || !assetText(r.threadId, 256) || !(r.sessionId === null || assetText(r.sessionId, 256))) throw new Error('Invalid exact asset conversation.');
   return { provider: r.provider as AssetConversation['provider'], threadId: r.threadId, sessionId: r.sessionId };
 }
 function readAssetJob(value: unknown): AssetJobRecord {

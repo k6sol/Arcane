@@ -109,3 +109,57 @@ test('decision timeout aborts the original request, and receipt/status reads nev
   await reads.request('status', { jobId: JOB }, new AbortController().signal);
   assert.deepEqual(seen, ['/v1/assets/review/receipt', '/v1/assets/review/status']);
 });
+
+function providerStatus(provider:'codex'|'claude-code'|'arcane') {
+  return status(subject=>{subject.conversation={provider,threadId:provider==='codex'?'owned-thread':'app:'+JOB,sessionId:null};});
+}
+for(const provider of ['codex','claude-code','arcane'] as const)test(provider+' review status preserves actual attribution and refuses mismatched provider, digest and viewed bytes',async()=>{
+  for(const decision of ['pending','approved','rejected'] as const){
+    const value=providerStatus(provider);
+    if(decision!=='pending')Object.assign(value.review,{status:decision,revision:1,decidedAt:'2026-10-19T00:01:00Z'});
+    const measured=await readAssetReviewStatus(value,viewed);
+    assert.deepEqual(measured.subject.conversation,value.subject.conversation);
+    assert.deepEqual(measured.review!.subject.conversation,value.subject.conversation);
+    assert.equal(measured.review!.status,decision);
+  }
+  const other=provider==='arcane'?'claude-code':'arcane';
+  const wrongProvider=providerStatus(provider);wrongProvider.review.subject=structuredClone(wrongProvider.subject);wrongProvider.review.subject.conversation.provider=other;
+  await assert.rejects(readAssetReviewStatus(wrongProvider,viewed));
+  const wrongDigest=providerStatus(provider);wrongDigest.review.subjectDigest='0'.repeat(64);
+  await assert.rejects(readAssetReviewStatus(wrongDigest,viewed));
+  const wrongBytes=providerStatus(provider);wrongBytes.review.subject=structuredClone(wrongBytes.subject);wrongBytes.review.subject.artifacts[0].bytes++;
+  await assert.rejects(readAssetReviewStatus(wrongBytes,viewed));
+  const badViewed=providerStatus(provider);await assert.rejects(readAssetReviewStatus(badViewed,{...viewed,bytes:viewed.bytes+1}));
+});
+
+for(const provider of ['codex','claude-code','arcane'] as const)test(provider+' review card requires a trusted human decision and fences mismatched receipts',async t=>{
+  for(const outcome of ['approved','rejected','provider-mismatch','digest-mismatch','bytes-mismatch'] as const)await t.test(outcome,async t=>{
+    const doc=new LearningDocument(ORIGIN),signals:unknown[]=[],calls:string[]=[];
+    doc.addEventListener('arcane-learning-signal',event=>signals.push((event as CustomEvent).detail));
+    const card=new AssetReviewCard(doc.asDocument(),TOKEN,{tokenOrigin:ORIGIN,transport:async(path,init)=>{
+      calls.push(String(path));if(String(path).endsWith('/prepare'))return Response.json(providerStatus(provider));
+      assert.equal(String(path),'/v1/assets/review/decide');
+      const command=JSON.parse(String(init!.body)),next=providerStatus(provider);
+      assert.deepEqual(Object.keys(command).sort(),['decision','idempotencyKey','reviewId']);
+      Object.assign(next.review,{status:command.decision,revision:1,decidedAt:'2026-10-19T00:01:00Z'});
+      if(outcome==='provider-mismatch')next.review.subject.conversation.provider=provider==='arcane'?'claude-code':'arcane';
+      if(outcome==='digest-mismatch')next.review.subjectDigest='0'.repeat(64);
+      if(outcome==='bytes-mismatch')next.review.subject.artifacts[0].bytes++;
+      return Response.json({state:'recorded',review:next.review,command:{idempotencyKey:command.idempotencyKey,decision:command.decision,revision:1},retry:false});
+    }});
+    t.after(()=>card.clear());
+    await card.show(doc.root as unknown as HTMLElement,viewed,new AbortController().signal,()=>true);
+    assert.deepEqual(calls,['/v1/assets/review/prepare']);assert.deepEqual(signals,[]);
+    assert.match(doc.root.textContent,/Pending/);
+    const button=doc.root.querySelectorAll('button').find(node=>node.textContent===(outcome==='rejected'?'Reject model':'Approve model'))!;
+    assert.equal(button.disabled,false);button.dispatchEvent(new Event('click'));await learningTick();
+    assert.deepEqual(calls,['/v1/assets/review/prepare'],'untrusted clicks never submit decisions');
+    button.trustedClick();const deadline=Date.now()+2000;
+    while(!/Model approved\.|Model rejected\.|Decision not confirmed\./.test(doc.root.textContent)&&Date.now()<deadline)await learningTick();
+    const accepted=outcome==='approved'||outcome==='rejected';
+    assert.deepEqual(signals,accepted?[{source:'review',jobId:JOB,positive:outcome==='approved'}]:[]);
+    assert.match(doc.root.textContent,accepted?/Model (?:approved|rejected)/:/Decision not confirmed/);
+    assert.deepEqual(calls,['/v1/assets/review/prepare','/v1/assets/review/decide'],'no automatic approval or decision replay');
+    if(!accepted)assert.equal(button.disabled,true,'unconfirmed decisions remain fenced');
+  });
+});

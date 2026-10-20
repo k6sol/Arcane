@@ -4,8 +4,9 @@ import fs, { mkdir, mkdtemp, realpath, rm, readFile, writeFile, readdir, lstat, 
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join, relative, isAbsolute, sep } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { ArcaneError } from '../../packages/protocol/src/providers.js';
+import type { AssetConversationProvider, AssetConversation } from '../../packages/protocol/src/asset-conversation.js';
 import type { StudioImportContextObservation } from '../../packages/protocol/src/studio.js';
 import { StudioStore } from '../../packages/storage/src/studio-store.js';
 import { ConversationWorkStore } from '../../packages/storage/src/conversation-work-store.js';
@@ -27,13 +28,17 @@ const refused = (code: string) => (error: unknown) => error instanceof ArcaneErr
 const code = (suffix: string) => refused('STUDIO_IMPORT_PREPARATION_' + suffix);
 function gate() { let release!: () => void; const promise = new Promise<void>(accept => { release = accept; }); return { promise, release }; }
 
-async function fixture(t: test.TestContext, local = false) {
+async function fixture(t: test.TestContext, local = false, provider: AssetConversationProvider = 'codex') {
   const boundary = await realpath(tmpdir()), root = await mkdtemp(join(boundary, 'arcane-preparation-store-')), projectPath = await realpath(root);
   let now = Date.now(), epoch = 0;
   const cws = new ConversationWorkStore({ directory: join(root, 'bindings'), projectPath });
-  cws.bind({ kind: 'asset-job', id: JOB, conversation: THREAD }); cws.bind({ kind: 'asset-job', id: NEXT, conversation: THREAD });
-  const registry = createNativeAssetRegistry({ projectPath }), incarnation = registry.issue(), binding = { connectionId: 'fixture-connection', threadId: THREAD.threadId };
-  incarnation.seal({ ...binding, ...THREAD }); incarnation.grant(binding); incarnation.dispatched({ ...binding, operationId: 'fixture-intent' });
+  const conversation:AssetConversation=provider==='codex'?THREAD:{provider,threadId:'app:55555555-5555-4555-8555-555555555555',sessionId:null};
+  cws.bind({ kind: 'asset-job', id: JOB, conversation }); cws.bind({ kind: 'asset-job', id: NEXT, conversation });
+  const registry = createNativeAssetRegistry({ projectPath }), incarnation = registry.issue(), binding = { connectionId: 'fixture-connection', threadId: conversation.threadId };
+  if(provider==='codex')incarnation.seal({ ...binding, ...THREAD });
+  else if(provider==='claude-code')incarnation.bindAppConversation({kind:'app-conversation',connectionId:binding.connectionId,provider,conversationId:conversation.threadId.slice(4),transport:{kind:'claude-code-process',incarnationId:'fixture-process',nativeSessionId:null}});
+  else incarnation.bindAppConversation({kind:'app-conversation',connectionId:binding.connectionId,provider,conversationId:conversation.threadId.slice(4),transport:{kind:'arcane-gateway-loop',incarnationId:'fixture-loop'}});
+  incarnation.grant(binding); incarnation.dispatched({ ...binding, operationId: 'fixture-intent' });
   const actor = registry.capture(incarnation.credential(), 'mutate');
   const studio = new StudioStore({ directory: join(root, 'studio-state'), now: () => now });
   const grant = studio.createGrant({ allowedRoots: ['Workspace', 'ServerStorage'], allowWrites: true });
@@ -154,7 +159,7 @@ test('explicit preparation attempts preserve originals and share the hard record
   const original=await readFile(join(f.options.directory,JOB+'.json'));
   const attempt='33333333-3333-4333-8333-333333333333';
   await store.saveAttempt(f.actor,JOB,attempt,f.prepared,f.witness,guard);
-  const record=await store.get(f.actor,JOB,guard,attempt);assert.equal(record?.schemaVersion,2);assert.equal(record?.preparationAttempt?.previousId,JOB);
+  const record=await store.get(f.actor,JOB,guard,attempt);assert.equal(record?.schemaVersion,4);assert.equal(record?.preparationAttempt?.previousId,JOB);
   assert.deepEqual(await readFile(join(f.options.directory,JOB+'.json')),original);
   await assert.rejects(store.get(f.actor,NEXT,guard,attempt),code('SCOPE'));
   const next=f.nextWitness();
@@ -180,6 +185,46 @@ test('preparation store consumes actual prepared codec and two real synthetic St
   await assert.rejects(reopened.save(readonly, JOB, f.prepared, f.witness, guard), refused('NATIVE_ASSET_AUTHORITY'));
 });
 
+for(const provider of ['claude-code','arcane'] as const)test(provider+' preparation writes preserve the durable app anchor in new immutable versions',async t=>{
+  const f=await fixture(t,false,provider),store=await f.create();
+  await store.save(f.actor,JOB,f.prepared,f.witness,guard);
+  const root=await store.get(f.actor,JOB,guard);assert.equal(root?.schemaVersion,3);
+  assert.deepEqual(root?.conversation,{provider,threadId:'app:55555555-5555-4555-8555-555555555555',sessionId:null});
+  const path=join(f.options.directory,JOB+'.json'),before=await readFile(path);
+  const attempt='33333333-3333-4333-8333-333333333333';await store.saveAttempt(f.actor,JOB,attempt,f.prepared,f.witness,guard);
+  assert.equal((await store.get(f.actor,JOB,guard,attempt))?.schemaVersion,4);
+  await store.close();const reopened=await f.create();
+  assert.deepEqual((await reopened.get(f.actor,JOB,guard,attempt))?.conversation,root?.conversation);
+  assert.deepEqual(await readFile(path),before);
+});
+function canonicalRecord(value:unknown):string {
+  if(Array.isArray(value))return '['+value.map(canonicalRecord).join(',')+']';
+  if(value!==null&&typeof value==='object')return '{'+Object.keys(value).sort().map(key=>JSON.stringify(key)+':'+canonicalRecord((value as Record<string,unknown>)[key])).join(',')+'}';
+  return JSON.stringify(value);
+}
+test('legacy v1 and v2 preparation files reopen byte-for-byte while subsequent attempts use v4',async t=>{
+  const f=await fixture(t),store=await f.create(),attempt='33333333-3333-4333-8333-333333333333';
+  await store.save(f.actor,JOB,f.prepared,f.witness,guard);await store.saveAttempt(f.actor,JOB,attempt,f.prepared,f.witness,guard);await store.close();
+  const before=new Map<string,Buffer>();
+  for(const [id,schemaVersion]of [[JOB,1],[attempt,2]] as const){
+    const path=join(f.options.directory,id+'.json');
+    const {recordSha256:_old,...content}=JSON.parse(await readFile(path,'utf8')) as Record<string,unknown>;
+    content.schemaVersion=schemaVersion;
+    const record={...content,recordSha256:createHash('sha256').update(canonicalRecord(content)).digest('hex')};
+    await writeFile(path,JSON.stringify(record));before.set(path,await readFile(path));
+  }
+  const reopened=await f.create();assert.equal((await reopened.get(f.actor,JOB,guard))?.schemaVersion,1);
+  assert.equal((await reopened.get(f.actor,JOB,guard,attempt))?.schemaVersion,2);
+  const next='44444444-4444-4444-8444-444444444444';await reopened.saveAttempt(f.actor,JOB,next,f.prepared,f.nextWitness(),guard);
+  assert.equal((await reopened.get(f.actor,JOB,guard,next))?.schemaVersion,4);
+  for(const [path,bytes]of before)assert.deepEqual(await readFile(path),bytes);
+});
+test('legacy preparation versions cannot claim an app provider even with a matching recomputed record hash',async t=>{
+  const f=await fixture(t,false,'arcane'),store=await f.create();await store.save(f.actor,JOB,f.prepared,f.witness,guard);await store.close();
+  const path=join(f.options.directory,JOB+'.json'),{recordSha256:_old,...content}=JSON.parse(await readFile(path,'utf8')) as Record<string,unknown>;
+  content.schemaVersion=1;await writeFile(path,JSON.stringify({...content,recordSha256:createHash('sha256').update(canonicalRecord(content)).digest('hex')}));
+  await assert.rejects(f.create(),code('CORRUPT'));
+});
 test('preparation store records local-user provenance only from two actual triple-zero context receipts', async t => {
   const f = await fixture(t, true), store = await f.create(); await store.save(f.actor, JOB, f.prepared, f.witness, guard);
   assert.equal((await store.get(f.actor, JOB, guard))!.contextReads.creatorProvenance, 'StudioService:GetUserId');

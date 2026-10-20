@@ -60,7 +60,7 @@ export function assetReviewFreeze<T>(value:T):T {
 }
 export function snapshotAssetReviewScope(value:unknown):AssetReviewScope {
   const a=assetReviewFields(value,['projectId','conversation']),c=assetReviewFields(a.conversation,['provider','threadId','sessionId']);
-  if(c.provider!=='codex'&&c.provider!=='claude-code'||typeof c.threadId!=='string'||!ID.test(c.threadId)
+  if(c.provider!=='codex'&&c.provider!=='claude-code'&&c.provider!=='arcane'||typeof c.threadId!=='string'||!ID.test(c.threadId)
     ||c.sessionId!==null&&(typeof c.sessionId!=='string'||!ID.test(c.sessionId)))assetReviewFailure('INPUT');
   return assetReviewFreeze({projectId:assetReviewHash(a.projectId),conversation:{provider:c.provider,threadId:c.threadId,sessionId:c.sessionId}} as AssetReviewScope);
 }

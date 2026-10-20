@@ -336,3 +336,35 @@ test('pagination is deterministic with gapped storage cursors and no input/recor
   assert.deepEqual(first, second); assert.equal(first.nextCursor, f.cursors[1]);
   assert.deepEqual(first.jobs, [records[0]]); assert.deepEqual(f.calls, [{ limit: 2 }, { limit: 2 }]);
 });
+
+function attributed(f:ReturnType<typeof fixture>,provider:NativeConversation['provider']) {
+  const conversation:NativeConversation={provider,threadId:provider==='codex'?NATIVE.threadId:'app:11111111-1111-4111-8111-111111111111',sessionId:null};
+  f.scope.conversation={...conversation};for(const item of f.bindings)item.conversation={...conversation};return conversation;
+}
+for(const provider of ['codex','claude-code','arcane'] as const)test(provider+' pages preserve exact app attribution and authoritative continuation',()=>{
+  const first=job('first'),second=job('second'),f=fixture(['first','second'],[first,second],[11,47]),conversation=attributed(f,provider);
+  const result=f.read(1);assert.deepEqual(result.conversation,conversation);assert.deepEqual(result.jobs,[first]);assert.equal(result.nextCursor,cursor(11));
+  assert.deepEqual(f.read(1,result.nextCursor),{...page([second],null),conversation});
+  assert.deepEqual(f.calls,[{limit:1},{limit:1,after:cursor(11)}]);
+  assert.throws(()=>f.read(1,'foreign-scope-cursor'),code('CONVERSATION_WORK_INPUT'));
+  assert.equal(f.calls.length,3);assert.equal(f.jobReads,2);
+});
+for(const provider of ['codex','claude-code','arcane'] as const)test(provider+' page prefix rechecks provider, anchor, session, project and cursor before accepting a byte cut',()=>{
+  for(const field of ['provider','thread','session','project','path','cursor'] as const){
+    const f=fixture(['first','second'],[sizedJob('first',300000),sizedJob('second',300000)]),conversation=attributed(f,provider);
+    f.onPage((output,count)=>{
+      if(count===1)return output;
+      const changed:NativeConversation={...conversation};
+      if(field==='provider')changed.provider=provider==='arcane'?'claude-code':'arcane';
+      if(field==='thread')changed.threadId='app:22222222-2222-4222-8222-222222222222';
+      if(field==='session')changed.sessionId='new-observation';
+      const projectId=field==='project'?'2'.repeat(64):output.projectId;
+      return {...output,projectId,projectPath:field==='path'?'C:/other/project':output.projectPath,conversation:changed,
+        items:output.items.map(item=>({...item,projectId,conversation:{...changed}})),nextCursor:field==='cursor'?null:output.nextCursor};
+    });
+    assert.throws(()=>f.read(2),code('ASSET_CONVERSATION_STALE'));assert.equal(f.calls.length,2);assert.equal(f.jobReads,1);
+  }
+  const f=fixture(['first'],[job('first')]);attributed(f,provider);
+  f.bindings[0]!.conversation.provider=provider==='arcane'?'claude-code':'arcane';
+  assert.throws(()=>f.read(1),code('ASSET_CONVERSATION_STALE'));assert.equal(f.jobReads,0);
+});

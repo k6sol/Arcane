@@ -379,3 +379,34 @@ test('production boot uses existing chat callbacks; static UI names global scope
   const assetSection = html.slice(html.indexOf('id="asset-heading"'), html.indexOf('id="work-heading"', html.indexOf('id="asset-heading"')));
   assert.doesNotMatch(assetSection, /class="badge/);
 });
+
+for(const provider of ['codex','claude-code','arcane'] as const)test(provider+' job pages and bound/unknown starts retain exact provider and app anchor',()=>{
+  const conversation:AssetConversation={provider,threadId:provider==='codex'?'owned-thread':'app:11111111-1111-4111-8111-111111111111',sessionId:null};
+  const history=page([job()],conversation,'exact-opaque:cursor');
+  assert.deepEqual(readAssetConversationPage(history),history);
+  for(const association of ['bound','unknown'] as const){const value={...receipt(association),conversation};assert.deepEqual(readAssetConversationStart(value),value);}
+  for(const invalid of ['Arcane','arcane ','gateway','inferred']){
+    assert.throws(()=>readAssetConversationPage({...history,conversation:{...conversation,provider:invalid}}));
+    assert.throws(()=>readAssetConversationStart({...receipt(),conversation:{...conversation,provider:invalid}}));
+  }
+  assert.throws(()=>readAssetConversationPage({...history,nextCursor:''}));
+  assert.throws(()=>readAssetConversationStart({...receipt(),conversation,jobId:'other-job'}));
+});
+for(const provider of ['codex','claude-code','arcane'] as const)test(provider+' attributed history keeps project/provider/session epochs and discards old cursor scope',async()=>{
+  const conversation:AssetConversation={provider,threadId:provider==='codex'?'owned-thread':'app:11111111-1111-4111-8111-111111111111',sessionId:null};
+  const c=context();c.change(conversation);const controller=new AssetConversationController(c.options),ticket=controller.capture(),history=page([job()],conversation,'scope-only-cursor');
+  assert.equal(controller.matches(ticket,history),true);
+  for(const changed of [
+    {...history,projectId:'c'.repeat(64)},
+    {...history,projectPath:PATH+'-other'},
+    {...history,conversation:{...conversation,provider:provider==='arcane'?'claude-code' as const:'arcane' as const}},
+    {...history,conversation:{...conversation,threadId:'other-thread'}},
+    {...history,conversation:{...conversation,sessionId:'different-session'}},
+  ])assert.equal(controller.matches(ticket,changed),false);
+  const paths:string[]=[];const {view}=workbench(new StudioApi(TOKEN,async path=>{paths.push(String(path));return Response.json(history);}),c.options);
+  await view.refreshAssets();assert.equal(view.assetNextCursor,'scope-only-cursor');assert.equal(view.assetJobs[0]?.jobId,ID);
+  c.change({...conversation,sessionId:'new-session'});
+  assert.equal(view.assetNextCursor,null);assert.deepEqual(view.assetJobs,[]);assert.equal(controller.current(ticket),false);
+  c.change(conversation);assert.equal(controller.current(ticket),false);
+  assert.equal(paths.some(path=>path.includes('after=')),false,'scope changes never silently consume an old cursor');
+});

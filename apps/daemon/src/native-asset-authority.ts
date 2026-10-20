@@ -3,6 +3,7 @@ import { types } from 'node:util';
 import { ArcaneError } from '../../../packages/protocol/src/providers.js';
 import { workflowProjectIdentity } from '../../../packages/storage/src/workflow-store.js';
 import type { NativeConversation } from '../../../packages/storage/src/conversation-work-store.js';
+import type { AppAssetConversationBinding } from '../../../packages/protocol/src/asset-conversation.js';
 
 export type NativeAssetOperation = 'read' | 'mutate';
 /** Opaque host-only capability. A structurally identical JSON object grants nothing. */
@@ -19,6 +20,9 @@ export interface NativeAssetIncarnation {
   credential(): string;
   /** Host calls only after the exact configured native acknowledgement AND durable journal commit. */
   seal(value: NativeAssetSeal): void;
+  /** Trusted app host only, after durable chat binding and its owned transport acknowledgement.
+   * The local chat anchor is never presented as a Codex/native session acknowledgement. */
+  bindAppConversation(value: AppAssetConversationBinding): void;
   grant(value: {connectionId: string; threadId: string}): void;
   /** Trusted HUMAN Send only, immediately before actual dispatch. Never grants
    * before dispatch and expires with that exact intent; manual grants persist. */
@@ -50,7 +54,8 @@ const TOKEN = /^[a-f0-9]{64}(?![\s\S])/;
 const DUMMY = Buffer.alloc(32);
 interface Entry {
   projectId: string; projectPath: string; generation: number; retired: boolean;
-  sealed: Readonly<NativeAssetSeal> | null; granted: boolean; active: string | null;
+  sealed: Readonly<{connectionId:string;provider:NativeConversation['provider'];threadId:string;sessionId:string|null}> | null;
+  binding: Readonly<NativeAssetSeal | AppAssetConversationBinding> | null; granted: boolean; active: string | null;
   nextIntent: boolean; automaticIntent: string | null;
   intents: Set<string>;
   work: Map<string, AbortController>;
@@ -80,7 +85,7 @@ function bump(entry: Entry): void {
   }
   entry.generation++;
 }
-function live(entry: Entry): Readonly<NativeAssetSeal> {
+function live(entry: Entry): NonNullable<Entry['sealed']> {
   if (entry.retired || !entry.sealed) fail();
   return entry.sealed;
 }
@@ -159,7 +164,7 @@ export function createNativeAssetRegistry(options: {projectPath: string}): Nativ
       const credential = randomBytes(32).toString('hex');
       const digest = createHash('sha256').update(credential).digest();
       if (entries.has(digest.toString('hex'))) {digest.fill(0);fail();}
-      const entry: Entry = {...project,generation:0,retired:false,sealed:null,granted:false,active:null,nextIntent:false,automaticIntent:null,intents:new Set(),work:new Map()};
+      const entry: Entry = {...project,generation:0,retired:false,sealed:null,binding:null,granted:false,active:null,nextIntent:false,automaticIntent:null,intents:new Set(),work:new Map()};
       entries.set(digest.toString('hex'),{digest,entry});
       const binding = (value: unknown, extra: readonly string[] = []): Record<string, unknown> => {
         open();const seal = live(entry), a=data(value,['connectionId','threadId',...extra]);
@@ -173,10 +178,33 @@ export function createNativeAssetRegistry(options: {projectPath: string}): Nativ
           const seal=Object.freeze({connectionId:opaque(a.connectionId),provider:'codex' as const,
             threadId:opaque(a.threadId),sessionId:a.sessionId===null?null:opaque(a.sessionId)});
           if (entry.sealed) {
-            if (JSON.stringify(entry.sealed)!==JSON.stringify(seal)) {retire(entry);fail();}
+            if (JSON.stringify(entry.binding)!==JSON.stringify(seal)) {retire(entry);fail();}
             return; // Exact duplicate durable ACK cannot open/regrant an intent.
           }
-          entry.sealed=seal;bump(entry);
+          entry.binding=seal;entry.sealed=seal;bump(entry);
+        },
+        bindAppConversation(value: AppAssetConversationBinding) {
+          open();if(entry.retired)fail();
+          const a=data(value,['kind','connectionId','provider','conversationId','transport']);
+          if(a.kind!=='app-conversation'||a.provider!=='claude-code'&&a.provider!=='arcane'||typeof a.conversationId!=='string'||
+            !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}(?![\s\S])/.test(a.conversationId))fail();
+          const provider=a.provider,connectionId=opaque(a.connectionId),conversationId=a.conversationId;
+          let transport:AppAssetConversationBinding['transport'];
+          if(provider==='claude-code'){
+            const t=data(a.transport,['kind','incarnationId','nativeSessionId']);
+            if(t.kind!=='claude-code-process'||t.nativeSessionId!==null&&typeof t.nativeSessionId!=='string')fail();
+            transport=Object.freeze({kind:'claude-code-process',incarnationId:opaque(t.incarnationId),nativeSessionId:t.nativeSessionId===null?null:opaque(t.nativeSessionId)});
+          }else{
+            const t=data(a.transport,['kind','incarnationId']);if(t.kind!=='arcane-gateway-loop')fail();
+            transport=Object.freeze({kind:'arcane-gateway-loop',incarnationId:opaque(t.incarnationId)});
+          }
+          const anchor={kind:'app-conversation' as const,connectionId,conversationId};
+          const binding:Readonly<AppAssetConversationBinding>=transport.kind==='claude-code-process'
+            ?Object.freeze({...anchor,provider:'claude-code',transport})
+            :Object.freeze({...anchor,provider:'arcane',transport});
+          if(entry.sealed){if(JSON.stringify(entry.binding)!==JSON.stringify(binding)){retire(entry);fail();}return;}
+          entry.binding=binding;
+          entry.sealed=Object.freeze({connectionId,provider,threadId:'app:'+conversationId,sessionId:null});bump(entry);
         },
         grant(value: {connectionId:string;threadId:string}) {binding(value);entry.granted=true;bump(entry);},
         grantNextIntent(value: {connectionId:string;threadId:string;sessionId:string|null}) {

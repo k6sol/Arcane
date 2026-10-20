@@ -31,7 +31,7 @@ function sameNative(a: NativeConversation, b: NativeConversation): boolean {
 }
 function native(value: NativeConversation): NativeConversation {
   if (!value || typeof value !== 'object' || types.isProxy(value) ||
-      (value.provider !== 'codex' && value.provider !== 'claude-code') ||
+      (value.provider !== 'codex' && value.provider !== 'claude-code' && value.provider !== 'arcane') ||
       typeof value.threadId !== 'string' || (value.sessionId !== null && typeof value.sessionId !== 'string')) stale();
   return { provider: value.provider, threadId: value.threadId, sessionId: value.sessionId };
 }

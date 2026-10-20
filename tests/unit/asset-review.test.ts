@@ -12,7 +12,7 @@ import {ConversationWorkStore} from '../../packages/storage/src/conversation-wor
 import {AssetReviewStore} from '../../apps/daemon/src/asset-review-store.js';
 import {createAssetReviewHost} from '../../apps/daemon/src/asset-review-host.js';
 import {assetReviewRoutes} from '../../apps/daemon/src/asset-review-routes.js';
-import {assetReviewCanonical,assetReviewDigest,snapshotAssetReviewSubject,type AssetReviewReceiptAuthority,type AssetReviewSubject} from '../../apps/daemon/src/asset-review.js';
+import {assetReviewCanonical,assetReviewDigest,snapshotAssetReviewScope,snapshotAssetReviewSubject,type AssetReviewReceiptAuthority,type AssetReviewSubject} from '../../apps/daemon/src/asset-review.js';
 import {createAssetReviewReceiptAuthority} from '../../apps/daemon/src/workflow-host.js';
 
 const JOB='11111111-1111-4111-8111-111111111111',H='a'.repeat(64),CONTROL='human-control-fixture',AGENT='agent-fixture';
@@ -22,7 +22,7 @@ function authority(directory:string):AssetReviewReceiptAuthority {
   const sign=(value:unknown)=>createHmac('sha256',key).update('fixture-asset-review\0').update(assetReviewCanonical(value)).digest('hex');
   return {directory,sign,verify:(value,signature)=>typeof signature==='string'&&signature===sign(value),withSnapshot:evaluate=>evaluate(),close(){}};
 }
-async function fixture(t:test.TestContext){
+async function fixture(t:test.TestContext,provider:AssetReviewSubject['conversation']['provider']='codex'){
   const boundary=await realpath(tmpdir()),directory=await mkdtemp(join(boundary,'arcane-asset-review-')),project=workflowProjectIdentity(directory);
   const privateDirectory=join(directory,'private');await mkdir(privateDirectory,{mode:0o700});
   const receiptAuthority=authority(privateDirectory),proof=Symbol('fixture-human');
@@ -30,7 +30,7 @@ async function fixture(t:test.TestContext){
   let permit=false;
   const store=()=>new AssetReviewStore({projectPath:project.projectPath,authority:receiptAuthority,authorizeHuman:(_command,actual)=>permit&&actual===proof});
   let selected=store();
-  const subject=snapshotAssetReviewSubject({schemaVersion:1,projectId:project.projectId,conversation:{provider:'codex',threadId:'native-fixture',sessionId:null},
+  const subject=snapshotAssetReviewSubject({schemaVersion:1,projectId:project.projectId,conversation:{provider,threadId:provider==='codex'?'native-fixture':'app:'+JOB,sessionId:null},
     jobId:JOB,manifestSha256:H,sourceRequestSha256:'b'.repeat(64),artifacts:[{path:'asset.glb',sha256:'c'.repeat(64),bytes:100},{path:'collision.glb',sha256:'d'.repeat(64),bytes:80}]});
   t.after(async()=>{for(const cleanup of cleanups.reverse())await cleanup();selected.close();const path=relative(boundary,directory);assert.ok(path.startsWith('arcane-asset-review-')&&!isAbsolute(path)&&!path.includes('..'));await rm(directory,{recursive:true,force:true});});
   return {directory,project,subject,authority:receiptAuthority,get store(){return selected;},
@@ -125,8 +125,8 @@ function request(origin:string,token=CONTROL):IncomingMessage {
   req.method='POST';req.headers={host,origin,authorization:'Bearer '+token,'content-type':'application/json'};
   req.rawHeaders=['Host',host,'Origin',origin,'Authorization','Bearer '+token,'Content-Type','application/json'];return req;
 }
-async function hostFixture(t:test.TestContext){
-  const f=await fixture(t);f.store.close();
+async function hostFixture(t:test.TestContext,provider:AssetReviewSubject['conversation']['provider']='codex'){
+  const f=await fixture(t,provider);f.store.close();
   const work=new ConversationWorkStore({directory:join(f.directory,'work'),projectPath:f.project.projectPath});
   work.bind({conversation:{...f.subject.conversation},kind:'asset-job',id:JOB});let current=true,source=f.subject,reads=0;
   let hold:(()=>Promise<void>)|undefined;
@@ -174,4 +174,65 @@ test('real human HTTP routes cannot be bypassed by direct native or generic agen
   assert.equal(recorded.state,'recorded');assert.equal(recorded.review.status,'approved');assert.equal(recorded.retry,false);
   const reject=await post('decide',{...input,idempotencyKey:randomUUID(),decision:'rejected'});assert.equal(reject.status,200);
   assert.throws(()=>f.host.assertApproved(f.subject),refused('ASSET_REVIEW_REJECTED'));
+});
+
+for(const provider of ['claude-code','arcane'] as const)test(provider+' review approval retains exact app attribution, source and human boundaries',async t=>{
+  const f=await fixture(t,provider),pending=f.store.prepare(f.subject);
+  assert.deepEqual(f.subject.conversation,{provider,threadId:'app:'+JOB,sessionId:null});
+  assert.equal(pending.status,'pending');
+  assert.throws(()=>f.store.decide({reviewId:pending.reviewId,decision:'approved',idempotencyKey:randomUUID()},f.subject,{approved:true}),refused('ASSET_REVIEW_HUMAN_REQUIRED'));
+  assert.throws(()=>f.store.assertApproved(f.subject),refused('ASSET_REVIEW_REQUIRED'));
+  f.decide(pending.reviewId,'approved');const reference=f.store.assertApproved(f.subject);
+  const changed:AssetReviewSubject[]=[
+    {...f.subject,projectId:'f'.repeat(64)},
+    {...f.subject,conversation:{...f.subject.conversation,provider:provider==='arcane'?'claude-code':'arcane'}},
+    {...f.subject,conversation:{...f.subject.conversation,threadId:'app:22222222-2222-4222-8222-222222222222'}},
+    {...f.subject,conversation:{...f.subject.conversation,sessionId:'native-observation'}},
+    {...f.subject,jobId:'22222222-2222-4222-8222-222222222222'},
+    {...f.subject,manifestSha256:'e'.repeat(64)},
+    {...f.subject,sourceRequestSha256:'e'.repeat(64)},
+    {...f.subject,artifacts:f.subject.artifacts.map((artifact,index)=>index===0?{...artifact,sha256:'e'.repeat(64)}:artifact)},
+    {...f.subject,artifacts:f.subject.artifacts.map((artifact,index)=>index===1?{...artifact,sha256:'e'.repeat(64)}:artifact)},
+    {...f.subject,artifacts:f.subject.artifacts.map((artifact,index)=>index===1?{...artifact,bytes:artifact.bytes+1}:artifact)},
+  ];
+  for(const value of changed)assert.throws(()=>f.store.assertReference(snapshotAssetReviewSubject(value),reference));
+  f.restart();assert.deepEqual(f.store.assertApproved(f.subject),reference);
+  assert.deepEqual(f.store.read(pending.reviewId).subject.conversation,f.subject.conversation);
+  for(const authority of ['actor','target','permission','credential'])assert.equal(authority in reference,false);
+});
+
+for(const provider of ['claude-code','arcane'] as const)test(provider+' human review host rechecks actual job scope and source without admitting agent decisions',async t=>{
+  const f=await hostFixture(t,provider),origin='http://127.0.0.1:12345',auth={controlToken:CONTROL,agentToken:AGENT,origin};
+  for(const token of [AGENT,'f'.repeat(64),provider])await assert.rejects(f.host.prepare({jobId:JOB},request(origin,token),auth));
+  await assert.rejects(f.host.prepare({jobId:JOB,conversation:f.subject.conversation},request(origin),auth),refused('ASSET_REVIEW_INPUT'));
+  await assert.rejects(f.host.prepare({jobId:'22222222-2222-4222-8222-222222222222'},request(origin),auth),refused('ASSET_REVIEW_NOT_FOUND'));
+  assert.equal(f.reads,0);
+  const prepared=await f.host.prepare({jobId:JOB},request(origin),auth);
+  assert.deepEqual(prepared.subject.conversation,{provider,threadId:'app:'+JOB,sessionId:null});
+  const input={reviewId:prepared.review!.reviewId,decision:'approved',idempotencyKey:randomUUID()};
+  await assert.rejects(f.host.decide(input,request(origin,AGENT),auth));
+  assert.throws(()=>f.host.assertApproved(f.subject),refused('ASSET_REVIEW_REQUIRED'));
+  f.source=snapshotAssetReviewSubject({...f.subject,sourceRequestSha256:'e'.repeat(64)});
+  await assert.rejects(f.host.decide(input,request(origin),auth),refused('ASSET_REVIEW_STALE'));
+  f.source=f.subject;f.hold=async()=>{f.current=false;};
+  await assert.rejects(f.host.decide(input,request(origin),auth),refused('ASSET_REVIEW_NOT_FOUND'));
+  f.current=true;f.hold=undefined;
+  const approved=await f.host.decide(input,request(origin),auth);
+  assert.equal(approved.review.status,'approved');
+  assert.deepEqual(approved.review.subject.conversation,f.subject.conversation);
+  assert.equal(f.host.assertApproved(f.subject).reviewId,prepared.review!.reviewId);
+});
+
+test('Arcane review intake adds only its exact provider value and never evaluates supplied authority fields',()=>{
+  const conversation={provider:'arcane',threadId:'app:'+JOB,sessionId:null},scope={projectId:H,conversation};
+  const snapshot=snapshotAssetReviewScope(scope);assert.deepEqual(snapshot,scope);
+  assert.ok(Object.isFrozen(snapshot)&&Object.isFrozen(snapshot.conversation));
+  for(const provider of ['Arcane','arcane ','arcane\n','gateway','unknown'])assert.throws(()=>snapshotAssetReviewScope({...scope,conversation:{...conversation,provider}}),refused('ASSET_REVIEW_INPUT'));
+  assert.throws(()=>snapshotAssetReviewScope({...scope,conversation:{...conversation,approved:true}}),refused('ASSET_REVIEW_INPUT'));
+  assert.throws(()=>snapshotAssetReviewScope({...scope,credential:'not-authority'}),refused('ASSET_REVIEW_INPUT'));
+  let reads=0;const getter={...conversation};
+  Object.defineProperty(getter,'provider',{enumerable:true,get(){reads++;return 'arcane';}});
+  assert.throws(()=>snapshotAssetReviewScope({...scope,conversation:getter}),refused('ASSET_REVIEW_INPUT'));
+  assert.throws(()=>snapshotAssetReviewScope({...scope,conversation:new Proxy(conversation,{get(){reads++;return 'arcane';}})}),refused('ASSET_REVIEW_INPUT'));
+  assert.equal(reads,0);
 });

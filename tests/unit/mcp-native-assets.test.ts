@@ -12,6 +12,7 @@ import { compactAssetJobPage } from '../../apps/mcp/src/token-lean.js';
 import { assetHistoryInput, assetJobPage, nativeAssetHistoryInput, nativeAssetJobPage, nativeAssetStart, nativeAssetCancel } from '../../apps/mcp/src/asset-schemas.js';
 import { normalizeRequest } from '../../packages/asset-pipeline/src/validation.js';
 import type { AssetManifest } from '../../packages/asset-pipeline/src/types.js';
+import type { AssetConversation } from '../../packages/protocol/src/asset-conversation.js';
 import { HISTORY_PAGE_BYTES, type AssetJobRecord } from '../../apps/daemon/src/asset-service.js';
 
 // Owned loopback HTTP and official in-memory SDK fixtures only. No installed
@@ -22,7 +23,7 @@ const INPUT = { template: 'hero-prop' as const, name: 'native-fixture' }, REQUES
 const SCOPE = { projectId: 'a'.repeat(64), projectPath: ROOT,
   conversation: { provider: 'codex' as const, threadId: 'Native:Thread.Exact', sessionId: null as string | null } };
 const PROBE = { observedAt: '2026-10-13T00:00:00Z', available: false, blender: null, python: null, attempts: [] };
-function cursor(sequence: number, scope = SCOPE) {
+function cursor(sequence: number, scope: {projectId:string;conversation:AssetConversation} = SCOPE) {
   const { projectId, conversation: c } = scope;
   return createHash('sha256').update(JSON.stringify([projectId, c.provider, c.threadId, c.sessionId, 'asset-job'])).digest('hex') + ':' + sequence;
 }
@@ -165,7 +166,7 @@ test('native schemas: bounded IDs, absolute project path, scope cursors, complet
     { ...SCOPE, projectId: 'a'.repeat(63) }, { ...SCOPE, projectId: 'A'.repeat(64) }, { ...SCOPE, projectId: SCOPE.projectId + '\n' },
     { ...SCOPE, projectPath: '' }, { ...SCOPE, projectPath: 'relative/project' }, { ...SCOPE, projectPath: ROOT + '\0' },
     { ...SCOPE, projectPath: resolve(ROOT, '🌿'.repeat(1500)) },
-    { ...SCOPE, conversation: { ...SCOPE.conversation, provider: 'claude-code' } },
+    { ...SCOPE, conversation: { ...SCOPE.conversation, provider: 'unregistered-provider' } },
     { ...SCOPE, conversation: { ...SCOPE.conversation, threadId: '' } },
     { ...SCOPE, conversation: { ...SCOPE.conversation, threadId: 'a'.repeat(257) } },
     { ...SCOPE, conversation: { ...SCOPE.conversation, threadId: 'Thread/Outside' } },
@@ -199,6 +200,18 @@ test('native schemas: bounded IDs, absolute project path, scope cursors, complet
   assert.equal(nativeAssetJobPage.safeParse(page(largeJobs)).success, false);
 });
 
+test('native response envelopes preserve each app provider and reject another provider cursor',()=>{
+  for(const provider of ['claude-code','arcane'] as const){
+    const conversation={provider,threadId:'app:11111111-1111-4111-8111-111111111111',sessionId:null};
+    const scope={...SCOPE,conversation};
+    const result=nativeAssetJobPage.parse({...page(),...scope,nextCursor:cursor(1,scope)});
+    assert.deepEqual(result.conversation,conversation);
+    assert.deepEqual(nativeAssetStart.parse({...ack(),...scope}).conversation,conversation);
+    assert.equal(nativeAssetJobPage.safeParse({...page(),...scope,nextCursor:cursor(1)}).success,false);
+    const other={...scope,conversation:{...conversation,provider:provider==='arcane'?'claude-code' as const:'arcane' as const}};
+    assert.equal(nativeAssetJobPage.safeParse({...page(),...scope,nextCursor:cursor(1,other)}).success,false);
+  }
+});
 test('native MCP: explicit storage-scope pagination preserves complete records with no automatic fetch', async t => {
   const first = page([job()], cursor(9)), second = page([job(OTHER_ID)]);
   const f = await fixture(t, (url, response) => {
