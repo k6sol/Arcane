@@ -57,6 +57,7 @@ Callers: CombatService on enemy death (`"kill"`, enemy kind) credits players who
 ## DialogueService (server walks the tree)
 ```lua
 local current: { [Player]: { npc: Model, node: string } } = {}
+game:GetService("Players").PlayerRemoving:Connect(function(player) current[player] = nil end)
 local function open(player: Player, npc: Model, node: string)
 	current[player] = { npc = npc, node = node }
 	ShowDialogue:FireClient(player, npc.Name, node) -- client renders text/choices from Shared.Dialogue

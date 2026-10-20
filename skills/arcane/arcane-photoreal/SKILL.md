@@ -7,11 +7,11 @@ license: MIT
 # Photoreal finish: light, mood, materials, scale
 
 ## Rules first
-- One `environment_apply` call sets the look: `preset` (one word) + `technology: "Future"` + `terrainDecoration: true` when the ground uses Grass. The host expands the preset to exact Lighting, Atmosphere, Bloom, ColorCorrection and SunRays values; add only the section fields you want to change. Never leave default Lighting on a finished scene.
+- One `environment_apply` call sets the look: `preset` (one word) + `technology: "Future"` + `terrainDecoration: true` when the ground uses Grass. The host expands the preset to exact Lighting, Atmosphere, Bloom, ColorCorrection and SunRays values (forest-* also DepthOfField, Sky, Technology, Forest reverb); add only the section fields you want to change. Never leave default Lighting on a finished scene.
 - That call is one undo step, verified and rolled back as a whole. If Studio refuses a setting the error names the manual step (for example Lighting.Technology = Future or Terrain Decoration = true in the Properties window); tell the user that one line and continue.
 - MaterialService.Use2022Materials stays a manual Properties-window setting; mention it once if materials look flat.
 - Original assets by default: authored Blender/procedural meshes, original materials. Review `assets_preview`; session-only MeshParts vanish in Play unless uploaded. Only if the user explicitly requests Toolbox models may `studio_asset_search`/`studio_asset_insert` supply them. Reuse original `scene_build` templates. Primitive collision/blockout geometry is not a finished realistic asset. Never buy or publish.
-- Order: `terrain_generate` first (seeded landforms, a `flatten` clearing under the focal structure, river/path polylines, snowLine for peaks), then assets or procedural meshes, then `scene_build` geometry (one batch per layer); `environment_apply` sets the look. DepthOfField only through a client script: `scene_create` a LocalScript under StarterPlayer.StarterPlayerScripts, `script_update` it to create a `DepthOfFieldEffect` under the Camera, then enable it with `script_read` + `script_set_enabled`.
+- Order: `terrain_generate` first (seeded landforms, a `flatten` clearing under the focal structure, river/path polylines, snowLine for peaks), then assets or procedural meshes, then `scene_build` geometry (one batch per layer); `environment_apply` sets the look. `depthOfField` (a DepthOfFieldEffect) and `sky` (the built-in Sky; never custom skybox ids) are Lighting sections.
 - When Atmosphere exists, FogStart/FogEnd are ignored. Use Atmosphere Density and Haze for distance fog.
 - Verify with `studio_viewport_capture`: `frame {ref: main subject, views: ["three_quarter","low_angle"]}` (one sheet) plus one eye-level camera down the main path. Fix floating objects, plastic surfaces, repetition and blown highlights before reporting.
 
@@ -24,11 +24,12 @@ license: MIT
 | Night | night | ClockTime 0, cool OutdoorAmbient, ExposureCompensation 0.3, strong bloom | lighting OutdoorAmbient, bloom Threshold |
 | Horror | horror | ClockTime 0.5, Brightness 0.4, Contrast 0.25, Saturation -0.45, EnvironmentDiffuseScale 0.3 | atmosphere Decay, ShadowSoftness |
 | Sci-fi | sci_fi | ClockTime 21, cyan ColorShift_Top, Bloom 1/32/0.95 | colorCorrection TintColor |
+| Forest | forest-morning, forest-noon, forest-golden-hour, forest-overcast, forest-dusk | Future; ClockTime 7.4/12.5/17.7/11/18.6; morning Haze 2.2, SunRays 0.12; overcast ShadowSoftness 0.9, no sun disk | values: references ["arcane-photoreal:forest-light"] |
 
 - Night and horror are carried by practical lights: warm PointLights (ffb46b, Brightness 2-3) and, for horror, a player flashlight SpotLight (Angle 45, Range 40, Brightness 3, Shadows true) plus 1-3 flickering sources. Light and particle recipes (created directly): `arcane-vfx`.
 - Foggy forest adds low ground mist (the vfx Smoke preset with Size 0:4 1:12, Speed 0.3-0.6, near the ground).
 - Sci-fi surfaces: Metal, DiamondPlate, Glass; Neon trims 4fd8ff or ff3df0 on at most 5% of visible surface.
-- DepthOfField: gameplay FarIntensity 0.15, FocusDistance 40, InFocusRadius 60, NearIntensity 0; cinematic FarIntensity 0.4, FocusDistance 20, InFocusRadius 15. Expose an off switch in settings.
+- depthOfField: gameplay FarIntensity 0.05-0.15, FocusDistance 40-80, InFocusRadius 35-50, NearIntensity 0; cinematic 0.4/20/15. Forest clearings: plinth kit `life` (`arcane-natural-scenes`).
 
 ## Materials
 - Use textured materials (Concrete, Brick, WoodPlanks, Slate, Cobblestone, Plaster, Metal) over SmoothPlastic; SmoothPlastic only for painted manufactured items.

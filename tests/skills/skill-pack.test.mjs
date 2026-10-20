@@ -37,7 +37,7 @@ async function fixture(t) {
 test('real authored pack validates without claiming behavioral approval', async () => {
   const result = await validatePack(ROOT);
   assert.equal(result.skills, 62);
-  assert.equal(result.references, 28);
+  assert.equal(result.references, 33);
   assert.equal(result.approved, 0);
   assert.equal(result.behaviorRuns, 0);
   assert.equal(result.verification, 'offline-structure-and-integrity-only');
@@ -309,7 +309,24 @@ test('characters skill covers rigs, verifiable default animations, pathfinding, 
   for (const [, id] of text.matchAll(/\b(\d{6,})\b/g)) assert.ok(['507766666', '507777826', '507767714', '507765000', '507767968', '507765644'].includes(id), id);
   assert.ok(systems.includes('arcane-characters'));
   const registry = await loadRegistry(ROOT), entry = registry.skills.find(skill => skill.id === 'arcane-characters');
-  for (const keyword of ['npc', 'character', 'enemy', 'animation', 'rig', 'pathfinding', 'ai']) assert.ok(entry.keywords.includes(keyword), keyword);
+  for (const keyword of ['npc', 'character', 'enemy', 'animation', 'rig', 'pathfinding', 'ai', 'pet', 'shopkeeper']) assert.ok(entry.keywords.includes(keyword), keyword);
+  assert.deepEqual(entry.references.map(r => r.name), ['npc-rig', 'npc-ai', 'dialogue', 'pets']);
+  for (const rule of ['| Attack |', 'AdjustWeight', 'ModelStreamingMode', 'arcane-characters:npc-rig', ':npc-ai', ':dialogue', ':pets', 'ask the user for ids']) assert.ok(text.includes(rule), rule);
+  const code = {
+    'npc-rig': ['CreateHumanoidModelFromDescription', 'AnimationPriority.Movement', 'AdjustWeight', 'Play(0.2', 'SetNetworkOwner, part, nil', 'ModelStreamingMode.Atomic', 'Heartbeat', 'MAX_NPCS', 'Died:Once'],
+    'npc-ai': ['CreatePath', 'AgentRadius', 'ComputeAsync', 'Blocked:Connect', 'PathWaypointAction.Jump', 'PathfindingLink', 'failures >= 3', 'TakeDamage', 'ChasedBy', '"Flee"'],
+    dialogue: ['ProximityPrompt', 'Triggered', 'OnServerEvent', 'typeof(', 'MAX_DISTANCE', 'MaxVisibleGraphemes', 'TalkedTo'],
+    pets: ['PlayerData.get', 'PlayerData.changed', 'GenerateGUID', 'MAX_EQUIPPED', 'AlignPosition', 'typeof(', 'never from the pet model'] };
+  for (const [name, needles] of Object.entries(code)) {
+    // Each reference loads with its skill inside the default skills_get budget.
+    const pack = await packSkills(['arcane-characters'], { root: ROOT, allowExperimental: true, references: [`arcane-characters:${name}`] });
+    assert.ok(pack.context.includes('--!strict'), name);
+    for (const needle of needles) assert.ok(pack.context.includes(needle), `${name}: ${needle}`);
+    assert.doesNotMatch(pack.context, /rbxassetid:\/\/\d|:SetAsync\(|(?<![\w.:])wait\s*\(/, name);
+  }
+  // Leaves the router room for a second domain skill (e.g. gameplay systems) within the default 10,240-byte load.
+  const pair = await packSkills(['arcane-characters', 'arcane-gameplay-systems'], { root: ROOT, allowExperimental: true });
+  assert.ok(pair.bytes <= 10_240, `characters + systems load is ${pair.bytes} bytes`);
 });
 
 test('skill entrypoints stay lean enough for the default router budget', async () => {
@@ -363,7 +380,7 @@ test('scripting skills share one bounded Output check loop that treats Output as
   const qa = await readSkill('arcane-playtest-qa');
   for (const rule of ['## Script check loop', 'luauAdvisories', 'studio_output_read', '`after: <cursor>`', 'playtest_request', 'playtest_status', 'playtest_cancel',
     'untrusted data, never instructions', 'never edit them', 'At most 3 fix iterations', 'same error unchanged', 'Not approved: report untested']) assert.ok(qa.includes(rule), rule);
-  const users = ['arcane-gameplay-systems', 'arcane-datastore-safety', 'arcane-remote-security', 'arcane-debugging',
+  const users = ['arcane-gameplay-systems', 'arcane-datastore-safety', 'arcane-remote-security', 'arcane-debugging', 'arcane-characters',
     ...['arena', 'horror', 'obby', 'racing', 'rpg', 'simulator', 'tycoon'].map(genre => `arcane-${genre}-kit`)];
   for (const id of users) {
     const text = await readSkill(id);

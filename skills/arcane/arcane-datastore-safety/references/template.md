@@ -135,9 +135,12 @@ function PlayerData.start()
 	task.spawn(function() -- autosave refreshes the lock; staggered
 		while true do
 			task.wait(AUTOSAVE)
-			for player in profiles do
-				task.spawn(save, player, false)
-				task.wait(1)
+			-- Iterate a snapshot: joins add profiles keys during task.wait, which breaks a live `for ... in profiles`.
+			for _, player in Players:GetPlayers() do
+				if profiles[player] then
+					task.spawn(save, player, false)
+					task.wait(1)
+				end
 			end
 		end
 	end)

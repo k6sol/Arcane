@@ -2204,6 +2204,39 @@
       "references": [
         "arcane-gameplay-systems:recipes"
       ]
+    },
+    {
+      "id": "routing-add-an-enemy-that-chases-players",
+      "request": "add an enemy that chases players",
+      "firstSkill": "arcane-characters",
+      "alsoIncluded": [
+        "arcane-gameplay-systems",
+        "arcane-npc"
+      ],
+      "references": [
+        "arcane-gameplay-systems:recipes"
+      ]
+    },
+    {
+      "id": "routing-make-a-shopkeeper-npc-with-dialogue",
+      "request": "make a shopkeeper NPC with dialogue",
+      "firstSkill": "arcane-characters",
+      "alsoIncluded": [
+        "arcane-gameplay-systems",
+        "arcane-npc"
+      ],
+      "references": [
+        "arcane-gameplay-systems:recipes"
+      ]
+    },
+    {
+      "id": "routing-add-a-pet-that-follows-me",
+      "request": "add a pet that follows me",
+      "firstSkill": "arcane-simulator-kit",
+      "alsoIncluded": [
+        "arcane-characters"
+      ],
+      "references": []
     }
   ],
   "runs": []

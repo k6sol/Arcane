@@ -6,7 +6,7 @@ license: MIT
 
 # Simulator kit
 
-Cross-links: economy model `arcane-economy`; feel and juice `arcane-gameplay-feel`; saving `arcane-datastore-safety`; remotes `arcane-remote-security`; HUD/shop/inventory grid `arcane-interface`; pickup VFX `arcane-vfx`; pet followers `arcane-characters` (no Humanoid needed). Code: [patterns](references/patterns.md) (`arcane-simulator-kit:patterns`).
+Cross-links: economy model `arcane-economy`; feel and juice `arcane-gameplay-feel`; saving `arcane-datastore-safety`; remotes `arcane-remote-security`; HUD/shop/inventory grid `arcane-interface`; pickup VFX `arcane-vfx`; pet followers and saved pet data `arcane-characters:pets` (no Humanoid needed). Code: [patterns](references/patterns.md) (`arcane-simulator-kit:patterns`).
 
 ## Architecture
 - ServerScriptService: Script `SimServer` + ModuleScripts `Sim/CollectService`, `Sim/SellService`, `Sim/UpgradeService`, `Sim/ZoneService`, `Sim/PetService`, `Sim/DataService`.

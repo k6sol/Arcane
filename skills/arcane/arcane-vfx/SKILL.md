@@ -35,7 +35,7 @@ license: MIT
 | Waterfall mist | smoke_main | 20 | 2-3 | 3-6 | 60,60 | 0:3 1:10 | 0:1 0.2:0.6 1:1 | ffffff dcecf5 | at pool, Acceleration 0,1,0, Drag 1 |
 | Dust motes | sparkles_main | 4 per 10x10 area | 6-10 | 0.1-0.3 | 180,180 | 0:0.1 1:0.1 | 0:1 0.3:0.5 0.7:0.5 1:1 | fff3d6 | Box host, ShapeStyle Volume, LightEmission 0.4 |
 | Footstep dust | smoke_main | 0 + Emit(6) | 0.6-0.9 | 2-4 | 70,70 | 0:0.6 1:2 | 0:0.5 1:1 | b9a58a | Drag 4, Acceleration 0,-2,0 |
-| Fireflies | sparkles_main | 3 | 6-9 | 0.3-0.8 | 180,180 | 0:0.1 0.5:0.22 1:0.1 | 0:1 0.2:0 0.4:0.6 0.6:0 0.8:0.5 1:1 | d8ff6a | Box host 60x8x60 at 2-6 studs, LightEmission 1, LightInfluence 0, Drag 1; night only |
+| Fireflies | sparkles_main | 3 | 6-9 | 0.3-0.8 | 180,180 | 0:0.1 0.5:0.22 1:0.1 | 0:1 0.2:0 0.4:0.6 0.6:0 0.8:0.5 1:1 | d8ff6a | Box host 60x8x60 at 2-6 studs, LightEmission 1, LightInfluence 0, Drag 1; dusk/night (plinth kit `life`) |
 | Falling leaves | SquareParticle | 3 | 8-12 | 1-2 | 30,30 | 0:0.4 1:0.4 | 0:1 0.05:0 0.9:0 1:1 | c8742b 9a3b1d (or 6f8f3a) | Box host above canopy, EmissionDirection Bottom, Acceleration 0.6,-1.2,0.3, Drag 0.6, RotSpeed -90..90, Squash 0.6 |
 
 Waterfall body: a `terrain_generate` lake (or an `environment_apply` Water fill) as the pool; falling sheet as Glass parts (Transparency 0.35, #5aa7c8) behind the particles.

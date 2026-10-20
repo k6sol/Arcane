@@ -106,6 +106,9 @@ for _, button in list:GetChildren() do
 			pending[button.Name] = button
 			button.AutoButtonColor = false
 			buy:FireServer(button.Name) -- the button name is the item id; price comes from the server
+			task.delay(5, function() -- no reply (rate-limited): unlock
+				if pending[button.Name] then pending[button.Name] = nil; button.AutoButtonColor = true end
+			end)
 		end)
 	end
 end
@@ -241,8 +244,8 @@ function Inventory.start()
 		if not data or not (data.items[id] or data.owned[id]) then return end -- must own it
 		local tools = ServerStorage:FindFirstChild("Tools")
 		local template = tools and tools:FindFirstChild(id)
-		local backpack = player:FindFirstChildOfClass("Backpack")
-		if not template or not template:IsA("Tool") or not backpack or backpack:FindFirstChild(template.Name) then return end
+		local backpack, character = player:FindFirstChildOfClass("Backpack"), player.Character
+		if not template or not template:IsA("Tool") or not backpack or backpack:FindFirstChild(id) or (character and character:FindFirstChild(id)) then return end
 		template:Clone().Parent = backpack
 	end)
 end

@@ -78,8 +78,9 @@ Bloom decides whether LightEmission and Neon glow. Change only what differs from
 | Campfire at night | preset night, bloom {Intensity 0.7, Size 28, Threshold 1.1} |
 | Magic / arcane | preset night or sci_fi, bloom {Intensity 0.9, Size 32, Threshold 0.95}, colorCorrection {Saturation 0.1} |
 | Waterfall by day | preset clear_day, atmosphere {Density 0.3, Haze 1.5}, sunRays {Intensity 0.08, Spread 0.7} |
+| Forest clearing | preset forest-morning (dusk: forest-dusk); scene_build plinth kit `life` adds Dust motes, rune light and Fireflies |
 | Volcanic | preset golden_hour, atmosphere {Density 0.45, Haze 2.5, Color "#c27a52", Decay "#6b2a14"}, colorCorrection {Contrast 0.15, TintColor "#ffe2c8"} |
-Sane ranges: Bloom Intensity 0.3-1, Size 20-36, Threshold 0.9-1.6 (under 0.8 the whole scene glows); ColorCorrection Contrast 0-0.25, Saturation -0.45 to 0.15, TintColor channels 0.85+; SunRays Intensity 0.03-0.15, Spread 0.4-0.9; Atmosphere Density 0.25-0.6 (0.7+ hides the map), Haze 0-3, Glare 0-0.6. DepthOfField only via a client script (values in `arcane-photoreal`).
+Sane ranges: Bloom Intensity 0.3-1, Size 20-36, Threshold 0.9-1.6 (under 0.8 the whole scene glows); ColorCorrection Contrast 0-0.25, Saturation -0.45 to 0.15, TintColor channels 0.85+; SunRays Intensity 0.03-0.15, Spread 0.4-0.9; Atmosphere Density 0.25-0.6 (0.7+ hides the map), Haze 0-3, Glare 0-0.6. DepthOfField: the `environment_apply` depthOfField section (values in `arcane-photoreal`).
 
 ## Performance budgets
 | Item | Cap |

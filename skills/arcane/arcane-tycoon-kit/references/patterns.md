@@ -70,12 +70,13 @@ local CollectionService = game:GetService("CollectionService")
 local Debris = game:GetService("Debris")
 local live: { [Model]: number } = {}
 local nextTick: { [BasePart]: number } = {}
+CollectionService:GetInstanceRemovedSignal("TycoonSpout"):Connect(function(spout) nextTick[spout] = nil end)
 RunService.Heartbeat:Connect(function()
 	local now = os.clock()
 	for _, spout in CollectionService:GetTagged("TycoonSpout") do
 		if (nextTick[spout] or 0) > now then continue end
 		local plot = plotOfPart(spout) -- the ancestor that is a direct child of workspace.Plots
-		nextTick[spout] = now + (spout:GetAttribute("Interval") :: number)
+		nextTick[spout] = now + (spout:GetAttribute("Interval") :: number? or 2)
 		if (live[plot] or 0) >= Config.MaxDropsPerPlot then continue end
 		local drop = Instance.new("Part")
 		drop.Size = Vector3.new(1, 1, 1); drop.CollisionGroup = "Drops"; drop.CanTouch = true
@@ -109,11 +110,14 @@ end
 
 ## DataService record (session-locked UpdateAsync)
 ```lua
-store:UpdateAsync("u_" .. player.UserId, function(old)
-	old = old or { version = 1, data = { cash = 0, rebirths = 0, owned = {}, lifetimeCash = 0 } }
-	if old.lock and old.lock.jobId ~= game.JobId and os.time() - old.lock.time < 1800 then return nil end
-	old.lock = { jobId = game.JobId, time = os.time() }
-	return old
+local ok, record = pcall(function()
+	return store:UpdateAsync("u_" .. player.UserId, function(old)
+		old = old or { version = 1, data = { cash = 0, rebirths = 0, owned = {}, lifetimeCash = 0 } }
+		if old.lock and old.lock.jobId ~= game.JobId and os.time() - old.lock.time < 1800 then return nil end
+		old.lock = { jobId = game.JobId, time = os.time() }
+		return old
+	end)
 end)
+local claimed = ok and record and record.lock and record.lock.jobId == game.JobId
 ```
-Wrap in pcall with `GetRequestBudgetForRequestType` checks and 1/2/4/8 s backoff. If the claim fails, do not create a plot or save anything for that player. Saves write `data` only when `old.lock.jobId == game.JobId`; the leaving save sets `lock = nil`. BindToClose saves all loaded players in parallel and waits (<= 25 s).
+Retry this pcall with `GetRequestBudgetForRequestType` checks and 1/2/4/8 s backoff. If the claim fails, do not create a plot or save anything for that player. Saves write `data` only when `old.lock.jobId == game.JobId`; the leaving save sets `lock = nil`. BindToClose saves all loaded players in parallel and waits (<= 25 s).

@@ -18,9 +18,11 @@ return {
 local tension: { [Player]: number } = {}
 local lastPeak: { [Player]: number } = {}
 local fired: { [Player]: { [string]: boolean } } = {}
+local Players = game:GetService("Players")
+Players.PlayerRemoving:Connect(function(player) tension[player], lastPeak[player], fired[player] = nil, nil, nil end)
 task.spawn(function()
 	while true do
-		for _, player in game.Players:GetPlayers() do
+		for _, player in Players:GetPlayers() do
 			local t = tension[player] or 0
 			t += if inLight(player) or player:GetAttribute("InSafeRoom") then -Config.Tension.lightDecay else Config.Tension.darkGain
 			tension[player] = math.clamp(t, 0, 100)
@@ -34,7 +36,7 @@ local function canScare(player: Player): boolean
 end
 for _, trigger in workspace.Triggers:GetChildren() do
 	trigger.Touched:Connect(function(hit)
-		local player = game.Players:GetPlayerFromCharacter(hit.Parent)
+		local player = Players:GetPlayerFromCharacter(hit.Parent)
 		if not player then return end
 		fired[player] = fired[player] or {}
 		if fired[player][trigger.Name] then return end
@@ -71,6 +73,7 @@ end)
 ```lua
 local lamps = CollectionService:GetTagged("Flicker") -- tagged at start from workspace.Lights.Flicker
 task.spawn(function()
+	if #lamps == 0 then return end -- math.random(0) would error and kill the loop
 	while true do
 		local lamp = lamps[math.random(#lamps)]
 		local light = lamp:FindFirstChildWhichIsA("PointLight")

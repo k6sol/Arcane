@@ -35,7 +35,7 @@ function StageService.start()
 			if n == stage + 1 then StageService.set(player, n) end -- never skip ahead
 		end)
 	end
-	Players.PlayerAdded:Connect(function(player)
+	local function added(player: Player)
 		local stats = Instance.new("Folder"); stats.Name = "leaderstats"
 		local stage = Instance.new("IntValue"); stage.Name = "Stage"; stage.Parent = stats
 		stats.Parent = player
@@ -46,7 +46,9 @@ function StageService.start()
 				if cp then character:PivotTo(cp.CFrame + Vector3.new(0, 4, 0)) end
 			end)
 		end)
-	end)
+	end
+	Players.PlayerAdded:Connect(added)
+	for _, player in Players:GetPlayers() do task.spawn(added, player) end -- joined before start()
 end
 return StageService
 ```
@@ -118,8 +120,29 @@ local function load(player: Player): any?
 	if not ok or not record or not record.lock or record.lock.jobId ~= game.JobId then return nil end -- failed: never save over
 	return record.data
 end
--- save(player, data, release): UpdateAsync that writes data only if old.lock.jobId == game.JobId, sets lock = nil when releasing.
--- Autosave every 90 s staggered; PlayerRemoving saves + releases; BindToClose saves all in parallel (<= 25 s).
+local loaded: { [Player]: any } = {} -- only profiles that load() returned; never save a failed load
+local function save(player: Player, release: boolean): boolean
+	local data = loaded[player]
+	if not data then return false end
+	return (retry(Enum.DataStoreRequestType.UpdateAsync, function()
+		return store:UpdateAsync("u_" .. player.UserId, function(old)
+			if not old or not old.lock or old.lock.jobId ~= game.JobId then return nil end -- lost the lock
+			old.data = data
+			old.lock = if release then nil else { jobId = game.JobId, time = os.time() }
+			return old
+		end)
+	end))
+end
+-- Autosave every 90 s staggered; PlayerRemoving: save(player, true) then loaded[player] = nil.
+game:BindToClose(function() -- save all in parallel, <= 25 s
+	local pending = 0
+	for player in loaded do
+		pending += 1
+		task.spawn(function() save(player, true); pending -= 1 end)
+	end
+	local deadline = os.clock() + 25
+	while pending > 0 and os.clock() < deadline do task.wait(0.1) end
+end)
 ```
 
 ## Skip-stage receipt stub (idempotent, inactive while id is nil)

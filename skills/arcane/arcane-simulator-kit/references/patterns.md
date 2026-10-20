@@ -24,6 +24,7 @@ return {
 ```lua
 local lastSwing: { [Player]: number } = {}
 local nodeHp: { [BasePart]: number } = {}
+game:GetService("Players").PlayerRemoving:Connect(function(player) lastSwing[player] = nil end)
 Collect.OnServerEvent:Connect(function(player, node)
 	if typeof(node) ~= "Instance" or not node:IsA("BasePart") or not node:IsDescendantOf(workspace.Zones) then return end
 	local now = os.clock()
@@ -31,11 +32,11 @@ Collect.OnServerEvent:Connect(function(player, node)
 	lastSwing[player] = now
 	local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart") :: BasePart?
 	if not root or (root.Position - node.Position).Magnitude > Config.CollectRange then return end
-	local zoneId = node:GetAttribute("Zone") :: number
-	if (player:GetAttribute("Zone") :: number? or 1) < zoneId or node.Transparency >= 1 then return end
+	local zoneId = node:GetAttribute("Zone")
+	local zone = typeof(zoneId) == "number" and Config.Zones[zoneId]
+	if not zone or (player:GetAttribute("Zone") :: number? or 1) < zoneId or node.Transparency >= 1 then return end
 	local bag, bagMax = player:GetAttribute("Bag") :: number? or 0, player:GetAttribute("BagMax") :: number? or 25
 	if bag >= bagMax then return end
-	local zone = Config.Zones[zoneId]
 	nodeHp[node] = (nodeHp[node] or zone.nodeHp) - power(player)
 	if nodeHp[node] > 0 then return end
 	player:SetAttribute("Bag", math.min(bagMax, bag + zone.nodeValue))

@@ -59,6 +59,7 @@ return RoundService
 local votes: { [Player]: string } = {}
 local options: { string } = {}
 local open = false
+game:GetService("Players").PlayerRemoving:Connect(function(player) votes[player] = nil end) -- leavers do not count
 Vote.OnServerEvent:Connect(function(player, mapName)
 	if not open or type(mapName) ~= "string" or not table.find(options, mapName) then return end
 	votes[player] = mapName
@@ -86,6 +87,7 @@ end
 ```lua
 local history: { [Player]: { { t: number, cf: CFrame } } } = {} -- 20 Hz, 1 s per player
 local lastShot: { [Player]: number } = {}
+game:GetService("Players").PlayerRemoving:Connect(function(player) history[player], lastShot[player] = nil, nil end)
 Fire.OnServerEvent:Connect(function(player, origin, direction, shotId)
 	if typeof(origin) ~= "Vector3" or typeof(direction) ~= "Vector3" or type(shotId) ~= "number" then return end
 	if workspace:GetAttribute("RoundState") ~= "InRound" or not player:GetAttribute("Alive") then return end

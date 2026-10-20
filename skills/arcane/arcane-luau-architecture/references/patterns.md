@@ -146,6 +146,9 @@ local function tweenTo(inst: Instance, goal: { [string]: any }, info: TweenInfo)
 	if old then old:Cancel() end
 	local tween = TweenService:Create(inst, info, goal)
 	active[inst] = tween
+	tween.Completed:Once(function() -- also fires on Cancel; drop the entry so destroyed instances are not kept
+		if active[inst] == tween then active[inst] = nil end
+	end)
 	tween:Play()
 	return tween
 end

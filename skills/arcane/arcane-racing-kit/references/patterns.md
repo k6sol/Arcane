@@ -17,6 +17,7 @@ local Players = game:GetService("Players")
 local cps = workspace.Track.Checkpoints
 local count = #cps:GetChildren()
 local lapStart: { [Player]: number } = {}
+Players.PlayerRemoving:Connect(function(player) lapStart[player] = nil end)
 
 local function driverOf(hit: BasePart): Player?
 	local model = hit:FindFirstAncestorOfClass("Model")

@@ -67,6 +67,6 @@ test('routing cases pin realistic gameplay-code briefs to declared skills and re
       assert.ok(byId.get(skill)?.references.some(r => r.name === name), `${item.id}: ${reference}`);
     }
   }
-  for (const brief of ['round system', 'shop with datastore saving', 'sprint and stamina bar', 'checkpoint obby'])
+  for (const brief of ['round system', 'shop with datastore saving', 'sprint and stamina bar', 'checkpoint obby', 'enemy that chases', 'shopkeeper npc with dialogue', 'pet that follows'])
     assert.ok(routing.some(r => r.request.toLowerCase().includes(brief)), brief);
 });

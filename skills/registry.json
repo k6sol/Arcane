@@ -87,7 +87,7 @@
         {
           "name": "patterns",
           "path": "skills/arcane/arcane-luau-architecture/references/patterns.md",
-          "sha256": "c987ff2b907dc53e830a76da75945eeb0012d57c73bb8a5e6dc15f4e85ecf170"
+          "sha256": "400b636404181dec545656672d7630f27b0e773fbc061ec44a36548d2c8eb7db"
         }
       ]
     },
@@ -196,7 +196,7 @@
         {
           "name": "template",
           "path": "skills/arcane/arcane-datastore-safety/references/template.md",
-          "sha256": "1a14b652b5d7e78fdfeda228e45404a6879107fdcd73be4cd914ce7c25c5a83c"
+          "sha256": "38dcf507573d7691abc03d770f682e89ef10f20a55a4261748d128f503ce2079"
         }
       ]
     },
@@ -285,7 +285,7 @@
         {
           "name": "recipes",
           "path": "skills/arcane/arcane-gameplay-systems/references/recipes.md",
-          "sha256": "94d4c96b59bb422ce484adac3d7238fb4fcc82cba12742d3dd2554b9409feea2"
+          "sha256": "75790b6c82460266cb66e324c1279b2d866a3e73fdb721d1a16230a4be6239bf"
         }
       ]
     },
@@ -721,7 +721,7 @@
     {
       "id": "arcane-characters",
       "title": "NPCs and characters",
-      "description": "NPCs and characters that look and behave well: R15 rigs from HumanoidDescription, default animations, AnimationController creatures, pathfinding, idle/patrol/chase/flee state machines, ProximityPrompt dialogue, network ownership and server authority.",
+      "description": "NPCs and characters that look and behave well: R15 rigs from HumanoidDescription, default animations, AnimationController creatures, pathfinding, idle/patrol/chase/attack/flee state machines, ProximityPrompt dialogue, a pet or follower that follows the player, network ownership and server authority.",
       "category": "engineering",
       "keywords": [
         "npc",
@@ -733,11 +733,15 @@
         "ai",
         "humanoid",
         "creature",
-        "dialogue"
+        "dialogue",
+        "pet",
+        "follower",
+        "shopkeeper",
+        "dialog"
       ],
       "version": "0.2.0",
       "path": "skills/arcane/arcane-characters/SKILL.md",
-      "sha256": "d6cb835900938f0e05176d81bbedcd5756467cd275a103fe146e3b868f9d7678",
+      "sha256": "c2bbe483cb6e445ac895afbbde24c28f0d3829fc4dcfb0be2502406be40c1d3a",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -745,7 +749,28 @@
         "studio.write",
         "studio.test"
       ],
-      "references": []
+      "references": [
+        {
+          "name": "npc-rig",
+          "path": "skills/arcane/arcane-characters/references/npc-rig.md",
+          "sha256": "e44d4a2618dfc79c2e87f8e4ceb1a43e32ecf6f6d937fc6d646666a4a5a1def0"
+        },
+        {
+          "name": "npc-ai",
+          "path": "skills/arcane/arcane-characters/references/npc-ai.md",
+          "sha256": "a50ce921c30199cecf8e84bd1b8f204064db2b9caa27ede7beec7f320b638361"
+        },
+        {
+          "name": "dialogue",
+          "path": "skills/arcane/arcane-characters/references/dialogue.md",
+          "sha256": "a45ca8e039353a1da3eafc9ba73dd8dc17c69a50836a33e176bd902bade49167"
+        },
+        {
+          "name": "pets",
+          "path": "skills/arcane/arcane-characters/references/pets.md",
+          "sha256": "d8d6ffb6dc24cd5b9317ffca69bb510aee479e8408e2bd4d4f6d358a5827bb2c"
+        }
+      ]
     },
     {
       "id": "arcane-materials",
@@ -818,7 +843,7 @@
       ],
       "version": "0.2.0",
       "path": "skills/arcane/arcane-vfx/SKILL.md",
-      "sha256": "f97b0425b7a1e3c71504f94e28fa1aa579692f89837b0bc9eb34572ebf4c34b1",
+      "sha256": "40d5b61d1429073f08643ddfed8315ef10976ae6f6e141225f20aba4bfd715da",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -830,7 +855,7 @@
         {
           "name": "recipes",
           "path": "skills/arcane/arcane-vfx/references/recipes.md",
-          "sha256": "453128f3066af03b73eb0a69b8c31dba15bc17f5d10536dbcb40e271cec59adf"
+          "sha256": "caca9356c72d9ed59e1388515c71b6460b2eca1a113e13e4cfd6287858b57876"
         }
       ]
     },
@@ -1337,7 +1362,7 @@
       ],
       "version": "0.1.0",
       "path": "skills/arcane/arcane-natural-scenes/SKILL.md",
-      "sha256": "6f554c7a49becd235d7a29dd85be96884505bc42b02534f4442265862669f6d7",
+      "sha256": "44f2400e31574bb7da58ed85d6a55da95a88eac2b08f4131dba91e43f7b095c0",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -1365,7 +1390,7 @@
       ],
       "version": "0.1.0",
       "path": "skills/arcane/arcane-photoreal/SKILL.md",
-      "sha256": "f146a17b8704d681de00f02e55dacdcf90cb199a114c53d9352c2a6b72c38a42",
+      "sha256": "bba84c0f2b82add9a8bdbdf444e3e3f2c49d5552a7cdb490416a538f4b1f8fc0",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -1373,7 +1398,13 @@
         "studio.write",
         "studio.capture"
       ],
-      "references": []
+      "references": [
+        {
+          "name": "forest-light",
+          "path": "skills/arcane/arcane-photoreal/references/forest-light.md",
+          "sha256": "a87ead5e5f50178d3ac0651fcfe95f9717b92e77db29a41a78f25b679df5a842"
+        }
+      ]
     },
     {
       "id": "arcane-procedural-generation",
@@ -1522,7 +1553,7 @@
         {
           "name": "patterns",
           "path": "skills/arcane/arcane-tycoon-kit/references/patterns.md",
-          "sha256": "6c6769a1d527c9b41549bf7d2359cdea55cf7f7016eb4f6cf948401579ce1e38"
+          "sha256": "c75f4b35aa1a190f7e8df3f0e74ddb848ffffb2ad65350611dd6f7edb461ecba"
         }
       ]
     },
@@ -1557,7 +1588,7 @@
         {
           "name": "patterns",
           "path": "skills/arcane/arcane-obby-kit/references/patterns.md",
-          "sha256": "c9787d178683ea4bfa184cd711534ae89f3e267e1d61ecbfe36254a3e48408d1"
+          "sha256": "95ee0ab05297604463bb54bec8968b264931888fad844907914df59c2a6ea3e4"
         }
       ]
     },
@@ -1582,7 +1613,7 @@
       ],
       "version": "0.1.0",
       "path": "skills/arcane/arcane-simulator-kit/SKILL.md",
-      "sha256": "9a985dfdc230186d0286775409e60640f3972f9a67dcd95433fa4b200d51db0f",
+      "sha256": "dba3915f3f3e052e74a7a917fa7ff4bce32c55b31c4d14efcaa4d9d3f218b889",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -1594,7 +1625,7 @@
         {
           "name": "patterns",
           "path": "skills/arcane/arcane-simulator-kit/references/patterns.md",
-          "sha256": "7743eda32f28ce634082da649588d058671cee42a5ae017c4371ae745863ffb2"
+          "sha256": "84fc7578ef711e0f3c94ed554c7697a8cbaf2d3fcce9dc43d0aab1f158422348"
         }
       ]
     },
@@ -1630,7 +1661,7 @@
         {
           "name": "patterns",
           "path": "skills/arcane/arcane-horror-kit/references/patterns.md",
-          "sha256": "baebd2dcb124e29f084ed20ae346c5cc07a62c4b4f4382f78c7e9d16bb0d14a1"
+          "sha256": "fb49a3b83b6398d09e53e30423a8c3ec39d3527f8f7c2741020aa4c67ffe69b4"
         }
       ]
     },
@@ -1666,7 +1697,7 @@
         {
           "name": "patterns",
           "path": "skills/arcane/arcane-arena-kit/references/patterns.md",
-          "sha256": "16708a32b7fd0f49f09210f8f686d51cee3b36a6e935c41ec0da947aabae7fa0"
+          "sha256": "5470ecf55fc4b2507fd5d06a2f9139042d1464a40a7df8c05e4f4eeb3e022f63"
         }
       ]
     },
@@ -1702,7 +1733,7 @@
         {
           "name": "patterns",
           "path": "skills/arcane/arcane-racing-kit/references/patterns.md",
-          "sha256": "9326f161cea98a9279c35470b559876d4721dc539904542884bf9ea40a225f2a"
+          "sha256": "43ed46b379fa21ee48b2b5e5020c712fcfd9053ce38e7547ea64d758f953555e"
         }
       ]
     },
@@ -1738,7 +1769,7 @@
         {
           "name": "patterns",
           "path": "skills/arcane/arcane-rpg-kit/references/patterns.md",
-          "sha256": "f256a3effbea9c34fcbbd07ec1a1d0e146a065a6970f2dcd521d91e18f23012c"
+          "sha256": "1de70b5e6c797eb5017d46bf15df686e2009280b437fbf967fdc08a39e430853"
         }
       ]
     }
