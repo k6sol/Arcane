@@ -103,6 +103,30 @@ test('real Edge setup: bounded startup status, explicit login/install, auth gate
  assert.equal(await page.locator('#provider-login-gate').isVisible(),false);
  assert.equal(await page.evaluate(()=>(window as any).calls.length),9,'handoff rendering starts no login or native status call');
  await page.evaluate(()=>{(window as any).updater.stop();(window as any).controller.cleanup();});
+ // A cold launch checks saved auth first; metadata may stay pending without showing Sign in.
+ await page.evaluate(async()=>{
+   const w=window as any;w.account=null;w.restoreCalls=[];
+   const path:string='/provider-setup.js',m=await import(path);
+   const status=(provider:string)=>{w.restoreCalls.push('status:'+provider);return new Promise(resolve=>{w.releaseRestore=resolve;});};
+   const forbidden=async()=>{w.restoreCalls.push('unexpected action');throw Error('No login or launch expected');};
+   w.controller=m.startProviderSetup(document,{nativeBridge:Object.freeze({version:1,status,login:forbidden,install:forbidden,launch:forbidden}),chat:{
+     providerConnectionStatus:()=>w.account,subscribeProviderStateChange:(fn:()=>void)=>{w.subscriber=fn;return()=>{};},
+     connectForSavedLogin:()=>{w.restoreCalls.push('metadata');return new Promise<void>(resolve=>{w.releaseMetadata=resolve;});}
+   }});
+ });
+ assert.equal(await page.locator('html').getAttribute('data-provider-view'),'checking');
+ assert.equal(await page.locator('#provider-login-gate').isVisible(),false);
+ assert.equal(await page.locator('#codex-composer').isVisible(),false,'undecided auth cannot expose the workspace composer');
+ assert.equal(await page.evaluate(()=>(window as any).controller.isSignedIn()),false);
+ await page.evaluate(()=>{(window as any).releaseRestore({version:1,provider:'codex',installed:true,auth:'subscription',busy:false,cliVersion:'1',message:null});});
+ await page.waitForFunction(()=>typeof(window as any).releaseMetadata==='function');
+ assert.equal(await page.locator('html').getAttribute('data-provider-view'),'workspace');
+ assert.equal(await page.locator('#provider-login-gate').isVisible(),false);
+ assert.equal(await page.locator('#codex-composer').isVisible(),true);
+ assert.equal(await page.locator('#codex-composer').inputValue(),'Keep my unsent draft');
+ assert.equal(await page.evaluate(()=>(window as any).controller.isSignedIn()),false,'presentation is not native authority');
+ assert.deepEqual(await page.evaluate(()=>(window as any).restoreCalls),['status:codex','metadata']);
+ await page.evaluate(()=>{(window as any).releaseMetadata();(window as any).controller.cleanup();});
  await page.evaluate(async()=>{
    const w=window as any;w.account={connected:true,ready:true,fresh:true,auth:'subscription'};w.connections=0;
    const path:string='/provider-setup.js',m=await import(path);

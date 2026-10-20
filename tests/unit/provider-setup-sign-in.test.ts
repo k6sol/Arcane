@@ -9,7 +9,8 @@ class Control {
   textContent = ''; value = ''; disabled = false; hidden = false; parentElement = null;
   attributes = new Map<string, string>();
   listeners = new Map<string, Set<(event: Event) => void>>();
-  classList = { toggle() {} };
+  classes = new Set<string>();
+  classList = { toggle: (name: string, force: boolean) => { if (force) this.classes.add(name); else this.classes.delete(name); } };
   setAttribute(name: string, value: string) { this.attributes.set(name, value); }
   addEventListener(name: string, listener: (event: Event) => void) {
     if (!this.listeners.has(name)) this.listeners.set(name, new Set());
@@ -22,14 +23,15 @@ class Control {
   }
   click() { this.emit('click', false); }
 }
-function fixture(options: { autoSelect?: boolean; preferred?: SetupProvider; state?: Partial<ProviderSetupState>; connectSavedLogin?: () => Promise<void>; noBridge?: boolean } = {}) {
+function fixture(options: { autoSelect?: boolean; preferred?: SetupProvider; state?: Partial<ProviderSetupState>; connectSavedLogin?: () => Promise<void>; initialStatus?: (provider: SetupProvider) => Promise<unknown>; noBridge?: boolean } = {}) {
   const elements = new Map(['provider-setup-panel', 'provider-login-gate', 'provider-setup-provider',
     'provider-login-start', 'provider-login-refresh', 'provider-login-codex', 'provider-login-claude',
     'provider-login-message', 'provider-setup-status', 'provider-setup-details', 'provider-setup-refresh',
     'provider-setup-login', 'provider-setup-install', 'provider-setup-launch', 'workspace-stage', 'codex-connect', 'codex-disconnect',
-    'provider-login-credits', 'provider-login-credits-note'].map(id => [id, new Control()]));
-  const doc = new EventTarget() as EventTarget & { getElementById(id: string): Control | null; defaultView: unknown };
+    'provider-login-credits', 'provider-login-credits-note', 'codex-composer'].map(id => [id, new Control()]));
+  const doc = new EventTarget() as EventTarget & { getElementById(id: string): Control | null; defaultView: unknown; documentElement: Control };
   doc.getElementById = id => elements.get(id) ?? null;
+  doc.documentElement = new Control();
   const stored = new Map<string, string>();
   if (options.preferred) stored.set(PROVIDER_PRESENTATION_KEY, JSON.stringify({ version: 1, provider: options.preferred }));
   doc.defaultView = { CustomEvent, location: { protocol: 'http:', origin: 'http://fixture.test' },
@@ -40,7 +42,7 @@ function fixture(options: { autoSelect?: boolean; preferred?: SetupProvider; sta
   const calls: string[] = [];
   let reply: (() => Promise<unknown>) | null = null;
   const native = Object.freeze({ version: 1, ...Object.fromEntries(['status', 'login', 'install', 'launch'].map(action =>
-    [action, async (provider: string) => { calls.push(action + ':' + provider); return reply ? reply() : { ...state, provider }; }])) });
+    [action, async (provider: string) => { calls.push(action + ':' + provider); return reply ? reply() : action === 'status' && options.initialStatus ? options.initialStatus(provider as SetupProvider) : { ...state, provider }; }])) });
   const controller = startProviderSetup(doc as unknown as Document, { ...(options.autoSelect ? { autoSelectSignedIn: true } : {}), nativeBridge: options.noBridge ? null : native, chat: {
     providerConnectionStatus: () => connection,
     subscribeProviderStateChange(listener) { subscriber = listener; return () => { subscriber = () => {}; }; },
@@ -56,6 +58,122 @@ function fixture(options: { autoSelect?: boolean; preferred?: SetupProvider; sta
 }
 const settled = async () => { await new Promise<void>(resolve => setImmediate(resolve)); };
 const connected: ProviderConnectionStatus = { connected: true, ready: true, fresh: true, auth: 'subscription' };
+
+test('an undecided startup check hides sign-in without exposing workspace actions', async t => {
+  let release!: (value: unknown) => void;
+  const f = fixture({ initialStatus: () => new Promise(resolve => { release = resolve; }) });
+  t.after(() => f.controller.cleanup());
+  const stage = f.control('workspace-stage');
+  assert.equal(stage.attributes.get('data-provider-view'), 'checking');
+  assert.equal(f.doc.documentElement.attributes.get('data-provider-view'), 'checking');
+  assert.equal(stage.classes.has('provider-required'), true);
+  assert.equal(f.control('provider-login-gate').hidden, true);
+  assert.equal(f.controller.isSignedIn(), false);
+  release({ version: 1, provider: 'codex', installed: true, auth: 'signed-out', busy: false, cliVersion: '1.0.0', message: null });
+  await settled();
+  assert.equal(stage.attributes.get('data-provider-view'), 'setup');
+  assert.equal(f.control('provider-login-gate').hidden, false);
+  assert.equal(f.controller.isSignedIn(), false);
+  assert.deepEqual(f.calls, ['status:codex']);
+});
+
+test('saved login restores the workspace during held or failed metadata without authorizing a turn', async t => {
+  let fail!: (error: Error) => void;
+  const f = fixture({ state: { auth: 'subscription' }, connectSavedLogin: () => new Promise((_resolve, reject) => { fail = reject; }) });
+  t.after(() => f.controller.cleanup());
+  f.control('codex-composer').value = 'Keep this draft';
+  await settled();
+  const stage = f.control('workspace-stage');
+  assert.equal(stage.attributes.get('data-provider-view'), 'workspace');
+  assert.equal(f.doc.documentElement.attributes.get('data-provider-view'), 'workspace');
+  assert.equal(stage.classes.has('provider-required'), false);
+  assert.equal(f.control('provider-login-gate').hidden, true);
+  assert.equal(f.controller.isSignedIn(), false);
+  fail(Error('Metadata unavailable')); await settled();
+  assert.equal(stage.attributes.get('data-provider-view'), 'workspace');
+  assert.match(f.control('provider-setup-status').textContent, /Signed in\. Connection unavailable/);
+  assert.equal(f.controller.isSignedIn(), false);
+  f.connection(connected); assert.equal(f.controller.isSignedIn(), true);
+  f.connection({ ...connected, ready: false });
+  assert.equal(stage.attributes.get('data-provider-view'), 'workspace');
+  assert.equal(f.controller.isSignedIn(), false);
+  f.connection({ ...connected, auth: 'signed-out' });
+  assert.equal(stage.attributes.get('data-provider-view'), 'setup');
+  assert.equal(f.control('provider-login-gate').hidden, false);
+  assert.equal(f.control('codex-composer').value, 'Keep this draft');
+  assert.deepEqual(f.calls, ['status:codex']);
+});
+
+test('busy, hostile and failed startup reads never restore a workspace from a saved preference', async t => {
+  for (const reply of [
+    async () => ({ version: 1, provider: 'codex', installed: true, auth: 'subscription', busy: true, cliVersion: '1', message: null }),
+    async () => ({ version: 1, provider: 'codex', installed: true, auth: 'subscription', busy: false, cliVersion: '1', message: null, token: 'fixture' }),
+    async () => { throw Error('Unavailable'); },
+  ]) {
+    const f = fixture({ preferred: 'codex', initialStatus: reply, connectSavedLogin: async () => assert.fail('no connection from unconfirmed status') });
+    t.after(() => f.controller.cleanup()); await settled();
+    assert.equal(f.control('workspace-stage').attributes.get('data-provider-view'), 'setup');
+    assert.equal(f.control('workspace-stage').classes.has('provider-required'), true);
+    assert.equal(f.controller.isSignedIn(), false);
+    assert.deepEqual(f.calls, ['status:codex']);
+  }
+});
+
+test('startup checks the other saved provider without showing a transient sign-in page', async t => {
+  let release!: (value: unknown) => void;
+  const f = fixture({ autoSelect: true, initialStatus: async provider => provider === 'codex'
+    ? { version: 1, provider, installed: true, auth: 'signed-out', busy: false, cliVersion: '1', message: null }
+    : new Promise(resolve => { release = resolve; }) });
+  t.after(() => f.controller.cleanup()); await settled();
+  assert.deepEqual(f.calls, ['status:codex', 'status:claude']);
+  assert.equal(f.control('workspace-stage').attributes.get('data-provider-view'), 'checking');
+  assert.equal(f.control('provider-login-gate').hidden, true);
+  f.reply(async () => ({ version: 1, provider: 'claude', installed: true, auth: 'subscription', busy: false, cliVersion: '1', message: null }));
+  release({ version: 1, provider: 'claude', installed: true, auth: 'subscription', busy: false, cliVersion: '1', message: null });
+  await settled();
+  assert.equal(f.controller.chatSurface(), 'claude');
+  assert.equal(f.control('workspace-stage').attributes.get('data-provider-view'), 'workspace');
+  assert.deepEqual(f.calls, ['status:codex', 'status:claude', 'status:claude']);
+});
+
+test('a held fallback check is bounded and late success cannot replace the completed setup view', async t => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 100000 });
+  let release!: (value: unknown) => void;
+  const f = fixture({ autoSelect: true, initialStatus: async provider => provider === 'codex'
+    ? { version: 1, provider, installed: true, auth: 'signed-out', busy: false, cliVersion: '1', message: null }
+    : new Promise(resolve => { release = resolve; }) });
+  t.after(() => f.controller.cleanup()); await settled();
+  assert.equal(f.control('workspace-stage').attributes.get('data-provider-view'), 'checking');
+  t.mock.timers.tick(35000); await settled();
+  assert.equal(f.control('workspace-stage').attributes.get('data-provider-view'), 'setup');
+  assert.equal(f.control('provider-login-gate').hidden, false);
+  release({ version: 1, provider: 'claude', installed: true, auth: 'subscription', busy: false, cliVersion: '1', message: null });
+  await settled(); assert.equal(f.controller.selectedProvider(), 'codex');
+  assert.equal(f.controller.isSignedIn(), false);
+  assert.deepEqual(f.calls, ['status:codex', 'status:claude']);
+});
+
+test('explicit same-provider and Arcane choices retire a held fallback, including an already resolved reply', async t => {
+  for (const choice of ['codex', 'arcane'] as const) for (const resolveBeforeChoice of [false, true]) {
+    let release!: (value: unknown) => void;
+    const f = fixture({ autoSelect: true, initialStatus: async provider => provider === 'codex'
+      ? { version: 1, provider, installed: true, auth: 'signed-out', busy: false, cliVersion: '1', message: null }
+      : new Promise(resolve => { release = resolve; }) });
+    t.after(() => f.controller.cleanup()); await settled();
+    assert.equal(f.control('workspace-stage').attributes.get('data-provider-view'), 'checking');
+    const reply = { version: 1, provider: 'claude', installed: true, auth: 'subscription', busy: false, cliVersion: '1', message: null };
+    if (choice === 'arcane') f.controller.setArcaneAvailable(true);
+    if (resolveBeforeChoice) release(reply);
+    assert.equal(f.controller.requestProvider(choice), true);
+    if (!resolveBeforeChoice) release(reply);
+    await settled();
+    assert.equal(f.controller.chatSurface(), choice);
+    assert.equal(f.controller.selectedProvider(), 'codex');
+    assert.equal(f.control('workspace-stage').attributes.get('data-provider-view'), choice === 'arcane' ? 'workspace' : 'setup');
+    assert.equal(f.controller.isSignedIn(), false);
+    assert.deepEqual(f.calls, ['status:codex', 'status:claude']);
+  }
+});
 
 test('sign-in observer requires actual fresh ready Codex connection and not a preference or login snapshot', async t => {
   const f = fixture(); t.after(() => f.controller.cleanup());
@@ -155,7 +273,7 @@ test('mount recognizes saved CLI login and calls the optional metadata hook once
   assert.equal(connections, 1); assert.equal(f.control('provider-setup-status').textContent, 'ChatGPT signed in.');
   assert.equal(f.control('provider-setup-login').hidden, true);
   assert.equal(f.controller.isSignedIn(), false, 'CLI auth does not forge a ready native session');
-  assert.equal(f.control('provider-login-gate').hidden, false);
+  assert.equal(f.control('provider-login-gate').hidden, true, 'saved sign-in restores presentation while the native connection prepares');
   f.choose('codex'); f.controller.resume();
   for (let i = 0; i < 5; i++) { f.doc.dispatchEvent(new Event('input')); f.connection(null); }
   assert.deepEqual(f.calls, ['status:codex']); assert.equal(connections, 1);

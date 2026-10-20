@@ -195,6 +195,9 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
   // Sign in once: until the human explicitly picks a provider, a startup status that finds the selected provider
   // signed out may switch to the other provider when that one already reports a saved subscription sign-in.
   let autoSelect = options.autoSelectSignedIn === true;
+  let fallbackCheck: { provider: SetupProvider; epoch: number } | null = null;
+  let cancelFallback: (() => void) | null = null;
+  const retireFallback = () => { fallbackCheck = null; const cancel = cancelFallback; cancelFallback = null; cancel?.(); };
   const savedLoginConnections = new Set<string>();
   const signInListeners = new Set<() => void>();
   const choiceListeners = new Set<() => void>();
@@ -305,7 +308,14 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
       else if(!connection?.connected&&(state?.auth==='signed-out'||state?.auth==='api-or-cloud'))codexChatEvidence=false;
     }
     rememberEvidence();
-    gate.hidden = (provider==='codex'&&codexChatEvidence&&reconnectAllowed) || claudeChatActive() || arcaneChatActive(); el('workspace-stage')?.classList.toggle('provider-required', !gate.hidden);
+    const workspace = (provider === 'codex' && codexChatEvidence && reconnectAllowed) || claudeChatActive() || arcaneChatActive();
+    const firstCheck = !!native && !stopped && !disposed && !actionError && (!states.has(provider) || fallbackCheck !== null);
+    const view = workspace ? 'workspace' : firstCheck ? 'checking' : 'setup';
+    gate.hidden = view !== 'setup';
+    const stage = el('workspace-stage');
+    stage?.classList.toggle('provider-required', view !== 'workspace');
+    stage?.setAttribute('data-provider-view', view);
+    doc.documentElement?.setAttribute('data-provider-view', view);
     const checking = busy && activeAction === 'status' || pendingStatus;
     const text = connected() ? 'Codex connected.' : checking ? 'Checking ' + name + ' sign-in…' : connectingSavedLogin ? 'Connecting Codex…' : state?.auth === 'subscription' && !state.busy ? name + ' signed in.' :
       state?.auth === 'signed-out' || provider === 'codex' && connection?.fresh && connection.auth === 'signed-out' ? 'Sign in with ' + name + '.' :
@@ -358,9 +368,9 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
     if (next !== provider) clearLoginWatch();
     if (stopped || disposed) return;
     // An explicit ChatGPT/Claude choice leaves the Arcane chat; a restored preference (publish false) does not.
-    if (publish) chooseArcane(false);
+    if (publish) { retireFallback(); chooseArcane(false); }
     const changed = next !== provider;
-    if (changed) { clearRecovery();recoveryAttempt=0;savedLoginObserved=false;savedLoginConnections.clear(); rememberEvidence(); provider = next; codexChatEvidence = next === 'codex' && knownSignedIn.codex; epoch++; actionError = null; states.delete(next); claudeChatEvidence = next === 'claude' && knownSignedIn.claude; if (next === 'claude') claudeSignInObserved = null; }
+    if (changed) { retireFallback();clearRecovery();recoveryAttempt=0;savedLoginObserved=false;savedLoginConnections.clear(); rememberEvidence(); provider = next; codexChatEvidence = next === 'codex' && knownSignedIn.codex; epoch++; actionError = null; states.delete(next); claudeChatEvidence = next === 'claude' && knownSignedIn.claude; if (next === 'claude') claudeSignInObserved = null; }
     try { storage?.setItem(PROVIDER_PRESENTATION_KEY, JSON.stringify({ version: 1, provider })); } catch { /* Only presentation is lost. */ }
     render();
     const Event = doc.defaultView?.CustomEvent;
@@ -385,7 +395,12 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
         observed = value;
         states.set(target, { state: value, observed: Date.now() });
         if(target==='codex'&&action==='status'&&!value.busy){
-          if(value.auth==='subscription')savedLoginObserved=true;
+          if(value.auth==='subscription') {
+            savedLoginObserved=true;
+            // A checked saved sign-in can restore the workspace while metadata connects.
+            // This does not make isSignedIn() true or grant native actions.
+            if (reconnectAllowed && options.chat.connectForSavedLogin) codexChatEvidence = true;
+          }
           else if(value.auth==='signed-out'||value.auth==='api-or-cloud'||!value.installed)savedLoginObserved=false;
         }
         if (target === 'claude') {
@@ -409,6 +424,9 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
     } catch {
       if (!stopped && !disposed && generation === epoch) { clearLoginWatch(); states.delete(target); if (target === 'claude') { claudeSignInObserved = null; } awaitingStatus.delete(target); actionError = 'Setup unavailable. Click Check sign-in to try again; restart Arcane if it keeps happening.'; }
     } finally {
+      const checkOther = !stopped && !disposed && generation === epoch && target === provider && action === 'status' &&
+        observed && !observed.busy && (observed.auth === 'signed-out' || observed.auth === 'api-or-cloud') && autoSelect;
+      if (checkOther) fallbackCheck = { provider: target, epoch: generation };
       busy = false; activeAction = null; cancelStatus = null; if (!disposed) render();
       if (!stopped && !disposed && generation === epoch && target === provider) {
         // This follows only the user's explicit sign-in intent, not startup or
@@ -442,17 +460,35 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
         } else if (loginWatch && loginWatch.remaining <= 0) clearLoginWatch();
       }
       if (pendingStatus && !stopped && !disposed) requestStatus();
-      if (action === 'status' && observed && !observed.busy && (observed.auth === 'signed-out' || observed.auth === 'api-or-cloud') && autoSelect) void preferSignedIn(target, generation);
+      if (checkOther && fallbackCheck?.provider === target && fallbackCheck.epoch === generation) void preferSignedIn(target, generation);
     }
   };
   const preferSignedIn = async (from: SetupProvider, generation: number) => {
     autoSelect = false;
     const other: SetupProvider = from === 'codex' ? 'claude' : 'codex';
-    if (!native || stopped || disposed || provider !== from || generation !== epoch) return;
+    const check = fallbackCheck;
+    if (!native || !check || check.provider !== from || check.epoch !== generation || stopped || disposed || provider !== from || generation !== epoch) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let cancel: (() => void) | null = null;
     try {
-      const value = readProviderSetupState(await native.status(other), other);
-      if (value.auth === 'subscription' && !value.busy && !stopped && !disposed && provider === from && generation === epoch && !busy) choose(other);
+      const request = native.status(other);
+      const result = await new Promise<unknown>((resolve, reject) => {
+        timer = setTimeout(() => reject(Error('Native provider status timed out.')), STATUS_TIMEOUT_MS);
+        cancel = () => reject(Error('Native provider status cancelled.'));
+        cancelFallback = cancel;
+        Promise.resolve(request).then(resolve, reject);
+      });
+      const value = readProviderSetupState(result, other);
+      if (fallbackCheck === check && value.auth === 'subscription' && !value.busy && !stopped && !disposed && provider === from && generation === epoch && !busy) choose(other);
     } catch { /* The selected provider keeps its own sign-in prompt. */ }
+    finally {
+      if (timer !== null) clearTimeout(timer);
+      if (cancelFallback === cancel) cancelFallback = null;
+      if (fallbackCheck === check) {
+        fallbackCheck = null;
+        if (!disposed) render();
+      }
+    }
   };
   const requestStatus = () => {
     if (!native || stopped || disposed) return;
@@ -503,7 +539,7 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
   if (credits) listen(credits, 'click', event => {
     if (!trusted(event) || credits.disabled || stopped || disposed) return;
     // Ready: switch to the Arcane Credits chat (the gate then hides). Otherwise show what is still needed in Plans & credits.
-    if (arcaneAvailable) { autoSelect = false; chooseArcane(true); render(); }
+    if (arcaneAvailable) { autoSelect = false; retireFallback(); chooseArcane(true); render(); }
     else requestSettings(ARCANE_CREDITS_TARGET);
   });
   // Exact presentation event only. A changed preference requests native status,
@@ -538,11 +574,11 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
       if (providers(next) && hint?.signedIn === true && next !== provider) knownSignedIn[next] = true;
       if (next === 'arcane') {
         if (!arcaneAvailable) return false;
-        autoSelect = false; chooseArcane(true); render();
+        autoSelect = false; retireFallback(); chooseArcane(true); render();
         return true;
       }
       if (!providers(next)) return false;
-      autoSelect = false;
+      autoSelect = false; retireFallback();
       if (next !== provider) choose(next);
       else { chooseArcane(false); render(); if (next === 'claude' && !claudeChatEvidence) requestStatus(); }
       return true;
@@ -567,8 +603,8 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
       signInListeners.add(listener);
       return () => { signInListeners.delete(listener); };
     },
-    stop() { clearRecovery();savedLoginObserved=false;savedLoginConnections.clear();recoveryAttempt=0; stopped = true; epoch++; pendingStatus = false; cancelStatus?.(); clearLoginWatch(); states.clear(); claudeSignInObserved = null; claudeChatEvidence = false; codexChatEvidence=false; knownSignedIn.codex = knownSignedIn.claude = false; awaitingStatus.clear(); render(); },
+    stop() { retireFallback();clearRecovery();savedLoginObserved=false;savedLoginConnections.clear();recoveryAttempt=0; stopped = true; epoch++; pendingStatus = false; cancelStatus?.(); clearLoginWatch(); states.clear(); claudeSignInObserved = null; claudeChatEvidence = false; codexChatEvidence=false; knownSignedIn.codex = knownSignedIn.claude = false; awaitingStatus.clear(); render(); },
     resume() { if (disposed || !stopped) return; stopped = false; epoch++; render(); requestStatus(); },
-    cleanup() { if (disposed) return; clearRecovery();savedLoginObserved=false;savedLoginConnections.clear(); disposed = true; stopped = true; epoch++; pendingStatus = false; cancelStatus?.(); clearLoginWatch(); clearSignInTimer(); states.clear(); claudeSignInObserved = null; claudeChatEvidence = false; codexChatEvidence = false; knownSignedIn.codex = knownSignedIn.claude = false; awaitingStatus.clear(); notifySignInChange(); notifyChoices(); applySurface(); signInListeners.clear(); choiceListeners.clear(); surfaceListeners.clear(); for (const remove of removers.splice(0)) remove(); },
+    cleanup() { if (disposed) return; retireFallback();clearRecovery();savedLoginObserved=false;savedLoginConnections.clear(); disposed = true; stopped = true; epoch++; pendingStatus = false; cancelStatus?.(); clearLoginWatch(); clearSignInTimer(); states.clear(); claudeSignInObserved = null; claudeChatEvidence = false; codexChatEvidence = false; knownSignedIn.codex = knownSignedIn.claude = false; awaitingStatus.clear(); notifySignInChange(); notifyChoices(); applySurface(); signInListeners.clear(); choiceListeners.clear(); surfaceListeners.clear(); for (const remove of removers.splice(0)) remove(); },
   };
 }

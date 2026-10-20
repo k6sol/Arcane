@@ -89,6 +89,8 @@ jobs:
           $env:ARCANE_UI_BROWSER_EXE = $edgeExecutable
           node --test --test-concurrency=1 dist/tests/unit/studio-key-onboarding-browser.test.js dist/tests/unit/studio-key-settings-ui.test.js dist/tests/unit/welcome-tour.test.js dist/tests/unit/gui-revamp-layout-browser.test.js
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test --test-concurrency=1 dist/tests/unit/provider-setup-ui.test.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $env:ARCANE_VIEWER_BROWSER = $edgeExecutable
           node --test --test-concurrency=1 tests/browser/asset-viewer-renderer.test.mjs tests/browser/asset-viewer-resize.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
