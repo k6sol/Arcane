@@ -190,6 +190,12 @@ def bake_domain(np, samples, seed, frame="box", axis=(0, 0, 1), centre=(0, 0, 0)
         # Caps (faces across the axis: barrel heads) take the box frame: parallel boards.
         cap = np.abs(n @ (np.asarray(axis, dtype=float) / np.linalg.norm(axis))) > .7
         f[cap] = box_frame(np, p[cap], n[cap])
+    elif frame == "parts":
+        # Each connected part's own principal axes: grain along its longest side (planks,
+        # braces, blades), across its width, depth through its thinnest dimension.
+        pid = samples["part"].ravel()[m]
+        rel = p - samples["partCentres"][pid]
+        f = np.einsum("nij,nj->ni", samples["partAxes"][pid], rel)
     elif frame == "local":
         f = samples["local"].reshape(-1, 3)[m]
     else:
@@ -291,6 +297,11 @@ def weather(np, dom, L, prm):
     if wear > 0:
         threshold = 1.0 - .75 * wear
         shape = edge * (.55 + .75 * breakup + .3 * (fine - .5))
+        # Never more than a wear-proportional share of the surface: thin parts (bars, grips,
+        # rivets) are convex everywhere, but only their most exposed arrises should wear.
+        if n:
+            share = .04 + .22 * wear
+            threshold = max(threshold, float(np.quantile(shape, 1 - share)) - .02)
         worn = smooth(np, threshold - .12, threshold + .08, shape) * smooth(np, 0, .12, wear)
         if L.wear_shape is not None:
             worn = worn * L.wear_shape
@@ -405,6 +416,10 @@ def encode(np, dom, L, masks, ao_in_albedo=.5):
     h, w = dom.shape
     ao = masks["ao"]
     albedo = L.albedo * (1 - ao_in_albedo * (1 - ao))[:, None]
+    # Physically plausible dielectric band (charcoal .012 .. fresh snow .9, linear); metals keep
+    # their reflectance colour.
+    dielectric = (L.metal < .5)[:, None]
+    albedo = np.where(dielectric, np.clip(albedo, .012, .9), albedo)
     n = normals(np, dom, L.height)
     fill_albedo = albedo.mean(axis=0) if len(albedo) else np.full(3, .5)
     alpha = np.ones(dom.count) if L.alpha is None else np.where(L.alpha >= .5, 1.0, 0.0)

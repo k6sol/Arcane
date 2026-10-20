@@ -678,10 +678,10 @@ def cluster_split(topo, faces, up, view, count=6):
                 if best != label[f] and votes[best] > 1.6 * votes.get(label[f], 0.0):
                     changed[f] = best
         label.update(changed)
-    return components(topo, faces, label)
+    return components(topo, faces, label, merge=True)
 
 
-def components(topo, faces, label):
+def components(topo, faces, label, merge=False):
     fset, seen, out = set(faces), set(), []
     for f in faces:
         if f in seen:
@@ -721,7 +721,42 @@ def components(topo, faces, label):
         j = max(sorted(border), key=lambda k: border[k])
         out[j] = sorted(out[j] + out[i])
         out.pop(i)
-    return out
+    return merge_strips(topo, out) if merge else out
+
+
+def merge_strips(topo, groups):
+    """Fold thin strips (a plank's edge, a bevel band) onto the larger neighbour they share most of
+    their long side with: the fold along a straight edge unfolds without distortion, and a strip a
+    few texels wide packed alone would cost more in padding than it holds."""
+    groups = [list(g) for g in groups]
+    while len(groups) > 1:
+        owner = {f: k for k, g in enumerate(groups) for f in g}
+        areas = [sum(topo.areas[f] for f in g) for g in groups]
+        best = None
+        for i, g in enumerate(groups):
+            border, rim = defaultdict(float), 0.0
+            for f in g:
+                face = topo.faces[f]
+                for k in range(len(face)):
+                    a, b = face[k], face[(k + 1) % len(face)]
+                    key = (a, b) if a < b else (b, a)
+                    others = [owner[h] for h in topo.edges[key] if h in owner and owner[h] != i]
+                    if others or len(topo.edges[key]) != 2:
+                        rim += topo.edge_length(key)
+                    for o in set(others):
+                        border[o] += topo.edge_length(key)
+            if not border:
+                continue
+            j = max(sorted(border), key=lambda k: border[k])
+            # Thin: the shared side is most of half the strip's rim, and the strip is much smaller.
+            if border[j] >= .4 * rim and areas[i] <= .3 * areas[j] and (best is None or areas[i] < best[0]):
+                best = (areas[i], i, j)
+        if best is None:
+            break
+        _, i, j = best
+        groups[j] = sorted(groups[j] + groups[i])
+        groups.pop(i)
+    return groups
 
 
 def bisect_faces(topo, faces):
@@ -1201,9 +1236,12 @@ def principal_axis(chart):
     return (math.cos(theta), math.sin(theta))
 
 
-def split_long(topo, chart, aspect=3.0, depth=0):
+def split_long(topo, chart, aspect=3.0, depth=0, limit=None):
     """Cut long strips (tubes, bands) and skewed charts that fill under half of their box along
-    their principal axis into pieces that pack well."""
+    their principal axis into pieces that pack well. With ``limit`` (UV units: about half the
+    expected atlas side) a strip is cut only when it is longer than that, into the fewest pieces
+    under it: a short thin strip (a plank's bevel or edge) packs whole, since every extra piece
+    costs a padding ring that many small islands cannot afford."""
     d = principal_axis(chart)
     n = (-d[1], d[0])
     along = {f: [p[0] * d[0] + p[1] * d[1] for p in chart.uvs[f]] for f in chart.faces}
@@ -1215,7 +1253,11 @@ def split_long(topo, chart, aspect=3.0, depth=0):
     skewed = area < .5 * span * width and len(chart.faces) >= 32 and depth < 3
     if (span < aspect * max(width, 1e-9) and not skewed) or len(chart.faces) < 8:
         return [chart]
+    if limit is not None and not skewed and span <= limit:
+        return [chart]
     pieces = max(2, int(round(span / max(width, 1e-9) / 1.5)))
+    if limit is not None and not skewed:
+        pieces = max(2, int(math.ceil(span / limit)))
     groups = defaultdict(list)
     for f in chart.faces:
         c = sum(along[f]) / len(along[f])
@@ -1225,8 +1267,29 @@ def split_long(topo, chart, aspect=3.0, depth=0):
         label = {f: 0 for f in groups[k]}
         for comp in components(topo, groups[k], label):
             piece = Chart(comp, {f: chart.uvs[f] for f in comp}, chart.kind, chart.locked, None)
-            out += split_long(topo, piece, aspect, depth + 1) if skewed else [piece]
+            out += split_long(topo, piece, aspect, depth + 1, limit) if skewed else [piece]
     return out
+
+
+def _box_fill(chart):
+    pts = [p for f in chart.faces for p in chart.uvs[f]]
+    w = max(p[0] for p in pts) - min(p[0] for p in pts)
+    h = max(p[1] for p in pts) - min(p[1] for p in pts)
+    area = sum(_tri_area((pts[0], pts[i], pts[i + 1])) for pts in chart.uvs.values() for i in range(1, len(pts) - 1))
+    return area / max(w * h, 1e-18)
+
+
+def unlock_skewed(chart):
+    """An up-locked chart that lies diagonally (a brace, a sloped strip) fills a sliver of its box;
+    in a many-part atlas it is freed to lie along u when that at least doubles the fill, trading
+    level strata on that one strip for the whole atlas's resolution."""
+    if not chart.locked or len(chart.faces) < 2:
+        return chart
+    fill = _box_fill(chart)
+    if fill >= .45:
+        return chart
+    free = align_free(Chart(chart.faces, dict(chart.uvs), chart.kind, False, chart.around))
+    return free if _box_fill(free) >= 2 * fill else chart
 
 
 def align_free(chart):
@@ -1480,6 +1543,10 @@ def _cuts(faces, coords, axis, scale, centred=False):
 
 
 # ---------------------------------------------------------------- top level ---
+# Atlases of at least this many charts (many-part models) cut strips only by atlas length.
+ATLAS_MANY_CHARTS = 24
+
+
 def padding_px(texture_size):
     """Island padding in pixels: grows with the texture (2 px @256, 4 px @512, 8 px @1024)."""
     return max(2, int(round(texture_size / 128)))
@@ -1504,9 +1571,15 @@ def unwrap(vertices, faces, labels=None, *, up=UP, view=VIEW, feature_angle=58.0
         pieces = []
         areas = [sum(topo.areas[f] for f in ch.faces) for ch in charts]
         total = sum(areas) or 1.0
+        # Expected atlas side in chart units (metres) at a typical 60% fill: strips longer than
+        # half of it are cut, shorter ones pack whole (see split_long).
+        uv_area = sum(_tri_area((pts[0], pts[i], pts[i + 1])) for ch in charts for pts in ch.uvs.values() for i in range(1, len(pts) - 1))
+        limit = .5 * math.sqrt(max(uv_area, 1e-12) / .6) if len(charts) >= ATLAS_MANY_CHARTS else None
+        if limit is not None:
+            charts = [unlock_skewed(ch) for ch in charts]
         for ch, a in zip(charts, areas):
             # A chart that dominates the atlas caps its resolution unless it is near square.
-            pieces += [align_free(piece) for piece in split_long(topo, ch, 1.8 if a > .4 * total else 3.0)]
+            pieces += [align_free(piece) for piece in split_long(topo, ch, 1.8 if a > .4 * total else 3.0, 0, limit)]
         pad_uv = (padding if padding is not None else padding_px(texture_size)) / texture_size
         grid = max(128, min(512, texture_size))
         if target_ppm is not None and fixed_scale is None:

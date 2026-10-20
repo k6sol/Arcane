@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "workers" / "blender" / "uv"))
+import worker_paths  # noqa: E402,F401  (job layout: every workers/blender subpackage importable flat)
 import uv_engine as E  # noqa: E402
 import uv_metrics as M  # noqa: E402
 
@@ -255,6 +255,62 @@ class ProceduralStage(unittest.TestCase):
         self.assertEqual(natural.uvs, legacy.uvs, "authored rock UVs are untouched by the stage")
         column = {"kind": "column", "radius": .35, "height": 4, "flutes": 20, "base": "attic", "capital": "corinthian"}
         self.assertIsNone(procedural.plan(self.request(column))[0][2].uv_report)
+
+
+def plank(v, f, size, centre, n=6, tilt=0.0):
+    """Closed box subdivided along x (a plank), optionally tilted about y."""
+    sx, sy, sz = size
+    base = len(v)
+    ring = [(-sy / 2, -sz / 2), (sy / 2, -sz / 2), (sy / 2, sz / 2), (-sy / 2, sz / 2)]
+    c, s = math.cos(tilt), math.sin(tilt)
+    for i in range(n + 1):
+        x = -sx / 2 + sx * i / n
+        for y, z in ring:
+            v.append((centre[0] + x * c - z * s, centre[1] + y, centre[2] + x * s + z * c))
+    for i in range(n):
+        for k in range(4):
+            a, b = base + 4 * i + k, base + 4 * i + (k + 1) % 4
+            f.append((a, b, b + 4, a + 4))
+    f.append(tuple(base + k for k in (3, 2, 1, 0)))
+    f.append(tuple(base + 4 * n + k for k in range(4)))
+
+
+def crate():
+    v, f = [], []
+    for side in (-1, 1):
+        for row in range(3):
+            plank(v, f, (.74, .022, .24), (0, side * .39, .15 + .25 * row))
+        plank(v, f, (.9, .022, .06), (0, side * .41, .4), tilt=math.radians(40))
+    for k in range(8):
+        plank(v, f, (.74, .06, .06), (0, -.3 + .085 * k, .78))
+    return v, f
+
+
+class ManyPartAtlas(unittest.TestCase):
+    def test_many_small_planks_pack_densely(self):
+        # Thin plank edges fold onto their faces and short strips pack whole (no padding ring per
+        # cut piece); diagonal braces lie along u. The cut-every-strip layout filled 0.54 here.
+        v, f = crate()
+        r = E.unwrap(v, f, texture_size=512, mode="atlas")
+        q = M.report(v, f, r["uvs"], "unique", 512)
+        self.assertEqual(q["errors"], [])
+        self.assertGreaterEqual(q["utilization"], .58)
+        self.assertLessEqual(r["charts"], 120)
+        self.assertEqual(r["uvs"], E.unwrap(v, f, texture_size=512, mode="atlas")["uvs"])  # deterministic
+
+
+class BlenderAdapterContract(unittest.TestCase):
+    def test_unwrap_blender_mesh_keeps_no_uv_layer_reference_across_operators(self):
+        # A UV layer (or its data) held in a frame across an edit-mode round trip goes stale; freeing
+        # it later (an exception traceback, a closure) crashed Blender with pack="best". UVs are read
+        # and written by layer name through foreach_get/foreach_set helpers only.
+        import ast
+        source = (ROOT / "workers" / "blender" / "uv" / "uv_stage.py").read_text(encoding="utf-8")
+        fn = next(n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef) and n.name == "unwrap_blender_mesh")
+        names = {n.attr for n in ast.walk(fn) if isinstance(n, ast.Attribute)}
+        self.assertNotIn("uv_layers", names)
+        self.assertNotIn("data", {n.attr for n in ast.walk(fn) if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id != "obj"})
+        self.assertIn("view_layer", names)  # objects outside the view layer keep the engine packing
 
 
 if __name__ == "__main__":

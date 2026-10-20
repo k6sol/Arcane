@@ -362,6 +362,7 @@ class Mesh:
         self.faces = []
         self.uvs = []
         self.auto_uv = False
+        self.tones = None  # optional per-face tone ids (masonry blocks): 0 = the part's own tone
 
     def v(self, p):
         self.verts.append((float(p[0]), float(p[1]), float(p[2])))
@@ -387,6 +388,9 @@ class Mesh:
         return sum(len(f) - 2 for f in self.faces)
 
     def extend(self, other, m=IDENTITY):
+        if self.tones is not None or other.tones is not None:
+            self.tones = (self.tones if self.tones is not None else [0] * len(self.faces)) + \
+                (list(other.tones) if other.tones is not None else [0] * len(other.faces))
         base = len(self.verts)
         flip = determinant(m) < 0
         self.verts.extend(apply(m, p) for p in other.verts)
@@ -607,11 +611,11 @@ def revolve_loop(profile, edge, curve, flutes, segments):
     return mesh
 
 
-def extrude(outline, height, bevel=0.0, inset=None, edge=.05):
+def extrude(outline, height, bevel=0.0, inset=None, edge=.05, max_segments=6):
     """Prism over a CCW footprint (z = 0..height) with quarter-round top/bottom bevels and an optional inset step."""
     stations = []
     if bevel > 0:
-        k = max(1, min(6, int(math.ceil(bevel * math.pi / 2 / edge))))
+        k = max(1, min(max_segments, 6, int(math.ceil(bevel * math.pi / 2 / edge))))
         for i in range(k + 1):
             a = math.pi / 2 * i / k
             stations.append((-bevel + bevel * math.sin(a), bevel - bevel * math.cos(a)))
@@ -642,9 +646,11 @@ def extrude(outline, height, bevel=0.0, inset=None, edge=.05):
     return mesh
 
 
-def box(size, bevel=0.0, edge=.05):
+def box(size, bevel=0.0, edge=.05, max_segments=6, grid=0.0):
+    """Box centred on the origin. `bevel` rounds every edge and corner (at most `max_segments` segments);
+    `grid` > 0 also subdivides the flat faces into cells of about that size (for micro relief)."""
     x, y, z = size[0] / 2, size[1] / 2, size[2] / 2
-    if bevel <= 0:
+    if bevel <= 0 and grid <= 0:
         mesh = Mesh()
         c = [mesh.v(p) for p in [(-x, -y, -z), (x, -y, -z), (x, y, -z), (-x, y, -z), (-x, -y, z), (x, -y, z), (x, y, z), (-x, y, z)]]
         for face in ((3, 2, 1, 0), (4, 5, 6, 7), (0, 1, 5, 4), (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7)):
@@ -652,13 +658,16 @@ def box(size, bevel=0.0, edge=.05):
         return mesh
     # Rounded box: a box-surface grid (dense only inside the bevel bands) pushed onto the
     # sphere-swept surface of the inner box, so every edge and corner is evenly rounded.
-    k = max(1, min(6, int(math.ceil(bevel * math.pi / 2 / edge))))
+    bevel = max(0.0, bevel)
+    k = max(1, min(max_segments, 6, int(math.ceil(bevel * math.pi / 2 / edge)))) if bevel > 0 else 0
     half = (x, y, z)
 
     def ticks(h):
         inner = h - bevel
-        band = [inner + bevel * math.sin(math.pi / 2 * i / k) for i in range(k + 1)]
-        return [-t for t in reversed(band)] + band
+        n = max(1, int(math.ceil(2 * inner / grid))) if grid > 0 else 1
+        mid = [-inner + 2 * inner * i / n for i in range(n + 1)]
+        band = [inner + bevel * math.sin(math.pi / 2 * i / k) for i in range(1, k + 1)] if k else []
+        return [-t for t in reversed(band)] + mid + band
     axes_ticks = [ticks(h) for h in half]
     mesh = Mesh()
     index = {}
@@ -668,7 +677,7 @@ def box(size, bevel=0.0, edge=.05):
         if key not in index:
             inner = tuple(max(-(h - bevel), min(h - bevel, c)) for c, h in zip(p, half))
             d = sub(p, inner)
-            q = add(inner, mul(norm(d), bevel)) if length(d) > 1e-12 else p
+            q = add(inner, mul(norm(d), bevel)) if length(d) > 1e-12 and bevel > 0 else p
             index[key] = mesh.v(q)
         return index[key]
     for axis in range(3):
@@ -692,12 +701,64 @@ def box(size, bevel=0.0, edge=.05):
     return mesh
 
 
-def cylinder(radius, height, radius_top=None, bevel=0.0, edge=.05, segments=0):
+def chamfer_box(size, chamfer):
+    """Cheapest crafted box: every edge cut by one flat chamfer (6 faces + 12 edge strips + 8
+    corner triangles = 44 triangles), centred on the origin. Used for masonry blocks."""
+    h = (size[0] / 2, size[1] / 2, size[2] / 2)
+    c = max(0.0, min(chamfer, min(h) * .45))
+    if c <= 0:
+        return box(size)
+    mesh = Mesh()
+    ids = {}
+    for ax in range(3):
+        a, b = [k for k in range(3) if k != ax]
+        for s in (-1, 1):
+            for sa in (-1, 1):
+                for sb in (-1, 1):
+                    p = [0.0, 0.0, 0.0]
+                    p[ax], p[a], p[b] = s * h[ax], sa * (h[a] - c), sb * (h[b] - c)
+                    ids[(ax, s, sa, sb)] = mesh.v(p)
+
+    def key(ax, signs):
+        a, b = [k for k in range(3) if k != ax]
+        return ids[(ax, signs[ax], signs[a], signs[b])]
+
+    def outward(face):
+        pts = [mesh.verts[i] for i in face]
+        nrm = (0.0, 0.0, 0.0)
+        for i in range(1, len(pts) - 1):
+            nrm = add(nrm, cross(sub(pts[i], pts[0]), sub(pts[i + 1], pts[0])))
+        centre = mul(add(add(pts[0], pts[1]), pts[2]), 1 / 3)
+        mesh.f(tuple(reversed(face)) if dot(nrm, centre) < 0 else tuple(face))
+    for ax in range(3):
+        a, b = [k for k in range(3) if k != ax]
+        for s in (-1, 1):
+            outward([ids[(ax, s, -1, -1)], ids[(ax, s, 1, -1)], ids[(ax, s, 1, 1)], ids[(ax, s, -1, 1)]])
+    for i in range(3):
+        for j in range(i + 1, 3):
+            k = 3 - i - j
+            for si in (-1, 1):
+                for sj in (-1, 1):
+                    quad = []
+                    for sk in (-1, 1):
+                        signs = [0, 0, 0]
+                        signs[i], signs[j], signs[k] = si, sj, sk
+                        quad.append((key(i, signs), key(j, signs)))
+                    outward([quad[0][0], quad[1][0], quad[1][1], quad[0][1]])
+    for sx in (-1, 1):
+        for sy in (-1, 1):
+            for sz in (-1, 1):
+                signs = (sx, sy, sz)
+                outward([key(0, signs), key(1, signs), key(2, signs)])
+    return mesh
+
+
+def cylinder(radius, height, radius_top=None, bevel=0.0, edge=.05, segments=0, max_segments=6):
     rt = radius if radius_top is None else radius_top
     h = height / 2
     prof = [(0.0, -h)]
     if bevel > 0:
-        k = max(1, min(6, int(math.ceil(bevel * math.pi / 2 / edge))))
+        k = max(1, min(max_segments, 6, int(math.ceil(bevel * math.pi / 2 / edge))))
         for i in range(k + 1):
             a = math.pi / 2 * i / k
             prof.append((radius - bevel + bevel * math.sin(a), -h + bevel - bevel * math.cos(a)))

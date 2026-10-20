@@ -222,7 +222,8 @@ def prim(value, where):
 
 
 COMMON = ("id", "op", "material", "at", "rot", "scale", "parent", "mirror", "radial", "array", "scatter", "csg", "with",
-          "noise", "smooth", "detail", "grain", "segments")
+          "noise", "smooth", "detail", "grain", "segments", "surface", "blocks")
+LIBRARY = re.compile(r"^[a-z][a-z-]{1,31}$")
 OP_FIELDS = {
     "box": ("size", "bevel"),
     "cylinder": ("radius", "radiusTop", "height", "bevel"),
@@ -263,7 +264,28 @@ def part(value, index, materials):
            "grain": choice(p.get("grain"), AXES, where + ".grain", "auto") if p.get("grain") is not None else "auto",
            "segments": integer(p.get("segments"), 3, 128, where + ".segments", 0) if p.get("segments") is not None else 0,
            "mirror": choice(p.get("mirror"), MIRRORS, where + ".mirror", "none") if p.get("mirror") is not None else None,
-           "radial": None, "array": None, "scatter": None}
+           "radial": None, "array": None, "scatter": None, "bevelAuto": op in ("box", "cylinder", "extrude") and p.get("bevel") is None,
+           "surface": None, "blocks": None}
+    s = p.get("surface")
+    if isinstance(s, dict):
+        s = fields(s, ("on", "protrude"), where + ".surface")
+        if s.get("on") is not None and (not isinstance(s["on"], str) or not ID.match(s["on"])):
+            fail(where + ".surface.on must name a part")
+        out["surface"] = {"on": s.get("on"), "protrude": number(s.get("protrude"), .0002, .5, where + ".surface.protrude") if s.get("protrude") is not None else None}
+    elif s is not None:
+        out["surface"] = flag(s, where + ".surface")
+    b = p.get("blocks")
+    if b is not None:
+        if op != "box":
+            fail(where + ".blocks (masonry courses) needs a box part")
+        if isinstance(b, dict):
+            b = fields(b, ("course", "length", "mortar", "depth"), where + ".blocks")
+            out["blocks"] = {"course": number(b.get("course"), .08, 2, where + ".blocks.course", 0.0) or None,
+                             "length": number(b.get("length"), .1, 4, where + ".blocks.length", 0.0) or None,
+                             "mortar": number(b.get("mortar"), .002, .05, where + ".blocks.mortar", 0.0) or None,
+                             "depth": number(b.get("depth"), .002, .05, where + ".blocks.depth", 0.0) or None}
+        else:
+            out["blocks"] = flag(b, where + ".blocks")
     if out["parent"] is not None and (not isinstance(out["parent"], str) or not ID.match(out["parent"])):
         fail(where + ".parent must be a part id")
     if p.get("with") is not None:
@@ -386,7 +408,7 @@ def part(value, index, materials):
 
 def material(value, index):
     where = "materials[%d]" % index
-    m = fields(value, ("id", "finish", "color", "roughness", "metallic", "wear", "cavity"), where)
+    m = fields(value, ("id", "finish", "color", "roughness", "metallic", "wear", "cavity", "library", "glow", "moss", "age"), where)
     mid = m.get("id")
     if not isinstance(mid, str) or not MATERIAL_ID.match(mid):
         fail(where + ".id must be a lowercase id (a-z, 0-9; up to 16 characters)")
@@ -394,18 +416,42 @@ def material(value, index):
     _, rough, metal, wear, cavity, color = FINISHES[finish]
     return {"id": mid, "finish": finish, "color": vec(m.get("color"), 3, 0, 1, where + ".color", color),
             "roughness": number(m.get("roughness"), 0, 1, where + ".roughness", rough), "metallic": number(m.get("metallic"), 0, 1, where + ".metallic", metal),
-            "wear": number(m.get("wear"), 0, 1, where + ".wear", wear), "cavity": number(m.get("cavity"), 0, 1, where + ".cavity", cavity)}
+            "wear": number(m.get("wear"), 0, 1, where + ".wear", wear), "cavity": number(m.get("cavity"), 0, 1, where + ".cavity", cavity),
+            "library": library(m.get("library"), where + ".library"), "glow": number(m.get("glow"), 0, 10, where + ".glow", 0.0),
+            # Optional library weathering overrides (model_materials infers them from context otherwise).
+            **{k: number(m[k], 0, 1, where + "." + k) for k in ("moss", "age") if m.get(k) is not None}}
+
+
+def library(value, where):
+    # A material library name (workers/blender/materials catalogue); unknown names fall back to the finish bake.
+    if value is None:
+        return None
+    if not isinstance(value, str) or not LIBRARY.match(value):
+        fail(where + " must be a library material name such as stone-ashlar")
+    return value
+
+
+CONTEXT_TAG = re.compile(r"^[a-z][a-z0-9-]{0,23}$")
+
+
+def context(value):
+    # Scene/theme tags (outdoor, ancient, swamp, snowy, new...) that steer material inference.
+    if not isinstance(value, list) or len(value) > 8 or not all(isinstance(t, str) and CONTEXT_TAG.match(t) for t in value):
+        fail("context must be up to 8 lowercase tags such as outdoor or ancient")
+    return list(value)
 
 
 def validate(value):
     """Return the normalized spec (all defaults explicit) or raise SpecError."""
-    s = fields(value, ("kind", "finish", "size", "materials", "parts", "pivot", "smoothAngle"), "spec")
+    s = fields(value, ("kind", "finish", "size", "materials", "parts", "pivot", "smoothAngle", "autoDetail", "context"), "spec")
     if s.get("kind") != "spec":
         fail("kind must be spec")
     lo, hi = LIMITS["size"]
     out = {"kind": "spec", "finish": choice(s.get("finish"), ("natural", "flat"), "finish", "natural"),
            "size": vec(s.get("size"), 3, lo, hi, "size"), "pivot": choice(s.get("pivot"), PIVOTS, "pivot", "base"),
-           "smoothAngle": number(s.get("smoothAngle"), 0, 180, "smoothAngle", 35.0)}
+           "smoothAngle": number(s.get("smoothAngle"), 0, 180, "smoothAngle", 35.0), "autoDetail": flag(s.get("autoDetail"), "autoDetail", True)}
+    if s.get("context") is not None:
+        out["context"] = context(s["context"])
     mats = s.get("materials")
     if not isinstance(mats, list) or not 1 <= len(mats) <= LIMITS["materials"]:
         fail("materials needs 1..%d entries" % LIMITS["materials"])
@@ -423,7 +469,8 @@ def validate(value):
             fail("part ids must be unique (" + p["id"] + ")")
         by[p["id"]] = p
     for p in parts:
-        for ref, label in [(p["parent"], "parent"), ((p["scatter"] or {}).get("on"), "scatter.on")] + [(w, "with") for w in p["with"] or []]:
+        surface_on = p["surface"].get("on") if isinstance(p["surface"], dict) else None
+        for ref, label in [(p["parent"], "parent"), ((p["scatter"] or {}).get("on"), "scatter.on"), (surface_on, "surface.on")] + [(w, "with") for w in p["with"] or []]:
             if ref is not None and ref not in by:
                 fail("part " + p["id"] + "." + label + " names an unknown part")
             if ref == p["id"]:

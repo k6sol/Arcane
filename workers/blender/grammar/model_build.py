@@ -46,6 +46,8 @@ def to_object(inst, index, instance, collection, name):
     part.data.foreach_set("value", [index] * len(me.polygons))
     owner = me.attributes.new("arcane_inst", "INT", "FACE")
     owner.data.foreach_set("value", [instance] * len(me.polygons))
+    tone = me.attributes.new("arcane_tone", "INT", "FACE")
+    tone.data.foreach_set("value", list(inst.mesh.tones) if inst.mesh.tones is not None else [0] * len(me.polygons))
     auto = me.attributes.new("arcane_auto_uv", "BOOLEAN", "FACE")
     auto.data.foreach_set("value", [inst.auto_uv] * len(me.polygons))
     obj = bpy.data.objects.new(name, me)
@@ -214,6 +216,135 @@ def sharp_edges(obj, angles):
         bm.to_mesh(obj.data)
     finally:
         bm.free()
+
+
+# ------------------------------------------------------------ detail tiers --
+EDGE_ANGLE = math.radians(50)
+
+
+def planar_uv(face, uv):
+    """Metre UVs on the face's dominant axis, right-handed (as model_geom.Mesh.planar_uv)."""
+    n = face.normal
+    axis = max(range(3), key=lambda k: abs(n[k]))
+    a, b = ((1, 2), (2, 0), (0, 1))[axis]
+    if n[axis] < 0:
+        a, b = b, a
+    for loop in face.loops:
+        loop[uv].uv = (loop.vert.co[a], loop.vert.co[b])
+
+
+def bevel_object(obj, widths, max_segments):
+    """Bevel the convex hard edges (> 50 degrees) left after planning and CSG, each with the
+    width of the parts it joins (model_plan.edge_widths). New faces get metre planar UVs and
+    their neighbours' part/instance ids. Returns the new face count, or None when the result
+    would not be a closed manifold (the object is then left untouched)."""
+    bm = bmesh.new()
+    try:
+        bm.from_mesh(obj.data)
+        part = bm.faces.layers.int.get("arcane_part")
+        inst = bm.faces.layers.int.get("arcane_inst")
+        tone = bm.faces.layers.int.get("arcane_tone")
+        uv = bm.loops.layers.uv.get("UVMap")
+        new_tag = bm.faces.layers.int.new("arcane_bevel")
+        bm.normal_update()
+        added = 0
+
+        def width(e):
+            ws = [widths[f[part]] for f in e.link_faces if f[new_tag] == 0 and widths[f[part]] is not None]
+            if len(ws) == 0 or any(f[new_tag] for f in e.link_faces):
+                return None
+            w = min(x[0] for x in ws)
+            return w if e.calc_length() > 3 * w else None
+        buckets = sorted({round(w[0], 5) for w in widths if w is not None}, reverse=True)
+        segs = {round(w[0], 5): min(max_segments, w[1]) for w in widths if w is not None}
+        for bucket in buckets:
+            edges = []
+            for e in bm.edges:
+                if len(e.link_faces) != 2 or not e.is_convex or e.calc_face_angle(0) < EDGE_ANGLE:
+                    continue
+                w = width(e)
+                if w is not None and abs(round(w, 5) - bucket) < 1e-9:
+                    edges.append(e)
+            if not edges:
+                continue
+            verts = list({v for e in edges for v in e.verts})
+            result = bmesh.ops.bevel(bm, geom=edges + verts, offset=bucket, offset_type="OFFSET", segments=segs[bucket], profile=.5,
+                                     affect="EDGES", clamp_overlap=True, loop_slide=True, harden_normals=False)
+            faces = [f for f in result["faces"] if f.is_valid]
+            for f in faces:
+                f[new_tag] = 1
+            added += len(faces)
+        bm.normal_update()
+        fresh = [f for f in bm.faces if f[new_tag]]
+        # Part/instance ids flood in from original neighbours; UVs are metric planar charts.
+        pending = fresh
+        for _ in range(6):
+            left = []
+            for f in pending:
+                src = next((g for e in f.edges for g in e.link_faces if g is not f and (g[new_tag] == 0 or g[new_tag] == 2)), None)
+                if src is None:
+                    left.append(f)
+                    continue
+                f[part], f[inst] = src[part], src[inst]
+                if tone is not None:
+                    f[tone] = src[tone]
+                f[new_tag] = 2
+            pending = left
+            if not pending:
+                break
+        for f in fresh:
+            planar_uv(f, uv)
+            f.smooth = True
+        if any(len(e.link_faces) != 2 for e in bm.edges) or any(f.calc_area() <= 0 for f in fresh):
+            return None
+        bm.faces.layers.int.remove(new_tag)
+        bm.to_mesh(obj.data)
+        obj.data.update()
+        return added
+    finally:
+        bm.free()
+
+
+def edge_bevel_tier(final, widths, budget, info, warnings):
+    """Tier 2 of the detail hierarchy in Blender: bevel every remaining hard edge, degrading
+    from the material's segments to a single chamfer, then to none, to stay within budget."""
+    if not any(w is not None for w in widths):
+        return
+    objects = [o for o, _, _ in final]
+    keep = [snapshot(o) for o in objects]
+    base = sum(triangles(o) for o in objects)
+    used = None
+    for segments in (2, 1):
+        done, failed = 0, 0
+        for o in objects:
+            got = bevel_object(o, widths, segments)
+            if got is None:
+                failed += 1
+            else:
+                done += got
+        total = sum(triangles(o) for o in objects)
+        if total <= budget * .97:
+            used = segments
+            break
+        for o, mesh in zip(objects, keep):
+            restore(o, mesh.copy())
+    for mesh in keep:
+        bpy.data.meshes.remove(mesh)
+    if used is None:
+        warnings.append("edge bevels skipped (triangle budget)")
+    info["detail"] = {"edgeBevelSegments": used or 0, "edgeBevelTriangles": (sum(triangles(o) for o in objects) - base) if used else 0}
+    if used and failed:
+        warnings.append("edge bevels skipped on %d solids (would not stay closed)" % failed)
+
+
+def weighted_normals(obj):
+    """Face-area weighted custom normals: flat faces stay flat, bevels carry the shading."""
+    mod = obj.modifiers.new("Arcane_WeightedNormals", "WEIGHTED_NORMAL")
+    mod.mode = "FACE_AREA"
+    mod.weight = 50
+    mod.keep_sharp = True
+    bake_modifiers(obj)
+    return bool(obj.data.has_custom_normals)
 
 
 # ---------------------------------------------------------------------- UV --
@@ -414,8 +545,8 @@ def uv_stage(objects, texture_size, info, budget_seconds=40.0):
             if not any(not (c[2] or {}).get("errors") for c in candidates) and time.perf_counter() - start < budget_seconds:
                 write_uvs(obj, analytic)
                 try:
-                    # pack="engine": the "best" re-pack reuses a UV layer reference across an edit-mode round trip.
-                    report = stage.unwrap_blender_mesh(obj, mode="atlas", texture_size=texture_size, pack="engine")
+                    # pack="best": the engine layout, or Blender's re-pack of its charts when that scores better.
+                    report = stage.unwrap_blender_mesh(obj, mode="atlas", texture_size=texture_size, pack="best")
                     candidates.append(("uv_stage", read_uvs(obj), report, visible_density(obj, texture_size, dark)))
                 except Exception as error:  # The hook never fails the asset; the bundled layouts remain.
                     info.setdefault("uvNotes", []).append("uv_stage %s on %s" % (type(error).__name__, key))
@@ -584,6 +715,12 @@ def build(request, make_material, make_collection, select, make_box):
             final.append((base, members, m["id"]))
         else:
             final.extend((o, {i.part}, m["id"]) for i, o in group)
+        for i, o in rest:
+            if i.weld:
+                # Masonry blocks over their core: one watertight solid with recessed joints.
+                empty = bpy.data.collections.new("CSG_Empty_" + i.part)
+                boolean(o, empty, "UNION", warnings, "weld " + i.part)
+                bpy.data.collections.remove(empty)
         final.extend((o, {i.part}, m["id"]) for i, o in rest)
     for inst, cutter in cutters:
         if inst.targets:
@@ -600,6 +737,8 @@ def build(request, make_material, make_collection, select, make_box):
         bpy.data.objects.remove(cutter, do_unlink=True)
         bpy.data.meshes.remove(mesh)
     tick("csg")
+    edge_bevel_tier(final, model_plan.edge_widths(spec), plan.budget, STATE["info"], warnings)
+    tick("bevel")
     group = make_collection("COL_Procedural")
     main = []
     for m in spec["materials"]:
@@ -623,6 +762,8 @@ def build(request, make_material, make_collection, select, make_box):
         raise ValueError("Procedural mesh exceeded its triangle budget or is empty")
     for obj in main:
         sharp_edges(obj, angles)
+        if spec["autoDetail"]:
+            STATE["info"].setdefault("detail", {})["weightedNormals"] = weighted_normals(obj)
     bpy.data.collections.remove(work)
     for obj, m in zip(main, spec["materials"]):
         obj["arcane_source_key"] = m["id"]

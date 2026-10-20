@@ -570,6 +570,9 @@ PROXY_RADIUS = {0: .20, 1: .09, 2: .035, 3: .015, 4: .004}
 UNION_RESERVE = 1.1
 # Junction seam fairing: Taubin smoothing pairs over the seam band.
 FAIR_PAIRS = 12
+# Junction UV relaxation after fairing (relax_junction_uvs): on, and its harmonic Jacobi passes.
+JUNCTION_UV_RELAX = True
+JUNCTION_UV_PASSES = 8
 # Union slivers shorter than this are collapsed before the structural gate.
 SLIVER_DIST = 1e-5
 # Order-3 wood inlet radius <= prune radius + slope * length, so short limbs read as slender
@@ -946,6 +949,16 @@ def bark_tile(species, order, spine, radius, sides, rng, dead=False):
     return result
 
 
+def bark_uv_bands(species):
+    """The v bands one bark tile copy may use (each strip inset by half a texel, else the whole tile):
+    junction UV relaxation keeps every corner inside its own band, so no strip bleeds into another."""
+    strips = {"birch": BIRCH_STRIPS, "pine": PINE_STRIPS}.get(species)
+    if strips is None:
+        return [(0.0, 1.0)]
+    pad = .5 / BARK_RESOLUTION
+    return [(v0 + pad, v0 + h - pad) for v0, h in sorted(strips.values())]
+
+
 def pine_bark_strips(result, order, spine, rng, dead=False):
     """Pine trunk: plated bark up to about 40% of the trunk, one grading repeat, then the thin upper
     bark, which every living limb also wears (dead stubs keep the dark plated bark). Whole repeats
@@ -1162,7 +1175,7 @@ def plan_broadleaf(params, seed, budget_total):
             trunk_vertices, trunk_faces = len(bark.vertices), len(bark.faces)
     bark.wood = {"trunkVertices": trunk_vertices, "trunkFaces": trunk_faces, "samples": samples, "junctions": junctions, "scale": scale,
                  "triangleLimit": int(math.floor(bark.triangles() * UNION_RESERVE)),
-                 "preset": list(chosen), "woodAxes": sum(a["kept"] for a in axes)}
+                 "preset": list(chosen), "woodAxes": sum(a["kept"] for a in axes), "uvBands": bark_uv_bands(params["species"])}
 
     if density == 0:
         return bark, leaves
@@ -2793,7 +2806,7 @@ def union_wood(data, name):
         bpy.data.meshes.remove(trunk)
         bpy.data.meshes.remove(branches)
     mesh.name = name
-    report = fair_wood(mesh, original, wood["samples"], wood["scale"])
+    report = fair_wood(mesh, original, wood["samples"], wood["scale"], wood.get("uvBands", [(0.0, 1.0)]))
     bounds = [(min(v[k] for v in data.vertices), max(v[k] for v in data.vertices)) for k in range(3)]
     report.update(wood_gate(mesh, wood["triangleLimit"], bounds))
     WOOD_UNION.update(report)
@@ -2805,7 +2818,7 @@ def union_wood(data, name):
     return mesh
 
 
-def fair_wood(mesh, original, samples, scale):
+def fair_wood(mesh, original, samples, scale, uv_bands=((0.0, 1.0),)):
     """Blend every junction band: weighted Laplacian over a geodesic band around the union seams.
 
     The band half-width follows the thinner participating axis plus a share of the thicker
@@ -2905,6 +2918,7 @@ def fair_wood(mesh, original, samples, scale):
                         # Halve back toward the union position; the last attempts restore it fully.
                         v.co = v.co.lerp(start[v.index], .5 if attempt < 5 else 1.0)
             bm.normal_update()
+        relaxed = relax_junction_uvs(bm, start, weight, {v.index for v in seam}, uv_bands) if JUNCTION_UV_RELAX else 0
         bmesh.ops.dissolve_degenerate(bm, dist=SLIVER_DIST, edges=list(bm.edges))
         # Collapsing slivers can merge triangles back into polygons; keep the mesh all triangles
         # so later game triangulation cannot create new zero-area UV faces.
@@ -2916,7 +2930,219 @@ def fair_wood(mesh, original, samples, scale):
     finally:
         bm.free()
     mesh.update()
-    return {"unionNonManifoldEdges": union_nonmanifold, "seamVertices": len(seam), "bandVertices": len(weight), "fairingPasses": 2 * FAIR_PAIRS, "residualFlippedFaces": flips, "repairedUVFaces": repaired}
+    return {"unionNonManifoldEdges": union_nonmanifold, "seamVertices": len(seam), "bandVertices": len(weight), "fairingPasses": 2 * FAIR_PAIRS, "residualFlippedFaces": flips, "repairedUVFaces": repaired, "relaxedUVs": relaxed}
+
+
+def _uv_jacobian(points, uvs):
+    """2x3 map J of one triangle with J (P_i - P_0) = uv_i - uv_0 and J n = 0, or None if degenerate."""
+    e1, e2 = points[1] - points[0], points[2] - points[0]
+    g00, g01, g11 = e1.dot(e1), e1.dot(e2), e2.dot(e2)
+    det = g00 * g11 - g01 * g01
+    if det <= 1e-20 * max(g00 * g11, 1e-30):
+        return None
+    d1, d2 = uvs[1] - uvs[0], uvs[2] - uvs[0]
+    # J = D G^-1 E^T with D = [d1 d2], E = [e1 e2], G = E^T E.
+    i00, i01, i11 = g11 / det, -g01 / det, g00 / det
+    a = (d1.x * i00 + d2.x * i01, d1.x * i01 + d2.x * i11)
+    b = (d1.y * i00 + d2.y * i01, d1.y * i01 + d2.y * i11)
+    return (e1 * a[0] + e2 * a[1], e1 * b[0] + e2 * b[1])
+
+
+def _uv_signed_area(uvs):
+    return ((uvs[1].x - uvs[0].x) * (uvs[2].y - uvs[0].y) - (uvs[2].x - uvs[0].x) * (uvs[1].y - uvs[0].y)) / 2
+
+
+def relax_junction_uvs(bm, start, weight, hard=frozenset(), bands=((0.0, 1.0),)):
+    """Junction UV relaxation after seam fairing (natural bark only).
+
+    Fairing moves junction-band vertices but keeps their authored branch-aligned bark UVs, so the
+    band's texture stretches (pine crotches measured about 1.4:1 against 0.86 elsewhere). Two steps,
+    with everything outside the band (``start``, falloff ``weight``) pinned:
+
+    1. Transfer: each band UV corner (a vertex's loops sharing one UV) moves by its faces' authored
+       UV map J over the pre-fairing positions, J (P' - P): the bark stays where it was painted on
+       the union surface instead of sliding with the moved vertex. The corners of a vertex on a
+       tile-copy or strip seam take one mean shift, so the repeating bark stays continuous there.
+    2. Local/global relaxation (``JUNCTION_UV_PASSES`` Jacobi passes): each triangle's target UV
+       shape is its authored map applied to its faired shape, rotated back onto the authored
+       triangle; single-UV corners and both sides of the trunk/branch union seam (``hard``; never
+       continuous) move to the area-weighted mean of their targets, damped by the band falloff.
+
+    Every corner stays inside its own tile copy (u 0..1) and strip band (``bands``), and a move
+    that would fold or collapse a UV triangle is undone. Deterministic (fixed vertex/UV order).
+    Returns the number of corner moves accepted."""
+    from mathutils import Vector
+    layer = bm.loops.layers.uv.active
+    if layer is None or not start:
+        return 0
+
+    def original(v):
+        return start.get(v.index, v.co)
+    corners = []  # (vertex, [loops]) per band UV corner, in vertex then UV order
+    for index in sorted(start):
+        v = bm.verts[index]
+        groups = {}
+        for loop in v.link_loops:
+            uv = loop[layer].uv
+            groups.setdefault((round(uv.x, 7), round(uv.y, 7)), []).append(loop)
+        for key in sorted(groups):
+            corners.append((v, groups[key]))
+    uv_of = {}
+    for v, loops in corners:
+        for loop in loops:
+            uv_of[loop] = loop[layer].uv.copy()
+
+    authored = {loop: uv.copy() for loop, uv in uv_of.items()}
+
+    def face_uvs(f):
+        return [uv_of.get(loop, loop[layer].uv) for loop in f.loops]
+
+    def box(loops):
+        # The tile copy (u 0..1) and the strip band holding every face of this corner; a corner whose
+        # faces straddle bands (a repair patch) keeps the UV box of its own faces.
+        pts = [p for loop in loops for p in face_uvs(loop.face)]
+        lo_u, lo_v, hi_u, hi_v = min(p.x for p in pts), min(p.y for p in pts), max(p.x for p in pts), max(p.y for p in pts)
+        if lo_u < -1e-6 or hi_u > 1 + 1e-6:
+            return lo_u, lo_v, hi_u, hi_v
+        for lo, hi in bands:
+            if lo - 1e-6 <= lo_v and hi_v <= hi + 1e-6:
+                return 0.0, lo, 1.0, hi
+        return lo_u, lo_v, hi_u, hi_v
+    boxes = [box(loops) for _, loops in corners]
+
+    def place(cis, targets):
+        """Move corners together (each boxed); undo all if any of their faces would fold or collapse."""
+        loops = [loop for ci in cis for loop in corners[ci][1]]
+        saved = [uv_of[loop].copy() for loop in loops]
+        faces = list({loop.face: None for loop in loops})
+        before = [_uv_signed_area(face_uvs(f)) for f in faces]
+        for ci, target in zip(cis, targets):
+            lo_u, lo_v, hi_u, hi_v = boxes[ci]
+            target = Vector((min(hi_u, max(lo_u, target.x)), min(hi_v, max(lo_v, target.y))))
+            for loop in corners[ci][1]:
+                uv_of[loop] = target.copy()
+        for f, area in zip(faces, before):
+            after = _uv_signed_area(face_uvs(f))
+            if area * after <= 0 or abs(after) < .25 * abs(area):
+                for back, uv in zip(loops, saved):
+                    uv_of[back] = uv
+                return False
+        return True
+
+    def transfer(ci, delta):
+        """UV shift of corner ci for a 3D move ``delta``: its faces' pre-fairing Jacobian, by area."""
+        ju, jv, total = Vector((0.0, 0.0, 0.0)), Vector((0.0, 0.0, 0.0)), 0.0
+        for loop in corners[ci][1]:
+            f = loop.face
+            if len(f.verts) != 3:
+                continue
+            points = [original(w) for w in f.verts]
+            j = _uv_jacobian(points, [Vector(authored.get(loop, loop[layer].uv)) for loop in f.loops])
+            if j is None:
+                continue
+            area = (points[1] - points[0]).cross(points[2] - points[0]).length
+            ju, jv, total = ju + j[0] * area, jv + j[1] * area, total + area
+        return Vector((ju.dot(delta) / total, jv.dot(delta) / total)) if total > 0 else None
+    moved = set()
+    by_vertex = {}
+    for ci, (v, _) in enumerate(corners):
+        by_vertex.setdefault(v.index, []).append(ci)
+
+    def shift_vertex(index, shifts):
+        """Apply per-corner UV shifts of one vertex. Corners of a tile-copy or strip seam take their
+        mean shift, so the repeating bark stays continuous across it (each corner still boxed); the
+        two sides of the trunk/branch union seam (``hard``) were never continuous and move apart."""
+        cis = by_vertex[index]
+        if index not in hard and len(cis) > 1:
+            known = [x for x in shifts if x is not None]
+            if not known:
+                return
+            mean = sum(known, Vector((0.0, 0.0))) / len(known)
+            shifts = [mean] * len(cis)
+        if index not in hard and len(cis) > 1:
+            if place(cis, [uv_of[corners[ci][1][0]] + x for ci, x in zip(cis, shifts)]):
+                moved.update(cis)
+            return
+        for ci, x in zip(cis, shifts):
+            if x is not None and place([ci], [uv_of[corners[ci][1][0]] + x]):
+                moved.add(ci)
+    # 1. Transfer: the moved vertex reads the bark painted at its pre-fairing surface point.
+    for index in sorted(by_vertex):
+        v = corners[by_vertex[index][0]][0]
+        delta = v.co - original(v)
+        if delta.length > 1e-9:
+            shift_vertex(index, [transfer(ci, delta) for ci in by_vertex[index]])
+    # 2. Local/global relaxation against each triangle's authored UV map: a triangle's target UV
+    # shape is its rest map A (pre-fairing 3D -> authored UV) applied to its faired shape, rotated
+    # back onto the rest triangle; each free corner moves to the area-weighted mean of its targets.
+    rest = {}
+    for f in {loop.face: None for _, loops in corners for loop in loops}:
+        if len(f.verts) != 3:
+            continue
+        points = [original(w) for w in f.verts]
+        e1, e2 = points[1] - points[0], points[2] - points[0]
+        n = e1.cross(e2)
+        if e1.length <= 1e-9 or n.length <= 1e-12:
+            continue
+        x = e1.normalized()
+        y = n.normalized().cross(x)
+        a, b, c = e1.length, e2.dot(x), e2.dot(y)
+        if c <= .1 * max(a, abs(b), abs(b - a)):  # slivers have no reliable rest map
+            continue
+        uvs = [Vector(authored.get(loop, loop[layer].uv)) for loop in f.loops]
+        d1, d2 = uvs[1] - uvs[0], uvs[2] - uvs[0]
+        # A [a b; 0 c] = [d1 d2]
+        m = ((d1.x / a, (d2.x - d1.x * b / a) / c), (d1.y / a, (d2.y - d1.y * b / a) / c))
+        o = [(0.0, 0.0), (a, 0.0), (b, c)]
+        rest[f] = (m, o, n.length / 2)
+    # Tile-copy and strip seam vertices keep their transfer: averaging two sides' targets drags both.
+    free = [index for index in sorted(by_vertex) if weight.get(index, 0) > 0 and (len(by_vertex[index]) == 1 or index in hard)]
+    for _ in range(JUNCTION_UV_PASSES):
+        targets = {}
+        for f, (m, o, area) in rest.items():
+            q = [w.co for w in f.verts]
+            e1, e2 = q[1] - q[0], q[2] - q[0]
+            n = e1.cross(e2)
+            if e1.length <= 1e-9 or n.length <= 1e-12:
+                continue
+            x = e1.normalized()
+            y = n.normalized().cross(x)
+            p = [(0.0, 0.0), (e1.length, 0.0), (e2.dot(x), e2.dot(y))]
+            pc = ((p[1][0] + p[2][0]) / 3, (p[1][1] + p[2][1]) / 3)
+            oc = ((o[1][0] + o[2][0]) / 3, (o[1][1] + o[2][1]) / 3)
+            sx = sy = 0.0
+            for (px, py), (ox, oy) in zip(p, o):
+                px, py, ox, oy = px - pc[0], py - pc[1], ox - oc[0], oy - oc[1]
+                sx += px * ox + py * oy
+                sy += px * oy - py * ox
+            t = math.atan2(sy, sx)
+            cs, sn = math.cos(t), math.sin(t)
+            loops = list(f.loops)
+            current = [Vector(uv_of.get(loop, loop[layer].uv)) for loop in loops]
+            centre = (current[0] + current[1] + current[2]) / 3
+            for loop, (px, py) in zip(loops, p):
+                if loop not in uv_of:
+                    continue
+                rx, ry = cs * (px - pc[0]) - sn * (py - pc[1]), sn * (px - pc[0]) + cs * (py - pc[1])
+                goal = centre + Vector((m[0][0] * rx + m[0][1] * ry, m[1][0] * rx + m[1][1] * ry))
+                acc = targets.setdefault(loop, [Vector((0.0, 0.0)), 0.0])
+                acc[0] += goal * area
+                acc[1] += area
+        for index in free:
+            shifts = []
+            for ci in by_vertex[index]:
+                loops = corners[ci][1]
+                total = sum(targets[loop][1] for loop in loops if loop in targets)
+                if total <= 0:
+                    shifts.append(None)
+                    continue
+                goal = sum((targets[loop][0] for loop in loops if loop in targets), Vector((0.0, 0.0))) / total
+                shifts.append((goal - uv_of[loops[0]]) * weight[index])
+            shift_vertex(index, shifts)
+    for v, loops in corners:
+        for loop in loops:
+            loop[layer].uv = uv_of[loop]
+    return len(moved)
 
 
 def repair_wood_uvs(bm):

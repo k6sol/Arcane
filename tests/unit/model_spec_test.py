@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "workers" / "blender" / "grammar"))
+import worker_paths  # noqa: E402,F401  (job layout: every workers/blender subpackage importable flat)
 import model_geom as G  # noqa: E402
 import model_plan  # noqa: E402
 import model_spec  # noqa: E402
@@ -52,7 +52,7 @@ class Validation(unittest.TestCase):
                 spec = model_spec.validate(load(path)["spec"])
                 self.assertEqual(spec["finish"], "natural")
                 for m in spec["materials"]:
-                    self.assertEqual(set(m), {"id", "finish", "color", "roughness", "metallic", "wear", "cavity"})
+                    self.assertEqual(set(m), {"id", "finish", "color", "roughness", "metallic", "wear", "cavity", "library", "glow"})
 
     def test_invalid_specs_are_refused_with_actionable_messages(self):
         base = load(FIXTURES[0])["spec"]

@@ -3,6 +3,13 @@
 preview-hero.png: the shared three-quarter hero view. preview-side.png: a 2x2 review sheet
 (top-left front -Y, top-right right +X, bottom-left top +Z, bottom-right wireframe hero) so
 silhouette, proportions and topology can be judged in one image.
+Lighting (previews only; exported assets are untouched): a neutral, revealing review rig instead of
+the generic lookdev lights: a soft key sun raking from camera-left (about 5:1 over the ambient, so
+relief, normal maps and tone variation read), a cool low fill from camera-right, a rim from behind,
+a procedural horizon-to-zenith sky (generated nodes, no image), a mid-grey (18%) ground that takes
+contact shadows, path-traced ambient occlusion and AgX at exposure 0. The hero's bottom-left corner
+carries an inset "in-game" approximation: one sharp sun plus flat sky ambient, the look of Roblox
+Future lighting, so the preview predicts the in-Studio read.
 Metrics (audit.json "review", also returned by assets_preview): built size vs spec (metres
 and studs), triangles vs budget, closed/manifold per mesh, minimum wall thickness, silhouette
 fidelity (IoU of the final mesh vs the planned spec geometry) and complexity per view, parts
@@ -213,6 +220,150 @@ def render_sheet(bpy, directory, camera, target, span, request, render_metrics, 
     return render_metrics(directory / "preview-side.png")
 
 
+def _sun(bpy, group, name, azimuth, elevation, strength, angle, color):
+    from mathutils import Vector
+    data = bpy.data.lights.new("LGT_Review" + name, "SUN")
+    data.energy, data.angle, data.color = strength, math.radians(angle), color
+    obj = bpy.data.objects.new("LGT_Review" + name, data)
+    group.objects.link(obj)
+    a, e = math.radians(azimuth), math.radians(elevation)
+    towards = Vector((math.cos(a) * math.cos(e), math.sin(a) * math.cos(e), math.sin(e)))
+    obj.rotation_euler = (-towards).to_track_quat("-Z", "Y").to_euler()
+    return obj
+
+
+def _sky(world, zenith, horizon, ground, strength):
+    """Procedural gradient sky: ground colour below the horizon, horizon -> zenith above."""
+    world.use_nodes = True
+    nodes, links = world.node_tree.nodes, world.node_tree.links
+    for node in list(nodes):
+        nodes.remove(node)
+    out = nodes.new("ShaderNodeOutputWorld")
+    bg = nodes.new("ShaderNodeBackground")
+    coord = nodes.new("ShaderNodeTexCoord")
+    split = nodes.new("ShaderNodeSeparateXYZ")
+    remap = nodes.new("ShaderNodeMapRange")
+    ramp = nodes.new("ShaderNodeValToRGB")
+    # World "Generated" coordinates are the view direction; z in -1..1 -> 0..1.
+    links.new(coord.outputs["Generated"], split.inputs["Vector"])
+    remap.inputs["From Min"].default_value, remap.inputs["From Max"].default_value = -1.0, 1.0
+    links.new(split.outputs["Z"], remap.inputs["Value"])
+    links.new(remap.outputs["Result"], ramp.inputs["Fac"])
+    els = ramp.color_ramp.elements
+    els[0].position, els[0].color = .47, tuple(ground) + (1,)
+    els[1].position, els[1].color = 1.0, tuple(zenith) + (1,)
+    mid = els.new(.5)
+    mid.color = tuple(horizon) + (1,)
+    links.new(ramp.outputs["Color"], bg.inputs["Color"])
+    bg.inputs["Strength"].default_value = strength
+    links.new(bg.outputs["Background"], out.inputs["Surface"])
+    return bg, ramp
+
+
+def _look(view, name):
+    try:
+        view.look = name
+    except TypeError:
+        pass
+
+
+def review_rig(bpy, scene):
+    """Replace the generic lookdev lights with the review rig (see module doc). Returns the rig
+    and in-game light lists plus the sky nodes so the inset render can switch between them."""
+    for obj in scene.objects:
+        if obj.type == "LIGHT" and obj.name.startswith("LGT_") and not obj.name.startswith("LGT_Review"):
+            obj.hide_render = True
+    ground = bpy.data.objects.get("PreviewGround")
+    if ground is not None:
+        mat = bpy.data.materials.new("PreviewReviewGround")
+        mat.use_nodes = True
+        shader = next(n for n in mat.node_tree.nodes if n.type == "BSDF_PRINCIPLED")
+        shader.inputs["Base Color"].default_value = (.18, .18, .18, 1)
+        shader.inputs["Roughness"].default_value = .9
+        ground.data.materials.clear()
+        ground.data.materials.append(mat)
+    group = bpy.data.collections.get("COL_Preview") or scene.collection
+    rig = [_sun(bpy, group, "Key", -125, 38, KEY, 6, (1.0, .97, .92)),
+           _sun(bpy, group, "Fill", 10, 16, KEY * .2, 35, (.86, .92, 1.0)),
+           _sun(bpy, group, "Rim", 160, 55, KEY * .6, 10, (.95, .97, 1.0))]
+    game = [_sun(bpy, group, "GameSun", -100, 52, 2.6, 1, (1.0, .96, .9))]
+    for obj in game:
+        obj.hide_render = True
+    sky = _sky(scene.world, (.3, .38, .5), (.55, .56, .58), (.2, .19, .18), SKY)
+    vs = scene.view_settings
+    vs.view_transform = "AgX"
+    _look(vs, "AgX - Medium High Contrast")
+    vs.exposure = 0.0
+    c = scene.cycles
+    c.max_bounces, c.diffuse_bounces, c.glossy_bounces, c.transmission_bounces = 4, 2, 2, 2
+    c.transparent_max_bounces, c.volume_bounces = 2, 0
+    return {"rig": rig, "game": game, "sky": sky}
+
+
+KEY = 2.4   # key sun irradiance (W/m2); the sky ambient is about a fifth of it
+SKY = .55
+
+
+def ingame_inset(bpy, scene, rig, directory, res):
+    """Render the hero view under the in-game approximation at a fifth of the resolution."""
+    vs = scene.view_settings
+    look = vs.look
+    bg, ramp = rig["sky"]
+    saved = [tuple(e.color) for e in ramp.color_ramp.elements]
+    for obj in rig["rig"]:
+        obj.hide_render = True
+    for obj in rig["game"]:
+        obj.hide_render = False
+    for e in ramp.color_ramp.elements:  # flat sky ambient, like Studio's Ambient/OutdoorAmbient
+        e.color = (.55, .6, .68, 1)
+    bg.inputs["Strength"].default_value = .6
+    _look(vs, "AgX - Base Contrast")
+    samples = scene.cycles.samples
+    scene.cycles.samples = max(4, samples // 2)
+    small = max(64, res // 5)
+    scene.render.resolution_x = scene.render.resolution_y = small
+    path = directory / ".worker" / "review-ingame.png"
+    scene.render.filepath = str(path)
+    try:
+        bpy.ops.render.render(write_still=True)
+    finally:
+        scene.render.resolution_x = scene.render.resolution_y = res
+        scene.cycles.samples = samples
+        _look(vs, look)
+        bg.inputs["Strength"].default_value = SKY
+        for e, col in zip(ramp.color_ramp.elements, saved):
+            e.color = col
+        for obj in rig["rig"]:
+            obj.hide_render = False
+        for obj in rig["game"]:
+            obj.hide_render = True
+    return path, small
+
+
+def composite_inset(bpy, hero_path, inset_path, res, small):
+    np = np_()
+    image = bpy.data.images.load(str(hero_path))
+    px = np.array(image.pixels[:], np.float32).reshape(res, res, 4)
+    bpy.data.images.remove(image)
+    image = bpy.data.images.load(str(inset_path))
+    ins = np.array(image.pixels[:], np.float32).reshape(small, small, 4)
+    bpy.data.images.remove(image)
+    m = max(4, res // 64)
+    # Rows run bottom-up: the bottom-left corner is the first rows and columns (the emptiest corner
+    # of the hero framing: the x axis runs down-right and key shadows fall to the right).
+    y0 = x0 = m
+    y1, x1 = y0 + small, x0 + small
+    px[y0 - 2:y1 + 2, x0 - 2:x1 + 2, :3] = .92
+    px[y0:y1, x0:x1] = ins
+    px[..., 3] = 1
+    out = bpy.data.images.new("ReviewHero", width=res, height=res, alpha=True)
+    out.pixels.foreach_set(px.ravel())
+    out.filepath_raw = str(hero_path)
+    out.file_format = "PNG"
+    out.save()
+    bpy.data.images.remove(out)
+
+
 def wire_material(bpy):
     mat = bpy.data.materials.new("PreviewWire")
     mat.use_nodes = True
@@ -240,16 +391,25 @@ def review(request, directory, camera, target, span, render_metrics, state):
     plan, info, main = state["plan"], state["info"], state["main"]
     spec = plan.spec
     scene = bpy.context.scene
-    scene.view_settings.exposure = -1.5
+    import time
+    started = time.perf_counter()
+    rig = review_rig(bpy, scene)
     renders = []
     camera.location = target + Vector((2.6, -3.5, 2.3)) * span
     camera.rotation_euler = (target - camera.location).to_track_quat("-Z", "Y").to_euler()
-    scene.render.filepath = str(directory / "preview-hero.png")
+    hero = directory / "preview-hero.png"
+    scene.render.filepath = str(hero)
     bpy.ops.render.render(write_still=True)
-    renders.append(render_metrics(directory / "preview-hero.png"))
+    hero_done = time.perf_counter()
+    inset, small = ingame_inset(bpy, scene, rig, directory, request["renderResolution"])
+    composite_inset(bpy, hero, inset, request["renderResolution"], small)
+    inset_done = time.perf_counter()
+    renders.append(render_metrics(hero))
     renders.append(render_sheet(bpy, directory, camera, target, span, request, render_metrics, main))
-    import time
     rendered = time.perf_counter()
+    lighting = {"rig": "review-v2: key/fill/rim suns, procedural sky, 18% grey ground, AgX medium-high contrast, exposure 0",
+                "inset": "bottom-left of preview-hero.png: in-game approximation (one sharp sun + flat sky ambient)",
+                "seconds": {"hero": round(hero_done - started, 2), "inset": round(inset_done - hero_done, 2), "sheet": round(rendered - inset_done, 2)}}
     # ---- metrics
     verts, polys = [], []
     for obj in main:
@@ -320,8 +480,11 @@ def review(request, directory, camera, target, span, render_metrics, state):
         "uv": {"stage": info.get("uvStage"), "texelsPerMetre": info.get("texelsPerMetre"), "quality": info.get("uvQuality"), "candidates": info.get("uvCandidates"), "seconds": info.get("uvSeconds"),
                "hiddenFaces": {k: rnd(v / max(1, meshes[k]["triangles"]), 3) for k, v in info.get("hiddenFaces", {}).items() if k in meshes}},
         "surfaces": info.get("surfaces", {}),
+        "detail": {**getattr(plan, "detail", {}), **info.get("detail", {}), **({"glow": info["glow"]} if info.get("glow") else {})},
         "lod": {"lod1Triangles": int(total * .5), "lod2Triangles": int(total * .2), "lod1AtStuds": lod_distance(.25), "lod2AtStuds": lod_distance(.1)},
         "parts": {k: {"instances": v[0], "triangles": v[1]} for k, v in sorted(parts.items())},
+        "materials": info.get("materials"),
+        "lighting": lighting,
         "warnings": (state["warnings"] + ([note] if note else []))[:16],
         "seconds": {**info.get("seconds", {}), "renders": round(rendered - state.get("_t", rendered), 2), "metrics": round(time.perf_counter() - rendered, 2)},
     }
@@ -337,5 +500,9 @@ def review(request, directory, camera, target, span, render_metrics, state):
     buried = [k for k, v in result["uv"]["hiddenFaces"].items() if v > .4]
     if buried:
         hints.append("Over 40% of the faces of " + ", ".join(buried) + " are buried inside other parts (fine for inlays): if unintended, drop hidden parts or weld same-material parts with csg union.")
+    inferred = [e for e in (info.get("materials") or {}).get("materials", []) if e.get("source") == "inferred"]
+    if inferred:
+        hints.append("Materials inferred (review.materials): " + ", ".join("%s -> %s" % (e["material"], e["library"]) for e in inferred)
+                     + "; set materials[].library (or 'none'), wear, cavity, moss, age or spec.context to override.")
     result["hints"] = hints
     return renders, result

@@ -18,7 +18,7 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "workers" / "blender" / "procedural.py"
-sys.path.insert(0, str(ROOT / "workers" / "blender" / "uv"))  # UV engine modules (natural finish; flat in a job)
+import worker_paths  # noqa: E402,F401  (job layout: every workers/blender subpackage importable flat)
 spec = importlib.util.spec_from_file_location("arcane_procedural_under_test", SOURCE)
 procedural = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(procedural)
@@ -717,7 +717,9 @@ class GeneratorContract(unittest.TestCase):
         self.assertFalse(names & {"eval", "exec", "compile", "open", "__import__", "getattr", "globals"})
         imported = {alias.name.split(".")[0] for node in ast.walk(tree_ast) if isinstance(node, (ast.Import, ast.ImportFrom))
                     for alias in node.names} | {node.module for node in ast.walk(tree_ast) if isinstance(node, ast.ImportFrom) and node.module}
-        self.assertLessEqual(imported, {"math", "random", "heapq", "bpy", "bmesh", "textures", "author_surfaces", "uv_stage"})
+        # Standard library, Blender, and the bundled worker modules (flat in a job; see worker_paths).
+        local = imported - {"math", "random", "heapq", "bpy", "bmesh", "mathutils", "Vector", "author_surfaces"}
+        self.assertLessEqual(local, set(worker_paths.MODULES) - {"asset_worker", "probe", "procedural"})
         texture_imports = [node for node in ast.walk(tree_ast) if isinstance(node, ast.ImportFrom) and node.module == "textures"]
         self.assertEqual([[alias.name for alias in node.names] for node in texture_imports], [["author_surfaces"]])
 

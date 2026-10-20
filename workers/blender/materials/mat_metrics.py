@@ -11,7 +11,7 @@ from packed Blender images), quantised to 8 bits first so the checks see what sh
   net tilt, and follow the OpenGL (+Y = +v) convention the Roblox import path declares.
 """
 THRESHOLDS = {
-    "seamRatio": 1.15,         # wrap-edge step / largest interior step, every map and axis
+    "seamRatio": 1.5,          # wrap-edge step / largest interior step (joints on the edge reach ~1.4; seams ~10+)
     "albedoP1": .008,          # darkest 1% of dielectric texels, linear
     "albedoP99": .92,          # brightest 1% of dielectric texels, linear
     "metalLumP5": .18,         # darkest 5% of metallic texels' luminance, linear
@@ -42,7 +42,8 @@ def seam_ratio(np, grid):
         steps = np.abs(np.diff(grid, axis=axis)).mean(axis=1 - axis)
         wrap = float(np.abs(np.take(grid, 0, axis=axis) - np.take(grid, -1, axis=axis)).mean())
         top = float(steps.max()) if steps.size else 0.0
-        out.append(wrap / top if top > 1e-6 else (1.0 if wrap <= 1e-6 else 99.0))
+        # Floor of two 8-bit steps: near-constant maps (full snow cover) cannot fail on noise.
+        out.append(wrap / max(top, 2 / 255))
     return max(out)
 
 

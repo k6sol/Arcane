@@ -561,7 +561,7 @@ def fabric(np, dom, prm):
     s = prm["scale"]
     a, b = dom.f[:, 0], dom.f[:, 1]
     texel = float(np.max(dom.texel)) if np.ndim(dom.texel) else float(dom.texel)
-    pitch = dom.fit(max(.0028 * s, 4.2 * texel))
+    pitch = dom.fit(max(.0028 * s, 4.2 * texel), 4)  # the 2/2 twill repeats every 4 threads
     ia, ib = np.floor(a / pitch).astype(np.int64), np.floor(b / pitch).astype(np.int64)
     fa, fb = a / pitch - ia, b / pitch - ib
     # 2/2 twill: the warp thread is on top where (i + j) mod 4 < 2.

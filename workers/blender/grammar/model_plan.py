@@ -10,6 +10,7 @@ import hashlib
 import math
 import random
 
+import model_detail as D
 import model_geom as G
 from model_sdf import Field, mesh_field, noise_field, noise_mask
 from model_spec import validate, FINISHES
@@ -25,7 +26,7 @@ def stable_seed(*parts):
 
 
 class Instance:
-    __slots__ = ("key", "part", "material", "csg", "targets", "mesh", "matrix", "auto_uv", "smooth", "target", "grain", "scatter", "op")
+    __slots__ = ("key", "part", "material", "csg", "targets", "mesh", "matrix", "auto_uv", "smooth", "target", "grain", "scatter", "op", "weld")
 
     def __init__(self, **kw):
         for k in self.__slots__:
@@ -35,6 +36,7 @@ class Instance:
 class Plan:
     def __init__(self, spec, instances, edge, budget, warnings):
         self.spec, self.instances, self.edge, self.budget, self.warnings = spec, instances, edge, budget, warnings
+        self.detail = {}
 
     def solids(self):
         return [i for i in self.instances if i.csg not in ("subtract", "intersect")]
@@ -51,16 +53,19 @@ def prototype(p, edge):
     e = edge / p["detail"]
     seg = p["segments"]
     op = p["op"]
+    cap = p.get("_bevelSegments", 6)
     if op == "box":
-        return G.box(p["size"], p["bevel"], e)
+        if p.get("_blocks"):
+            return D.ashlar(p, p["_blocks"])
+        return G.box(p["size"], p["bevel"], e, cap, p.get("_grid", 0.0))
     if op == "cylinder":
-        return G.cylinder(p["radius"], p["height"], p["radiusTop"], p["bevel"], e, seg)
+        return G.cylinder(p["radius"], p["height"], p["radiusTop"], p["bevel"], e, seg, cap)
     if op == "sphere":
         return G.sphere(p["radius"], e, seg)
     if op == "revolve":
         return G.revolve(p["profile"], e, p["curve"], p["flutes"], seg, p["closed"])
     if op == "extrude":
-        return G.extrude(G.shape_points(p["shape"], e, seg), p["height"], p["bevel"], p["inset"], e)
+        return G.extrude(G.shape_points(p["shape"], e, seg), p["height"], p["bevel"], p["inset"], e, cap)
     if op == "loft":
         return G.loft(p["sections"], e, p["curve"], seg)
     if op == "sweep":
@@ -175,12 +180,14 @@ def world_bases(spec):
     return {pid: base(pid) for pid in by}
 
 
-def scatter_frames(p, targets, seed):
-    """Seeded Poisson-disk points on the target meshes, aligned to the surface normal."""
+def scatter_frames(p, targets, seed, solids=None):
+    """Seeded Poisson-disk points on the target meshes, aligned to the surface normal. With
+    `solids` (model_detail.Solids of the other parts), faces buried inside another solid are skipped."""
     s = p["scatter"]
     rng = random.Random(stable_seed("scatter", seed, p["id"], s["seed"]))
     tris = []
     for mesh in targets:
+        own = []
         for face in mesh.faces:
             a = mesh.verts[face[0]]
             for i in range(1, len(face) - 1):
@@ -188,7 +195,10 @@ def scatter_frames(p, targets, seed):
                 n = G.cross(G.sub(b, a), G.sub(c, a))
                 area = G.length(n) / 2
                 if area > 1e-12 and G.norm(n)[2] >= s["minUp"]:
-                    tris.append((area, a, b, c, G.norm(n)))
+                    own.append((area, a, b, c, G.norm(n), mesh))
+        if solids is not None:
+            own = D.visible_triangles(own, solids, lambda inst, mesh=mesh: inst.mesh is mesh)
+        tris.extend(own)
     if not tris:
         return []
     total = sum(t[0] for t in tris)
@@ -202,11 +212,13 @@ def scatter_frames(p, targets, seed):
     for _ in range(s["count"] * 40):
         if len(accepted) >= s["count"]:
             break
-        _, a, b, c, n = tris[min(len(tris) - 1, bisect.bisect_left(cumulative, rng.random() * total))]
+        _, a, b, c, n, host = tris[min(len(tris) - 1, bisect.bisect_left(cumulative, rng.random() * total))]
         u, v = rng.random(), rng.random()
         if u + v > 1:
             u, v = 1 - u, 1 - v
         q = G.add(a, G.add(G.mul(G.sub(b, a), u), G.mul(G.sub(c, a), v)))
+        if solids is not None and solids.inside_any(G.add(q, G.mul(n, 1e-3)), lambda inst, host=host: inst.mesh is host):
+            continue  # this spot of the face is covered by another part
         if any(math.dist(q, o[0]) < spacing for o in accepted):
             continue
         accepted.append((q, n))
@@ -254,7 +266,8 @@ def build_instances(spec, seed, edge, final):
                 mats = [base] * p["scatter"]["count"]
             else:
                 parent = G.compose(p["at"], p["rot"], p["scale"])
-                mats = [G.matmul(f, parent) for f in scatter_frames(p, on, seed)]
+                solids = D.Solids([i for i in instances if i.csg not in ("subtract", "intersect")]) if spec.get("autoDetail", True) else None
+                mats = [G.matmul(f, parent) for f in scatter_frames(p, on, seed, solids)]
                 if len(mats) < p["scatter"]["count"]:
                     warnings.append("scatter %s placed %d of %d (surface too small for its spacing or minUp)" % (p["id"], len(mats), p["scatter"]["count"]))
             dropped = 0
@@ -263,6 +276,9 @@ def build_instances(spec, seed, edge, final):
         if dropped:
             warnings.append("part %s: %d coincident copies dropped (mirror/radial of a centred part)" % (p["id"], dropped))
         built[p["id"]] = proto
+        if proto is not None:
+            lo3, hi3 = proto.bounds()
+            p["_extent"] = min((h - l) * abs(s) for l, h, s in zip(lo3, hi3, p["scale"]))
         nz = None
         if final and p["noise"] and p["op"] != "sdf":
             nz = (noise_field(p["noise"], stable_seed("noise", seed, p["id"])), noise_mask(p["noise"]))
@@ -278,7 +294,7 @@ def build_instances(spec, seed, edge, final):
             instances.append(Instance(key="%s#%d" % (p["id"], n), part=p["id"], material=p["material"], csg=p["csg"], targets=p["with"],
                                       mesh=mesh, matrix=m, auto_uv=p["op"] == "sdf", smooth=spec["smoothAngle"] if p["smooth"] is None else p["smooth"],
                                       target=target if p["op"] == "sdf" else 0, grain=grain_axis(p, proto) if proto is not None else 2,
-                                      scatter=bool(p["scatter"]), op=p["op"]))
+                                      scatter=bool(p["scatter"]), op=p["op"], weld=bool(p.get("_blocks"))))
     return instances, warnings
 
 
@@ -299,11 +315,14 @@ def estimate(spec, seed, edge):
 
 
 def plan(request):
-    spec = validate(request["procedural"])
+    spec = D.prepare(validate(request["procedural"]))
     seed = int(request["seed"])
     budget = min(int(request["triangleBudget"]), HARD_TRIANGLE_LIMIT)
-    reserve = .82 if any(p["csg"] for p in spec["parts"]) else .94
+    # Headroom for booleans; the Blender edge-bevel tier (model_build) degrades to fit what is left.
+    csg = any(p["csg"] for p in spec["parts"])
+    reserve = .82 if csg else .94
     goal = budget * reserve
+    notes = D.fit_blocks(spec, goal, 0)
     span = max(spec["size"])
     lo, hi = span / 600, span / 5
     coarse, _ = estimate(spec, seed, hi)
@@ -319,11 +338,24 @@ def plan(request):
             else:
                 lo = mid
     edge = hi
+    # Micro relief spends what the silhouette, bevels and masonry leave (lowest priority tier).
+    used, _ = estimate(spec, seed, edge)
+    bases = world_bases(spec)
+    counts = {p["id"]: (p["scatter"]["count"] if p["scatter"] else len(copies_of(p, bases[p["id"]], None)[0])) for p in spec["parts"]}
+    notes += D.plan_relief(spec, goal - used, counts)
+    if any(p.get("_grid") for p in spec["parts"]) and estimate(spec, seed, edge)[0] > goal:
+        for p in spec["parts"]:
+            if p.pop("_grid", None):
+                p["noise"], p["_relief"] = None, 0.0
+        notes.append("micro relief skipped (triangle budget)")
     instances, warnings = build_instances(spec, seed, edge, True)
+    warnings = notes + warnings
     for inst in instances:
         if not inst.mesh.closed():
             raise ValueError("Model spec: part " + inst.part + " did not build a closed solid")
+    seated = D.seat(instances, spec, warnings) if spec["autoDetail"] or any(p.get("_surface") for p in spec["parts"]) else {}
     plan_ = Plan(spec, instances, edge, budget, warnings)
+    plan_.detail = detail_summary(spec, seated)
     # Floor pivot (and centred base): the lowest solid vertex rests on z = 0.
     pts = [v for i in plan_.solids() for v in i.mesh.verts]
     lo3 = [min(v[k] for v in pts) for k in range(3)]
@@ -339,6 +371,35 @@ def plan(request):
         if abs(built[k] - want) > max(.1 * want, .01):
             warnings.append("size %s: built %.3f m, spec says %.3f m" % (name, built[k], want))
     return plan_
+
+
+def detail_summary(spec, seated):
+    """Compact record of the automatic detail tiers for the review (audit.json review.detail)."""
+    out = {"auto": spec["autoDetail"], "bevels": {}, "blocks": {}, "relief": {}, "surfaceDetails": seated}
+    for p in spec["parts"]:
+        if p.get("_bevelAuto"):
+            out["bevels"][p["id"]] = round(p["bevel"], 4)
+        if p.get("_blocks"):
+            out["blocks"][p["id"]] = {k: round(v, 4) for k, v in p["_blocks"].items()}
+        if p.get("_relief"):
+            out["relief"][p["id"]] = round(p["_relief"], 4)
+    return out
+
+
+def edge_widths(spec):
+    """Per part: (Blender edge-bevel width, segments) for the hard edges the planner could not
+    round itself (CSG cuts, extrude corners, revolve/sweep/loft creases); None = skip."""
+    out = []
+    for p in spec["parts"]:
+        if not spec["autoDetail"] or p["op"] == "sdf" or p["csg"] in ("subtract", "intersect"):
+            out.append(None)
+            continue
+        d = p.get("_extent") or 0.0
+        if p.get("_blocks"):
+            d = min(d, p["_blocks"]["course"])
+        w = D.width_for(p["_finish"], d) if d > 0 else 0.0
+        out.append((w, D.BEVEL[p["_finish"]][3]) if w > 0 else None)
+    return out
 
 
 def surface_profile(material):

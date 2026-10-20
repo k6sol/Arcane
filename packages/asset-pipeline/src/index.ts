@@ -11,7 +11,7 @@ import { runBounded, workerEnvironment, type CommandOptions, type CommandResult,
 import { workerLaunchDirectory, workerFileArgument, workerDirectoryArgument } from './launch-paths.js';
 import { WorkerSupervision } from './worker-journal.js';
 import type { ProcessQueryHost, WorkerRole } from './worker-identity.js';
-import { normalizeRequest, readJson, record, sha256, UV_WORKER_SCRIPTS, validateAudit, validateManifestFiles, workerScripts } from './validation.js';
+import { MATERIAL_WORKER_SCRIPTS, normalizeRequest, readJson, record, sha256, usesMaterialLibrary, UV_WORKER_SCRIPTS, validateAudit, validateManifestFiles, workerScripts, workerSourcePath } from './validation.js';
 import { MODEL_WORKER_SCRIPTS } from './model-spec.js';
 import { AssetError } from './types.js';
 import { atomicAssetJson, AtomicJsonFailure } from './atomic-json.js';
@@ -90,7 +90,7 @@ async function atomicJson(directory: string, filename: string, value: unknown): 
 }
 const COLLECTION_FILENAMES = new Set(['asset.blend', 'blockout.blend', 'asset.glb', 'asset.fbx', 'collision.glb', 'asset-lod1.glb',
   'preview-hero.png', 'preview-side.png', 'audit.json', 'request.json', 'input.json', 'assembly.json',
-  'asset_worker.py', 'audit.py', 'probe.py', 'assembly.py', 'procedural.py', 'variation.py', 'textures.py', ...MODEL_WORKER_SCRIPTS, ...UV_WORKER_SCRIPTS]);
+  'asset_worker.py', 'audit.py', 'probe.py', 'assembly.py', 'procedural.py', 'variation.py', 'textures.py', ...MODEL_WORKER_SCRIPTS, ...UV_WORKER_SCRIPTS, ...MATERIAL_WORKER_SCRIPTS]);
 /** Only host-selected inventory filenames may appear in collection errors. */
 async function withArtifactFile<T>(name: string, action: () => Promise<T>): Promise<T> {
   try { return await action(); }
@@ -144,11 +144,11 @@ export class AssetPipeline {
   }
   private async script(name: string): Promise<string> {
     return withArtifactFile(name, async () => {
-      // variation.py is the workers/blender/variation package, copied into jobs as one flat module.
-      // uv_*.py are the workers/blender/uv engine modules, copied into jobs beside procedural.py.
-      // model_*.py are the workers/blender/grammar model spec compiler, copied flat for kind "spec".
-      const path = name === 'variation.py' ? join(this.workerRoot, 'variation', '__init__.py') : UV_WORKER_SCRIPTS.includes(name) ? artifactPath(join(this.workerRoot, 'uv'), name)
-        : MODEL_WORKER_SCRIPTS.includes(name) ? artifactPath(join(this.workerRoot, 'grammar'), name) : artifactPath(this.workerRoot, name); await regularFile(path, 256 * 1024); return realpath(path);
+      // Worker subpackages (workers/blender/uv, grammar, materials, variation) are copied into jobs flat
+      // beside asset_worker.py; a package __init__.py becomes <directory>.py (see WORKER_PACKAGES).
+      const [first, ...rest] = workerSourcePath(name);
+      const path = !rest.length ? artifactPath(this.workerRoot, name) : rest[0] === '__init__.py' ? join(artifactPath(this.workerRoot, first!), '__init__.py') : artifactPath(join(this.workerRoot, first!), rest[0]!);
+      await regularFile(path, 256 * 1024); return realpath(path);
     });
   }
   private discoveryOptions() {
@@ -275,6 +275,7 @@ export class AssetPipeline {
       if (request.procedural?.finish === 'natural' || request.procedural?.kind === 'spec') files.push(...UV_WORKER_SCRIPTS.map(name => [name, 'worker'] as [string, Artifact['role']]));
       if (request.procedural?.variant) files.push(['variation.py', 'worker']);
       if (request.procedural?.kind === 'spec') files.push(...MODEL_WORKER_SCRIPTS.map(name => [name, 'worker'] as [string, Artifact['role']]));
+      if (usesMaterialLibrary(request)) files.push(...MATERIAL_WORKER_SCRIPTS.map(name => [name, 'worker'] as [string, Artifact['role']]));
       if (audit.totals.lod1Triangles) files.push(['asset-lod1.glb', 'export']);
       for (const [name, role] of files) {
         remaining(end, signal);

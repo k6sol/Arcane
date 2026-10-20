@@ -3,7 +3,8 @@ import type { Vec3 } from './types.js';
 
 /** Declarative model spec ("part graph") for assets_procedural kind "spec": parts built by
  * spatial-math operators (box, cylinder, sphere, revolve, extrude, loft, sweep, sdf) with
- * transforms, symmetry, arrays, scatter, CSG, noise and up to three PBR material slots.
+ * transforms, symmetry, arrays, scatter, CSG, noise and up to three PBR material slots, plus the
+ * automatic detail controls (autoDetail, part surface/blocks, material library/glow).
  * Data only (numbers, enums, ids, point lists). The worker (workers/blender/grammar/model_spec.py)
  * enforces the same rules; this host copy rejects bad specs early with an actionable message.
  * Normalization is canonical: material defaults become explicit, every object is re-emitted
@@ -26,14 +27,14 @@ export const MODEL_FINISH_DEFAULTS: Readonly<Record<ModelFinish, readonly ['bark
 });
 export const MODEL_LIMITS = Object.freeze({ parts: 48, materials: 3, instances: 640, points: 64, sections: 32, prims: 24, coord: 50, size: [0.02, 40] as const,
   length: [0.0005, 40] as const, count: 64, scatter: 256, defaultTriangles: 8000 });
-export interface ModelMaterial { id: string; finish: ModelFinish; color: Vec3; roughness: number; metallic: number; wear: number; cavity: number }
+export interface ModelMaterial { id: string; finish: ModelFinish; color: Vec3; roughness: number; metallic: number; wear: number; cavity: number; library?: string; glow?: number; moss?: number; age?: number }
 export interface ModelSpec {
-  kind: 'spec'; finish?: 'natural' | 'flat'; size: Vec3; pivot?: 'base' | 'origin'; smoothAngle?: number;
+  kind: 'spec'; finish?: 'natural' | 'flat'; size: Vec3; pivot?: 'base' | 'origin'; smoothAngle?: number; autoDetail?: boolean; context?: string[];
   materials: ModelMaterial[]; parts: Record<string, unknown>[];
 }
 
 type R = Record<string, unknown>;
-const ID = /^[a-z][a-z0-9_]{0,23}$/, MATERIAL_ID = /^[a-z][a-z0-9]{0,15}$/;
+const ID = /^[a-z][a-z0-9_]{0,23}$/, MATERIAL_ID = /^[a-z][a-z0-9]{0,15}$/, LIBRARY = /^[a-z][a-z-]{1,31}$/;
 function fail(message: string): never { throw new AssetError('INPUT', 'Model spec: ' + message); }
 function fields(value: unknown, allowed: readonly string[], where: string): R {
   if (!value || typeof value !== 'object' || Array.isArray(value)) fail(where + ' must be an object');
@@ -149,7 +150,7 @@ function prim(value: unknown, where: string): R {
   return out(o);
 }
 
-const COMMON = ['id', 'op', 'material', 'at', 'rot', 'scale', 'parent', 'mirror', 'radial', 'array', 'scatter', 'csg', 'with', 'noise', 'smooth', 'detail', 'grain', 'segments'] as const;
+const COMMON = ['id', 'op', 'material', 'at', 'rot', 'scale', 'parent', 'mirror', 'radial', 'array', 'scatter', 'csg', 'with', 'noise', 'smooth', 'detail', 'grain', 'segments', 'surface', 'blocks'] as const;
 const OP_FIELDS: Record<typeof MODEL_OPS[number], readonly string[]> = {
   box: ['size', 'bevel'], cylinder: ['radius', 'radiusTop', 'height', 'bevel'], sphere: ['radius'], revolve: ['profile', 'curve', 'flutes', 'closed'],
   extrude: ['shape', 'height', 'bevel', 'inset'], loft: ['sections', 'curve'], sweep: ['path', 'shape', 'twist', 'taper'], sdf: ['shapes', 'resolution'],
@@ -216,6 +217,22 @@ function part(value: unknown, index: number, materials: string[]): R {
       ['align', num(s.align, 0, 1, where + '.scatter.align', true)], ['minUp', num(s.minUp, -1, 1, where + '.scatter.minUp', true)], ['scaleRange', range],
       ['yaw', num(s.yaw, 0, 360, where + '.scatter.yaw', true)], ['sink', num(s.sink, -5, 5, where + '.scatter.sink', true)], ['seed', int(s.seed, 0, 65535, where + '.scatter.seed', true)]]);
   }
+  // Automatic detail controls: `surface` marks a detail that must stand proud; `blocks` lays masonry courses on a box.
+  let surface: unknown;
+  if (p.surface !== undefined && p.surface !== null && typeof p.surface === 'object') {
+    const s = fields(p.surface, ['on', 'protrude'], where + '.surface');
+    if (s.on !== undefined && (typeof s.on !== 'string' || !ID.test(s.on))) fail(where + '.surface.on must name a part');
+    surface = out([['on', s.on], ['protrude', num(s.protrude, .0002, .5, where + '.surface.protrude', true)]]);
+  } else surface = bool(p.surface, where + '.surface');
+  let blocks: unknown;
+  if (p.blocks !== undefined && p.blocks !== null) {
+    if (op !== 'box') fail(where + '.blocks (masonry courses) needs a box part');
+    if (typeof p.blocks === 'object') {
+      const b = fields(p.blocks, ['course', 'length', 'mortar', 'depth'], where + '.blocks');
+      blocks = out([['course', num(b.course, .08, 2, where + '.blocks.course', true)], ['length', num(b.length, .1, 4, where + '.blocks.length', true)],
+        ['mortar', num(b.mortar, .002, .05, where + '.blocks.mortar', true)], ['depth', num(b.depth, .002, .05, where + '.blocks.depth', true)]]);
+    } else blocks = bool(p.blocks, where + '.blocks');
+  }
   const o: [string, unknown][] = [['id', p.id], ['op', op], ['material', p.material], ['at', vec(p.at, 3, -c, c, where + '.at', true)],
     ['rot', vec(p.rot, 3, -720, 720, where + '.rot', true)], ['scale', scale], ['parent', p.parent]];
   if (op === 'box') {
@@ -274,20 +291,33 @@ function part(value: unknown, index: number, materials: string[]): R {
   }
   o.push(['mirror', pick(p.mirror, MIRRORS, where + '.mirror', true)], ['radial', radial], ['array', array], ['scatter', scatter], ['csg', csg], ['with', p.with],
     ['noise', noise(p.noise, where + '.noise')], ['smooth', smooth], ['detail', num(p.detail, .1, 8, where + '.detail', true)],
-    ['grain', pick(p.grain, AXES, where + '.grain', true)], ['segments', int(p.segments, 3, 128, where + '.segments', true)]);
+    ['grain', pick(p.grain, AXES, where + '.grain', true)], ['segments', int(p.segments, 3, 128, where + '.segments', true)], ['surface', surface], ['blocks', blocks]);
   return out(o);
 }
 
 function material(value: unknown, index: number): ModelMaterial {
-  const where = `materials[${index}]`, m = fields(value, ['id', 'finish', 'color', 'roughness', 'metallic', 'wear', 'cavity'], where);
+  const where = `materials[${index}]`, m = fields(value, ['id', 'finish', 'color', 'roughness', 'metallic', 'wear', 'cavity', 'library', 'glow', 'moss', 'age'], where);
   if (typeof m.id !== 'string' || !MATERIAL_ID.test(m.id)) fail(where + '.id must be a lowercase id (a-z, 0-9; up to 16 characters)');
   const finish = pick(m.finish, MODEL_FINISHES, where + '.finish')!, [, rough, metal, wear, cavity, color] = MODEL_FINISH_DEFAULTS[finish];
   return { id: m.id, finish, color: (vec(m.color, 3, 0, 1, where + '.color', true) ?? [...color]) as Vec3, roughness: num(m.roughness, 0, 1, where + '.roughness', true) ?? rough,
-    metallic: num(m.metallic, 0, 1, where + '.metallic', true) ?? metal, wear: num(m.wear, 0, 1, where + '.wear', true) ?? wear, cavity: num(m.cavity, 0, 1, where + '.cavity', true) ?? cavity };
+    metallic: num(m.metallic, 0, 1, where + '.metallic', true) ?? metal, wear: num(m.wear, 0, 1, where + '.wear', true) ?? wear, cavity: num(m.cavity, 0, 1, where + '.cavity', true) ?? cavity,
+    // Optional: a material-library family name (falls back to the finish bake) and a glow (lit look + Neon/PointLight hint; the import has no emissive slot).
+    ...(m.library === undefined ? {} : { library: typeof m.library === 'string' && LIBRARY.test(m.library) ? m.library : fail(where + '.library must be a library material name such as stone-ashlar') }),
+    ...(m.glow === undefined ? {} : { glow: num(m.glow, 0, 10, where + '.glow')! }),
+    // Optional library weathering overrides; otherwise the worker infers them from spec.context (model_materials.py).
+    ...(m.moss === undefined ? {} : { moss: num(m.moss, 0, 1, where + '.moss')! }), ...(m.age === undefined ? {} : { age: num(m.age, 0, 1, where + '.age')! }) };
+}
+
+const CONTEXT_TAG = /^[a-z][a-z0-9-]{0,23}$/;
+/** Scene/theme tags (outdoor, ancient, swamp, snowy, new...) that steer the worker's material inference. */
+function context(value: unknown): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > 8 || !value.every(t => typeof t === 'string' && CONTEXT_TAG.test(t))) fail('context must be up to 8 lowercase tags such as outdoor or ancient');
+  return [...value] as string[];
 }
 
 export function normalizeModelSpec(value: unknown): ModelSpec {
-  const s = fields(value, ['kind', 'finish', 'size', 'materials', 'parts', 'pivot', 'smoothAngle'], 'spec');
+  const s = fields(value, ['kind', 'finish', 'size', 'materials', 'parts', 'pivot', 'smoothAngle', 'autoDetail', 'context'], 'spec');
   if (s.kind !== 'spec') fail('kind must be spec');
   const [lo, hi] = MODEL_LIMITS.size;
   const size = vec(s.size, 3, lo, hi, 'size') as Vec3;
@@ -299,7 +329,7 @@ export function normalizeModelSpec(value: unknown): ModelSpec {
   for (const p of parts) { if (by.has(p.id as string)) fail('part ids must be unique (' + String(p.id) + ')'); by.set(p.id as string, p); }
   const cutter = (p: R) => p.csg === 'subtract' || p.csg === 'intersect';
   for (const p of parts) {
-    const refs: [unknown, string][] = [[p.parent, 'parent'], [(p.scatter as R | undefined)?.on, 'scatter.on'], ...((p.with as string[] | undefined) ?? []).map(w => [w, 'with'] as [unknown, string])];
+    const refs: [unknown, string][] = [[p.parent, 'parent'], [(p.scatter as R | undefined)?.on, 'scatter.on'], [(p.surface as R | undefined)?.on, 'surface.on'], ...((p.with as string[] | undefined) ?? []).map(w => [w, 'with'] as [unknown, string])];
     for (const [ref, label] of refs) {
       if (ref === undefined) continue;
       if (!by.has(ref as string)) fail(`part ${String(p.id)}.${label} names an unknown part`);
@@ -320,11 +350,12 @@ export function normalizeModelSpec(value: unknown): ModelSpec {
   const instances = parts.reduce((sum, p) => sum + (p.scatter ? (p.scatter as R).count as number : copies(p)), 0);
   if (instances > MODEL_LIMITS.instances) fail(`parts expand to more than ${MODEL_LIMITS.instances} instances; reduce arrays/scatter`);
   return out([['kind', 'spec'], ['finish', pick(s.finish, ['natural', 'flat'] as const, 'finish', true) ?? 'natural'], ['size', size], ['materials', materials], ['parts', parts],
-    ['pivot', pick(s.pivot, ['base', 'origin'] as const, 'pivot', true)], ['smoothAngle', num(s.smoothAngle, 0, 180, 'smoothAngle', true)]]) as unknown as ModelSpec;
+    ['pivot', pick(s.pivot, ['base', 'origin'] as const, 'pivot', true)], ['smoothAngle', num(s.smoothAngle, 0, 180, 'smoothAngle', true)],
+    ['autoDetail', bool(s.autoDetail, 'autoDetail')], ['context', context(s.context)]]) as unknown as ModelSpec;
 }
 
 /** One render mesh per material: the material ids are the source keys. */
 export const modelSourceKeys = (spec: ModelSpec): string[] => spec.materials.map(m => m.id);
 export const modelMaterialName = (id: string): string => id.slice(0, 1).toUpperCase() + id.slice(1);
 /** Compiler modules (workers/blender/grammar), copied flat into kind "spec" jobs after the shared worker files. */
-export const MODEL_WORKER_SCRIPTS: readonly string[] = ['model_spec.py', 'model_geom.py', 'model_sdf.py', 'model_plan.py', 'model_build.py', 'model_surface.py', 'model_review.py'];
+export const MODEL_WORKER_SCRIPTS: readonly string[] = ['model_spec.py', 'model_geom.py', 'model_detail.py', 'model_sdf.py', 'model_plan.py', 'model_build.py', 'model_surface.py', 'model_materials.py', 'model_review.py'];

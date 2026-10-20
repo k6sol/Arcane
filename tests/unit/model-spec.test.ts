@@ -6,7 +6,7 @@ import { audit } from '../../packages/asset-pipeline/testing/fixture.js';
 import { AssetError, normalizeRequest } from '../../packages/asset-pipeline/src/index.js';
 import { MODEL_WORKER_SCRIPTS, normalizeModelSpec } from '../../packages/asset-pipeline/src/model-spec.js';
 import { proceduralRenderSourceKeys, proceduralSurfaceMaterials, proceduralSurfacePattern } from '../../packages/asset-pipeline/src/procedural.js';
-import { UV_WORKER_SCRIPTS, validateAudit, workerScripts } from '../../packages/asset-pipeline/src/validation.js';
+import { MATERIAL_WORKER_SCRIPTS, UV_WORKER_SCRIPTS, validateAudit, workerScripts } from '../../packages/asset-pipeline/src/validation.js';
 import { assetInput, assetRequest } from '../../apps/mcp/src/asset-schemas.js';
 import { proceduralInput, proceduralStartBody, specReview } from '../../apps/mcp/src/procedural-tools.js';
 import type { DaemonClient } from '../../apps/mcp/src/daemon-client.js';
@@ -48,9 +48,12 @@ test('spec materials bake one 512 px PBR atlas each with explicit values and spe
   assert.equal(proceduralSurfacePattern(spec, 'Nope'), undefined);
   const flat = normalizeRequest({ ...input(fixtures[0]!), procedural: { ...clone(fixtures[0]!.spec), finish: 'flat' } });
   assert.deepEqual(proceduralSurfaceMaterials(flat.procedural!, flat.color), []);
-  // Compiler modules ship flat after the shared worker files, only for spec jobs.
+  // Compiler modules ship flat after the shared worker files, only for spec jobs; a natural spec also ships
+  // the material library (the worker infers a family for every unnamed slot), a flat one only when it names one.
   const scripts = workerScripts(sword);
-  assert.deepEqual(scripts.slice(-MODEL_WORKER_SCRIPTS.length), [...MODEL_WORKER_SCRIPTS]);
+  assert.deepEqual(scripts.slice(-MODEL_WORKER_SCRIPTS.length - MATERIAL_WORKER_SCRIPTS.length), [...MODEL_WORKER_SCRIPTS, ...MATERIAL_WORKER_SCRIPTS]);
+  assert.ok(MODEL_WORKER_SCRIPTS.includes('model_materials.py'));
+  assert.ok(!workerScripts(flat).some(name => MATERIAL_WORKER_SCRIPTS.includes(name)));
   assert.ok(UV_WORKER_SCRIPTS.every(name => scripts.includes(name)));
   assert.ok(!workerScripts(normalizeRequest({ template: 'procedural', name: 'oak', procedural: { kind: 'tree' } })).some(name => name.startsWith('model_')));
 });
@@ -80,6 +83,38 @@ test('invalid specs are refused before Blender with the worker validator message
     assert.throws(() => normalizeModelSpec(spec), refused(message), message);
   }
   assert.throws(() => normalizeRequest({ template: 'procedural', name: 'arch', procedural: { ...clone(base), variant: [1, 3] } }), /no variant family/);
+});
+
+test('detail controls normalize canonically and refuse misuse with worker messages', () => {
+  const arch = clone(fixtures.find(f => f.name === 'stone-arch')!.spec) as { materials: Record<string, unknown>[]; parts: Record<string, unknown>[]; autoDetail?: boolean };
+  arch.autoDetail = false;
+  arch.materials[0]!.library = 'stone-sandstone';
+  arch.materials[0]!.glow = 2;
+  arch.parts[0]!.blocks = { course: .3, mortar: .01 };
+  arch.parts.push({ id: 'stud', op: 'sphere', material: 'granite', radius: .02, at: [0, -.32, 1], surface: { on: 'wall', protrude: .01 } });
+  const spec = normalizeModelSpec(arch);
+  assert.equal(spec.autoDetail, false);
+  assert.deepEqual(Object.keys(spec.materials[0]!), ['id', 'finish', 'color', 'roughness', 'metallic', 'wear', 'cavity', 'library', 'glow']);
+  assert.deepEqual(spec.parts[0]!.blocks, { course: .3, mortar: .01 });
+  assert.deepEqual(spec.parts.at(-1)!.surface, { on: 'wall', protrude: .01 });
+  assert.deepEqual(normalizeModelSpec(JSON.parse(JSON.stringify(spec))), spec);
+  for (const [mutate, message] of [
+    [(s: typeof arch) => { s.parts[5]!.blocks = true; }, 'blocks (masonry courses) needs a box part'],
+    [(s: typeof arch) => { s.materials[0]!.library = 'Stone Ashlar'; }, 'library must be a library material name'],
+    [(s: typeof arch) => { s.materials[0]!.glow = 11; }, 'glow must be a number in 0..10'],
+    [(s: typeof arch) => { s.parts.at(-1)!.surface = { on: 'ghost' }; }, 'surface.on names an unknown part'],
+    [(s: typeof arch) => { s.parts[0]!.surface = 'yes'; }, 'surface must be true or false'],
+  ] as [(s: typeof arch) => void, string][]) {
+    const bad = clone(arch); mutate(bad);
+    assert.throws(() => normalizeModelSpec(bad), refused(message), message);
+  }
+  const lantern = fixtures.find(f => f.name === 'iron-lantern')!;
+  const glowing = clone(lantern.spec) as { materials: Record<string, unknown>[] };
+  glowing.materials[1]!.glow = 4;
+  assert.equal(proceduralInput.safeParse({ name: 'lantern', generator: { ...glowing, autoDetail: true } }).success, true);
+  // Glow is a lit look plus Neon/PointLight hints: the material contract stays non-emissive.
+  const rows = proceduralSurfaceMaterials(normalizeRequest({ ...input(lantern), procedural: glowing }).procedural!, [1, 1, 1]);
+  assert.ok(rows.every(r => r.emission === undefined));
 });
 
 test('assets_procedural advertises a compact spec generator that maps onto the host normalizer', () => {

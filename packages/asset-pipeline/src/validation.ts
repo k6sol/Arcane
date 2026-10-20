@@ -351,11 +351,35 @@ export function validateUvQuality(value: unknown, role: unknown, meshIndex: numb
 }
 /** General UV engine modules (workers/blender/uv), bundled flat for natural-finish and model-spec jobs. */
 export const UV_WORKER_SCRIPTS: readonly string[] = ['uv_engine.py', 'uv_metrics.py', 'uv_stage.py'];
+/** Procedural PBR material library modules (workers/blender/materials), bundled flat for library materials. */
+export const MATERIAL_WORKER_SCRIPTS: readonly string[] = ['mat_noise.py', 'mat_core.py', 'mat_families.py', 'mat_metrics.py', 'mat_bake.py', 'mat_library.py', 'mat_blender.py'];
+/** Worker subpackages: every module of workers/blender/<directory> is staged flat beside asset_worker.py
+ * in a job (the worker puts the directories on sys.path in the repository). A directory holding one
+ * package __init__.py is staged as <directory>.py. tests/unit/worker-modules.test.ts holds these lists
+ * equal to the directories, so a new worker module or subpackage cannot be left out of jobs. */
+export const WORKER_PACKAGES: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  uv: UV_WORKER_SCRIPTS, grammar: MODEL_WORKER_SCRIPTS, materials: MATERIAL_WORKER_SCRIPTS, variation: ['variation.py'] });
+/** Repository path segments (under workers/blender) of a bundled worker file name. */
+export function workerSourcePath(name: string): string[] {
+  for (const [directory, names] of Object.entries(WORKER_PACKAGES)) {
+    if (names.includes(name)) return name === directory + '.py' ? [directory, '__init__.py'] : [directory, name];
+  }
+  return [name];
+}
+/** Library materials (materials/mat_library) are requested by name on a recipe material; a natural-finish
+ * model spec always may use them (the worker infers a family for unnamed slots), so the host stages them. */
+export function usesMaterialLibrary(request: AssetRequest): boolean {
+  const named = (materials: unknown) => Array.isArray(materials) && materials.some(material =>
+    !!material && typeof material === 'object' && (material as { library?: unknown }).library !== undefined);
+  const procedural = request.procedural as { kind?: string; finish?: string; materials?: unknown } | undefined;
+  return named(request.recipe?.materials) || (procedural?.kind === 'spec' && (procedural.finish !== 'flat' || named(procedural.materials)));
+}
 /** Bundled worker files hashed into a job's template digest, in fixed order. */
 export function workerScripts(request: AssetRequest): string[] {
   return ['asset_worker.py', 'audit.py', 'probe.py', ...(request.recipe ? ['assembly.py'] : []), ...(request.procedural ? ['procedural.py'] : []), ...(request.procedural?.variant ? ['variation.py'] : []),
     ...(request.recipe?.materials.some(material => material.surface) || request.procedural?.finish === 'natural' ? ['textures.py'] : []),
-    ...(request.procedural?.finish === 'natural' || request.procedural?.kind === 'spec' ? UV_WORKER_SCRIPTS : []), ...(request.procedural?.kind === 'spec' ? MODEL_WORKER_SCRIPTS : [])];
+    ...(request.procedural?.finish === 'natural' || request.procedural?.kind === 'spec' ? UV_WORKER_SCRIPTS : []), ...(request.procedural?.kind === 'spec' ? MODEL_WORKER_SCRIPTS : []),
+    ...(usesMaterialLibrary(request) ? MATERIAL_WORKER_SCRIPTS : [])];
 }
 function validateGeneratedSurface(value: unknown, wanted: AssemblyMaterial, pattern?: string): void {
   const surface = record(value, 'generated procedural surface'), expected = { ...wanted.surface! };
@@ -444,8 +468,8 @@ export async function validateManifestFiles(directory: string, value: unknown): 
   if (coordinates.units !== 'meters' || coordinates.sceneUp !== 'Z' || coordinates.glbUp !== 'Y' || coordinates.fbxUp !== 'Y' || coordinates.pivot !== 'floor' || coordinates.robloxScaleVerified !== false) throw new AssetError('MANIFEST', 'Invalid coordinate-system evidence.');
   if (!Array.isArray(m.limitations) || m.limitations.length > 32 || m.limitations.some(line => typeof line !== 'string' || line.length > 2048)) throw new AssetError('MANIFEST', 'Invalid limitations.');
   const request = normalizeRequest(m.request), audit = validateAudit(m.validation, request, m.schemaVersion);
-  if (!Array.isArray(m.artifacts) || m.artifacts.length < 10 || m.artifacts.length > 32) throw new AssetError('MANIFEST', 'Invalid artifact list.');
-  const roles: Record<string, string> = { 'asset.blend': 'scene', 'blockout.blend': 'checkpoint', 'asset.glb': 'export', 'asset.fbx': 'export', 'collision.glb': 'export', 'asset-lod1.glb': 'export', 'preview-hero.png': 'preview', 'preview-side.png': 'preview', 'audit.json': 'audit', 'request.json': 'request', 'asset_worker.py': 'worker', 'audit.py': 'worker', 'probe.py': 'worker', 'assembly.py': 'worker', 'procedural.py': 'worker', ...Object.fromEntries(MODEL_WORKER_SCRIPTS.map(name => [name, 'worker'])), 'variation.py': 'worker', 'textures.py': 'worker', 'uv_engine.py': 'worker', 'uv_metrics.py': 'worker', 'uv_stage.py': 'worker', 'input.json': 'request', 'assembly.json': 'audit' };
+  if (!Array.isArray(m.artifacts) || m.artifacts.length < 10 || m.artifacts.length > 64) throw new AssetError('MANIFEST', 'Invalid artifact list.');
+  const roles: Record<string, string> = { 'asset.blend': 'scene', 'blockout.blend': 'checkpoint', 'asset.glb': 'export', 'asset.fbx': 'export', 'collision.glb': 'export', 'asset-lod1.glb': 'export', 'preview-hero.png': 'preview', 'preview-side.png': 'preview', 'audit.json': 'audit', 'request.json': 'request', 'asset_worker.py': 'worker', 'audit.py': 'worker', 'probe.py': 'worker', 'assembly.py': 'worker', 'procedural.py': 'worker', ...Object.fromEntries(MODEL_WORKER_SCRIPTS.map(name => [name, 'worker'])), 'variation.py': 'worker', 'textures.py': 'worker', ...Object.fromEntries([...UV_WORKER_SCRIPTS, ...MATERIAL_WORKER_SCRIPTS].map(name => [name, 'worker'])), 'input.json': 'request', 'assembly.json': 'audit' };
   if (typeof m.createdAt !== 'string' || !Number.isFinite(Date.parse(m.createdAt))) throw new AssetError('MANIFEST', 'Invalid manifest timestamp.');
   const names = new Set<string>(), hashes = new Map<string, string>();
   let totalBytes = 0;
@@ -469,7 +493,7 @@ export async function validateManifestFiles(directory: string, value: unknown): 
     } catch (error) { artifactFailure(error, name); }
   }
   if ((request.recipe?.materials.some(material => material.surface) || request.procedural?.finish === 'natural') && !names.has('textures.py')) throw new AssetError('MANIFEST', 'Generated surface worker artifact is missing.');
-  for (const required of ['asset.blend', 'blockout.blend', 'asset.glb', 'asset.fbx', 'collision.glb', 'preview-hero.png', 'preview-side.png', 'audit.json', 'request.json', 'asset_worker.py', 'audit.py', 'probe.py', ...(audit.totals.lod1Triangles ? ['asset-lod1.glb'] : []), ...(request.recipe ? ['assembly.py', 'assembly.json', 'input.json'] : []), ...(request.procedural ? ['procedural.py', 'input.json'] : []), ...(request.procedural?.variant ? ['variation.py'] : []), ...(request.procedural?.kind === 'spec' ? MODEL_WORKER_SCRIPTS : [])]) {
+  for (const required of ['asset.blend', 'blockout.blend', 'asset.glb', 'asset.fbx', 'collision.glb', 'preview-hero.png', 'preview-side.png', 'audit.json', 'request.json', 'asset_worker.py', 'audit.py', 'probe.py', ...(audit.totals.lod1Triangles ? ['asset-lod1.glb'] : []), ...(request.recipe ? ['assembly.py', 'assembly.json', 'input.json'] : []), ...(request.procedural ? ['procedural.py', 'input.json'] : []), ...(request.procedural?.variant ? ['variation.py'] : []), ...(request.procedural?.kind === 'spec' ? MODEL_WORKER_SCRIPTS : []), ...(usesMaterialLibrary(request) ? MATERIAL_WORKER_SCRIPTS : [])]) {
     if (!names.has(required)) throw new AssetError('MANIFEST', 'Required artifact is missing: ' + required);
   }
   // Natural assets generated before the UV engine bundled no uv_*.py modules.

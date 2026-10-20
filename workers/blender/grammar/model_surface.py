@@ -6,7 +6,14 @@ rasterisation; the finish (wood grain along each part's grain axis, stone, metal
 fabric, ceramic, plaster, plastic, glass) is evaluated in object space with seeded NumPy
 value noise, and two masks weather it:
 - edge wear from local convexity (normals of nearby surface points diverge),
-- cavity from short-range ambient occlusion rays (crevices, contact seams).
+- cavity from short-range ambient occlusion rays (crevices, contact seams),
+- up-facing grime: dust settles on faces that look up, most in their occluded corners.
+Glass is opaque-stylised (Roblox imports no BLEND): a dark tint, a bright rim on convex edges and
+soft diagonal specular streaks; `glow` > 0 adds a constant emission (lantern panes, windows).
+Every material is baked by a workers/blender/materials library family over the same UV0 atlas,
+under the same texture contract: the family named in `library`, else one inferred from the ids,
+context tags and geometry (model_materials; reported in review.materials). Glass, plastic,
+`library: "none"` and a missing or failing library use the finish bake below.
 Outputs follow the shared texture contract (textures.surface_evidence): T_<Id>_BaseColor
 (sRGB), T_<Id>_Normal (OpenGL tangent space) and T_<Id>_MetallicRoughness (G roughness,
 B metallic), packed, REPEAT/Linear, bound to UV0. Deterministic for the request seed.
@@ -193,6 +200,14 @@ def finish_layers(np, finish, local, world, grain, inst_seed, seed, n):
     return np.stack([tone, tone, tone], -1), .00005 * soft, .03 * soft, ones
 
 
+# finish -> share of the material's cavity amount that settles as up-facing grime
+GRIME = {"wood": .55, "stone": .6, "metal": .45, "plaster": .6, "ceramic": .3, "leather": .3, "fabric": .4, "plastic": .3, "glass": .35}
+DUST = (.2, .18, .15)
+# finish -> ground-line darkening share, and piece-to-piece tone spread (blocks, staves, copies)
+GROUND = {"wood": .8, "stone": .9, "metal": .5, "plaster": .9, "ceramic": .4, "leather": .4, "fabric": .5, "plastic": .3, "glass": 0.0}
+PIECE_TONE = {"wood": .3, "stone": .22, "metal": .05, "plaster": .06, "ceramic": .04, "leather": .08, "fabric": .08, "plastic": .03, "glass": 0.0}
+MUD = (.07, .06, .045)
+
 WEAR = {
     # finish -> (edge colour lift, edge roughness shift, cavity darkening, cavity roughness shift)
     "wood": ((1.32, 1.28, 1.2), .06, .5, .12), "stone": ((1.22, 1.2, 1.17), -.04, .45, .06),
@@ -268,6 +283,12 @@ def author(request, directory, objects, state):
     mats = {m["id"]: m for m in spec["materials"]}
     inv = [Matrix([list(r) for r in i.matrix]).inverted_safe() for i in plan.instances]
     grains = np.array([i.grain for i in plan.instances], np.int64)
+    by_part = {p["id"]: p for p in spec["parts"]}
+    # Revolved wood with flutes reads as staves: the seams split the tone per stave.
+    staves_of = np.array([(by_part[i.part]["flutes"] or {}).get("count", 0) if by_part[i.part]["op"] == "revolve" and by_part[i.part]["_finish"] == "wood" else 0
+                          for i in plan.instances], np.int64)
+    floor_z = min(v.co.z for obj in objects for v in obj.data.vertices)
+    top_z = max(v.co.z for obj in objects for v in obj.data.vertices)
     # One BVH over every material: wear and occlusion see neighbouring parts (contact seams).
     verts, polys = [], []
     for obj in objects:
@@ -280,6 +301,13 @@ def author(request, directory, objects, state):
     size_hint = float(np.max(hi - lo))
     info = state["info"]
     info.setdefault("surfaces", {})
+    # Material choice: explicit library families win; other slots get an inferred family and
+    # context weathering (model_materials), reported in review.materials so it can be overridden.
+    from model_materials import infer
+    masonry = {p["material"] for p in spec["parts"] if p.get("_blocks")}
+    inferred = infer(spec, request.get("procedural"), request.get("name", ""), masonry)
+    info["materials"] = inferred
+    choice = {e["material"]: e for e in inferred["materials"]}
     for obj in objects:
         mid = obj["arcane_source_key"]
         m = mats[mid]
@@ -301,6 +329,10 @@ def author(request, directory, objects, state):
         poly_inst = np.zeros(len(me.polygons), np.int64)
         if inst_attr is not None:
             inst_attr.data.foreach_get("value", poly_inst)
+        tone_attr = me.attributes.get("arcane_tone")
+        poly_tone = np.zeros(len(me.polygons), np.int64)
+        if tone_attr is not None:
+            tone_attr.data.foreach_get("value", poly_tone)
         fid, bary = raster(np, tri_uv * size, size)
         covered = fid >= 0
         f = np.where(covered, fid, 0)
@@ -318,6 +350,33 @@ def author(request, directory, objects, state):
         local = np.einsum("hwij,hwj->hwi", mi[..., :3, :3], pos) + mi[..., :3, 3]
         grain = grains[inst]
         mult, height, rough_shift, _ = finish_layers(np, m["finish"], local.astype(np.float32), pos.astype(np.float32), grain, inst.astype(np.float32), seed, size)
+        # Piece-to-piece tone: every stone block, stave and part copy is cut from different stock.
+        tone_id = np.where(covered, poly_tone[tri_poly[f]], 0)
+        staves = staves_of[inst]
+        sector = np.floor((np.arctan2(local[..., 1], local[..., 0]) / (2 * math.pi) + .5) * np.maximum(staves, 1) + .5).astype(np.int64) % np.maximum(staves, 1)
+        piece = np.where(tone_id > 0, tone_id * 7919, np.where(staves > 0, inst * 104729 + sector * 31 + 17, inst * 104729 + 3))
+        jitter = ((np.sin(piece.astype(np.float64) * 12.9898 + seed * .001) * 43758.5453) % 1.0 - .5).astype(np.float32)
+        jitter2 = ((np.sin(piece.astype(np.float64) * 78.233 + 2.1) * 12543.123) % 1.0 - .5).astype(np.float32)
+        spread = PIECE_TONE[m["finish"]]
+        tone = (1 + spread * jitter)[..., None] * np.stack([1 + .25 * spread * jitter2, np.ones_like(jitter2), 1 - .25 * spread * jitter2], -1)
+        mult = mult * tone
+        pick = choice.get(mid)
+        library = library_maps(m, pick, obj, bvh, size_hint, seed, info) if pick and pick["library"] else None
+        if library is not None:
+            # Library bake (no finish layers needed): keep the piece-to-piece tone of blocks,
+            # staves and part copies on top of the family's own variation.
+            if pick["source"] == "inferred":
+                base_c = library["baseColor"]
+                lin = np.where(base_c[..., :3] <= .04045, base_c[..., :3] / 12.92, np.power((np.clip(base_c[..., :3], 0, 1) + .055) / 1.055, 2.4))
+                library["baseColor"] = np.concatenate([srgb(np, lin * np.where(covered[..., None], tone, 1)), base_c[..., 3:]], -1).astype(np.float32)
+            write_material(bpy, directory, m, None, None, None, None, size, library)
+            ev = library.get("_evidence", {})
+            info["surfaces"][mid] = {"finish": m["finish"], "library": pick["library"], "source": pick["source"], "coverage": round(float(covered.mean()), 3),
+                                     **{k: v for k, v in (ev.get("coverage") or {}).items()}}
+            if m.get("glow"):
+                info["surfaces"][mid]["glow"] = m["glow"]
+                info.setdefault("glow", []).append(glow_hint(m, obj))
+            continue
         # Weathering masks on covered texels only (edge wear at 1/2, occlusion at 1/4 resolution:
         # both are broad), grown into the gutters, upsampled and softened.
         edge = edge_mask(np, bvh, pos[::2, ::2], nrm[::2, ::2], covered[::2, ::2], size_hint, Vector)
@@ -329,14 +388,30 @@ def author(request, directory, objects, state):
         breakup = fbm3(np, pos.astype(np.float32), .025, 3, seed + 61)
         wear = smoothstep(np, .18, .55, edge * (.75 + .9 * breakup)) * m["wear"]
         dirt = smoothstep(np, .12, .6, cav) * m["cavity"]
+        # Up-facing grime: dust on faces that look up, heavier in their occluded corners, broken up.
+        blotch = fbm3(np, pos.astype(np.float32), .12, 3, seed + 67)
+        up = smoothstep(np, .35, .95, nrm[..., 2])
+        grime = np.clip(up * (.35 + .65 * smoothstep(np, .05, .45, cav)) * smoothstep(np, -.35, .45, blotch) * (1 - wear), 0, 1) * m["cavity"] * GRIME[m["finish"]]
+        # Ground line: splash and damp darken the lowest band of anything standing on the floor.
+        reach = max(.04, min(.35, .14 * (top_z - floor_z)))
+        ground = (1 - smoothstep(np, 0, reach, pos[..., 2] - floor_z)) * (.6 + .4 * smoothstep(np, -.4, .4, blotch)) * m["cavity"] * GROUND[m["finish"]]
         lift, rough_edge, dark, rough_cav = WEAR[m["finish"]]
         base = np.array(m["color"], np.float32)
         albedo = base * mult
         worn = np.clip(base * np.array(lift, np.float32), 0, 1)
         albedo = albedo * (1 - wear[..., None]) + worn * mult * wear[..., None]
         albedo = albedo * (1 - dark * dirt[..., None])
-        rough = np.clip(m["roughness"] + rough_shift + rough_edge * wear + rough_cav * dirt, .02, 1)
-        metal = np.clip(m["metallic"] * (1 - .55 * dirt) * np.ones_like(rough), 0, 1)
+        albedo = albedo * (1 - .55 * grime[..., None]) + np.array(DUST, np.float32) * (.55 * grime[..., None])
+        albedo = albedo * (1 - .45 * ground[..., None]) + np.array(MUD, np.float32) * (.45 * ground[..., None])
+        rough = np.clip(m["roughness"] + rough_shift + rough_edge * wear + rough_cav * dirt + .18 * grime + .12 * ground, .02, 1)
+        metal = np.clip(m["metallic"] * (1 - .55 * dirt) * (1 - .6 * grime) * (1 - .5 * ground) * np.ones_like(rough), 0, 1)
+        if m["finish"] == "glass":
+            albedo, rough = stylised_glass(np, base, pos.astype(np.float32), nrm.astype(np.float32), edge, cav, seed)
+        if m.get("glow"):
+            # Lit look baked into the albedo (no emissive slot in the import): warm, bright, brightest mid-pane.
+            lit = np.clip(np.array(m["color"], np.float32) * 1.25 + .12, 0, 1)
+            k = min(1.0, .25 + .12 * m["glow"]) * (1 - .5 * smoothstep(np, .1, .6, cav))
+            albedo = albedo * (1 - k[..., None]) + lit * k[..., None]
         height = height - .0004 * wear * (breakup > .1)
         ppm = max(info.get("texelsPerMetre", 200.0), 1.0)
         texel = 1.0 / ppm
@@ -347,13 +422,82 @@ def author(request, directory, objects, state):
         nl = np.sqrt(gx * gx + gy * gy + 1)
         normal = np.stack([-gx / nl * .5 + .5, -gy / nl * .5 + .5, 1 / nl * .5 + .5], -1)
         empty = ~filled
-        albedo[empty] = base
+        albedo[empty] = albedo[covered].mean(0) if covered.any() else base
         rough[empty] = m["roughness"]
         normal[empty] = (.5, .5, 1.0)
         write_material(bpy, directory, m, albedo, normal, rough, metal, size)
         info["surfaces"][mid] = {"finish": m["finish"], "coverage": round(float(covered.mean()), 3),
                                  "edgeWear": round(float(((wear > .2) & covered).mean() / max(covered.mean(), 1e-6)), 3),
-                                 "cavity": round(float(((dirt > .2) & covered).mean() / max(covered.mean(), 1e-6)), 3)}
+                                 "cavity": round(float(((dirt > .2) & covered).mean() / max(covered.mean(), 1e-6)), 3),
+                                 "grime": round(float(((grime > .1) & covered).mean() / max(covered.mean(), 1e-6)), 3)}
+        if m.get("glow"):
+            info["surfaces"][mid]["glow"] = m["glow"]
+            info.setdefault("glow", []).append(glow_hint(m, obj))
+
+
+def stylised_glass(np, base, pos, nrm, edge, cav, seed):
+    """Opaque glass that still reads as glass: a dark tinted body, a bright rim along convex
+    edges (frame catch-light) and two soft diagonal specular streaks; low roughness."""
+    lum = float(base @ np.array([.2126, .7152, .0722], np.float32))
+    body = base * (.42 / max(lum, .05)) * .32 if lum > .1 else base * .9
+    depth = fbm3(np, pos, .3, 2, seed + 71)
+    diag = (pos[..., 0] * .7 - pos[..., 1] * .45 + pos[..., 2] * 1.0)
+    upright = 1 - smoothstep(np, .5, .9, np.abs(nrm[..., 2]))
+    streak = (smoothstep(np, .9, .99, np.cos(diag * 9.0 + depth * 1.2)) * .8 + smoothstep(np, .95, .995, np.cos(diag * 23.0 + 1.3)) * .45) * upright
+    rim = smoothstep(np, .15, .5, edge)
+    shade = 1 - .45 * smoothstep(np, .1, .5, cav)
+    albedo = body[None, None, :] * (.85 + .3 * depth[..., None]) * shade[..., None]
+    bright = np.clip(base * 1.35 + .28, 0, .95)
+    albedo = albedo + (bright - albedo) * np.clip(.6 * rim + .3 * streak * shade, 0, .75)[..., None]
+    rough = np.clip(.05 + .03 * depth - .03 * streak + .1 * rim, .02, .3)
+    return albedo.astype(np.float32), rough.astype(np.float32)
+
+
+def glow_hint(m, obj):
+    """Roblox imports have no emissive slot: a glowing material asks the scene for a Neon part
+    and a PointLight at its centre (Studio units: studs, brightness 0-10)."""
+    pts = [v.co for v in obj.data.vertices]
+    lo = [min(p[k] for p in pts) for k in range(3)]
+    hi = [max(p[k] for p in pts) for k in range(3)]
+    span = max(h - l for l, h in zip(lo, hi))
+    colour = [round(min(1.0, c * 1.25 + .12), 3) for c in m["color"]]
+    return {"material": m["id"], "neon": {"color": colour, "sizeMeters": [round(h - l, 3) for l, h in zip(lo, hi)]},
+            "pointLight": {"position": [round((l + h) / 2, 3) for l, h in zip(lo, hi)], "color": colour,
+                           "brightness": round(min(10.0, float(m["glow"])), 2), "rangeStuds": round(min(60.0, max(8.0, span * 3.57 * 12)), 1)}}
+
+
+def library_maps(m, pick, obj, bvh, span, seed, info):
+    """Bake the chosen library family (explicit or inferred, see model_materials) over obj's UV0
+    atlas (workers/blender/materials), or None when the library is not shipped, does not know the
+    name or fails (the finish bake is used)."""
+    name = pick["library"]
+    try:
+        import mat_bake
+        import mat_library
+    except ImportError:
+        info.setdefault("surfaceNotes", []).append("library %s unavailable; finish bake used" % name)
+        return None
+    if name not in mat_library.NAMES:
+        info.setdefault("surfaceNotes", []).append("library %s unknown; finish bake used" % name)
+        return None
+    params = {k: (tuple(v) if isinstance(v, list) else v) for k, v in pick["params"].items()}
+    known = mat_library.describe()[name]["params"]
+    params = {k: v for k, v in params.items() if k in known}
+    kw = {"frame": pick.get("frame", "box")}
+    if kw["frame"] == "axis":
+        pts = [v.co for v in obj.data.vertices]
+        kw["axis"] = tuple(pick.get("axis", (0, 0, 1)))
+        kw["centre"] = ((min(p.x for p in pts) + max(p.x for p in pts)) / 2, (min(p.y for p in pts) + max(p.y for p in pts)) / 2, 0.0)
+    try:
+        samples = mat_bake.object_samples(obj, RESOLUTION, "UVMap")
+        mat_bake.mesh_masks(samples, bvh, span)
+        result = mat_library.bake(name, samples, params, seed=int(seed) % (2 ** 31), **kw)
+    except Exception as error:  # A library failure never fails the asset: the finish bake remains.
+        info.setdefault("surfaceNotes", []).append("library %s failed (%s); finish bake used" % (name, type(error).__name__))
+        return None
+    maps = dict(result["maps"])
+    maps["_evidence"] = result["evidence"]
+    return maps
 
 
 def box_blur(np, a, r):
@@ -371,7 +515,7 @@ def srgb(np, x):
     return np.where(x <= .0031308, 12.92 * x, 1.055 * np.power(x, 1 / 2.4) - .055)
 
 
-def write_material(bpy, directory, m, albedo, normal, rough, metal, size):
+def write_material(bpy, directory, m, albedo, normal, rough, metal, size, library=None):
     from model_spec import FINISHES
     np = np_()
     mid = m["id"][:1].upper() + m["id"][1:]
@@ -380,13 +524,17 @@ def write_material(bpy, directory, m, albedo, normal, rough, metal, size):
     shader = next(node for node in nodes if node.type == "BSDF_PRINCIPLED")
     uvn = nodes.new("ShaderNodeUVMap")
     uvn.name, uvn.uv_map = "Arcane_UV0", "UVMap"
-    ones = np.ones(albedo.shape[:2] + (1,), np.float32)
-    zeros = np.zeros(albedo.shape[:2] + (1,), np.float32)
-    pixels = {
-        "BaseColor": np.concatenate([srgb(np, albedo), ones], -1),
-        "Normal": np.concatenate([normal, ones], -1),
-        "MetallicRoughness": np.concatenate([ones, rough[..., None], metal[..., None], ones], -1),
-    }
+    if library is None:
+        ones = np.ones(albedo.shape[:2] + (1,), np.float32)
+        pixels = {
+            "BaseColor": np.concatenate([srgb(np, albedo), ones], -1),
+            "Normal": np.concatenate([normal, ones], -1),
+            "MetallicRoughness": np.concatenate([ones, rough[..., None], metal[..., None], ones], -1),
+        }
+    else:
+        # Same image names, colour spaces and binding as the finish bake.
+        pixels = {"BaseColor": library["baseColor"], "Normal": library["normal"],
+                  "MetallicRoughness": library["metallicRoughness"]}  # R occlusion, G roughness, B metallic as the import expects
     roles = [("baseColor", "BaseColor", "sRGB"), ("normal", "Normal", "Non-Color"), ("metallicRoughness", "MetallicRoughness", "Non-Color")]
     textures = {}
     for role, suffix, space in roles:

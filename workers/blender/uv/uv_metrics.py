@@ -40,7 +40,7 @@ THRESHOLDS = {
     # Authored repeating tiles: tapering tubes and flares stretch a fixed number of repeats round a branch
     # and boolean junctions leave slivers, so moderate anisotropy is expected; texture smeared over a
     # quarter of the surface (sigma1/sigma2 > 3), a mean above 2.25:1 or folds fail. (Natural pine bark
-    # measures 0.91-0.99 / 10-14%: union fairing stretches the bark round its whorl junctions.)
+    # measures about 0.67-0.71 / 6-8% since the junction UV relaxation; 0.91-0.99 before it.)
     "tiled": {
         "fail": {"foldedFraction": .005, "angleDistortion": 1.25, "stretchedShare": .25},
         "warn": {"angleDistortion": .35, "angleDistortionP95": 2.0, "stretchedShare": .05, "densityCV": .5, "mirroredFaces": 0, "smoothSeamRatio": .3},
