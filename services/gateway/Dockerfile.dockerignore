@@ -1,0 +1,25 @@
+# Fixed source allowlist. Do not admit directories or wildcard exceptions: contexts may be sent to remote builders.
+**
+!services/gateway/package.json
+!services/gateway/src/account-access.ts
+!services/gateway/src/account-config.ts
+!services/gateway/src/account-provider.ts
+!services/gateway/src/account-routes.ts
+!services/gateway/src/account-session.ts
+!services/gateway/src/account-store.ts
+!services/gateway/src/account-ui.ts
+!services/gateway/src/auth.ts
+!services/gateway/src/billing.ts
+!services/gateway/src/config.ts
+!services/gateway/src/db.ts
+!services/gateway/src/diagnostics-config.ts
+!services/gateway/src/diagnostics.ts
+!services/gateway/src/limits.ts
+!services/gateway/src/mail.ts
+!services/gateway/src/main.ts
+!services/gateway/src/metering-store.ts
+!services/gateway/src/metering.ts
+!services/gateway/src/providers.ts
+!services/gateway/src/server.ts
+!services/gateway/src/stripe.ts
+!packages/diagnostics/src/report.ts

@@ -13,10 +13,12 @@ import {balanceOf} from './billing.ts';
 import {RateLimiter} from './limits.ts';
 import {createCustomerPortalSession} from './stripe.ts';
 import {accountPage} from './account-ui.ts';
+import type {Diagnostics} from './diagnostics.ts';
 
 interface Dependencies {
  config:GatewayConfig;db:DatabaseSync;now:()=>number;providerFetch?:typeof fetch;paymentFetch?:typeof fetch;
  checkout(account:Account,offer:unknown,key:string|null):Promise<{status:number;body:unknown}>;
+ diagnostics?:Diagnostics|null;
 }
 export function createAccountRoutes(deps:Dependencies){
  const {config,db,now}=deps;if(!config.accounts)return null;
@@ -79,6 +81,11 @@ export function createAccountRoutes(deps:Dependencies){
     }
     if(key==='GET /v1/account/session'){send(res,200,await view(current));return;}
     if(key==='GET /v1/admin/overview'){const principal=await authenticated(current);send(res,200,access.dashboard(principal,current.data.mfaAt,url.searchParams.get('after')??'',now()));return;}
+    if(key==='GET /v1/admin/diagnostics'){
+     const principal=await authenticated(current);access.requireOwner(principal,current.data.mfaAt,now());
+     if(!deps.diagnostics)throw new AccountError(503,'diagnostics_disabled','Hosted diagnostics are not configured.');
+     send(res,200,deps.diagnostics.list(url.searchParams));return;
+    }
     if(req.method!=='POST')throw new AccountError(404,'not_found','Not found.');sessions.csrf(req,current);const body=await json(req);
     if(key==='POST /v1/account/login'){
      const address=email(body.email);if(!loginRate.take(store.hash('login',address),now()))throw new AccountError(429,'rate_limited','Wait a moment before trying to sign in again.');

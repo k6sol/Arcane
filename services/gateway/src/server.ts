@@ -14,6 +14,9 @@ import { creditsFor, estimateInputTokens, estimateOutputTokens } from './meterin
 import { releaseStaleHolds, reserve, settle } from './metering-store.ts';
 import type { ChatMessage, StopReason, ToolSpec, UpstreamStreamer } from './providers.ts';
 import { createCheckoutSession, SignatureError, verifyWebhookSignature } from './stripe.ts';
+import {createDiagnostics} from './diagnostics.ts';
+import {AccountError} from './account-provider.ts';
+import {DIAGNOSTIC_MAX_BYTES} from '../../../packages/diagnostics/src/report.ts';
 
 export interface GatewayDeps {
   config: GatewayConfig; db: DatabaseSync; upstream: UpstreamStreamer; sendMail: MailSender;
@@ -134,7 +137,8 @@ export function createGateway(deps: GatewayDeps) {
     return { status: 200, body };
   }
 
-  const accountRoutes=createAccountRoutes({config,db,now,providerFetch:deps.accountFetch,paymentFetch:deps.fetch,checkout:startCheckout});
+  const diagnostics=createDiagnostics(config,db,now);
+  const accountRoutes=createAccountRoutes({config,db,now,providerFetch:deps.accountFetch,paymentFetch:deps.fetch,checkout:startCheckout,diagnostics});
 
 
   function checkoutPage(res: ServerResponse, url: URL): void {
@@ -309,6 +313,17 @@ export function createGateway(deps: GatewayDeps) {
     const key = (req.method ?? 'GET') + ' ' + url.pathname;
     switch (key) {
       case 'GET /v1/health': return json(res, 200, { service: 'arcane-billing', version: 1, gateway: true });
+      case 'POST /v1/diagnostics/events': {
+        if (!diagnostics) throw new HttpError(503, 'diagnostics_disabled', 'Hosted diagnostics are not configured.');
+        diagnostics.ipLimit(clientIp(req));
+        const account=requireAccount(req);
+        return json(res, 200, diagnostics.accept(account.id, await readJson(req, DIAGNOSTIC_MAX_BYTES)));
+      }
+      case 'GET /v1/diagnostics/identity': {
+        if (!diagnostics) throw new HttpError(503, 'diagnostics_disabled', 'Hosted diagnostics are not configured.');
+        diagnostics.ipLimit(clientIp(req));
+        return json(res, 200, {accountId:requireAccount(req).id});
+      }
       // Prices are credits per million tokens with the markup applied (what the account is charged), rounded up.
       case 'GET /v1/models': requireAccount(req); return json(res, 200, { models: config.models.map(model => ({ id: model.id, label: model.label,
         pricing: { inputPerMTok: creditsFor({ inputPerMTok: model.inputPerMTok, outputPerMTok: 0 }, 1_000_000, 0, config.markupBps),
@@ -360,7 +375,7 @@ export function createGateway(deps: GatewayDeps) {
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     try { await route(req, res); }
     catch (error) {
-      const known = error instanceof HttpError;
+      const known = error instanceof HttpError || error instanceof AccountError;
       if (!known) log('gateway error: ' + (error instanceof Error ? error.message : 'unknown'));
       if (res.headersSent) { res.destroy(); return; }
       json(res, known ? error.status : 500, { error: known ? error.code : 'internal', message: known ? error.message : 'Something went wrong.' },
@@ -368,7 +383,7 @@ export function createGateway(deps: GatewayDeps) {
     }
   }
 
-  const sweeper = setInterval(() => { try { sweepAuth(db, now()); db.prepare('DELETE FROM idempotency WHERE created_at < ?').run(now() - 86_400_000); } catch { /* next run */ } }, 3600_000);
+  const sweeper = setInterval(() => { try { sweepAuth(db, now()); db.prepare('DELETE FROM idempotency WHERE created_at < ?').run(now() - 86_400_000); diagnostics?.sweep(); } catch { /* next run */ } }, 3600_000);
   sweeper.unref();
   return { handle, close: () => clearInterval(sweeper), streams };
 }

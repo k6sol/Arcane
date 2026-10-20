@@ -1,4 +1,4 @@
-# Arcane gateway. Build from services/gateway:  docker build -t arcane-gateway services/gateway
+# Arcane gateway. Build from repository root: docker build -f services/gateway/Dockerfile -t arcane-gateway .
 # No npm install: the server uses only Node built-ins (node:http, node:sqlite, fetch) and runs TypeScript directly.
 FROM node:24-slim
 
@@ -6,9 +6,10 @@ ENV NODE_ENV=production \
     DATABASE_FILE=/data/gateway.sqlite \
     PORT=8787
 
-WORKDIR /app
-COPY package.json ./
-COPY src ./src
+WORKDIR /app/services/gateway
+COPY services/gateway/package.json ./
+COPY services/gateway/src ./src
+COPY packages/diagnostics/src/report.ts /app/packages/diagnostics/src/report.ts
 
 RUN mkdir -p /data && chown node:node /data
 USER node

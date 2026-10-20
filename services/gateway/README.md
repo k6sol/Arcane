@@ -9,6 +9,8 @@ One small service that does what the Arcane desktop app expects from your infras
   revocation. Owner access requires an authenticator and a recent second-factor check.
 - **Model gateway.** Streams chat from upstream model providers with your server-side API keys. Tokens are metered to
   credits with your price table and markup. A request the balance can't cover is refused.
+- **Diagnostics.** Optional encrypted, bounded error reports from approved devices. Owners inspect reports through an
+  authenticated API with a recent authenticator check. [Setup and report contract](../../docs/build/HOSTED_DIAGNOSTICS.md).
 
 It uses Node 24 built-ins only (`node:http`, `node:sqlite`, `fetch`). There is nothing to `npm install`, and Node runs
 the TypeScript sources directly. The API contract is in [`docs/ARCANE_CREDITS.md`](../../docs/ARCANE_CREDITS.md).
@@ -18,6 +20,9 @@ the TypeScript sources directly. The API contract is in [`docs/ARCANE_CREDITS.md
 | Method | Path | Auth | Purpose |
 | --- | --- | --- | --- |
 | GET | `/v1/health` | none | `{"service":"arcane-billing","version":1,"gateway":true}` |
+| POST | `/v1/diagnostics/events` | approved device bearer | Record one closed-schema failure idempotently |
+| GET | `/v1/diagnostics/identity` | approved device bearer | Account id for the local queue's origin/account binding |
+| GET | `/v1/admin/diagnostics` | owner + recent MFA | Inspect bounded reports; optional cursor/account/event filters |
 | GET | `/account` | browser session | Registration, login, security settings, device approval and billing |
 | GET | `/admin` | owner + recent MFA | Account administration |
 | GET | `/checkout?kind=&offer=` | browser | Continue in the authenticated account page |
@@ -134,7 +139,7 @@ Test-mode payments:
 ## Deploy (any container host)
 
 ```sh
-docker build -t arcane-gateway services/gateway
+docker build -f services/gateway/Dockerfile -t arcane-gateway .
 docker run -d --name arcane-gateway -p 8787:8787 --env-file /secure/arcane-gateway.env \
   -v arcane-gateway-data:/data --restart unless-stopped arcane-gateway
 ```
