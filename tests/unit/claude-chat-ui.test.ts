@@ -1911,10 +1911,15 @@ test('Edge: Claude activity lines, change card, queue chips, usage meter and the
     await composer.fill(''); await composer.pressSequentially('/model'); await composer.press('Enter');
     await page.locator('#codex-picker-summary').waitFor(); await page.keyboard.press('Escape');
     assert.equal(await page.evaluate(() => (window as any).fx.calls.length), 2, 'commands never send');
-    // A failed reply returns the queue to the message box.
+    // A failed reply retains its remaining row separately and never replays it into the composer.
+    const retainedComposer = await composer.inputValue();
     await page.evaluate(() => (window as any).fx.emit({ turnId: 'turn-2', conversationId: 'conv-spawn', type: 'done', ok: false, error: 'Claude stopped before finishing.', usage: null }));
-    await page.waitForFunction(() => (document.getElementById('codex-composer') as HTMLTextAreaElement).value.includes('Then add a checkpoint'));
-    assert.equal(await page.locator('#claude-chat-queue').isVisible(), false);
+    await page.waitForFunction(() => !(window as any).fx.claude.running() &&
+      document.querySelectorAll('#claude-chat-queue .queue-row[data-queue-state="paused"]').length === 1);
+    assert.deepEqual(await page.locator('#claude-chat-queue .queue-text').allInnerTexts(), ['Then add a checkpoint']);
+    assert.equal(await composer.inputValue(), retainedComposer, 'the original composer stays independent of the paused row');
+    assert.equal(await page.evaluate(() => (window as any).fx.calls.length), 2, 'a failed reply never sends the next row');
+    assert.equal(await page.locator('#claude-chat-queue').isVisible(), true);
     await page.setViewportSize({ width: 390, height: 844 });
     await page.locator('#codex-messages .chat-change-card').scrollIntoViewIfNeeded();
     await page.screenshot({ path: join(shots, 'activity-mobile-' + scheme + '.png') });
@@ -2615,6 +2620,31 @@ test('durability: opening a linked saved conversation changes nothing when its h
   b.histories.set('saved-conversation',{conversationId:'saved-conversation',messages:[{id:'saved-message',role:'user',text:'Saved prompt',at:'2026-10-20T18:00:00.000Z'}]});
   assert.equal(await f.chat.openRecordedConversation('saved-conversation'),true);assert.equal(f.chat.activeConversation(),'saved-conversation');
   assert.ok(f.bubbles().some(row=>row.text==='Saved prompt'));
+});
+
+for(const mode of ['active','whitespace','inactive'] as const)test('durability: a held saved-list omission preserves '+mode+' unsent text and its exact native conversation',{timeout:5000},async t=>{
+  let finish!:(value:unknown)=>void,started!:()=>void;
+  const listed=new Promise<void>(resolve=>started=resolve);
+  const b=fakeBridge({list:async()=>{started();return new Promise(resolve=>finish=resolve);}});
+  const row=(localId:string,threadId:string)=>({localId,title:'Saved chat',provider:'claude',threadId,sessionId:null,draft:'',modelId:'opus',effort:'low',tool:'all',previewOpen:false});
+  const native=nativeClaudePreferences({version:1,projectPath:nativeClaudeProject,provider:'claude',activeTabId:'draft-tab',tabs:[
+    row('draft-tab','draft-owner'),row('obsolete-tab','empty-obsolete'),
+  ]});
+  const f=mount(b.bridge,memory(),true,native.bridge);t.after(()=>f.chat.stop());
+  await f.queueReady;await f.chat.readyForRuntimeRecovery();
+  const refreshing=f.chat.refresh();await listed;
+  const draft=mode==='whitespace'?' \n\t  ':'  Keep raw held-list draft\n\n\u{1F9E9}  ';
+  f.input.value=draft; // Native/composer restoration can update the value without dispatching an input event.
+  if(mode==='inactive'){f.chat.deactivate();f.input.value='Other provider draft';}
+  finish({conversations:[]});await refreshing;
+  assert.deepEqual(f.chat.openTabs().map(tab=>({key:tab.key,conversationId:tab.conversationId,model:tab.model,effort:tab.effort})),[
+    {key:'draft-tab',conversationId:'draft-owner',model:'opus',effort:'low'},
+  ],'the draft keeps its native identity and model; only the empty obsolete tab closes');
+  assert.equal(f.input.value,mode==='inactive'?'Other provider draft':draft);assert.equal(f.chat.activeConversation(),'draft-owner');
+  await f.chat.prepareForRuntimeRecovery();
+  assert.equal((native.saved as {tabs:{draft:string}[]}).tabs[0]!.draft,draft);
+  assert.equal(f.input.value,mode==='inactive'?'Other provider draft':draft);assert.equal(sends(b).length,0);
+  if(mode==='inactive'){f.chat.activate();assert.equal(f.input.value,draft);assert.equal(sends(b).length,0);}
 });
 
 test('durability: a saved-list read started before Send cannot remove the newly accepted conversation',async t=>{

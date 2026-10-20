@@ -1191,9 +1191,10 @@ export class ClaudeChat {
       if (row) this.conversations.unshift(row);
     }
     if (!ok) return;
-    // Tabs restored from presentation storage close when their conversation no longer exists.
+    // A saved-list omission cannot discard unsent text or change its conversation identity.
+    this.saveDraft();
     const known = new Set(this.conversations.map(row => row.conversationId));
-    const gone = this.tabs.filter(tab => tab.conversationId !== null && !known.has(tab.conversationId) && tab.conversationId !== this.turn?.conversationId);
+    const gone = this.tabs.filter(tab => tab.conversationId !== null && !tab.draft.length && !known.has(tab.conversationId) && tab.conversationId !== this.turn?.conversationId);
     if (!gone.length) return;
     const activeGone = gone.some(tab => tab.key === this.activeKey);
     this.tabs = this.tabs.filter(tab => !gone.includes(tab));
