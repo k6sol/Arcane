@@ -53,7 +53,7 @@ export const scenarioPlanSchema = z.strictObject({ version: z.literal(1), runtim
     }
     budget += step.kind === 'hold-key' ? step.holdMs : 'withinMs' in step ? step.withinMs : step.kind === 'click-gui' ? 50 : 0;
   }
-  if (budget > plan.runtimeBudgetMs) reject('Scenario waits exceed the admitted runtime budget.');
+  if (budget > plan.runtimeBudgetMs) reject('Scenario waits total ' + budget + ' ms (each hold-key holdMs, each assert withinMs and 50 ms per click-gui) but runtimeBudgetMs is ' + plan.runtimeBudgetMs + ' (max ' + SCENARIO_LIMITS.runtimeMs + '). Raise runtimeBudgetMs, shorten withinMs/holdMs, or split the checks into two playtests.');
   if (Buffer.byteLength(JSON.stringify(plan)) > 16 * 1024) reject('Scenario exceeds its input budget.');
 });
 export type ScenarioPlan = z.infer<typeof scenarioPlanSchema>;

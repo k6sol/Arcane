@@ -325,13 +325,18 @@ export class StudioStore {
     mkdirSync(options.directory, { recursive: true });
     this.workspaceDirectory = resolve(options.directory);
     this.lockPath = join(options.directory, 'studio.lock');
+    // workspaceInUse marks only a lock whose owner process is alive (another open Arcane runtime), so the launcher can
+    // say so precisely. A live owner's lock is never signalled, taken over or removed.
+    const inUse = (message: string) => Object.assign(new ArcaneError('LOCKED', message), { workspaceInUse: true as const });
     if (existsSync(this.lockPath)) {
-      let stale = false;
+      let stale = false, live = false;
       try {
         const prior = JSON.parse(readFileSync(this.lockPath, 'utf8')) as { pid: number };
         if (!Number.isInteger(prior.pid) || prior.pid < 1) throw new Error('Invalid lock');
-        try { process.kill(prior.pid, 0); } catch (e) { stale = (e as NodeJS.ErrnoException).code === 'ESRCH'; }
+        try { process.kill(prior.pid, 0); live = true; }
+        catch (e) { const code = (e as NodeJS.ErrnoException).code; stale = code === 'ESRCH'; live = code === 'EPERM'; }
       } catch { /* Unknown lock state is not safe to remove automatically. */ }
+      if (live) throw inUse('This workspace daemon is already running.');
       if (!stale) throw new ArcaneError('LOCKED', 'This workspace daemon is already running, or its lock needs manual inspection.');
       unlinkSync(this.lockPath);
     }
@@ -1230,7 +1235,7 @@ export class StudioStore {
     // reuse its receipt, even after that reservation was safely released.
     if(this.#testOwners.has(sessionId)||this.hasTestSetupFence()
       ||this.db.prepare('SELECT 1 FROM studio_test_commands WHERE request_id=?').get(requestId))
-      throw new ArcaneError('BUSY','An owned playtest fences the Studio command queue until verified cleanup.');
+      throw new ArcaneError('BUSY','A playtest is running in Studio, so edits wait until it stops. Check playtest_status until it finishes, or stop it with playtest_cancel, then retry this command; nothing was changed.');
   }
   private checkTestReservation(record:TestReservationRecord,role:'setup'|'restore'):StudioSession {
     if(this.closed||this.#testOwners.get(record.sessionId)!==record.jobId||this.#testReservationRecords.get(record.sessionId)!==record)throw new ArcaneError('TEST_RESERVATION','The original test reservation is no longer active.');

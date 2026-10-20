@@ -61,3 +61,11 @@ test('actual offline preference access retires when the document, project or win
   const f=fixture({choice:0});await f.stop({code:0});assert.ok(f.preferences.get('workspace')());mutate(f);assert.equal(f.preferences.get('workspace')(),null);assert.equal(f.preferences.get('claude')(),null);
  }
 });
+test('a project taken by another open Arcane during recovery stays a retryable stop, never a takeover or kill',async()=>{
+ const f=fixture();f.context.startDaemon=async path=>{f.calls.push(['startDaemon',path]);throw Object.assign(new Error('Arcane is already open for this project in another window. Switch to it, or close it and try again.'),{code:'ARCANE_PROJECT_IN_USE'});};
+ const done=f.stop();await settle();await f.ack(true);await done;
+ assert.equal(f.recovery.status().state,'stopped');assert.match(f.recovery.status().message,/could not restart.*try again/i);
+ assert.equal(f.calls.filter(row=>row[0]==='startDaemon').length,1,'One attempt; no automatic loop against the other instance.');
+ assert.equal(f.calls.filter(row=>row[0]==='confirm').length,0,'The one automatic restart asks nothing; a later retry is up to the person.');assert.equal(f.calls.some(row=>row[0]==='loadWorkspace'),false);
+ assert.match(between("runtimeRecovery = require('./runtime-recovery.cjs').createRuntimeRecovery(",'runtimeRecovery.installIpc(ipcMain, rendererEvent);'),/start: async \(\) => \{ await startDaemon\(projectPath\); await startClaudeChat\(\); \}/);
+});

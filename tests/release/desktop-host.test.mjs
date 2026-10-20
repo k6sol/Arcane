@@ -430,7 +430,8 @@ test('source contract: bundled resource entry executes in owned writable cwd ove
   // stdout (which carries the workspace token) stays ignored; only stderr may reach the bounded state-root log.
   assert.match(mainSource, /stdio:\s*\['ignore',\s*'ignore',\s*stderrLog \? 'pipe' : 'ignore',\s*'ipc'\]/);
   assert.match(mainSource, /const stderrLog = policy\.daemonStderrLog\(stateRoot\)/);
-  assert.match(mainSource, /await stopDaemon\(\)[\s\S]*?await startDaemon\(path\)/);
+  // Project switch stops the old runtime before starting the next one (through the in-use question wrapper).
+  assert.match(mainSource, /await stopDaemon\(\)[\s\S]*?if \(!await startProjectRuntime\(path\)\) return;/);
   assert.match(productSource, /outputRoot:\s*join\(directory,\s*'assets'\)/);
   assert.match(productSource, /process\.send\(\{\s*type:\s*'arcane-ready'/);
 });
@@ -830,6 +831,78 @@ test('trusted dialogs: timeout, closing the window, owner close and dispose all 
   g.setOwner(null); await g.host.showMessageBox(g.owner, consent); assert.equal(g.natives.length, 3, 'closing/switching: native');
   const { isDecisionDialog } = requireHost('trusted-dialog.cjs');
   assert.equal(isDecisionDialog(consent), true); assert.equal(isDecisionDialog({ buttons: ['OK'] }), false); assert.equal(isDecisionDialog({}), false);
+});
+
+test('trusted dialogs: a standalone startup question opens the trusted page as its own taskbar window and answers once', async () => {
+  const f = trustedFixture(); f.setOwner(null);
+  const question = { type: 'warning', title: 'Arcane is already open', message: 'Arcane is already open for this project in another window.', buttons: ['Quit', 'Try again'], defaultId: 1, cancelId: 0 };
+  const pending = f.host.showStandalone(question); await nextTick();
+  assert.equal(f.windows.length, 1); const w = f.windows[0];
+  assert.equal(w.opts.parent, undefined); assert.equal(w.opts.modal, undefined); assert.equal(w.opts.skipTaskbar, false); assert.equal(w.opts.center, true);
+  assert.deepEqual([w.opts.webPreferences.sandbox, w.opts.webPreferences.contextIsolation, w.opts.webPreferences.nodeIntegration], [true, true, false]);
+  const request = await f.call(w.webContents, 'arcane:trusted-dialog-open');
+  assert.deepEqual([request.title, [...request.buttons], request.defaultId, request.cancelId], ['Arcane is already open', ['Quit', 'Try again'], 1, 0]);
+  assert.deepEqual(await f.call(w.webContents, 'arcane:trusted-dialog-ready', 200), { shown: true }); assert.equal(w.shown, true);
+  assert.deepEqual(await f.call(w.webContents, 'arcane:trusted-dialog-answer', { id: request.id, response: 1 }), { accepted: true });
+  assert.deepEqual(await pending, { response: 1, checkboxChecked: false }); assert.equal(f.natives.length, 0);
+  const closed = f.host.showStandalone(question); await nextTick(); f.windows[1].destroy();
+  assert.deepEqual(await closed, { response: 0, checkboxChecked: false }, 'closing the window = Quit (cancel)');
+  const g = trustedFixture({ loadFails: true }); g.setOwner(null);
+  assert.deepEqual(await g.host.showStandalone(question), { response: 0, native: true }, 'page failure: native question');
+  g.host.dispose(); await g.host.showStandalone(question); assert.equal(g.natives.length, 2, 'after dispose: native');
+});
+
+// ------------------------------------------------------------- another Arcane already open for the same project
+function projectInUseFixture({ answers = [], failures = 1, error = null, smoke = false } = {}) {
+  const begin = mainSource.indexOf('async function startProjectRuntime('), end = mainSource.indexOf('async function runtimeStopped(');
+  assert.ok(begin > 0 && end > begin);
+  const calls = [], inUse = () => Object.assign(new Error('Arcane is already open for this project in another window. Switch to it, or close it and try again.'), { code: 'ARCANE_PROJECT_IN_USE' });
+  let starts = 0;
+  const context = vm.createContext({ smoke, closing: false, appDialogs: { dispose: () => calls.push(['appDialogs.dispose']) }, providerSetup: { dispose() {} },
+    stopClaudeChat: () => Promise.resolve(),
+    startDaemon: async project => { calls.push(['startDaemon', project]); if (error) throw error; if (starts++ < failures) throw inUse(); },
+    stopDaemon: async () => { calls.push(['stopDaemon']); return true; },
+    trustedDialogs: { showStandalone: async config => { calls.push(['ask', config]); return { response: answers.shift() ?? 0 }; }, dispose: () => calls.push(['trustedDialogs.dispose']) },
+    nativeDialog: { showMessageBox: async () => assert.fail('The in-use question uses the trusted Arcane window, not a native box.') },
+    app: { exit: code => calls.push(['exit', code]) } });
+  vm.runInContext(mainSource.slice(begin, end) + '\nglobalThis.run = startProjectRuntime;', context);
+  return { calls, context, run: project => context.run(project) };
+}
+
+test('another open Arcane: the trusted question offers Try again (rechecks) and Quit, never a native box or takeover', async () => {
+  const f = projectInUseFixture({ answers: [1, 1], failures: 2 });
+  assert.equal(await f.run('C:\\Project'), true);
+  assert.deepEqual(f.calls.filter(row => row[0] === 'startDaemon').length, 3, 'each Try again rechecks from the start');
+  const ask = f.calls.find(row => row[0] === 'ask')[1];
+  assert.deepEqual([ask.title, ask.message, [...ask.buttons], ask.defaultId, ask.cancelId], ['Arcane is already open', 'Arcane is already open for this project in another window.', ['Quit', 'Try again'], 1, 0]);
+  assert.match(ask.detail, /Switch to it, or close it and try again/); assert.match(ask.detail, /never closes the other window or takes over its project/);
+  assert.equal(f.calls.some(row => row[0] === 'exit'), false);
+  const quit = projectInUseFixture({ answers: [0] });
+  assert.equal(await quit.run('C:\\Project'), false);
+  assert.deepEqual(quit.calls.map(row => row[0]), ['startDaemon', 'stopDaemon', 'ask', 'appDialogs.dispose', 'trustedDialogs.dispose', 'stopDaemon', 'exit']);
+  assert.deepEqual(quit.calls.at(-1), ['exit', 0], 'Quit is a clean exit, not a startup failure');
+});
+
+test('other startup failures and smoke runs keep their existing failure path without the in-use question', async () => {
+  const generic = Object.assign(new Error('The local runtime could not start.'), { code: 'ARCANE_STARTUP' });
+  const f = projectInUseFixture({ error: generic });
+  await assert.rejects(f.run('C:\\Project'), error => error === generic); assert.equal(f.calls.some(row => row[0] === 'ask'), false);
+  const s = projectInUseFixture({ smoke: true });
+  await assert.rejects(s.run('C:\\Project'), { code: 'ARCANE_PROJECT_IN_USE' }); assert.equal(s.calls.some(row => row[0] === 'ask'), false);
+});
+
+test('single-instance focus stays first; startup and project switch both use the in-use question; the lock is never taken', () => {
+  assert.match(mainSource, /const locked = !profilePreparationFailed && app\.requestSingleInstanceLock\(\)/);
+  assert.match(mainSource, /else if \(!locked\) app\.quit\(\);/);
+  assert.match(mainSource, /app\.on\('second-instance', \(\) => \{ if \(window\) \{ if \(window\.isMinimized\(\)\) window\.restore\(\); window\.show\(\); window\.focus\(\); \} \}\)/);
+  assert.match(mainSource, /if \(!await startProjectRuntime\(selected\)\) return;/);
+  assert.match(mainSource, /if \(!await startProjectRuntime\(path\)\) return;/);
+  assert.match(mainSource, /if \(await policy\.liveRuntimeOwner\(stateRoot\)\) throw startupFailure\('PROJECT_IN_USE'\);/);
+  const realPolicy = requireHost('policy.cjs');
+  assert.equal(realPolicy.STARTUP_FAILURE_CODES.includes('PROJECT_IN_USE'), true);
+  assert.equal(realPolicy.startupFailureMessage({ type: 'arcane-startup-failure', protocolVersion: 1, code: 'PROJECT_IN_USE' }), 'PROJECT_IN_USE');
+  const start = mainSource.slice(mainSource.indexOf('async function startProjectRuntime('), mainSource.indexOf('async function runtimeStopped('));
+  assert.doesNotMatch(start, /\.kill\(|unlink|studio\.lock|daemon\.json/);
 });
 
 test('in-app host delegates every decision to the trusted window; the renderer only ever receives one-button notices', async () => {

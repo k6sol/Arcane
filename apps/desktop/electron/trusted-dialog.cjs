@@ -8,7 +8,9 @@
 // tiny preload (trusted-dialog-preload.cjs) can only fetch this one request and return one button index for its id.
 // Answers are accepted only from that window's own webContents and only for its request id; a timeout, the window being
 // closed, its renderer going away or the owner closing all answer the cancel button. Without an owner window the native
-// message box is used. Import and construction have no native side effects.
+// message box is used, except for showStandalone: a startup question asked before any workspace window exists (for example
+// "Arcane is already open for this project") opens the same trusted page as its own top-level window.
+// Import and construction have no native side effects.
 const { randomUUID: nativeUUID } = require('node:crypto');
 const { join } = require('node:path');
 const { pathToFileURL } = require('node:url');
@@ -47,8 +49,9 @@ function createTrustedDialogs(options) {
     entry.resolve(Object.freeze({ response, checkboxChecked: false }));
   }
   function createWindow(owner, request) {
-    const window = new options.BrowserWindow({ parent: owner, modal: true, show: false, frame: false, width: LIMITS.width, height: 240, useContentSize: true,
-      resizable: false, minimizable: false, maximizable: false, fullscreenable: false, skipTaskbar: true, autoHideMenuBar: true, title: request.title,
+    // A standalone (ownerless) window stays reachable from the taskbar; an owned one is a modal child of the workspace.
+    const window = new options.BrowserWindow({ ...(owner ? { parent: owner, modal: true } : { center: true }), show: false, frame: false, width: LIMITS.width, height: 240, useContentSize: true,
+      resizable: false, minimizable: !owner, maximizable: false, fullscreenable: false, skipTaskbar: !!owner, autoHideMenuBar: true, title: request.title,
       backgroundColor: '#0d0d0f', webPreferences: { preload: join(directory, 'trusted-dialog-preload.cjs'), sandbox: true, contextIsolation: true,
         nodeIntegration: false, nodeIntegrationInWorker: false, nodeIntegrationInSubFrames: false, webSecurity: true, allowRunningInsecureContent: false,
         webviewTag: false, navigateOnDragDrop: false, spellcheck: false, devTools: false, disableDialogs: true, partition: 'arcane-trusted-dialog' } });
@@ -67,7 +70,7 @@ function createTrustedDialogs(options) {
   /** One question in its own trusted window; resolves with the validated choice, the cancel button, or null (could not show). */
   function present(owner, request) {
     return new Promise(resolve => {
-      if (disposed || !liveOwner(owner)) { resolve(null); return; }
+      if (disposed || (owner !== null && !liveOwner(owner))) { resolve(null); return; }
       const entry = { request, owner, window: null, contents: null, resolve, done: false, shown: false, timer: null, onOwnerClosed: () => settle(entry, request.cancelId) };
       try { entry.window = createWindow(owner, request); entry.contents = entry.window.webContents; }
       catch { entry.done = true; resolve(null); return; }
@@ -75,7 +78,7 @@ function createTrustedDialogs(options) {
       entry.timer = setTimeout(() => settle(entry, request.cancelId), timeoutMs);
       entry.window.on('closed', () => settle(entry, request.cancelId));
       for (const type of ['render-process-gone', 'destroyed']) entry.contents.on(type, () => settle(entry, request.cancelId));
-      owner.once?.('closed', entry.onOwnerClosed);
+      owner?.once?.('closed', entry.onOwnerClosed);
       Promise.resolve().then(() => entry.window.loadURL(pageUrl)).catch(() => {
         // The local page could not load: ask natively instead (never silently grant).
         if (entry.done) return;
@@ -98,6 +101,18 @@ function createTrustedDialogs(options) {
     let result;
     try { result = await run; } finally { queued--; }
     if (result === null) return disposed || !liveOwner(owner) ? Object.freeze({ response: request.cancelId, checkboxChecked: false }) : native().showMessageBox(owner, config);
+    return result;
+  }
+  /** A trusted question with no owner window (startup, before the workspace exists). Native only if the page cannot load. */
+  async function showStandalone(config) {
+    const request = dialogRequest(config, randomUUID());
+    if (disposed || !request || queued >= LIMITS.queued) return native().showMessageBox(config);
+    queued++;
+    const run = queue.then(() => present(null, request));
+    queue = run.catch(() => null);
+    let result;
+    try { result = await run; } finally { queued--; }
+    if (result === null) return disposed ? Object.freeze({ response: request.cancelId, checkboxChecked: false }) : native().showMessageBox(config);
     return result;
   }
   /** The exact pending entry for this sender (only the dialog window's own main frame). */
@@ -123,7 +138,7 @@ function createTrustedDialogs(options) {
       const window = entry.window;
       try {
         window.setContentSize?.(LIMITS.width, height);
-        const parent = options.getWindow(), bounds = parent && !parent.isDestroyed?.() ? parent.getBounds?.() : null, own = window.getBounds?.();
+        const parent = entry.owner ? options.getWindow() : null, bounds = parent && !parent.isDestroyed?.() ? parent.getBounds?.() : null, own = window.getBounds?.();
         if (bounds && own) window.setPosition?.(Math.round(bounds.x + (bounds.width - own.width) / 2), Math.round(bounds.y + Math.max(48, (bounds.height - own.height) / 3)));
         window.show(); window.focus(); entry.contents.focus?.();
       } catch { settle(entry, entry.request.cancelId); throw new Error('This dialog is unavailable.'); }
@@ -145,7 +160,7 @@ function createTrustedDialogs(options) {
     });
   }
   return Object.freeze({
-    showMessageBox, installIpc,
+    showMessageBox, showStandalone, installIpc,
     open: () => !!pending,
     dispose: () => { disposed = true; settle(pending, pending?.request.cancelId); },
   });

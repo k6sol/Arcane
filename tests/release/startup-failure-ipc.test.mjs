@@ -132,6 +132,20 @@ test('regression: an empty owner file from a crash during lock creation is recov
   await assert.rejects(access(path),{code:'ENOENT'});
 });
 
+test('actual daemon reports a workspace lock held by a live process as project in use and leaves the lock alone',async t=>{
+  // This live test process stands in for the other open Arcane runtime; it is never signalled beyond the existence probe.
+  const f=await fixture(t),lock=join(f.state,'studio.lock'),content=JSON.stringify({pid:process.pid,openedAt:new Date(0).toISOString()});
+  await writeFile(lock,content);
+  reported(await start(f),'PROJECT_IN_USE');
+  assert.equal(await readFile(lock,'utf8'),content);
+  await assert.rejects(access(join(f.state,'studio.sqlite')),{code:'ENOENT'});
+});
+
+test('an unverifiable workspace lock keeps the general startup failure',async t=>{
+  const f=await fixture(t),lock=join(f.state,'studio.lock');await writeFile(lock,'{"pid":"unknown"}');
+  reported(await start(f),'STARTUP_FAILED');assert.equal(await readFile(lock,'utf8'),'{"pid":"unknown"}');
+});
+
 test('foreign or other-project preparation owner files are still refused and retained unchanged',async t=>{
   for(const content of ['{"foreign":"lock"}',JSON.stringify({schemaVersion:1,projectId:'b'.repeat(64),writerId:randomUUID()})]){
     const f=await fixture(t),path=await preparationLock(f,content);

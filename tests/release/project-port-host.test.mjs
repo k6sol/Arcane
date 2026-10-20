@@ -212,6 +212,53 @@ test('only a daemon-proved bind conflict uses port-conflict guidance', async t =
   unadopted(h, f, record(45071));
 });
 
+test('a daemon-reported live workspace lock says Arcane is already open, not a port or generic failure', async t => {
+  const f = fixture(t); fs.writeFileSync(f.portFile, record(45071));
+  const h = host(f, exitAfter(failure('PROJECT_IN_USE')));
+  const error = await h.start().then(() => assert.fail('Expected startup failure.'), error => error);
+  assert.equal(error.code, 'ARCANE_PROJECT_IN_USE');
+  assert.equal(error.message, 'Arcane is already open for this project in another window. Switch to it, or close it and try again.');
+  assert.doesNotMatch(error.message, /local runtime could not start|port/);
+  unadopted(h, f, record(45071));
+});
+
+test('daemon.json naming a live process whose listener answers stops before spawning a contender', async t => {
+  const f = fixture(t); fs.writeFileSync(f.portFile, record(45071));
+  const requests = [], server = createServer((request, response) => { requests.push({ url: request.url, authorization: request.headers.authorization ?? null }); response.writeHead(307, { Location: '/studio' }); response.end(); });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); f.cleanup.push(() => new Promise(resolve => server.close(resolve)));
+  // The live parent of this test process stands in for the other open Arcane runtime (probed with signal 0 only).
+  const descriptor = path.join(f.stateRoot, 'daemon.json'), bytes = JSON.stringify({ origin: 'http://127.0.0.1:' + server.address().port, pid: process.ppid, protocolVersion: 1 }) + '\n';
+  fs.writeFileSync(descriptor, bytes);
+  const h = host(f);
+  await assert.rejects(h.start(), { code: 'ARCANE_PROJECT_IN_USE', message: /already open for this project in another window/ });
+  assert.equal(h.calls.length, 0, 'No second runtime is spawned against the held project.');
+  assert.deepEqual(requests, [{ url: '/', authorization: null }], 'One unauthenticated liveness request; no token is sent.');
+  assert.equal(fs.readFileSync(descriptor, 'utf8'), bytes); assert.equal(fs.readFileSync(f.portFile, 'utf8'), record(45071));
+  assert.equal(h.context.origin, ''); assert.equal(h.context.token, ''); assert.equal(h.context.projectSession, null);
+});
+
+test('a stale, foreign or silent daemon.json never blocks startup and is left in place', async t => {
+  const silent = createServer(() => {}), closedPort = await new Promise(resolve => { const s = createServer(); s.listen(0, '127.0.0.1', () => { const { port } = s.address(); s.close(() => resolve(port)); }); });
+  await new Promise(resolve => silent.listen(0, '127.0.0.1', resolve));
+  t.after(() => { silent.closeAllConnections?.(); return new Promise(resolve => silent.close(resolve)); });
+  const dead = 2 ** 31 - 2;
+  // Live process but nothing listening; this process itself; a dead pid; a non-loopback origin; another protocol; malformed.
+  for (const value of [{ origin: 'http://127.0.0.1:' + closedPort, pid: process.ppid, protocolVersion: 1 }, { origin: 'http://127.0.0.1:' + silent.address().port, pid: process.pid, protocolVersion: 1 },
+    { origin: 'http://127.0.0.1:' + closedPort, pid: dead, protocolVersion: 1 }, { origin: 'http://example.com:80', pid: process.ppid, protocolVersion: 1 },
+    { origin: 'http://127.0.0.1:' + closedPort, pid: process.ppid, protocolVersion: 2 }, '{broken']) {
+    const f = fixture(t), descriptor = path.join(f.stateRoot, 'daemon.json'), bytes = typeof value === 'string' ? value : JSON.stringify(value);
+    fs.writeFileSync(descriptor, bytes); const h = host(f); await h.start();
+    assert.equal(h.calls.length, 1, bytes); assert.equal(fs.readFileSync(descriptor, 'utf8'), bytes);
+  }
+  // A listener that never answers is bounded by the liveness timeout and is not treated as an open Arcane.
+  const f = fixture(t); fs.writeFileSync(path.join(f.stateRoot, 'daemon.json'), JSON.stringify({ origin: 'http://127.0.0.1:' + silent.address().port, pid: process.ppid, protocolVersion: 1 }));
+  assert.equal(await policy.liveRuntimeOwner(f.stateRoot, { selfPid: process.pid + 1, answers: origin => policy.loopbackAnswers(origin, 200) }), false);
+  // The process probe is signal 0 only; this process is never asked to stop.
+  const signals = []; assert.equal(await policy.liveRuntimeOwner(f.stateRoot, { selfPid: process.pid + 1, kill: (pid, signal) => { signals.push(signal); }, answers: async () => true }), true);
+  assert.deepEqual(signals, [0]);
+  assert.equal(await policy.liveRuntimeOwner(f.stateRoot, { selfPid: process.ppid, answers: async () => true }), false, 'The checking process itself is never "another Arcane".');
+});
+
 test('reported state, resource and generic failures map to their fixed guidance', async t => {
   for (const [code, text] of [['STATE_NEWER', /saved by a newer version of Arcane.*Open this project with that version or later/], ['STATE_UNSAFE', /could not safely verify this project's saved records/],
     ['RESOURCE_UNAVAILABLE', /application folder is incomplete or unavailable/], ['STARTUP_FAILED', /^The local runtime could not start\. Project records/]]) {

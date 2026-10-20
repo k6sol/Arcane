@@ -24,6 +24,8 @@ const witnessSchema=z.strictObject({placeId:z.number().int().nonnegative(),unive
 type Witness=z.infer<typeof witnessSchema>;
 export interface NativeTestConnection {client:Client;evidence:'native'|'fixture';witness(studioId:string,markerName:string,mode:'Edit'|'Play',signal:AbortSignal):Promise<Witness>;close():Promise<void>}
 interface Options {directory:string;store:StudioStore;pluginArtifactHash:string;connect?:()=>Promise<NativeTestConnection>;taskPort?:StudioTestTaskPort;
+  /** Trusted host proof that this process is the only possible journal writer (the project workspace lock). Never HTTP input. */
+  exclusiveWriter?:()=>boolean;
   /** Trusted fixture clock only; never request data and never accepted for a native connection. */
   fixtureScheduler?:Scheduler}
 export interface StudioTestView {id:string;targetName:string;actor:string;state:'needs_approval'|'running'|'complete'|'cancelled';display:Readonly<ConsentDisplay>;displayDigest:string;review:Readonly<TestReview>;evidence:'fixture'|'native';nativeAcceptance:false}
@@ -64,7 +66,7 @@ export async function createStudioTestService(options:Options){
   if(!hash.safeParse(options.pluginArtifactHash).success)rejected('INVALID_REQUEST');
   if(options.fixtureScheduler&&!options.connect)rejected('INVALID_REQUEST');
   await mkdir(options.directory,{recursive:true,mode:0o700});const root=await realpath(options.directory);
-  const ledger=await TestLedger.open(join(root,'ledger'),root);
+  const ledger=await TestLedger.open(join(root,'ledger'),root,options.exclusiveWriter?{exclusiveWriter:options.exclusiveWriter}:{});
   const captures=await createStudioTestCaptureStore(root).catch(async error=>{
     // Construction has not admitted a run. Close only the ledger we acquired;
     // retained capture evidence and any failed-close fence remain untouched.

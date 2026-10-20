@@ -665,3 +665,35 @@ test('a throwing switch reads as off', async t => {
   for (let index = 0; index < 8; index++) { t.mock.timers.tick(250); await flush(); }
   assert.equal(f.posts().length, 0);
 });
+
+test('a FENCED status read shows Repair playtest records; two trusted clicks post the human repair and resume', async t => {
+  const f = fixture(t, []);
+  let fenced = true;
+  f.handler(async call => {
+    if (call.path === '/v1/playtests/repair') { fenced = false; return Response.json({ repaired: true, retained: 'playtests-retained/ledger-x', message: 'ok' }); }
+    return fenced ? Response.json({ error: 'FENCED', message: 'paused' }, { status: 409 }) : Response.json({ jobs: [] });
+  });
+  await f.panel.refresh(); await f.panel.refresh(); await flush(); // the first call joins the mount-time read
+  assert.equal(f.root.hidden, false, 'The fence is visible even with no jobs.');
+  assert.match(f.root.textContent, /Playtests are paused/);
+  const repair = button(f, 'Repair playtest records');
+  repair.click(); await flush(); assert.equal(f.posts().length, 0, 'Untrusted clicks do nothing.');
+  repair.emit('click', true); await flush();
+  assert.equal(f.posts().length, 0, 'The first click only asks the person to confirm Studio is stopped.');
+  assert.match(repair.textContent, /Studio is stopped/);
+  repair.emit('click', true); await flush();
+  assert.equal(f.posts().length, 1);
+  assert.equal(f.posts()[0]!.path, '/v1/playtests/repair'); assert.deepEqual(f.posts()[0]!.body, { confirm: 'studio-in-edit-mode' });
+  await flush();
+  assert.match(f.root.textContent, /Playtest records repaired/);
+  assert.equal(repair.hidden, true);
+});
+
+test('other refusals keep the generic refresh notice and never offer repair', async t => {
+  const f = fixture(t, []);
+  f.handler(async () => Response.json({ error: 'UNAVAILABLE', message: 'x' }, { status: 503 }));
+  await f.panel.refresh(); await f.panel.refresh(); await flush();
+  assert.match(f.root.textContent, /Couldn’t refresh test status/);
+  const repair = f.root.all().find(element => element.tagName === 'BUTTON' && element.textContent === 'Repair playtest records');
+  assert.ok(!repair || repair.hidden);
+});

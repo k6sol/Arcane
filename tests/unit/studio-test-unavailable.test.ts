@@ -149,7 +149,7 @@ function refusal(reply: Reply, code: 'UNAVAILABLE' | 'FENCED', lab: Lab, root: s
   assert.equal(reply.status, code === 'FENCED' ? 409 : 503);
   assert.equal(reply.json.error, code);
   assert.deepEqual(Object.keys(reply.json).sort(), ['error', 'message'], 'A refusal cannot impersonate a job or completion.');
-  assert.match(String(reply.json.message), code === 'FENCED' ? /human.*reconcile.*restart/i : /repair.*plugin.*restart/i);
+  assert.match(String(reply.json.message), code === 'FENCED' ? /stop any running playtest.*Repair playtest records/i : /repair.*plugin.*restart/i);
   assert.equal(reply.headers['cache-control'], 'no-store');
   assert.equal(reply.headers['content-type'], 'application/json; charset=utf-8');
   assert.equal(reply.headers['x-content-type-options'], 'nosniff');
@@ -168,12 +168,15 @@ async function mountedRefusals(f: ReturnType<typeof fixture>, lab: Lab, code: 'U
   }
   refusal(await post(lab, 'approve', APPROVAL, lab.token, { Origin: lab.origin }), code, lab, f.root);
   const mcp = new DaemonClient({ url: lab.origin, token: lab.agentToken });
-  await assert.rejects(mcp.playtestStatus(undefined), error => error instanceof BridgeError && error.code === code && /restart/i.test(error.message));
+  const guidance = code === 'FENCED' ? /Repair playtest records/ : /restart/i;
+  await assert.rejects(mcp.playtestStatus(undefined), error => error instanceof BridgeError && error.code === code && guidance.test(error.message));
+  // Viewport capture shares the service: it names the same reason instead of a generic "unavailable".
+  refusal(await post(lab, 'viewport', { sessionId: f.pair.sessionId }), code, lab, f.root);
   assert.equal((await call(lab, { path: '/v1/studio/sessions' })).status, 200);
   assert.equal((await call(lab, { path: '/v1/codex/state', token: lab.token })).status, 200);
   const state = await call(lab, { path: '/v1/state', token: lab.token });
   assert.equal(state.status, 200); assert.equal(state.json.inferenceRuns, 0);
-  assert.ok((state.json.warnings as string[]).some(message => /restart/i.test(message)));
+  assert.ok((state.json.warnings as string[]).some(message => guidance.test(message)));
   assert.deepEqual(f.counts(), beforeCounts, 'Refused HTTP/MCP requests cannot write Studio commands or events.');
   assert.deepEqual(persistentFiles(f.root), beforeFiles, 'Refused requests cannot rewrite artifacts, locks, journals, or durable SQLite/WAL bytes.');
   f.noExecution();
@@ -315,4 +318,78 @@ test('offline borrowed service still receives only trusted actors and is never c
   const denied = await post(lab, 'approve', APPROVAL, lab.token, { Origin: lab.origin });
   assert.equal(denied.status, 503); assert.equal(denied.text.includes(PRIVATE), false); assert.equal(approvals, 1);
   await lab.close(); assert.equal(closes, 0); f.noExecution();
+});
+
+/** The desktop layout: the playtest state lives inside the project directory whose StudioStore holds the workspace lock. */
+function projectLayout(f: ReturnType<typeof fixture>) {
+  const stateDirectory = join(f.root, 'studio-fixture', 'connection-lab'), ledgerDirectory = join(stateDirectory, 'playtests', 'ledger');
+  mkdirSync(ledgerDirectory, { recursive: true });
+  return { stateDirectory, ledgerDirectory };
+}
+const unresolvedRecord = () => {
+  const event = { kind: 'admit', id: 'fixture-unresolved-run', at: 1, scopeDigest: 'a'.repeat(64), evidence: 'fixture', code: 'OK' };
+  const record = { seq: 1, previous: 'genesis', event };
+  return JSON.stringify({ ...record, hash: digest(record) });
+};
+
+test('an empty writer lock left by a killed daemon no longer fences playtests or viewport capture', async t => {
+  const f = fixture(t), layout = projectLayout(f);
+  // Exactly the retained state found after the unclean shutdown: a zero-byte lock and no records.
+  writeFileSync(join(layout.ledgerDirectory, 'writer.lock'), '');
+  const lab = await f.start({ stateDirectory: layout.stateDirectory });
+  for (const token of [lab.token, lab.agentToken]) {
+    const listed = await call(lab, { token }); assert.equal(listed.status, 200); assert.deepEqual(listed.json, { jobs: [] });
+  }
+  const state = await call(lab, { path: '/v1/state', token: lab.token });
+  assert.deepEqual(state.json.warnings, []);
+  const lock = JSON.parse(readFileSync(join(layout.ledgerDirectory, 'writer.lock'), 'utf8'));
+  assert.deepEqual(Object.keys(lock).sort(), ['schemaVersion', 'writerId'], 'The new lock names its owner shape.');
+  await lab.close();
+  assert.equal(existsSync(join(layout.ledgerDirectory, 'writer.lock')), false);
+  // A second unclean stop leaves the new JSON lock: it is recognised and recovered too.
+  writeFileSync(join(layout.ledgerDirectory, 'writer.lock'), JSON.stringify(lock));
+  const again = await f.start({ stateDirectory: layout.stateDirectory });
+  assert.equal((await call(again)).status, 200);
+  f.noExecution();
+});
+
+test('a foreign lock, unresolved run or lab outside the project lock stays fenced with the repair guidance', async t => {
+  for (const kind of ['foreign-lock', 'unresolved-run', 'no-project-lock'] as const) await t.test(kind, async sub => {
+    const f = fixture(sub);
+    const layout = kind === 'no-project-lock'
+      ? { stateDirectory: f.stateDirectory, ledgerDirectory: f.ledgerDirectory } : projectLayout(f);
+    mkdirSync(layout.ledgerDirectory, { recursive: true });
+    writeFileSync(join(layout.ledgerDirectory, 'writer.lock'), kind === 'foreign-lock' ? PRIVATE : '');
+    if (kind === 'unresolved-run') writeFileSync(join(layout.ledgerDirectory, '00001.json'), unresolvedRecord());
+    const before = persistentFiles(f.root);
+    const lab = await f.start({ stateDirectory: layout.stateDirectory });
+    refusal(await call(lab), 'FENCED', lab, f.root);
+    assert.deepEqual(persistentFiles(f.root), before, 'Unprovable state is never cleared automatically.');
+    f.noExecution();
+  });
+});
+
+test('Repair playtest records is human-only, keeps the earlier journal and restarts playtests', async t => {
+  const f = fixture(t), layout = projectLayout(f);
+  const recordBytes = unresolvedRecord();
+  writeFileSync(join(layout.ledgerDirectory, '00001.json'), recordBytes); writeFileSync(join(layout.ledgerDirectory, 'writer.lock'), '');
+  const lab = await f.start({ stateDirectory: layout.stateDirectory });
+  refusal(await call(lab), 'FENCED', lab, f.root);
+  const repair = (token: string, body: unknown, headers: Record<string, string> = { Origin: lab.origin }) =>
+    call(lab, { path: '/v1/playtests/repair', body: JSON.stringify(body), token, headers });
+  const confirm = { confirm: 'studio-in-edit-mode' };
+  assert.equal((await repair(lab.agentToken, confirm)).status, 401, 'The assistant cannot repair its own fence.');
+  assert.equal((await repair(lab.token, confirm, {})).status, 403, 'The desktop Origin is required.');
+  assert.equal((await repair(lab.token, {})).status, 400, 'The person must confirm Studio is back in Edit mode.');
+  assert.equal(existsSync(join(layout.ledgerDirectory, '00001.json')), true);
+  const repaired = await repair(lab.token, confirm);
+  assert.equal(repaired.status, 200); assert.equal(repaired.json.repaired, true);
+  const retainedRoot = join(layout.stateDirectory, 'playtests-retained'), [kept] = readdirSync(retainedRoot);
+  assert.ok(kept && String(repaired.json.retained).endsWith(kept));
+  assert.equal(readFileSync(join(retainedRoot, kept, '00001.json'), 'utf8'), recordBytes, 'The earlier evidence is kept byte for byte.');
+  assert.equal(existsSync(join(retainedRoot, kept, 'writer.lock')), true);
+  for (const token of [lab.token, lab.agentToken]) assert.deepEqual((await call(lab, { token })).json, { jobs: [] });
+  assert.deepEqual((await call(lab, { path: '/v1/state', token: lab.token })).json.warnings, []);
+  assert.equal((await repair(lab.token, confirm)).json.error, 'NOT_FENCED');
+  f.noExecution();
 });

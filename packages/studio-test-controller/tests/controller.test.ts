@@ -356,3 +356,111 @@ test('controller proof freshness cannot be weakened by a more permissive injecte
     proofMaxAgeMs: 5, humanVerifier: { async confirm() { return false; } } });
   await assert.rejects(controller.prepare(f.proposal), code('STALE_PROOF')); assert.equal(f.effects().length, 0);
 });
+
+test('abandoned writer lock is cleared only with the exclusive-writer proof and fully resolved records', async t => {
+  const f = await fixture(); t.after(f.close);
+  await f.approve(); const ledgerPath = join(f.root, 'host-ledger');
+  // Simulate a killed daemon: records stay, close() never ran, so the lock outlives its writer.
+  const records = f.ledger.records(); await f.ledger.close();
+  await writeFile(join(ledgerPath, 'writer.lock'), '');
+  await assert.rejects(TestLedger.open(ledgerPath, f.root), code('FENCED'), 'Without the host proof the lock still fences.');
+  await assert.rejects(TestLedger.open(ledgerPath, f.root, { exclusiveWriter: () => false }), code('FENCED'));
+  await assert.rejects(TestLedger.open(ledgerPath, f.root, { exclusiveWriter: () => { throw new Error('proof failed'); } }), code('FENCED'));
+  assert.equal(await TestLedger.fence(ledgerPath, f.root), 'live-writer');
+  const recovered = await TestLedger.open(ledgerPath, f.root, { exclusiveWriter: () => true });
+  try {
+    assert.deepEqual(recovered.records(), records, 'Recovery never rewrites retained records.');
+    // A live ledger in this process is never recovered from under itself, even with the proof.
+    await assert.rejects(TestLedger.open(ledgerPath, f.root, { exclusiveWriter: () => true }), code('FENCED'));
+    assert.equal(await TestLedger.fence(ledgerPath, f.root), 'live-writer');
+  } finally { await recovered.close(); }
+  assert.equal(await TestLedger.fence(ledgerPath, f.root), 'none');
+});
+
+test('a ledger opening with an empty new lock cannot be recovered by a concurrent opener', async t => {
+  const f = await fixture(); t.after(f.close);
+  const path = join(f.root, 'opening-ledger'), lock = join(path, 'writer.lock'), original = fs.open;
+  let release!: () => void, entered!: () => void, paused = false;
+  const waiting = new Promise<void>(resolve => { release = resolve; }), created = new Promise<void>(resolve => { entered = resolve; });
+  const mocked = t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
+    const file = await original(...args);
+    if (args[0] === lock && args[1] === 'wx' && !paused) { paused = true; entered(); await waiting; }
+    return file;
+  });
+  syncBuiltinESMExports();
+  const opening = TestLedger.open(path, f.root, { exclusiveWriter: () => true });
+  let contender: TestLedger | undefined;
+  try {
+    await created;
+    await assert.rejects(TestLedger.open(path, f.root, { exclusiveWriter: () => true }).then(value => { contender = value; return value; }), code('FENCED'));
+    assert.equal(await readFile(lock, 'utf8'), '', 'The first opener still owns its uninitialised lock.');
+  } finally {
+    release(); mocked.mock.restore(); syncBuiltinESMExports();
+    const first = await opening;
+    const closed = await Promise.allSettled([first.close(), contender?.close()]);
+    for (const result of closed) assert.equal(result.status, 'fulfilled', 'Owned test ledgers close cleanly.');
+  }
+});
+
+test('a closing ledger keeps its reservation until the original writer lock is removed', async t => {
+  const f = await fixture(); t.after(f.close);
+  const path = join(f.root, 'closing-ledger'), lock = join(path, 'writer.lock'), ledger = await TestLedger.open(path, f.root);
+  const original = fs.unlink; let release!: () => void, entered!: () => void, paused = false;
+  const waiting = new Promise<void>(resolve => { release = resolve; }), removing = new Promise<void>(resolve => { entered = resolve; });
+  const mocked = t.mock.method(fs, 'unlink', async (...args: Parameters<typeof fs.unlink>) => {
+    if (args[0] === lock && !paused) { paused = true; entered(); await waiting; }
+    return original(...args);
+  });
+  syncBuiltinESMExports();
+  const closing = ledger.close(); let contender: TestLedger | undefined;
+  try {
+    await removing; assert.equal(ledger.close(), closing, 'Concurrent close callers await the same release.');
+    await assert.rejects(TestLedger.open(path, f.root, { exclusiveWriter: () => true }).then(value => { contender = value; return value; }), code('FENCED'));
+    assert.equal(await TestLedger.fence(path, f.root), 'live-writer');
+  } finally {
+    release(); mocked.mock.restore(); syncBuiltinESMExports();
+    await closing; await contender?.close();
+  }
+  const reopened = await TestLedger.open(path, f.root); await reopened.close();
+});
+
+test('abandoned-lock recovery rechecks the trusted writer proof before unlinking retained evidence', async t => {
+  const f = await fixture(); t.after(f.close); const path = join(f.root, 'proof-ledger');
+  await fs.mkdir(path); const lock = join(path, 'writer.lock'); await writeFile(lock, ''); let proofs = 0;
+  await assert.rejects(TestLedger.open(path, f.root, { exclusiveWriter: () => ++proofs === 1 }), code('FENCED'));
+  assert.equal(await readFile(lock, 'utf8'), '');
+  const recovered = await TestLedger.open(path, f.root, { exclusiveWriter: () => true }); await recovered.close();
+});
+
+test('a foreign lock shape or an unresolved run keeps the fence even with the exclusive-writer proof', async t => {
+  const f = await fixture(); t.after(f.close); const ledgerPath = join(f.root, 'host-ledger');
+  await f.ledger.close();
+  await writeFile(join(ledgerPath, 'writer.lock'), 'not this ledger');
+  await assert.rejects(TestLedger.open(ledgerPath, f.root, { exclusiveWriter: () => true }), code('FENCED'));
+  assert.equal(await readFile(join(ledgerPath, 'writer.lock'), 'utf8'), 'not this ledger');
+  await fs.unlink(join(ledgerPath, 'writer.lock'));
+  const open = await TestLedger.open(ledgerPath, f.root);
+  await open.append({ kind: 'admit', id: 'crashed-run', at: f.scheduler.now(), scopeDigest: 'a'.repeat(64), evidence: 'fixture', code: 'OK' });
+  await open.close(); // Unresolved: close keeps the lock as the reconciliation fence.
+  assert.equal(fsSync.existsSync(join(ledgerPath, 'writer.lock')), true);
+  await assert.rejects(TestLedger.open(ledgerPath, f.root, { exclusiveWriter: () => true }), code('FENCED'));
+  assert.equal(await TestLedger.fence(ledgerPath, f.root), 'unresolved-run');
+  // Human repair keeps the journal byte for byte and lets a fresh journal start.
+  const before = await readdir(ledgerPath), bytes = await Promise.all(before.map(name => readFile(join(ledgerPath, name))));
+  await assert.rejects(TestLedger.retainForRepair(ledgerPath, f.root, join(f.root, 'retained')), code('FENCED'));
+  const kept = await TestLedger.retainForRepair(ledgerPath, f.root, join(f.root, 'retained'), { exclusiveWriter: () => true });
+  assert.deepEqual((await readdir(kept)).sort(), [...before].sort());
+  assert.deepEqual(await Promise.all(before.map(name => readFile(join(kept, name)))), bytes, 'Repair retains every journal/lock byte.');
+  const fresh = await TestLedger.open(ledgerPath, f.root);
+  try { assert.equal(fresh.records().length, 0); } finally { await fresh.close(); }
+});
+
+test('human journal repair refuses a redirected retention directory without moving the journal', async t => {
+  const f = await fixture(); t.after(f.close); await f.ledger.close();
+  const path = join(f.root, 'host-ledger'), target = join(f.root, 'retained-target'), alias = join(f.root, 'retained-alias');
+  await writeFile(join(path, 'writer.lock'), ''); await fs.mkdir(target); await fs.symlink(target, alias, 'junction');
+  try {
+    await assert.rejects(TestLedger.retainForRepair(path, f.root, alias, { exclusiveWriter: () => true }), code('JOURNAL_FAILED'));
+    assert.equal(await readFile(join(path, 'writer.lock'), 'utf8'), ''); assert.deepEqual(await readdir(target), []);
+  } finally { await fs.unlink(alias); }
+});

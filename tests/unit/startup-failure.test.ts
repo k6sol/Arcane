@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:net';
 import { spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
 import { mkdtemp, realpath, rm } from 'node:fs/promises';
@@ -56,12 +58,49 @@ test('real newer-schema store refusals give version guidance', async t => {
   assert.equal(classifyStartupFailure('services', workError), 'STATE_NEWER');
 });
 
+test('only a workspace lock held by a live process is classified as project in use', async t => {
+  const root = await scratch(t), directory = join(root, 'studio');
+  const owner = new StudioStore({ directory });
+  let live: unknown; try { live = caught(() => new StudioStore({ directory })); } finally { owner.close(); }
+  assert.equal((live as { code?: string }).code, 'LOCKED'); assert.equal((live as { workspaceInUse?: boolean }).workspaceInUse, true);
+  assert.match(String((live as Error).message), /already running/);
+  assert.equal(classifyStartupFailure('services', live), 'PROJECT_IN_USE');
+  // Outside store opening, or a look-alike without the live-owner mark, is not proof.
+  assert.equal(classifyStartupFailure('listen', live), 'STARTUP_FAILED');
+  assert.equal(classifyStartupFailure('services', Object.assign(new Error('fabricated'), { code: 'LOCKED' })), 'STARTUP_FAILED');
+  assert.equal(classifyStartupFailure('services', { code: 'LOCKED', workspaceInUse: 'yes' }), 'STARTUP_FAILED');
+  // An unreadable lock still needs manual inspection: it stays the general failure and is retained.
+  const other = join(root, 'unreadable'); const fs = await import('node:fs/promises'); await fs.mkdir(other);
+  await fs.writeFile(join(other, 'studio.lock'), '{broken');
+  const unknown = caught(() => new StudioStore({ directory: other }));
+  assert.equal((unknown as { workspaceInUse?: boolean }).workspaceInUse, undefined);
+  assert.equal(classifyStartupFailure('services', unknown), 'STARTUP_FAILED');
+  assert.equal(await fs.readFile(join(other, 'studio.lock'), 'utf8'), '{broken');
+});
+
 test('fixed store refusal texts for later schemas are recognized', () => {
   for (const message of ['Workflow database is newer than this build.', 'Conversation work schema is newer than this build.',
     'Learning database is newer than this build; refusing to overwrite.', 'Native journal is newer than this build.', 'Task journal is newer than this build.']) {
     assert.equal(classifyStartupFailure('services', new Error(message)), 'STATE_NEWER', message);
   }
   assert.equal(classifyStartupFailure('services', new Error('Learning schema changed; close and inspect the database.')), 'STARTUP_FAILED');
+});
+
+test('an exclusive-create collision does not claim another live workspace without owner evidence', async t => {
+  const root = await scratch(t), directory = join(root, 'collision'), lock = join(directory, 'studio.lock');
+  const original = fs.openSync;
+  const mocked = t.mock.method(fs, 'openSync', (...args: Parameters<typeof fs.openSync>) => {
+    if (args[0] === lock && args[1] === 'wx') throw Object.assign(new Error('Unverified fixture collision'), { code: 'EEXIST' });
+    return original(...args);
+  });
+  syncBuiltinESMExports();
+  try {
+    const error = caught(() => new StudioStore({ directory }));
+    assert.equal((error as { code?: string }).code, 'LOCKED');
+    assert.equal((error as { workspaceInUse?: unknown }).workspaceInUse, undefined);
+    assert.equal(classifyStartupFailure('services', error), 'STARTUP_FAILED');
+    assert.equal(fs.existsSync(join(directory, 'studio.sqlite')), false);
+  } finally { mocked.mock.restore(); syncBuiltinESMExports(); }
 });
 
 test('phase determines state, resource and generic codes', () => {

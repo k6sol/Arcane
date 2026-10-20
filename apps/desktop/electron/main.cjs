@@ -124,8 +124,10 @@ async function startDaemon(project) {
   const portFile = join(stateRoot, 'listener-port.json'); let savedPort = null;
   const startupPortError = message => Object.assign(new Error(message), { code: 'ARCANE_PROJECT_PORT' });
   // Only a daemon-proved listener bind conflict uses port wording and the port code; other outcomes stay generic.
-  const startupFailure = code => code === 'PORT_IN_USE' ? startupPortError(STARTUP_FAILURE_TEXT[code]) : Object.assign(new Error(STARTUP_FAILURE_TEXT[code]), { code: 'ARCANE_STARTUP' });
+  const startupFailure = code => code === 'PORT_IN_USE' ? startupPortError(STARTUP_FAILURE_TEXT[code]) :
+    Object.assign(new Error(STARTUP_FAILURE_TEXT[code]), { code: code === 'PROJECT_IN_USE' ? 'ARCANE_PROJECT_IN_USE' : 'ARCANE_STARTUP' });
   const STARTUP_FAILURE_TEXT = Object.freeze({
+    PROJECT_IN_USE: 'Arcane is already open for this project in another window. Switch to it, or close it and try again.',
     PORT_IN_USE: 'The local runtime could not start because its local port is in use. Project records and the saved port were retained. Check for another app using the local port, then restart Arcane. No automatic retry was attempted.',
     STATE_NEWER: 'This project uses records saved by a newer version of Arcane. Open this project with that version or later. No automatic retry or downgrade was attempted.',
     STATE_UNSAFE: 'Arcane could not safely verify this project\'s saved records. They were retained unchanged; inspect the Arcane application-data folder before restarting. No automatic retry was attempted.',
@@ -133,6 +135,9 @@ async function startDaemon(project) {
     STARTUP_FAILED: 'The local runtime could not start. Project records and the saved port were retained. Its error output was saved to daemon-stderr.log in the Arcane runtime folder for this project. No automatic retry was attempted.',
     STARTUP_TIMEOUT: 'The local runtime startup timed out after 30 seconds. Project records and the saved port were retained. No automatic retry was attempted.',
   });
+  // Another live Arcane (a different build or profile window) already serves this project: never spawn a contender,
+  // signal it or take its lock. Read-only: its daemon.json names a live pid whose loopback listener answers.
+  if (await policy.liveRuntimeOwner(stateRoot)) throw startupFailure('PROJECT_IN_USE');
   const portFailure = () => { throw startupPortError('Saved local port metadata is unavailable. Project records were retained; inspect the Arcane application-data folder before restarting.'); };
   const samePath = (a, b) => process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
   const sameNode = (a, b) => ['dev', 'ino', 'mode', 'nlink'].every(name => a[name] === b[name]);
@@ -331,10 +336,11 @@ async function chooseProject() {
     const old = window; window = null; if (old && !old.isDestroyed()) old.destroy();
     void stopClaudeChat(); // children stop now; revocation runs beside the daemon shutdown
     if (!await stopDaemon()) throw new Error('Previous runtime did not close cleanly.');
-    await startDaemon(path); await startClaudeChat(); makeWindow(); await loadWorkspace();
+    if (!await startProjectRuntime(path)) return;
+    await startClaudeChat(); makeWindow(); await loadWorkspace();
     const pref = join(userRoot, 'last-project.json'); await policy.directPath(pref, 'file', true);
     await writeFile(pref, JSON.stringify({ version: 1, projectPath: path }) + '\n', { mode: 0o600 });
-  } catch (error) { await failStartup(['ARCANE_PROJECT_PORT', 'ARCANE_STARTUP'].includes(error.code) ? error.message : 'Project switching failed. Previous records were retained; no automatic retry was attempted.'); }
+  } catch (error) { await failStartup(['ARCANE_PROJECT_PORT', 'ARCANE_STARTUP', 'ARCANE_PROJECT_IN_USE'].includes(error.code) ? error.message : 'Project switching failed. Previous records were retained; no automatic retry was attempted.'); }
   finally { switching = false; }
 }
 function installMenu() {
@@ -354,6 +360,28 @@ async function failStartup(message) {
   if (!smoke) await dialog.showMessageBox({ type: 'error', title: 'Arcane could not continue', message });
   else if (smokeRoot) { try { await writeFile(join(smokeRoot, 'error.json'), JSON.stringify({ version: 1, error: message }) + '\n', { flag: 'wx' }); } catch {} }
   await stopDaemon(); app.exit(1);
+}
+/** Start a project's runtime; when another open Arcane already owns it, ask in a trusted Arcane window (not a native box)
+ * to try again or quit. Never closes the other instance or takes over its lock. Resolves false when the person quits. */
+async function startProjectRuntime(project) {
+  for (;;) {
+    try { await startDaemon(project); return true; }
+    catch (error) {
+      if (error?.code !== 'ARCANE_PROJECT_IN_USE' || smoke || closing) throw error;
+      await stopDaemon();
+      const config = { type: 'warning', title: 'Arcane is already open', message: 'Arcane is already open for this project in another window.',
+        detail: 'Switch to it, or close it and try again. If you just closed it, wait a moment for it to finish saving. Arcane never closes the other window or takes over its project.',
+        buttons: ['Quit', 'Try again'], defaultId: 1, cancelId: 0, noLink: true };
+      let choice; try { choice = trustedDialogs ? await trustedDialogs.showStandalone(config) : await nativeDialog.showMessageBox(config); } catch { choice = { response: 0 }; }
+      if (closing) return false;
+      if (choice?.response !== 1) { await quitStartup(); return false; }
+    }
+  }
+}
+async function quitStartup() {
+  providerSetup?.dispose(); void stopClaudeChat();
+  if (closing) return; closing = true; appDialogs?.dispose(); trustedDialogs?.dispose();
+  await stopDaemon(); app.exit(0);
 }
 async function runtimeStopped(info) {
   if (smoke) return failStartup('The local runtime stopped. Your project records have been retained.');
@@ -708,7 +736,8 @@ else {
         if (bytes.length > 8192) throw new Error('Project preference too large.'); const saved = JSON.parse(bytes.toString('utf8'));
         if (Object.keys(saved).sort().join(',') !== 'projectPath,version' || saved.version !== 1) throw new Error('Invalid project preference.'); selected = await policy.directPath(saved.projectPath);
       } catch (error) { if (error.code !== 'ENOENT' && !smoke) await dialog.showMessageBox({ type: 'warning', title: 'Saved project unavailable', message: 'Starting an empty local project. The saved preference was preserved; use File > Open project to choose a folder.' }); }
-      await startDaemon(selected); await startClaudeChat(); makeWindow(); installMenu(); await loadWorkspace(); if (smoke) await checkSmoke();
-    } catch (error) { await failStartup(['ARCANE_PROJECT_PORT', 'ARCANE_STARTUP'].includes(error.code) ? error.message : 'Startup failed. Verify the complete app folder is present and its runtime is permitted by Windows. No security settings were changed.'); }
+      if (!await startProjectRuntime(selected)) return;
+      await startClaudeChat(); makeWindow(); installMenu(); await loadWorkspace(); if (smoke) await checkSmoke();
+    } catch (error) { await failStartup(['ARCANE_PROJECT_PORT', 'ARCANE_STARTUP', 'ARCANE_PROJECT_IN_USE'].includes(error.code) ? error.message : 'Startup failed. Verify the complete app folder is present and its runtime is permitted by Windows. No security settings were changed.'); }
   });
 }

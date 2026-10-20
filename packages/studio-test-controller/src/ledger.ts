@@ -1,4 +1,6 @@
-import { mkdir, open, readFile, unlink } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
+import { constants } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { checkedDirectory, checkedEntries, checkedFile, FILE_LIMITS } from './paths.js';
@@ -21,27 +23,102 @@ export const eventSchema = z.strictObject({
 export type TestEvent = z.infer<typeof eventSchema>;
 const recordSchema = z.strictObject({ seq: z.number().int().positive(), previous: z.string().max(64), hash: fingerprint, event: eventSchema });
 export type TestRecord = z.infer<typeof recordSchema>;
+/** The writer lock names its owner so a later start can recognise its own shape. */
+const LOCK_BYTES = 1024;
+const lockSchema = z.strictObject({ schemaVersion: z.literal(1), writerId: z.string().uuid() });
+/** Directories held by a live ledger in this process; never recovered from under it. */
+const liveLedgers = new Set<string>();
+const liveKey = (path: string) => process.platform === 'win32' ? path.toLowerCase() : path;
+export interface TestLedgerOpenOptions {
+  /** Trusted host proof that no other process can be this ledger's writer (for example the
+   * project's exclusive workspace lock). Only then may an abandoned writer lock be cleared. */
+  exclusiveWriter?: () => boolean;
+}
+/** Why a start is fenced, without revealing journal contents. */
+export type TestLedgerFence = 'none' | 'live-writer' | 'unresolved-run' | 'unreadable';
+interface LockPin { dev: bigint; ino: bigint; size: bigint; mtimeNs: bigint; ctimeNs: bigint }
+const sameLock = (a: LockPin, b: LockPin) => a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.mtimeNs === b.mtimeNs && a.ctimeNs === b.ctimeNs;
+async function lockShapeIsOurs(lockPath: string): Promise<LockPin | null> {
+  const stat = await lstat(lockPath, { bigint: true });
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1n || stat.size > BigInt(LOCK_BYTES)) return null;
+  const file = await open(lockPath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  try {
+    if (!sameLock(stat, await file.stat({ bigint: true }))) return null;
+    const bytes = Buffer.alloc(LOCK_BYTES + 1); let length = 0;
+    while (length < bytes.length) { const read = await file.read(bytes, length, bytes.length - length, length); if (!read.bytesRead) break; length += read.bytesRead; }
+    if (BigInt(length) !== stat.size || !sameLock(stat, await file.stat({ bigint: true })) || !sameLock(stat, await lstat(lockPath, { bigint: true }))) return null;
+    // A zero-length file is a crash between creation and first write (or an older build's lock).
+    if (length && !lockSchema.safeParse(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, length)))).success) return null;
+    return stat;
+  } catch { return null; } finally { await file.close(); }
+}
+function unresolvedIn(records: readonly TestRecord[]): boolean {
+  for (const r of records.filter(r => r.event.kind === 'admit')) {
+    const events = records.filter(x => x.event.id === r.event.id).map(x => x.event);
+    if (events.filter(e => e.kind === 'terminal').length !== 1 || events.at(-1)?.kind !== 'cleanup' || events.at(-1)?.cleanup !== 'complete') return true;
+  }
+  return false;
+}
+const exclusiveProof = (options: TestLedgerOpenOptions): boolean => { try { return options.exclusiveWriter?.() === true; } catch { return false; } };
 /** One host-wide ledger/lock, shared by every controller. A new run directory or
- * process cannot bypass an unresolved run. Never delete a lock on crash recovery. */
+ * process cannot bypass an unresolved run. Only a proved abandoned, resolved lock can be recovered. */
 export class TestLedger {
   readonly #directory: string; readonly #root: string; readonly #records: TestRecord[];
   #closed = false; #broken = false; #busyRun: string | null = null;
   #tail: Promise<void> = Promise.resolve(); #queued = 0;
+  #closing: Promise<void> | null = null;
   private constructor(directory: string, root: string, records: TestRecord[]) {
     this.#directory = directory; this.#root = root; this.#records = records;
   }
-  static async open(directory: string, existingTrustedRoot: string): Promise<TestLedger> {
+  static async open(directory: string, existingTrustedRoot: string, options: TestLedgerOpenOptions = {}): Promise<TestLedger> {
     const path = await checkedDirectory(directory, existingTrustedRoot);
-    await mkdir(path, { recursive: true, mode: 0o700 });
-    await checkedDirectory(path, existingTrustedRoot); await checkedEntries(path);
-    const lockPath = await checkedFile(path, 'writer.lock', true);
-    const file = await open(lockPath, 'wx', 0o600).catch(() => fail('FENCED'));
-    try { await file.sync(); } finally { await file.close(); }
-    // Read failures leave the lock intact. Recovery is an authenticated host action.
-    const records = await readTestLedger(path, existingTrustedRoot);
-    const ledger = new TestLedger(path, existingTrustedRoot, records);
-    if (ledger.unresolved()) fail('FENCED');
-    return ledger;
+    const key = liveKey(path); if (liveLedgers.has(key)) fail('FENCED');
+    liveLedgers.add(key); // Reserve before any recovery/open awaits, including a still-empty new lock.
+    try {
+      await mkdir(path, { recursive: true, mode: 0o700 });
+      await checkedDirectory(path, existingTrustedRoot); await checkedEntries(path);
+      const lockPath = await checkedFile(path, 'writer.lock', true);
+      await recoverAbandonedLock(path, existingTrustedRoot, lockPath, options);
+      const file = await open(lockPath, 'wx', 0o600).catch(() => fail('FENCED'));
+      try { await file.writeFile(JSON.stringify({ schemaVersion: 1, writerId: randomUUID() }), 'utf8'); await file.sync(); } finally { await file.close(); }
+      // Read failures leave the lock intact. Recovery is an authenticated host action.
+      const records = await readTestLedger(path, existingTrustedRoot);
+      const ledger = new TestLedger(path, existingTrustedRoot, records);
+      if (ledger.unresolved()) fail('FENCED');
+      return ledger;
+    } catch (error) { liveLedgers.delete(key); throw error; }
+  }
+  /** Read-only: why a start would be fenced right now (for the host's repair prompt). */
+  static async fence(directory: string, existingTrustedRoot: string): Promise<TestLedgerFence> {
+    let path: string;
+    try { path = await checkedDirectory(directory, existingTrustedRoot); } catch { return 'unreadable'; }
+    if (liveLedgers.has(liveKey(path))) return 'live-writer';
+    try { await lstat(path); } catch (error) { return (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'none' : 'unreadable'; }
+    let records: TestRecord[];
+    try { records = await readTestLedger(path, existingTrustedRoot); } catch { return 'unreadable'; }
+    if (unresolvedIn(records)) return 'unresolved-run';
+    try { await lstat(join(path, 'writer.lock')); return 'live-writer'; } catch (error) { return (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'none' : 'unreadable'; }
+  }
+  /** Human repair: move the whole retained journal (records and lock) aside, unchanged, so a fresh
+   * journal can start. Nothing is deleted. The caller must hold the person's confirmation that
+   * Studio is back in Edit mode, plus the trusted exclusive-writer proof. Returns the retained path. */
+  static async retainForRepair(directory: string, existingTrustedRoot: string, retainedRoot: string,
+    options: TestLedgerOpenOptions & { now?: () => number } = {}): Promise<string> {
+    if (!exclusiveProof(options)) fail('FENCED');
+    const path = await checkedDirectory(directory, existingTrustedRoot);
+    const key = liveKey(path); if (liveLedgers.has(key)) fail('BUSY');
+    liveLedgers.add(key);
+    try {
+      const retained = await checkedDirectory(retainedRoot, dirname(existingTrustedRoot));
+      const stamp = new Date((options.now ?? Date.now)()).toISOString().replace(/[:.]/g, '-');
+      await mkdir(retained, { recursive: true, mode: 0o700 });
+      await checkedDirectory(retained, dirname(existingTrustedRoot));
+      const target = join(retained, 'ledger-' + stamp + '-' + randomUUID().slice(0, 8));
+      await checkedDirectory(path, existingTrustedRoot);
+      if (!exclusiveProof(options)) fail('FENCED');
+      await rename(path, target);
+      return target;
+    } finally { liveLedgers.delete(key); }
   }
   records(): readonly TestRecord[] { return freeze(structuredClone(this.#records)); }
   unresolved(): boolean {
@@ -90,13 +167,36 @@ export class TestLedger {
     this.#tail = work.catch(() => { this.#broken = true; });
     try { await work; } catch { this.#broken = true; fail('JOURNAL_FAILED'); } finally { this.#queued--; }
   }
-  async close(): Promise<void> {
-    if (this.#closed) return;
-    await this.#tail; this.#closed = true;
-    if (this.#busyRun || this.unresolved()) return; // retain the durable crash/reconciliation fence
+  close(): Promise<void> {
+    return this.#closing ??= this.finishClose();
+  }
+  private async finishClose(): Promise<void> {
+    this.#closed = true; await this.#tail;
+    if (this.#busyRun || this.unresolved()) { liveLedgers.delete(liveKey(this.#directory)); return; } // retain the durable crash/reconciliation fence
     await checkedDirectory(this.#directory, this.#root);
     await unlink(await checkedFile(this.#directory, 'writer.lock', false));
+    liveLedgers.delete(liveKey(this.#directory));
   }
+}
+/** A daemon that is killed (or loses power) never runs close(), so its writer lock outlives it and
+ * every later start is fenced although no test may ever have run. The lock is cleared only when the
+ * host proves it is the sole possible writer, no ledger in this process holds it, the file is this
+ * ledger's own lock shape, and every retained record verifies with no unresolved run. Anything else
+ * keeps the fence and leaves the evidence untouched. */
+async function recoverAbandonedLock(path: string, root: string, lockPath: string, options: TestLedgerOpenOptions): Promise<void> {
+  if (!exclusiveProof(options)) return;
+  let before: LockPin | null;
+  try { before = await lockShapeIsOurs(lockPath); } catch { return; }
+  if (!before) return;
+  let records: TestRecord[];
+  try { records = await readTestLedger(path, root); } catch { return; }
+  if (unresolvedIn(records)) return;
+  let after: LockPin | null;
+  try { after = await lockShapeIsOurs(lockPath); } catch { return; }
+  if (!after || !sameLock(after, before)) return;
+  await checkedDirectory(path, root);
+  if (!exclusiveProof(options)) return;
+  try { await unlink(lockPath); } catch { /* Exclusive creation below still decides. */ }
 }
 export async function readTestLedger(directory: string, existingTrustedRoot: string): Promise<TestRecord[]> {
   const path = await checkedDirectory(directory, existingTrustedRoot);

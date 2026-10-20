@@ -15,7 +15,8 @@ import type { LearningService } from './learning-service.js';
 import { createServer, type IncomingMessage, type OutgoingHttpHeaders, type ServerResponse } from 'node:http';
 import { randomBytes, timingSafeEqual, createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { TestLedger } from '../../../packages/studio-test-controller/src/ledger.js';
 import { ArcaneError, type Connection, type Selection } from '../../../packages/protocol/src/providers.js';
 import { validateSelection, SelectionStore } from '../../../packages/core/src/selection.js';
 import { discoverProviders } from '../../../packages/model-adapters/src/discovery.js';
@@ -41,13 +42,15 @@ import { createMeshKeep } from './mesh-keep-routes.js';
 
 const unavailableTestMessages = {
   UNAVAILABLE: 'Playtests are unavailable because the trusted plugin source could not be verified. Repair the local plugin build artifacts and restart Arcane before requesting a test.',
-  FENCED: 'Playtests are fenced because the retained test journal could not be safely opened. Have a human inspect and reconcile the retained playtest state before restarting Arcane. Do not delete the journal or writer lock to bypass this fence.',
+  FENCED: 'Playtests, viewport capture and Studio asset tools are paused: Arcane kept the records of an earlier playtest that did not finish cleanly. Ask the user to stop any running playtest in Studio and click "Repair playtest records" in the Playtests panel, then try again. Do not delete the journal or writer lock.',
 } as const;
 
 function unavailableStudioTestRoutes(code: keyof typeof unavailableTestMessages, resolveActor: StudioTestActorResolver) {
   const refuse = (): never => { throw new ArcaneError(code, unavailableTestMessages[code]); };
   const service: StudioTestRouteService = {
-    requests: { async prepare() { refuse(); }, status: refuse, list: refuse, async cancel() { refuse(); } },
+    // Viewport and native asset routes share this service; refuse them with the same fixed reason instead of a generic UNAVAILABLE.
+    requests: { async prepare() { refuse(); }, status: refuse, list: refuse, async cancel() { refuse(); }, viewport: (async () => { refuse(); }) as unknown as NonNullable<StudioTestRouteService['requests']['viewport']>,
+      nativeAssets: { async search() { refuse(); }, async insert() { refuse(); }, async generate() { refuse(); }, async job() { refuse(); } } as unknown as NonNullable<StudioTestRouteService['requests']['nativeAssets']> },
     humanControl: { async approve(_input, guard) { guard(); refuse(); } },
     lifecycle: { async close() {} },
   };
@@ -132,8 +135,11 @@ export async function createConnectionLab(options: Options) {
   };
   let bridge: ReturnType<typeof studioRoutes> | null = null;
   let ownedSourceVerifier: ScriptSourceVerifier | null = null;
-  let ownedTests: StudioTestService | null = null;
+  let ownedTests = null as StudioTestService | null; // assigned inside openOwnedTests
   let testApi: ReturnType<typeof studioTestRoutes> | null = null;
+  // Playtest journal repair (human only): set when the owned service is fenced by retained records.
+  let testsFenced = false, repairingTests = false;
+  let openOwnedTests: (() => Promise<boolean>) | null = null, exclusiveTestWriter: (() => boolean) | null = null;
   const native = options.studioStore ? nativeRoutes() : null;
   const learning = options.learningService ? learningRoutes(options.learningService) : null;
   const store = new SelectionStore(options.stateDirectory);
@@ -190,28 +196,38 @@ export async function createConnectionLab(options: Options) {
         if(bearer.length>0&&bearer===coreAgentToken(request))return {kind:'agent',id:'agent-'+createHash('sha256').update(bearer).digest('hex')};
         return null;
       };
-      let tests=options.studioTestService??null;
-      if(!tests){
+      const studioStore=options.studioStore;
+      // Only this daemon can write the journal when its StudioStore holds the project's exclusive
+      // workspace lock and the playtest state lives inside that project directory.
+      exclusiveTestWriter=()=>studioStore.holdsWorkspaceLock(dirname(options.stateDirectory));
+      const attach=(tests:StudioTestService)=>{
+        testApi=studioTestRoutes(tests,resolveTestActor);
+        if(codex?.playtestTasks&&tests.cancelExact&&tests.revalidateExact)codex.attachPlaytestCancellation?.(Object.freeze({cancelExact:tests.cancelExact,revalidateExact:tests.revalidateExact}));
+      };
+      openOwnedTests=async()=>{
         let unavailableCode: keyof typeof unavailableTestMessages = 'UNAVAILABLE';
         try{
           // Match the actual loaded Script/ModuleScript identity used by the
           // plugin's continuity proof, rather than a delivery-file checksum.
           const pluginArtifactHash=await studioImportPluginArtifactHash(options.cwd);
-          // Once source verification passes, any failed journal initialization
-          // is unknown retained state. Never remove its lock or try a fresh ledger.
+          // Once source verification passes, a failed journal initialization is
+          // retained state. Only a provably abandoned writer lock with fully
+          // verified, resolved records is cleared (inside TestLedger.open);
+          // everything else waits for the human "Repair playtest records" action.
           unavailableCode='FENCED';
-          ownedTests=await createStudioTestService({directory:join(options.stateDirectory,'playtests'),store:options.studioStore,pluginArtifactHash,
+          ownedTests=await createStudioTestService({directory:join(options.stateDirectory,'playtests'),store:studioStore,pluginArtifactHash,
+            exclusiveWriter:exclusiveTestWriter!,
             ...(options.studioTestConnect?{connect:options.studioTestConnect}:{}),
-            ...(codex?.playtestTasks?{taskPort:codex.playtestTasks}:{})});tests=ownedTests;
+            ...(codex?.playtestTasks?{taskPort:codex.playtestTasks}:{})});
+          testsFenced=false;attach(ownedTests);return true;
         }catch{
-          stateWarnings.push(unavailableTestMessages[unavailableCode]);
-          testApi=unavailableStudioTestRoutes(unavailableCode,resolveTestActor);
+          if(!stateWarnings.includes(unavailableTestMessages[unavailableCode]))stateWarnings.push(unavailableTestMessages[unavailableCode]);
+          testsFenced=unavailableCode==='FENCED';
+          testApi=unavailableStudioTestRoutes(unavailableCode,resolveTestActor);return false;
         }
-      }
-      if(tests){
-        testApi=studioTestRoutes(tests,resolveTestActor);
-        if(codex?.playtestTasks&&tests.cancelExact&&tests.revalidateExact)codex.attachPlaytestCancellation?.(Object.freeze({cancelExact:tests.cancelExact,revalidateExact:tests.revalidateExact}));
-      }
+      };
+      if(options.studioTestService)attach(options.studioTestService);
+      else await openOwnedTests();
     }
     if (options.workStore) {
       associations = options.conversationWorkStore ?? new ConversationWorkStore({
@@ -277,6 +293,36 @@ export async function createConnectionLab(options: Options) {
   const send = (response: ServerResponse, status: number, payload: unknown) => {
     response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
     response.end(JSON.stringify(payload));
+  };
+  /** POST /v1/playtests/repair: the person confirms Studio is back in Edit mode; the retained journal is
+   * moved aside unchanged (never deleted) and a fresh one opened. Human desktop token and Origin only. */
+  const repairPlaytestRecords = async (request: IncomingMessage, response: ServerResponse): Promise<boolean> => {
+    if (!openOwnedTests || !exclusiveTestWriter) return false;
+    const supplied = request.headers.authorization?.startsWith('Bearer ') ? request.headers.authorization.slice(7) : '';
+    if (Buffer.byteLength(supplied) !== Buffer.byteLength(token) || !timingSafeEqual(Buffer.from(supplied), Buffer.from(token))) {
+      send(response, 401, { error: 'AUTH', message: 'Only the person using Arcane can repair playtest records.' }); return true;
+    }
+    if (request.method !== 'POST') { send(response, 405, { error: 'METHOD', message: 'Use POST.' }); return true; }
+    if (request.headers.origin !== origin) throw new ArcaneError('ORIGIN', 'Writes require the local panel origin.');
+    const input = await readJson(request) as Record<string, unknown> | null;
+    if (!input || typeof input !== 'object' || Object.keys(input).join(',') !== 'confirm' || input.confirm !== 'studio-in-edit-mode') {
+      send(response, 400, { error: 'INVALID_REQUEST', message: 'Confirm that Studio is back in Edit mode.' }); return true;
+    }
+    if (!testsFenced) { send(response, 409, { error: 'NOT_FENCED', message: 'Playtest records are already healthy.' }); return true; }
+    if (repairingTests) { send(response, 409, { error: 'BUSY', message: 'A repair is already running.' }); return true; }
+    repairingTests = true;
+    try {
+      const root = await realpath(join(options.stateDirectory, 'playtests'));
+      let retained: string;
+      try { retained = await TestLedger.retainForRepair(join(root, 'ledger'), root, join(options.stateDirectory, 'playtests-retained'), { exclusiveWriter: exclusiveTestWriter }); }
+      catch { send(response, 409, { error: 'FENCED', message: 'Arcane could not set the earlier playtest records aside. Close other Arcane windows for this project and try again.' }); return true; }
+      const reopened = await openOwnedTests();
+      if (!reopened) { send(response, 409, { error: 'FENCED', message: 'The earlier records were kept, but playtests could not restart. Restart Arcane and try again.' }); return true; }
+      const kept = 'playtests-retained/' + retained.split(/[\\/]/).at(-1);
+      const notice = unavailableTestMessages.FENCED, at = stateWarnings.indexOf(notice); if (at >= 0) stateWarnings.splice(at, 1);
+      send(response, 200, { repaired: true, retained: kept, message: 'Playtest records repaired. The earlier records were kept in ' + kept + '.' });
+      return true;
+    } finally { repairingTests = false; }
   };
   const server = createServer(async (request, response) => {
     if (shuttingDown) { response.writeHead(503, {'Connection': 'close'}); response.end(); return; }
@@ -360,6 +406,7 @@ export async function createConnectionLab(options: Options) {
       if(projectMemory&&await projectMemory.handle(request,response,url,token,origin))return;
       if(scriptSync&&await scriptSync.handle(request,response,url,token,origin))return;
       if(meshKeep&&await meshKeep.handle(request,response,url,token,origin))return;
+      if(url.pathname==='/v1/playtests/repair'&&await repairPlaytestRecords(request,response))return;
       if(testApi&&await testApi(request,response,url,origin))return;
       if(handoffs&&await handoffs.handle(request,response,url,token,origin))return;
       if(workflowApi&&await workflowApi(request,response,url,token,origin,agentToken))return;

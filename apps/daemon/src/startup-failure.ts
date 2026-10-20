@@ -1,6 +1,6 @@
 /** Fixed startup-failure vocabulary for the private launcher IPC channel.
  * Only a code crosses the boundary: never stderr, paths, exception text or secrets. */
-export const STARTUP_FAILURE_CODES = Object.freeze(['PORT_IN_USE', 'STATE_NEWER', 'STATE_UNSAFE', 'RESOURCE_UNAVAILABLE', 'STARTUP_FAILED'] as const);
+export const STARTUP_FAILURE_CODES = Object.freeze(['PORT_IN_USE', 'PROJECT_IN_USE', 'STATE_NEWER', 'STATE_UNSAFE', 'RESOURCE_UNAVAILABLE', 'STARTUP_FAILED'] as const);
 export type StartupFailureCode = typeof STARTUP_FAILURE_CODES[number];
 export type StartupPhase = 'resources' | 'state' | 'services' | 'listen' | 'descriptor';
 export interface StartupFailureMessage { type: 'arcane-startup-failure'; protocolVersion: 1; code: StartupFailureCode }
@@ -10,9 +10,12 @@ export interface StartupFailureMessage { type: 'arcane-startup-failure'; protoco
 const NEWER_STATE = /\bnewer than this (?:Arcane )?build\b/;
 
 export function classifyStartupFailure(phase: StartupPhase, error: unknown): StartupFailureCode {
-  const value = error && typeof error === 'object' ? error as { code?: unknown; syscall?: unknown; message?: unknown } : {};
+  const value = error && typeof error === 'object' ? error as { code?: unknown; syscall?: unknown; message?: unknown; workspaceInUse?: unknown } : {};
   // Only a proved listener bind conflict is reported as a port conflict.
   if (phase === 'listen' && value.code === 'EADDRINUSE' && value.syscall === 'listen') return 'PORT_IN_USE';
+  // Only the workspace lock of a live runtime process (another open Arcane) is reported as in use;
+  // an unreadable or unverifiable lock keeps the general failure.
+  if (phase === 'services' && value.code === 'LOCKED' && value.workspaceInUse === true) return 'PROJECT_IN_USE';
   if (typeof value.message === 'string' && NEWER_STATE.test(value.message)) return 'STATE_NEWER';
   if (phase === 'state') return 'STATE_UNSAFE';
   if (phase === 'resources') return 'RESOURCE_UNAVAILABLE';

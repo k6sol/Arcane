@@ -32,6 +32,15 @@ interface Job {
     scenario?: {state:string;inputRelease:string;temporary:string;steps:Row[];capture:{id:string;sha256:string;bytes:number}|null} };
 }
 function invalid(): never { throw new Error('Invalid playtest response'); }
+/** A bounded non-200 reply that carried a fixed daemon error code (for example FENCED). */
+class PlaytestRefusal extends Error { constructor(readonly code: string) { super('Invalid playtest response'); } }
+export const PLAYTEST_REPAIR_COPY = Object.freeze({
+  fenced: 'Playtests are paused: an earlier playtest didn’t finish cleanly, so Arcane kept its records. Stop any playtest still running in Studio, then repair. The earlier records are kept, not deleted.',
+  button: 'Repair playtest records',
+  confirm: 'Studio is stopped (Edit mode) · Repair now',
+  done: 'Playtest records repaired. You can playtest again.',
+  failed: 'Couldn’t repair the playtest records. Restart Arcane and try again.',
+});
 function object(value: unknown): Row {
   if (!value || typeof value !== 'object' || Array.isArray(value)) invalid();
   return value as Row;
@@ -290,10 +299,15 @@ async function readResponse(response: Response, signal: AbortSignal): Promise<un
       chunks.push(part.value);
     }
   } finally { signal.removeEventListener('abort', abort); reader.releaseLock(); }
-  if (response.status !== 200) invalid();
   const body = new Uint8Array(size);
   let offset = 0;
   for (const chunk of chunks) { body.set(chunk, offset); offset += chunk.byteLength; }
+  if (response.status !== 200) {
+    let code: unknown = null;
+    try { code = (JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(body)) as Row)?.error; } catch { /* Not a coded refusal. */ }
+    if (typeof code === 'string' && /^[A-Z_]{1,64}$/.test(code)) throw new PlaytestRefusal(code);
+    invalid();
+  }
   return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(body)) as unknown;
 }
 function active(job: Job): boolean { return job.state === 'needs_approval' || job.state === 'running'; }
@@ -337,13 +351,17 @@ export function startPlaytestPanel(options: PlaytestPanelOptions): PlaytestPanel
   const notice = node('p', '', 'playtest-notice');
   notice.setAttribute('role', 'status'); notice.setAttribute('aria-live', 'polite');
   const refreshButton = node('button', 'Refresh status', 'playtest-refresh'); refreshButton.type = 'button';
-  const feedback = node('div', undefined, 'playtest-feedback'); feedback.append(notice, refreshButton); feedback.hidden = true;
+  // Shown only while the daemon reports FENCED: two trusted clicks (repair, then confirm Studio is stopped).
+  const repairButton = node('button', PLAYTEST_REPAIR_COPY.button, 'playtest-repair'); repairButton.type = 'button'; repairButton.hidden = true;
+  repairButton.setAttribute('data-playtest-action', 'repair');
+  let repairArmed = false, fenced = false;
+  const feedback = node('div', undefined, 'playtest-feedback'); feedback.append(notice, repairButton, refreshButton); feedback.hidden = true;
   root.hidden = true; root.replaceChildren();
   root.setAttribute('role', 'region'); root.setAttribute('aria-label', 'Playtests'); root.setAttribute('aria-busy', 'false');
 
   function clearRows(): void {
     for (const row of rendered.values()) row.remove();
-    rendered.clear(); jobs = []; root.replaceChildren(); root.hidden = true;
+    rendered.clear(); jobs = []; root.replaceChildren(); root.hidden = true; showFence(false);
     root.setAttribute('aria-busy', 'false'); notice.textContent = ''; feedback.hidden = true; stale = false;
   }
   function invalidate(): void {
@@ -367,7 +385,7 @@ export function startPlaytestPanel(options: PlaytestPanelOptions): PlaytestPanel
   }
   const attemptKey = (job: Job, action: string) => action + ':' + job.id + ':' + job.displayDigest;
   function busy(): void {
-    root.setAttribute('aria-busy', String(request !== null)); refreshButton.disabled = request !== null;
+    root.setAttribute('aria-busy', String(request !== null)); refreshButton.disabled = request !== null; repairButton.disabled = request !== null || !fenced;
     for (const row of rendered.values()) for (const button of row.controls) {
       const action = button.getAttribute('data-playtest-action')!;
       button.disabled = request !== null || stale || attempted.has(attemptKey(row.job, action)) ||
@@ -375,6 +393,10 @@ export function startPlaytestPanel(options: PlaytestPanelOptions): PlaytestPanel
     }
   }
   function message(content: string): void { notice.textContent = content; feedback.hidden = !content; }
+  function showFence(on: boolean): void {
+    fenced = on; repairArmed = false; repairButton.hidden = !on; repairButton.textContent = PLAYTEST_REPAIR_COPY.button;
+    if (on) { message(PLAYTEST_REPAIR_COPY.fenced); if (!root.contains(feedback)) root.replaceChildren(feedback); root.hidden = false; }
+  }
   function detailsFor(job: Job): HTMLDetailsElement {
     const details = node('details', undefined, 'playtest-details');
     const summary = node('summary', 'Permission details'); summary.setAttribute('data-playtest-action', 'details');
@@ -504,11 +526,11 @@ export function startPlaytestPanel(options: PlaytestPanelOptions): PlaytestPanel
         }
       }
     }
-    root.hidden = selected.length === 0; busy();
+    root.hidden = selected.length === 0 && !fenced; busy();
   }
 
   function run(token: string, method: 'GET' | 'POST', path: string, body: Row | undefined,
-    accept: (value: unknown) => void, failure: () => void, after?: () => void): Promise<void> {
+    accept: (value: unknown) => void, failure: (error?: unknown) => void, after?: () => void): Promise<void> {
     const controller = new AbortController();
     const operation = { controller, epoch, promise: Promise.resolve() };
     request = operation; nextPoll = Date.now() + POLL_MS; busy();
@@ -533,9 +555,9 @@ export function startPlaytestPanel(options: PlaytestPanelOptions): PlaytestPanel
           return readResponse(response, controller.signal);
         }), aborted]);
         if (current(operation, token)) accept(response);
-      } catch {
+      } catch (error) {
         // A deadline is reportable; an invalidated generation has no UI authority.
-        if (syncContext() === token && request === operation && epoch === operation.epoch) failure();
+        if (syncContext() === token && request === operation && epoch === operation.epoch) failure(error);
       } finally {
         if (deadline !== undefined) clearTimeout(deadline); removeAbort();
         if (request === operation && epoch === operation.epoch) {
@@ -550,11 +572,32 @@ export function startPlaytestPanel(options: PlaytestPanelOptions): PlaytestPanel
     if (!token) return Promise.resolve();
     if (request) return request.promise;
     return run(token, 'GET', '/v1/playtests', undefined, value => {
-      jobs = readJobs(value); stale = false;
+      jobs = readJobs(value); stale = false; if (fenced) { showFence(false); message(''); }
       for (const job of jobs) if (!firstSeenOn.has(job.id)) firstSeenOn.set(job.id, job.state === 'needs_approval' && autoOn());
       render();
-    }, () => { stale = true; message('Couldn’t refresh test status. Refresh status to check again.'); busy(); });
+    }, error => {
+      if (error instanceof PlaytestRefusal && error.code === 'FENCED') { stale = false; showFence(true); busy(); return; }
+      stale = true; message('Couldn’t refresh test status. Refresh status to check again.'); busy();
+    });
   }
+  /** The person's repair: moves the earlier journal aside (kept, never deleted) and restarts playtests. */
+  function repair(): Promise<void> {
+    const token = syncContext();
+    if (!token || request || !fenced) return Promise.resolve();
+    return run(token, 'POST', '/v1/playtests/repair', { confirm: 'studio-in-edit-mode' }, value => {
+      if (object(value).repaired !== true) invalid();
+      showFence(false); message(PLAYTEST_REPAIR_COPY.done);
+    }, error => {
+      if (error instanceof PlaytestRefusal && error.code === 'NOT_FENCED') { showFence(false); message(''); return; }
+      showFence(true); message(PLAYTEST_REPAIR_COPY.failed); busy();
+    }, () => { void refresh(); });
+  }
+  const repairClick = (event: Event) => {
+    if (event.isTrusted !== true || repairButton.disabled || !root.contains(repairButton) || !fenced) return;
+    if (!repairArmed) { repairArmed = true; repairButton.textContent = PLAYTEST_REPAIR_COPY.confirm; return; }
+    repairArmed = false; void repair();
+  };
+  repairButton.addEventListener('click', repairClick);
   /** The pending request the switch may approve: from the managed chat, first seen while on, with the same checks a click has. */
   function autoCandidate(): Job | null {
     if (!autoOn() || request || stale) return null;
@@ -612,7 +655,7 @@ export function startPlaytestPanel(options: PlaytestPanelOptions): PlaytestPanel
       stopped = true; if (timer !== undefined) clearTimeout(timer); timer = undefined;
       doc.removeEventListener('visibilitychange', visibility);
       view?.removeEventListener('pagehide', hide); view?.removeEventListener('pageshow', show);
-      refreshButton.removeEventListener('click', refreshClick); invalidate(); attempted.clear(); firstSeenOn.clear(); autoApproved.clear();
+      refreshButton.removeEventListener('click', refreshClick); repairButton.removeEventListener('click', repairClick); invalidate(); attempted.clear(); firstSeenOn.clear(); autoApproved.clear();
     },
   };
 }

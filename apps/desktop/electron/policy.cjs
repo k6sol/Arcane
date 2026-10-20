@@ -113,13 +113,40 @@ function readyMessage(message) {
   if (!message || typeof message !== 'object' || Object.keys(message).sort().join(',') !== 'origin,protocolVersion,token,type' || message.type !== 'arcane-ready' || message.protocolVersion !== 1 || !validOrigin(message.origin) || !/^[a-f0-9]{64}$/.test(message.token)) throw new Error('Invalid private daemon handoff.');
   return { origin: message.origin, token: message.token };
 }
-const STARTUP_FAILURE_CODES = Object.freeze(['PORT_IN_USE', 'STATE_NEWER', 'STATE_UNSAFE', 'RESOURCE_UNAVAILABLE', 'STARTUP_FAILED']);
+const STARTUP_FAILURE_CODES = Object.freeze(['PORT_IN_USE', 'PROJECT_IN_USE', 'STATE_NEWER', 'STATE_UNSAFE', 'RESOURCE_UNAVAILABLE', 'STARTUP_FAILED']);
 // A fixed code only: never stderr, paths, exception text or secrets. Never readiness.
 function startupFailureMessage(message) {
   if (!message || typeof message !== 'object' || Object.getPrototypeOf(message) !== Object.prototype || Object.keys(message).sort().join(',') !== 'code,protocolVersion,type' || message.type !== 'arcane-startup-failure' || message.protocolVersion !== 1 || typeof message.code !== 'string' || !STARTUP_FAILURE_CODES.includes(message.code)) throw new Error('Invalid private daemon failure report.');
   return message.code;
 }
-const DAEMON_STDERR_LOG = 'daemon-stderr.log', DAEMON_STDERR_PREVIOUS_LOG = 'daemon-stderr.previous.log', DAEMON_STDERR_LIMIT = 64 * 1024;
+/** Answers whether any local listener responds at a validated loopback origin. Sends no token or credential. */
+function loopbackAnswers(origin, timeoutMs = 1500) {
+  return new Promise(resolve => {
+    let request;
+    const done = value => { clearTimeout(timer); try { request?.destroy(); } catch { /* Already closed. */ } resolve(value); };
+    const timer = setTimeout(() => done(false), timeoutMs);
+    try {
+      request = require('node:http').get(origin + '/', { agent: false, headers: { Connection: 'close' } }, response => { response.resume(); done(Number.isInteger(response.statusCode)); });
+      request.once('error', () => done(false));
+    } catch { done(false); }
+  });
+}
+/** Read-only proof that another live Arcane runtime already serves this project: the state root's daemon.json names a
+ * live process other than this one and its loopback listener answers. Never signals that process, sends a token, or
+ * removes or rewrites any file; a missing, stale or malformed descriptor is simply "not in use". */
+async function liveRuntimeOwner(stateRoot, { kill = (pid, signal) => process.kill(pid, signal), answers = loopbackAnswers, selfPid = process.pid } = {}) {
+  let descriptor;
+  try {
+    const path = join(stateRoot, 'daemon.json'), stat = lstatSync(path);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 1024) return false;
+    descriptor = JSON.parse(require('node:fs').readFileSync(path, 'utf8'));
+  } catch { return false; }
+  if (!descriptor || typeof descriptor !== 'object' || Object.getPrototypeOf(descriptor) !== Object.prototype || Object.keys(descriptor).sort().join(',') !== 'origin,pid,protocolVersion' ||
+      descriptor.protocolVersion !== 1 || !Number.isSafeInteger(descriptor.pid) || descriptor.pid < 1 || descriptor.pid === selfPid || !validOrigin(descriptor.origin)) return false;
+  try { kill(descriptor.pid, 0); } catch (error) { if (error?.code !== 'EPERM') return false; }
+  try { return await answers(descriptor.origin) === true; } catch { return false; }
+}
+const DAEMON_STDERR_LOG ='daemon-stderr.log', DAEMON_STDERR_PREVIOUS_LOG = 'daemon-stderr.previous.log', DAEMON_STDERR_LIMIT = 64 * 1024;
 /** Bounded diagnostic trail of the owned daemon's stderr (never stdout, which carries the workspace token).
  * The prior run's log is kept once as .previous; an unexpected file kind at either name disables logging
  * rather than following or replacing it. Logging never blocks or fails daemon startup. */
@@ -157,4 +184,4 @@ function daemonStderrLog(stateRoot, limit = DAEMON_STDERR_LIMIT) {
     close,
   });
 }
-module.exports = { daemonStderrLog, DAEMON_STDERR_LOG, DAEMON_STDERR_LIMIT, validOrigin, navigationAllowed, requestAllowed, protectConsolePipes, installClipboardPermissions, within, localPath, directPath, prepareSmokeDirectory, prepareUserDirectory, daemonEnvironment, readyMessage, STARTUP_FAILURE_CODES, startupFailureMessage };
+module.exports = { daemonStderrLog, DAEMON_STDERR_LOG, DAEMON_STDERR_LIMIT, validOrigin, navigationAllowed, requestAllowed, protectConsolePipes, installClipboardPermissions, within, localPath, directPath, prepareSmokeDirectory, prepareUserDirectory, daemonEnvironment, readyMessage, STARTUP_FAILURE_CODES, startupFailureMessage, liveRuntimeOwner, loopbackAnswers };
