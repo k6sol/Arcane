@@ -6,7 +6,7 @@
 import {
   closeChoiceBlocks, composerMenuOpen, composerPickerCheck, crossProviderColumns, describeToolActivity, fillModelColumns, firstModelRow, installComposerCommands, loopPickerFocus, modelListEntry,
   modelListMove, parseToolDetail, patchMessageText, positionComposerPopover, prefillComposer, prependProviderLogo, renderChangeCard, renderEarlierButton, renderMessageText, renderToolActivity,
-  restoreRequestText, revealEarlier, toolDetailText, transcriptWindowStart,
+  restoreRequestText, revealEarlier, toolDetailText, toolResultImage, transcriptWindowStart,
 } from './codex-chat.js';
 import type { ChoiceBlockOptions, ComposerModelGroup, ComposerProvider, CrossProviderModels, ProviderUsageLimit, ToolChange } from './codex-chat.js';
 import type { ChatAttachmentsController, ChatAttachmentsOwner } from './chat-attachments.js';
@@ -18,7 +18,8 @@ import { costDisplay, onCostPreferences, replyUsageText } from './task-usage-ui.
 export type ClaudeChatRole = 'user' | 'assistant' | 'tool' | 'error';
 export type ClaudeToolStatus = 'started' | 'finished' | 'failed';
 /** input/result are the engine's bounded display details (JSON or a short excerpt); older engines omit them. */
-export interface ClaudeChatTool { name: string; status: ClaudeToolStatus; input?: string; result?: string }
+/** `image`: a live tool event's capture (PNG/JPEG data: URL from the host's Arcane tools); saved history never has one. */
+export interface ClaudeChatTool { name: string; status: ClaudeToolStatus; input?: string; result?: string; image?: string }
 export interface ClaudeChatMessage { id: string; role: ClaudeChatRole; text: string; at: string; tool?: ClaudeChatTool }
 export interface ClaudeChatStatus {
   installed: boolean; signedIn: boolean; cliVersion: string | null; models: string[]; efforts: string[];
@@ -151,6 +152,8 @@ export function readClaudeChatMessage(value: unknown): ClaudeChatMessage | null 
   if (tool && typeof tool.status === 'string' && TOOL_STATES.includes(tool.status as ClaudeToolStatus)) {
     output.tool = { name: text(tool.name, 256) || 'Tool', status: tool.status as ClaudeToolStatus };
     for (const key of ['input', 'result'] as const) if (typeof tool[key] === 'string' && (tool[key] as string).length <= 4096) output.tool[key] = tool[key] as string;
+    // Display only: kept when it decodes as a bounded PNG/JPEG data URL (toolResultImage); anything else is dropped.
+    if (output.tool.status === 'finished' && typeof tool.image === 'string' && toolResultImage({ image: tool.image })) output.tool.image = tool.image;
   }
   return output;
 }
@@ -317,6 +320,8 @@ export class ClaudeChat {
   private active = false;
   private removers: (() => void)[] = [];
   private tools = new Map<string, { article: HTMLElement; tool: ClaudeChatTool; text: string }>();
+  /** The last few live captures by tool message id, so a re-rendered transcript keeps its thumbnails (memory only). */
+  private toolImages = new Map<string, string>();
   /** Studio changes reported by the visible turn's tools; shown as one card when the turn ends. */
   private turnChanges: ToolChange[] = [];
   /** Messages typed while a reply runs; sent one by one after each reply finishes successfully. */
@@ -922,7 +927,7 @@ export class ClaudeChat {
         this.flushStream();
         turn.bubble?.setAttribute('aria-busy', 'false'); turn.bubble?.removeAttribute('aria-live');
         const ok = event.ok === true, error = nullableText(event.error, 2048), limited = ok ? null : readUsageLimit(event.usageLimit, error, this.profile.usageLimitText);
-        this.turn = null;
+        this.turn = null; this.markTurnLive();
         // At the usage limit the unanswered message returns to an empty composer so it can move to the other provider.
         // It is never resent automatically.
         if (limited) {
@@ -1017,6 +1022,12 @@ export class ClaudeChat {
     const row = conversationId ? this.usage.get(conversationId) : undefined; return row ? { ...row } : null;
   }
   /** Shows the visible turn's Studio changes as one card after its messages. */
+  /** The shared transcript's build progress group is live while this tab's turn runs (presentation only). */
+  private markTurnLive(): void {
+    const box = this.el('codex-messages'); if (!box?.dataset || !this.active) return;
+    const live = String(!!this.turn && this.turn.tabKey === this.activeKey);
+    if (box.dataset.turnLive !== live) box.dataset.turnLive = live;
+  }
   private flushChanges(): void {
     const changes = this.turnChanges; this.turnChanges = [];
     const box = this.el('codex-messages'); if (!box || !this.active || !changes.length) return;
@@ -1026,7 +1037,14 @@ export class ClaudeChat {
   private toolArticle(message: ClaudeChatMessage, tool: ClaudeChatTool, extra: string): HTMLElement {
     const article = this.make('article', undefined, 'codex-message tool');
     article.setAttribute('data-role', 'tool'); article.setAttribute('aria-label', 'Tool activity'); article.dataset.toolState = tool.status;
-    const activity = describeToolActivity(tool.name, parseToolDetail(tool.input), parseToolDetail(tool.result), tool.status);
+    // Keyed so the build progress group keeps one start time per call across its status updates.
+    if (message.id) article.dataset.toolKey = 'claude\0' + message.id;
+    if (message.at) article.dataset.toolAt = message.at;
+    // A failed call's plain-text result is its reason; JSON results describe themselves.
+    const activity = describeToolActivity(tool.name, parseToolDetail(tool.input), parseToolDetail(tool.result) ?? (tool.status === 'failed' ? tool.result ?? null : null), tool.status);
+    const capture = tool.status === 'finished' ? tool.image ?? (message.id ? this.toolImages.get(message.id) : undefined) : undefined;
+    if (capture && message.id && tool.image) { this.toolImages.delete(message.id); this.toolImages.set(message.id, capture); while (this.toolImages.size > 8) this.toolImages.delete(this.toolImages.keys().next().value!); }
+    if (capture && !activity.image) activity.image = toolResultImage({ image: capture });
     if (activity.change && !this.turnChanges.some(change => change.receipt === activity.change!.receipt)) this.turnChanges.push(activity.change);
     const scope = this.profile.name + ' · ' + (this.activeTab()?.conversationId ?? 'new chat') + (message.at ? ' · ' + message.at : '');
     article.append(...renderToolActivity(this.doc, activity, tool.status,
@@ -1643,6 +1661,7 @@ export class ClaudeChat {
     if (status) status.textContent = !this.bridge ? 'Unavailable' : this.turn ? 'Working' : this.ready() ? this.readyLabel() : this.state ? 'Not signed in' : 'Checking';
     const box = this.el('codex-messages');
     if (box) { box.setAttribute('aria-busy', String(this.loading || !!this.turn)); if (this.messageCount === 0 && !box.querySelector?.('.empty')) this.clearMessages(); }
+    this.markTurnLive();
     this.renderTabs();
     this.renderSaved();
     this.renderControls();

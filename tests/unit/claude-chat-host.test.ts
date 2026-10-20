@@ -754,3 +754,84 @@ test('the appended system prompt is identical on every turn; the Playtest switch
   assert.match(fallback, /selection_read[\s\S]*arcane-choices[\s\S]*arcane-plan[\s\S]*FIXTURE$/, 'other instructions keep the full preamble');
   assert.match(fallback, /an explicit build request needs no plan approval/, 'the fallback never makes every build wait for plan approval');
 });
+
+// ---- Tool-result images: Studio viewport captures reach the live event as a bounded PNG/JPEG data URL, never the transcript ----
+const CAPTURE_PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from('viewport capture fixture bytes')]).toString('base64');
+const CAPTURE_JPEG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.from('jpeg capture fixture bytes')]).toString('base64');
+const apiImage = (data: string, mediaType = 'image/png') => ({ type: 'image', source: { type: 'base64', media_type: mediaType, data } });
+const mcpImage = (data: string, mimeType = 'image/png') => ({ type: 'image', data, mimeType });
+const sized = (bytes: number, signature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]) => { const b = Buffer.alloc(bytes); Buffer.from(signature).copy(b); return b.toString('base64'); };
+
+test('tool-result images: only canonical PNG or JPEG bytes within 1.5 MiB become a data URL; URLs and other types never do', () => {
+  const text = { type: 'text', text: '{"viewport":{"width":768,"height":432}}' };
+  assert.equal(chat.toolResultImage([text, apiImage(CAPTURE_PNG)]), 'data:image/png;base64,' + CAPTURE_PNG, 'the form Claude Code reports');
+  assert.equal(chat.toolResultImage([mcpImage(CAPTURE_JPEG, 'image/jpeg')]), 'data:image/jpeg;base64,' + CAPTURE_JPEG, 'the MCP image block');
+  assert.equal(chat.toolResultImage([mcpImage(sized(1536 * 1024))])?.length, 'data:image/png;base64,'.length + Math.ceil(1536 * 1024 / 3) * 4, 'exactly 1.5 MiB is accepted');
+  for (const bad of [
+    [mcpImage(sized(1536 * 1024 + 1))], [apiImage(CAPTURE_PNG, 'image/gif')], [mcpImage(CAPTURE_PNG, 'image/svg+xml')], [mcpImage(CAPTURE_PNG, 'image/webp')],
+    [{ type: 'image', source: { type: 'url', url: 'https://example.invalid/capture.png' } }], [{ type: 'image', url: 'https://example.invalid/capture.png', mimeType: 'image/png' }],
+    [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'https://example.invalid/x.png' } }],
+    [mcpImage(CAPTURE_JPEG, 'image/png')], [mcpImage(CAPTURE_PNG, 'image/jpeg')], [mcpImage(Buffer.from('GIF89a fixture').toString('base64'))],
+    [mcpImage(CAPTURE_PNG + ' ')], [mcpImage(CAPTURE_PNG.slice(0, -1))], [mcpImage('data:image/png;base64,' + CAPTURE_PNG)], [mcpImage(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).toString('base64'))],
+    [{ type: 'text', text: CAPTURE_PNG }], [{ type: 'resource', resource: { uri: 'file:///C:/capture.png', mimeType: 'image/png', blob: CAPTURE_PNG } }], 'text', null, {},
+  ]) assert.equal(chat.toolResultImage(bad), null, JSON.stringify(bad).slice(0, 120));
+  assert.equal(chat.toolResultImage([mcpImage('not base64!'), mcpImage(CAPTURE_PNG)]), 'data:image/png;base64,' + CAPTURE_PNG, 'the first valid image wins');
+});
+
+test('a viewport capture from an Arcane tool rides on the live tool event only: bounded per reply, never persisted, never from other tools', async t => {
+  const f = await fixture(t);
+  const resultLine = (id: string, content: unknown, isError = false) => line({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content, is_error: isError }] }, parent_tool_use_id: null, session_id: SESSION });
+  const capture = (id: string, name = 'mcp__arcane__studio_viewport_capture') => assistant([{ type: 'tool_use', id, name, input: { maxDimension: 768 } }]);
+  const summary = { type: 'text', text: JSON.stringify({ viewport: { width: 768, height: 432, bytes: 30 } }) };
+  f.scripts.push(replay(init(),
+    capture('toolu_1'), resultLine('toolu_1', [summary, apiImage(CAPTURE_PNG)]),
+    capture('toolu_2'), resultLine('toolu_2', [summary, apiImage(CAPTURE_JPEG, 'image/jpeg')]),
+    capture('toolu_3', 'mcp__other__screenshot'), resultLine('toolu_3', [summary, apiImage(CAPTURE_PNG)]),
+    capture('toolu_4'), resultLine('toolu_4', [summary, apiImage(CAPTURE_PNG)], true),
+    capture('toolu_5'), resultLine('toolu_5', [summary, { type: 'image', source: { type: 'url', url: 'https://example.invalid/x.png' } }]),
+    ...[6, 7, 8].flatMap(n => [capture('toolu_' + n), resultLine('toolu_' + n, [summary, apiImage(CAPTURE_PNG)])]),
+    result()));
+  const reply = await f.host.send(turnInput('Build and capture the forest'));
+  await f.done(reply.turnId);
+  const finished = f.events.filter(e => e.type === 'tool' && e.message.tool.status !== 'started').map(e => e.message.tool);
+  assert.deepEqual(finished.map(tool => tool.image ?? null), ['data:image/png;base64,' + CAPTURE_PNG, 'data:image/jpeg;base64,' + CAPTURE_JPEG, null, null, null,
+    'data:image/png;base64,' + CAPTURE_PNG, 'data:image/png;base64,' + CAPTURE_PNG, null], 'Arcane tools only, never a failed call or a URL, at most 4 per reply');
+  assert.equal(finished[0].result, summary.text, 'the result detail stays the text summary');
+  assert.ok(f.events.filter(e => e.type === 'tool' && e.message.tool.status === 'started').every(e => !('image' in e.message.tool)));
+  const history = await f.host.history(reply.conversationId);
+  assert.ok(history.messages.every((m: any) => !m.tool || !('image' in m.tool)), 'history never carries an image');
+  const files: string[] = [];
+  const walk = async (dir: string): Promise<void> => { for (const entry of await readdir(dir, { withFileTypes: true })) { const full = join(dir, entry.name); if (entry.isDirectory()) await walk(full); else files.push(full); } };
+  await walk(f.state);
+  for (const file of files) { const saved = await readFile(file, 'utf8'); assert.ok(!saved.includes(CAPTURE_PNG) && !saved.includes(CAPTURE_JPEG), file); }
+  // The next reply has its own budget.
+  f.scripts.push(replay(init(), capture('toolu_9'), resultLine('toolu_9', [summary, apiImage(CAPTURE_PNG)]), result()));
+  const next = await f.host.send(turnInput('Capture again', reply.conversationId));
+  await f.done(next.turnId);
+  assert.equal(f.events.filter(e => e.turnId === next.turnId && e.type === 'tool').at(-1).message.tool.image, 'data:image/png;base64,' + CAPTURE_PNG);
+});
+
+test('preload forwards a tool image only on a finished live tool event, as a bounded PNG or JPEG data URL', async () => {
+  const vm = await import('node:vm');
+  const source = await readFile(join(process.cwd(), 'apps/desktop/electron/preload.cjs'), 'utf8');
+  let exposed: any; const listeners: ((event: unknown, payload: unknown) => void)[] = []; let historyReply: unknown = null;
+  // Replies are built inside the preload's realm, as Electron's structured clone delivers them.
+  const context = vm.createContext({ require: () => ({ contextBridge: { exposeInMainWorld: (_name: string, value: unknown) => { exposed = value; } },
+    ipcRenderer: { on: (channel: string, fn: any) => { if (channel === 'arcane:claude-chat-event') listeners.push(fn); }, removeListener() {}, invoke: async () => historyReply } }) });
+  vm.runInContext(source, context);
+  const seen: any[] = []; exposed.claudeChat.onEvent((event: unknown) => seen.push(event));
+  const send = (tool: Record<string, unknown>, type = 'tool') => { seen.length = 0; listeners[0]!({}, { turnId: randomUUID(), conversationId: randomUUID(), type,
+    message: { id: randomUUID(), role: 'tool', text: 'studio_viewport_capture', at: '2026-10-20T00:00:00.000Z', tool: { name: 'studio_viewport_capture', status: 'finished', ...tool } } }); return seen[0] ? JSON.parse(JSON.stringify(seen[0].message.tool)) : null; };
+  const png = 'data:image/png;base64,' + CAPTURE_PNG, jpeg = 'data:image/jpeg;base64,' + CAPTURE_JPEG;
+  assert.deepEqual(send({ image: png }), { name: 'studio_viewport_capture', status: 'finished', image: png });
+  assert.equal(send({ image: jpeg }).image, jpeg);
+  assert.equal(send({ image: 'data:image/png;base64,' + sized(1536 * 1024) }).image?.length, 'data:image/png;base64,'.length + Math.ceil(1536 * 1024 / 3) * 4);
+  for (const bad of ['https://example.invalid/capture.png', 'blob:http://127.0.0.1/x', 'file:///C:/capture.png', 'data:image/svg+xml;base64,' + CAPTURE_PNG, 'data:image/gif;base64,R0lGODlh',
+    'data:text/html;base64,' + CAPTURE_PNG, 'data:image/png;base64,' + CAPTURE_PNG + '"', 'data:image/png;base64,' + CAPTURE_PNG.slice(1), 'data:image/jpeg;base64,' + sized(1536 * 1024 + 3), { url: png }, 42])
+    assert.deepEqual(send({ image: bad }), { name: 'studio_viewport_capture', status: 'finished' }, 'an invalid image is dropped and the status still arrives: ' + String(bad).slice(0, 60));
+  assert.deepEqual(send({ image: png, status: 'started' }), { name: 'studio_viewport_capture', status: 'started' }, 'a running call has no image');
+  assert.equal(send({ image: png }, 'message').image, undefined, 'only tool events carry one');
+  historyReply = vm.runInContext('(' + JSON.stringify({ conversationId: randomUUID(), messages: [{ id: randomUUID(), role: 'tool', text: 'x', at: '2026-10-20T00:00:00.000Z', tool: { name: 'studio_viewport_capture', status: 'finished', image: png } }] }) + ')', context);
+  const history = await exposed.claudeChat.history(randomUUID());
+  assert.equal('image' in history.messages[0].tool, false, 'saved history never carries an image');
+});

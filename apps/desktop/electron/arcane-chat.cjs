@@ -494,7 +494,7 @@ function createArcaneChat(options) {
       const system = (server.includes(shared.GUIDANCE_START) ? shared.withoutSharedGuidance(own) : own) + (server ? '\n\n' + server : '') + shared.projectMemorySection(await loadProjectMemory());
       const messages = [{ role: 'system', content: system }, ...turn.history, { role: 'user', content: text + shared.playtestNote(turn.playtest) }];
       const base = { turnId: turn.turnId, conversationId: turn.conversationId };
-      let calls = 0;
+      let calls = 0, imagesShown = 0;
       for (let round = 0; ; round++) {
         if (interrupted(turn)) return finish(turn, false, stopMessage(turn), reported());
         if (round >= limits.rounds) return finish(turn, false, MESSAGES.steps, reported());
@@ -550,7 +550,10 @@ function createArcaneChat(options) {
           const detail = result ? shared.toolResultDetail(result.content, secret) : shared.toolResultDetail(content, secret);
           m.tool = { ...shared.toolCopy(m.tool), status: isError ? 'failed' : 'finished', ...(detail ? { result: detail } : {}) };
           await store.put(turn.conversationId, { ...m, tool: shared.toolCopy(m.tool) }).catch(() => {});
-          emit({ ...base, type: 'tool', message: publicMessage(m) });
+          // Every offered tool is one of Arcane's own MCP server's; a capture rides on this live event only, bounded per reply.
+          const image = result && !isError && imagesShown < shared.TOOL_IMAGE_LIMITS.perTurn ? shared.toolResultImage(result.content) : null;
+          if (image) imagesShown++;
+          emit({ ...base, type: 'tool', message: shared.withToolImage(publicMessage(m), image) });
           messages.push({ role: 'tool', toolCallId: call.id, content, ...(isError ? { isError: true } : {}) });
         }
       }

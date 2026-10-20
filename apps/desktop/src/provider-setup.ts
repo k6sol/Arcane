@@ -61,6 +61,11 @@ export interface ProviderSetupController {
    * Until it says true, choosing Arcane is refused and the surface never becomes 'arcane'.
    */
   setArcaneAvailable(available: boolean): void;
+  /**
+   * Presentation only: why Arcane Credits are not usable yet ('none': no Arcane Credits service is configured for this
+   * copy of Arcane; 'signed-out': it is, but no Arcane account is connected). The sign-in card explains the next step.
+   */
+  setArcaneSetup?(state: ArcaneCreditsSetup): void;
   /** The currently selected provider (not proof of sign-in). */
   selectedProvider(): SetupProvider;
   stop(): void;
@@ -72,6 +77,15 @@ export const PROVIDER_PRESENTATION_KEY = 'arcane.provider-presentation.v1';
 export const PROVIDER_PREFERENCE_EVENT = 'workspace:providerpreference';
 /** Presentation only: the user last chose the Arcane Credits chat (no account data, no authority). */
 export const ARCANE_SURFACE_KEY = 'arcane.chat-surface.v1';
+export type ArcaneCreditsSetup = 'none' | 'signed-out';
+/** The sign-in card's line for people without a ChatGPT or Claude subscription, by Arcane Credits readiness. */
+export const ARCANE_CREDITS_OFFER = Object.freeze({
+  ready: { note: 'No ChatGPT or Claude subscription? Build with Arcane Credits instead.', action: 'Use Arcane Credits' },
+  'signed-out': { note: 'No ChatGPT or Claude subscription? Connect your Arcane account to build with Arcane Credits.', action: 'Connect Arcane account' },
+  none: { note: 'No ChatGPT or Claude subscription? Arcane Credits can stand in, but this copy of Arcane is not connected to an Arcane Credits service yet.', action: 'What Arcane Credits need' },
+});
+/** Where Settings opens for the Arcane Credits card (Plans & credits). */
+export const ARCANE_CREDITS_TARGET = 'plans-credits-heading';
 const providers = (value: unknown): value is SetupProvider => value === 'codex' || value === 'claude';
 function data(value: unknown, keys: string[]): Record<string, unknown> | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -156,7 +170,7 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
     isSignedIn: () => false, subscribeSignInChange: (_listener: () => void) => () => {},
     handoffChoices: () => null, subscribeHandoffChoices: (_listener: () => void) => () => {},
     chatSurface: () => 'codex', subscribeChatSurface: (_listener: () => void) => () => {},
-    requestProvider: (_next: SetupProvider | 'arcane') => false, selectedProvider: () => 'codex', setArcaneAvailable: (_available: boolean) => {},
+    requestProvider: (_next: SetupProvider | 'arcane') => false, selectedProvider: () => 'codex', setArcaneAvailable: (_available: boolean) => {}, setArcaneSetup: (_state: ArcaneCreditsSetup) => {},
     stop() {}, resume() {}, cleanup() {},
   };
   const native = bridge(doc, options), storage = presentationStorage(doc);
@@ -186,7 +200,9 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
   const surfaceListeners = new Set<() => void>();
   const claudeChatActive = () => provider === 'claude' && claudeChatEvidence && !!native && !stopped && !disposed;
   // Arcane Credits chat: the user's explicit choice plus the chat's own availability report (no native CLI involved).
-  let arcaneChosen = false, arcaneAvailable = false;
+  let arcaneChosen = false, arcaneAvailable = false, arcaneSetup: ArcaneCreditsSetup = 'none';
+  // Providers whose official install steps were opened from the sign-in card: the card then offers Check sign-in.
+  const installOpened = new Set<SetupProvider>();
   const arcaneChatActive = () => arcaneChosen && arcaneAvailable && !stopped && !disposed;
   const applySurface = () => {
     const next: ChatSurface = arcaneChatActive() ? 'arcane' : claudeChatActive() ? 'claude' : 'codex';
@@ -245,13 +261,23 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
     lastChoices = signature;
     for (const listener of [...choiceListeners]) { try { listener(); } catch { /* Observers cannot interrupt setup. */ } }
   };
-  const nextAction = (): 'disconnect' | 'connect' | 'status' | 'login' | 'launch' => {
+  const nextAction = (): 'disconnect' | 'connect' | 'status' | 'login' | 'launch' | 'install' => {
     if (actionError) return 'status';
     if (needsDisconnect()) return 'disconnect';
     const state = status(), connection = options.chat.providerConnectionStatus();
     if (provider === 'codex' && (state?.auth === 'subscription' || connection?.fresh && connection.auth === 'subscription')) return 'connect';
     if (provider === 'claude' && state?.auth === 'subscription') return 'launch';
-    return awaitingStatus.has(provider) || !state || state.auth !== 'signed-out' ? 'status' : 'login';
+    // Not installed: the card opens the official install steps once, then checks again.
+    if (state && !state.installed) return installOpened.has(provider) ? 'status' : 'install';
+    // An API-key or cloud sign-in is not a subscription: offer the subscription sign-in instead of re-checking forever.
+    return awaitingStatus.has(provider) || !state || (state.auth !== 'signed-out' && state.auth !== 'api-or-cloud') ? 'status' : 'login';
+  };
+  const cliName = () => provider === 'codex' ? 'Codex' : 'Claude Code';
+  /** Plain next-step guidance for the sign-in card where native status alone would leave a new user stuck. */
+  const guidance = (state: ProviderSetupState | undefined): string | null => {
+    if (state && !state.installed && !installOpened.has(provider)) return cliName() + ' is not installed on this PC yet. Click Get ' + cliName() + ' for the official install steps, then come back and sign in.';
+    if (state?.auth === 'api-or-cloud') return 'This ' + cliName() + ' sign-in uses an API key or cloud account. Arcane builds with your ' + (provider === 'codex' ? 'ChatGPT' : 'Claude') + ' subscription: sign in with it, or use Arcane Credits.';
+    return null;
   };
   const render = () => {
     const state = status(), connection = options.chat.providerConnectionStatus(), name = provider === 'codex' ? 'ChatGPT' : 'Claude Code';
@@ -277,7 +303,7 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
       'Claude Code sign-in opens in its native terminal. Check status after signing in.' : 'Native sign-in requires the Arcane desktop app.')) +
       (state?.cliVersion ? ' Version ' + state.cliVersion + '.' : '') + (state?.auth === 'api-or-cloud' ? ' API or cloud billing was reported; no request was started.' : ''));
     set('provider-login-message', actionError ?? (!native ? 'Open the desktop app to sign in.' : checking ? 'Checking your saved ' + name + ' sign-in…' : needsDisconnect() ? 'Reconnect to use your signed-in account.' :
-      state?.message ?? (
+      guidance(state) ?? state?.message ?? (
       provider === 'claude' ? 'Claude Code opens in its native terminal.' : awaitingStatus.has(provider) ? 'Finish native sign-in, then check status.' :
       state?.auth === 'subscription' || connection?.fresh && connection.auth === 'subscription' ? 'Use your signed-in ChatGPT account.' : 'Sign in with ChatGPT in your browser.')));
     set('provider-setup-login', 'Sign in with ' + name);
@@ -291,9 +317,14 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
     if (login) {
       const action = nextAction(); login.hidden = false;
       login.textContent = checking ? 'Checking sign-in…' : connectingSavedLogin ? 'Connecting Codex…' : busy ? 'Please wait…' : action === 'disconnect' ? 'Disconnect old session' : action === 'connect' ? 'Connect Codex' :
-        action === 'status' ? 'Check sign-in' : action === 'launch' ? 'Open Claude Code' : 'Sign in with ' + name;
-      login.disabled = stopped || disposed || busy || connectingSavedLogin || !native || state?.installed === false;
+        action === 'status' ? 'Check sign-in' : action === 'launch' ? 'Open Claude Code' : action === 'install' ? 'Get ' + cliName() : 'Sign in with ' + name;
+      login.disabled = stopped || disposed || busy || connectingSavedLogin || !native;
     }
+    // No subscription: Arcane Credits when they are ready, otherwise a plain line about what they still need.
+    const offer = arcaneAvailable ? 'ready' : arcaneSetup;
+    set('provider-login-credits-note', ARCANE_CREDITS_OFFER[offer].note);
+    const credits = button('provider-login-credits');
+    if (credits) { credits.textContent = ARCANE_CREDITS_OFFER[offer].action; credits.disabled = stopped || disposed; credits.setAttribute('data-offer', offer); }
     // Keep the integration hook; the card offers status through its one primary action.
     const refresh = button('provider-login-refresh'); if (refresh) { refresh.hidden = true; refresh.disabled = stopped || disposed || busy || !native; }
     // Terminal handoff stays available as a secondary action beside the embedded Claude chat.
@@ -353,6 +384,8 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
           // Install/launch snapshots and busy replies may contain cached auth.
           // They cannot renew evidence from an actual native status check.
         }
+        if (action === 'install') installOpened.add(target);
+        else if (value.installed || action === 'status') installOpened.delete(target);
         if (action === 'login' && value.installed && value.auth === 'unknown') awaitingStatus.add(target);
         else if (action === 'status' && !value.busy) awaitingStatus.delete(target);
         if (target === 'codex' && action === 'login' && value.busy) loginWatch = { provider: target, epoch: generation, remaining: 450 };
@@ -362,7 +395,7 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
         if (watching && !value.busy) clearLoginWatch();
       }
     } catch {
-      if (!stopped && !disposed && generation === epoch) { clearLoginWatch(); states.delete(target); if (target === 'claude') { claudeSignInObserved = null; } awaitingStatus.delete(target); actionError = 'Setup unavailable. Try again in Settings.'; }
+      if (!stopped && !disposed && generation === epoch) { clearLoginWatch(); states.delete(target); if (target === 'claude') { claudeSignInObserved = null; } awaitingStatus.delete(target); actionError = 'Setup unavailable. Click Check sign-in to try again; restart Arcane if it keeps happening.'; }
     } finally {
       busy = false; activeAction = null; cancelStatus = null; if (!disposed) render();
       if (!stopped && !disposed && generation === epoch && target === provider) {
@@ -382,11 +415,11 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
             // Its implementation owns API freshness and native session authority.
             try {
               void options.chat.connectForSavedLogin().catch(() => {
-                if (!stopped && !disposed && generation === epoch) { actionError = 'Signed in. Connection unavailable. Try again in Settings.'; render(); }
+                if (!stopped && !disposed && generation === epoch) { actionError = 'Signed in. Connection unavailable. Click Check sign-in to try again.'; render(); }
               }).finally(() => { savedConnectionPending = false; if (!disposed) render(); });
             } catch {
               savedConnectionPending = false;
-              if (!stopped && !disposed && generation === epoch) { actionError = 'Signed in. Connection unavailable. Try again in Settings.'; render(); }
+              if (!stopped && !disposed && generation === epoch) { actionError = 'Signed in. Connection unavailable. Click Check sign-in to try again.'; render(); }
             }
           }
         }
@@ -448,11 +481,18 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
   listen(select, 'change', event => { if (event.isTrusted && providers(select.value)) { autoSelect = false; choose(select.value); } });
   const login = button('provider-login-start');
   if (login) listen(login, 'click', event => {
-    if (!trusted(event) || login.disabled || busy || stopped || disposed || !native || status()?.installed === false) return;
+    if (!trusted(event) || login.disabled || busy || stopped || disposed || !native) return;
     const action = nextAction();
     if (action === 'disconnect') { disconnectIntent(); const disconnect = button('codex-disconnect'); if (disconnect && !disconnect.disabled) disconnect.click(); return; }
     if (action === 'connect') { reconnectAllowed=true; const connect = button('codex-connect'); if (connect && !connect.disabled) connect.click(); else requestSettings('native-conversation-settings'); }
     else void invoke(action);
+  });
+  const credits = button('provider-login-credits');
+  if (credits) listen(credits, 'click', event => {
+    if (!trusted(event) || credits.disabled || stopped || disposed) return;
+    // Ready: switch to the Arcane Credits chat (the gate then hides). Otherwise show what is still needed in Plans & credits.
+    if (arcaneAvailable) { autoSelect = false; chooseArcane(true); render(); }
+    else requestSettings(ARCANE_CREDITS_TARGET);
   });
   // Exact presentation event only. A changed preference requests native status,
   // but its payload never supplies authentication or native session authority.
@@ -497,6 +537,11 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
     setArcaneAvailable(available: boolean) {
       if (disposed || arcaneAvailable === (available === true)) return;
       arcaneAvailable = available === true; render();
+    },
+    setArcaneSetup(state: ArcaneCreditsSetup) {
+      const next: ArcaneCreditsSetup = state === 'signed-out' ? 'signed-out' : 'none';
+      if (disposed || arcaneSetup === next) return;
+      arcaneSetup = next; render();
     },
     selectedProvider: () => provider,
     subscribeChatSurface(listener: () => void) {

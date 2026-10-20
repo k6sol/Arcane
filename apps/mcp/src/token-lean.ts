@@ -18,6 +18,10 @@ export function compactToolSchema(value: unknown): unknown {
   const node: Node = {};
   for (const [key, item] of Object.entries(value)) node[key] = key === 'enum' || key === 'required' || key === 'const' || key === 'default' ? item : compactToolSchema(item);
   delete node.$schema;
+  // "default" is an annotation (never validated); false and [] are what an omitted flag or list already means.
+  if (node.default === false || (Array.isArray(node.default) && !node.default.length)) delete node.default;
+  // .describe('') clears an inherited description where the tool text already covers the field.
+  if (node.description === '') delete node.description;
   // A string enum or const already fixes the type.
   if (node.type === 'string' && ((Array.isArray(node.enum) && node.enum.length && node.enum.every(item => typeof item === 'string')) || typeof node.const === 'string')) delete node.type;
   // Property names are always strings, and an empty additionalProperties schema allows anything anyway.

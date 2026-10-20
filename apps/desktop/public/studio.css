@@ -1464,10 +1464,10 @@ body.arcane-app{font-family:var(--font-ui);background:var(--vignette),var(--grai
 }
 
 /* Cards: in-conversation and settings surfaces share one glass card. */
-.arcane-app :where(.setup-checklist,.chat-change-card,.chat-choices,.workspace-stage .tool-group,.plans-offer,.plans-notice,.arcane-modal){
+.arcane-app :where(.setup-checklist,.chat-change-card,.chat-choices,.workspace-stage .tool-group,.workspace-stage .build-progress,.plans-offer,.plans-notice,.arcane-modal){
   background:var(--card-bg);border:1px solid var(--card-line);border-radius:var(--radius-card);box-shadow:var(--card-shadow);color:var(--text)}
 /* Conversation cards carry the red accent edge, like tool cards and code. */
-.arcane-app :where(.chat-change-card,.chat-choices,.workspace-stage .tool-group){border-left:2px solid var(--card-accent)}
+.arcane-app :where(.chat-change-card,.chat-choices,.workspace-stage .tool-group,.workspace-stage .build-progress){border-left:2px solid var(--card-accent)}
 /* Popovers and menus: stronger glass and the deep lift; one stacking order. */
 .arcane-app :where(.studio-diagnostics-panel,.composer-command-menu){
   background:var(--pop-bg);border:1px solid var(--glass-line);border-radius:var(--radius-card);box-shadow:var(--pop-shadow);backdrop-filter:blur(24px) saturate(140%);color:var(--text)}
@@ -1497,12 +1497,12 @@ body.arcane-app{font-family:var(--font-ui);background:var(--vignette),var(--grai
   background:var(--glass);color:var(--text);font:600 12px/1 var(--font-ui);font-variant-numeric:tabular-nums;white-space:nowrap;box-shadow:inset 0 1px 0 var(--glass-hi);backdrop-filter:blur(12px);cursor:pointer}
 @media (hover:hover) and (pointer:fine){.arcane-app :where(.arcane-balance-chip,.studio-diagnostics-badge,.playtest-toggle):hover:not(:disabled){background:var(--hover);border-color:var(--accent-line)}}
 /* One focus ring for every control in this layer. */
-.arcane-app :where(.setup-checklist,.chat-change-card,.chat-choices,.tool-group,.plans-page,.studio-diagnostics,.composer-queue,.arcane-modal,.permission-switch,.chat-edit,.display-settings,.shortcut-card,.workspace-topbar,.app-sidebar) :where(button,summary,input,select,textarea,[tabindex]):focus-visible{outline:2px solid var(--focus-ring);outline-offset:2px}
+.arcane-app :where(.setup-checklist,.chat-change-card,.chat-choices,.tool-group,.build-progress,.plans-page,.studio-diagnostics,.composer-queue,.arcane-modal,.permission-switch,.chat-edit,.display-settings,.shortcut-card,.workspace-topbar,.app-sidebar) :where(button,summary,input,select,textarea,[tabindex]):focus-visible{outline:2px solid var(--focus-ring);outline-offset:2px}
 @media (forced-colors:active){
-  .arcane-app :where(.setup-checklist,.chat-change-card,.chat-choices,.workspace-stage .tool-group,.plans-offer,.plans-notice,.arcane-modal,.studio-diagnostics-panel,.composer-command-menu){border-color:CanvasText;background:Canvas;color:CanvasText;box-shadow:none;backdrop-filter:none}
+  .arcane-app :where(.setup-checklist,.chat-change-card,.chat-choices,.workspace-stage .tool-group,.workspace-stage .build-progress,.plans-offer,.plans-notice,.arcane-modal,.studio-diagnostics-panel,.composer-command-menu){border-color:CanvasText;background:Canvas;color:CanvasText;box-shadow:none;backdrop-filter:none}
   .arcane-app :where(.chat-edit-send,.chat-edit-cancel,.chat-choice,.arcane-modal-button,.plans-buy,.chat-change-restore,.studio-diagnostics-clear,.studio-diagnostic-fix,.setup-checklist-item .secondary,.studio-connection-reconnect,.chat-message-retry,.usage-limit-notice button,.chat-message-edit,.chat-change-copy,.composer-queue-remove,.sidebar-compact-toggle,.arcane-balance-chip,.studio-diagnostics-badge,.playtest-toggle){border-color:ButtonText;background:ButtonFace;color:ButtonText;box-shadow:none;backdrop-filter:none;opacity:1}
   .arcane-app :where(.chat-edit-send,.chat-choice.chat-choice-primary,.arcane-modal-primary,.plans-buy-primary,.studio-diagnostic-fix,.usage-limit-notice button){border:2px solid Highlight}
-  .arcane-app :where(.setup-checklist,.chat-change-card,.chat-choices,.tool-group,.plans-page,.studio-diagnostics,.composer-queue,.arcane-modal,.permission-switch,.chat-edit,.display-settings,.shortcut-card,.workspace-topbar,.app-sidebar) :where(button,summary,input,select,textarea,[tabindex]):focus-visible{outline-color:Highlight}
+  .arcane-app :where(.setup-checklist,.chat-change-card,.chat-choices,.tool-group,.build-progress,.plans-page,.studio-diagnostics,.composer-queue,.arcane-modal,.permission-switch,.chat-edit,.display-settings,.shortcut-card,.workspace-topbar,.app-sidebar) :where(button,summary,input,select,textarea,[tabindex]):focus-visible{outline-color:Highlight}
 }
 /* ==== End component system ==== */
 /* ---- Provider columns and logo marks (model list: ChatGPT left, Claude right; chat tabs lead with their provider's mark) ---- */
@@ -1563,6 +1563,17 @@ body.arcane-app{font-family:var(--font-ui);background:var(--vignette),var(--grai
 .arcane-app .conversation-scroll:has(>#setup-checklist:not([hidden])) .workspace-welcome .conversation-start{margin-top:10px}
 @media(max-height:760px){.arcane-app .conversation-scroll:has(>#setup-checklist:not([hidden])) :is(.welcome-logo,.workspace-welcome>p:not(.visually-hidden)){display:none}.arcane-app .conversation-scroll:has(>#setup-checklist:not([hidden])) .workspace-welcome{padding-top:4px}.arcane-app .conversation-scroll:has(>#setup-checklist:not([hidden])) .workspace-welcome h2{font-size:24px;margin-bottom:0}.arcane-app .setup-checklist{padding-block:12px 8px}.arcane-app .setup-checklist-item{padding-block:7px}.arcane-app .setup-checklist-head{margin-bottom:2px}}
 @media(max-width:520px){.arcane-app .conversation-scroll:has(>#setup-checklist:not([hidden])) .welcome-logo{display:none}.arcane-app .conversation-scroll:has(>#setup-checklist:not([hidden])) .workspace-welcome{padding:8px 4px 0}.arcane-app .conversation-scroll:has(>#setup-checklist:not([hidden])) .workspace-welcome h2{font-size:24px}.arcane-app .conversation-scroll:has(>#setup-checklist:not([hidden])) .workspace-welcome p{font-size:13px}.arcane-app .setup-checklist{padding:12px 14px 10px}}
+/* First run: one Connect Studio prompt at a time (the checklist owns it while shown), the pairing code readable at a glance,
+   and a quiet no-subscription line under sign-in. Static: no new motion. */
+.arcane-app .codex-messages:not(:has(.codex-message))~.key-setup-gate:has(~#setup-checklist:not([hidden])){display:none}
+.arcane-app .codex-messages:not(:has(.codex-message))~.key-setup-gate:not([hidden]):has(~#setup-checklist:not([hidden]))~.workspace-welcome{display:flex}
+.arcane-app .setup-checklist-code{align-self:flex-start;margin-top:6px;padding:3px 10px;border:1px solid var(--accent-line);border-radius:8px;background:var(--accent-tint);color:var(--text);font-family:var(--font-mono);font-size:20px;font-weight:600;letter-spacing:.14em;font-variant-numeric:tabular-nums;line-height:1.3}
+.arcane-app .workspace-stage.provider-required .conversation-scroll{justify-content:safe center}
+.arcane-app #provider-login-gate .provider-credits{display:flex;flex-direction:column;align-items:center;gap:6px;width:100%;margin-top:22px;padding-top:16px;border-top:1px solid var(--line)}
+.arcane-app #provider-login-gate .provider-credits .hint{margin:0;max-width:44ch;font-size:var(--fs-meta);line-height:1.5;color:var(--text-secondary)}
+.arcane-app #provider-login-gate .provider-credits .quiet{min-height:36px;min-width:0;padding:6px 12px;border:0;background:transparent;color:var(--accent-text);font-size:var(--fs-meta);font-weight:600}
+.arcane-app #provider-login-gate .provider-credits .quiet[data-offer=ready]{border:1px solid var(--accent-line);background:var(--accent-tint);color:var(--text)}
+.arcane-app .workspace-welcome .setup-ready{margin:14px auto 0;padding:8px 14px;border:1px solid var(--accent-line);border-radius:10px;background:var(--accent-tint);color:var(--text);font-size:var(--fs-meta);line-height:1.5}
 @media (forced-colors:active){
   .arcane-app .setup-check{border-color:CanvasText;color:CanvasText}
   .arcane-app .setup-checklist-item[data-state=done] .setup-check{background:Highlight;border-color:Highlight;color:HighlightText;forced-color-adjust:none;box-shadow:none}
@@ -1845,6 +1856,48 @@ body.arcane-app.shell-compact .workspace-topbar .icon-button{min-height:36px;min
   .arcane-app :is(.tool-group-count,.playtest-auto){border-color:CanvasText;color:CanvasText}
 }
 /* ---- End Playtest switch and grouped tool cards ---- */
+/* ---- Build progress (codex-chat.ts groupBuildProgress): one compact group per turn that ran tools. Static marks and
+   shared tokens only; no new motion (a running call shows the still accent dot and a ticking elapsed time). ---- */
+.arcane-app .workspace-stage .build-progress{width:min(640px,100%);max-width:100%;margin:2px 0 14px 34px;padding:0}
+.arcane-app .workspace-stage .build-progress[data-tool-state=failed]{border-left-color:var(--danger)}
+.arcane-app .workspace-stage .build-progress[data-tool-state=finished]{border-left-color:var(--playtest-on)}
+.arcane-app .build-progress-summary{display:flex;align-items:center;flex-wrap:wrap;gap:6px 10px;min-height:44px;padding:9px 14px 9px 12px;list-style:none;cursor:pointer;color:var(--text);font:var(--fs-body)/1.5 var(--font-ui)}
+.arcane-app .build-progress-summary::-webkit-details-marker{display:none}
+.arcane-app .build-progress-summary:focus-visible{outline-offset:-2px;border-radius:11px}
+.arcane-app .build-progress-text{flex:1 1 220px;min-width:0;display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 10px}
+.arcane-app .build-progress-title{font-weight:650;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
+.arcane-app .build-progress-meta{color:var(--text-secondary);font-size:var(--fs-meta);font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.arcane-app .build-progress-meta:empty{display:none}
+.arcane-app .build-progress-facts{display:flex;flex-wrap:wrap;gap:4px}
+.arcane-app .build-progress-facts:empty,.arcane-app .build-progress[open] .build-progress-facts{display:none}
+.arcane-app .build-progress-chevron{flex:0 0 auto;width:7px;height:7px;margin:0 3px 3px 2px;border:solid var(--text-secondary);border-width:0 1.5px 1.5px 0;transform:rotate(45deg)}
+.arcane-app .build-progress[open] .build-progress-chevron{transform:rotate(-135deg);margin-bottom:-2px}
+.arcane-app .build-progress-items{display:grid;max-height:480px;overflow:auto;overscroll-behavior:contain;margin:0 10px 8px 12px;border-top:1px solid var(--line);scrollbar-width:thin}
+.arcane-app .workspace-stage .build-progress-items>:is(.codex-message.tool,.tool-group){width:auto;min-width:0;margin:0;padding:6px 2px 2px;border:0;border-bottom:1px solid var(--line);border-radius:0;background:transparent;box-shadow:none}
+.arcane-app .workspace-stage .build-progress-items>:last-child{border-bottom:0}
+.arcane-app .workspace-stage .build-progress .tool-details{margin:0 0 0 23px}
+.arcane-app .workspace-stage .build-progress .tool-details>summary{min-height:24px;padding:1px 0}
+.arcane-app .workspace-stage .build-progress .tool-group-summary{min-height:32px;padding:2px 0}
+.arcane-app .workspace-stage .build-progress .tool-group-items{margin:0 0 4px 23px}
+.arcane-app .tool-facts{display:inline-flex;flex-wrap:wrap;gap:4px}
+.arcane-app .tool-fact{display:inline-flex;align-items:center;min-height:20px;padding:0 8px;border:1px solid var(--line-strong);border-radius:var(--radius-pill);color:var(--text-secondary);font:500 var(--fs-meta)/1.4 var(--font-ui);font-variant-numeric:tabular-nums;white-space:nowrap}
+.arcane-app .tool-activity{flex-wrap:wrap}
+.arcane-app .tool-activity-time{margin-left:auto;padding-left:8px;color:var(--text-secondary);font-size:var(--fs-meta);font-variant-numeric:tabular-nums;white-space:nowrap}
+.arcane-app .tool-activity-time:empty{display:none}
+.arcane-app .tool-activity-reason{margin:1px 0 3px 23px;color:var(--danger);font-size:var(--fs-meta);line-height:1.45;overflow-wrap:anywhere}
+.arcane-app .tool-thumb{display:block;width:fit-content;max-width:calc(100% - 23px);min-height:0;margin:6px 0 4px 23px;padding:0;border:1px solid var(--line-strong);border-radius:8px;background:transparent;overflow:hidden;cursor:zoom-in}
+.arcane-app .tool-thumb img{display:block;width:176px;max-width:100%;height:auto}
+.arcane-app .tool-thumb[aria-expanded=true]{width:min(600px,calc(100% - 23px));cursor:zoom-out}
+.arcane-app .tool-thumb[aria-expanded=true] img{width:100%}
+.arcane-app .tool-thumb:focus-visible{outline:2px solid var(--focus-ring);outline-offset:2px}
+@media(hover:hover) and (pointer:fine){.arcane-app .build-progress-summary:hover .build-progress-chevron{border-color:var(--text)}.arcane-app .tool-thumb:hover{border-color:var(--accent)}}
+@media(max-width:560px){.arcane-app .workspace-stage .build-progress{margin-left:0}.arcane-app .tool-thumb{margin-left:0;max-width:100%}.arcane-app .tool-activity-reason{margin-left:0}}
+@media(forced-colors:active){
+  .arcane-app :is(.tool-fact,.build-progress-chevron){border-color:CanvasText;color:CanvasText}
+  .arcane-app .tool-thumb{border-color:ButtonText}
+  .arcane-app .tool-activity-reason{color:CanvasText}
+}
+/* ---- End build progress ---- */
 /* ---- In-app dialogs and Permissions (arcane-dialog.ts) ---- */
 /* Black glass, white type and one Arcane red; no motion. Light theme keeps the same structure with its own tokens. */
 .arcane-app .arcane-modal-layer{position:fixed;inset:0;z-index:var(--z-dialog);display:grid;place-items:center;padding:16px;background:radial-gradient(900px 600px at 50% 30%,rgba(200,16,46,.12),transparent 70%),var(--scrim);backdrop-filter:blur(8px) saturate(120%)}

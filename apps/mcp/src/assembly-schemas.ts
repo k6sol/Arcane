@@ -48,8 +48,9 @@ export const materialEvidence: z.ZodType<MaterialEvidence> = z.strictObject({
   name: boundedText(256), color: boundedVector(0, 1), metallic: z.number().min(0).max(1), roughness: z.number().min(0).max(1),
   emission: z.strictObject({ color: boundedVector(0, 1), strength: z.number().min(0).max(10) }),
   surface: z.strictObject({ profile: z.enum(['bark', 'stone', 'leaf', 'weathered']), resolution: z.union([z.literal(128), z.literal(256), z.literal(512)]),
-    generator: z.literal('arcane-tile-v1'), texCoord: z.literal(0), images: z.array(z.strictObject({ role: z.enum(['baseColor', 'normal', 'metallicRoughness']),
-      name: boundedText(128), width: z.number().int().min(128).max(512), height: z.number().int().min(128).max(512), sha256: hash, colorSpace: z.enum(['sRGB', 'Non-Color']) })).length(3) }).optional(),
+    generator: z.literal('arcane-tile-v1'), texCoord: z.literal(0), pattern: boundedText(32).optional(), alphaMode: z.enum(['OPAQUE', 'MASK']).optional(), images: z.array(z.strictObject({ role: z.enum(['baseColor', 'normal', 'metallicRoughness']),
+      name: boundedText(128), width: z.number().int().min(128).max(512), height: z.number().int().min(128).max(512), sha256: hash, colorSpace: z.enum(['sRGB', 'Non-Color']) })).length(3) })
+    .transform(({ pattern, alphaMode, ...rest }) => ({ ...rest, ...(pattern === undefined ? {} : { pattern }), ...(alphaMode === undefined ? {} : { alphaMode }) })).optional(),
 }).transform(({surface,...value})=>({...value,...(surface===undefined?{}:{surface})}));
 export const assemblyEvidence: z.ZodType<AssemblyEvidence> = z.strictObject({
   recipeSha256: hash,

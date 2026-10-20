@@ -56,11 +56,14 @@ export function checklistRows(s: ChecklistSignals): ChecklistRow[] {
   })();
   return [
     s.signedIn
-      ? { step: 'provider', label: 'Signed in', detail: 'Using your ' + s.providerName + ' account.', state: 'done', action: null }
-      : { step: 'provider', label: 'Sign in', detail: 'Use your ChatGPT or Claude account.', state: 'todo', action: { kind: 'sign-in', label: 'Sign in' } },
+      ? { step: 'provider', label: 'Signed in', detail: s.providerName === 'Arcane' ? 'Using Arcane Credits.' : 'Using your ' + s.providerName + ' account.', state: 'done', action: null }
+      : { step: 'provider', label: 'Sign in', detail: 'Use a ChatGPT or Claude subscription, or Arcane Credits.', state: 'todo', action: { kind: 'sign-in', label: 'Sign in' } },
     plugin,
     s.studioConnected === true
       ? { step: 'studio', label: 'Studio connected', detail: 'A live Studio session is paired.', state: 'done', action: null }
+      // In order: Studio can only connect through the plugin, so a missing plugin comes first.
+      : s.desktop && s.plugin?.state === 'missing' && (!s.pairing || s.pairing.phase === 'idle')
+      ? { step: 'studio', label: 'Connect Studio', detail: 'Install the plugin first. Then connect Studio here with a 6-digit code.', state: 'todo', action: null }
       : s.pairing ? studioPairingRow(s.studioConnected, s.pairing)
       : { step: 'studio', label: 'Connect Studio', detail: s.studioConnected === null ? 'Checking for a Studio session…' : 'Paste an Arcane API key into the plugin in Studio (one-click Connect Studio is unavailable here).',
         state: s.studioConnected === null ? 'checking' : 'todo', action: { kind: 'show-key', label: 'Use API key' } },
@@ -126,7 +129,7 @@ export interface PluginBannerInput {
 }
 export const PLUGIN_BANNER_TEXT = Object.freeze({
   available: 'Studio plugin update available — this version of Arcane needs a newer Arcane plugin in Roblox Studio.',
-  restart: 'Plugin updated. Restart Roblox Studio (or turn the Arcane plugin off and on under Plugins › Manage Plugins) to load it. Arcane will notice when it reconnects.',
+  restart: 'Studio plugin is ready. Restart Roblox Studio (or turn the Arcane plugin off and on under Plugins › Manage Plugins) to load it. Arcane will notice when it reconnects.',
   stale: 'Roblox Studio is still running an older Arcane plugin. Restart Roblox Studio to load the installed update.',
   staleBrowser: 'The connected Arcane Studio plugin is older than this app. Update it from the Arcane desktop app, then restart Roblox Studio.',
   ready: 'Studio is running the updated Arcane plugin.',
@@ -192,6 +195,10 @@ export interface SetupChecklistPersistence {
 }
 
 const TICK = 'M5 12.5 10 17 19 7';
+/** The Studio row right after this app installed the plugin: Studio has to restart before the plugin can take the code. */
+export function pairAfterInstallText(code: string): string {
+  return 'Restart Roblox Studio so it loads the plugin. Then open Arcane in Studio’s Plugins tab, type ' + code.slice(0, 3) + ' ' + code.slice(3) + ' and click Connect.';
+}
 export function startSetupChecklist(doc: Document, options: SetupChecklistOptions): SetupChecklistController {
   const root = doc.getElementById('setup-checklist'), list = doc.getElementById('setup-checklist-items');
   const native = bridges(options.desktop), storage = options.storage ?? null;
@@ -297,19 +304,31 @@ export function startSetupChecklist(doc: Document, options: SetupChecklistOption
   const render = () => {
     if (disposed) return;
     const current = rows();
-    if (hydrated && automatic && !memory.completed && current.every(row => row.state === 'done')) save({ ...memory, completed: true });
+    if (hydrated && automatic && !memory.completed && current.every(row => row.state === 'done')) {
+      save({ ...memory, completed: true });
+      // Finished during this visit: say what comes next where the checklist was, from the top of the empty chat.
+      if (root && !root.hidden && !stopped) {
+        const ready = el('setup-ready'); if (ready) ready.hidden = false;
+        try { const scroller = root.closest('.conversation-scroll'); if (scroller) scroller.scrollTop = 0; } catch { /* Optional. */ }
+      }
+    }
     renderSettings(); paintBanner();
     if (!root || !list) return;
     const visible = !stopped && (forced || hydrated && automatic && checklistVisible(current, memory, later));
     root.hidden = !visible;
     if (!visible) return;
     const done = current.filter(row => row.state === 'done').length;
+    // The waiting 6-digit code, large enough to read across to Studio (display only; the row text says what to do).
+    let code: string | null = null;
+    try { const view = options.pairing?.available() ? options.pairing.view() : null; code = view?.phase === 'waiting' && view.code && /^[0-9]{6}$/.test(view.code) ? view.code : null; } catch { code = null; }
     const progress = el('setup-checklist-progress'); if (progress) progress.textContent = done + ' of ' + current.length + ' ready';
     const items = current.map(row => {
       const item = make('li', undefined, 'setup-checklist-item');
       item.dataset.step = row.step; item.dataset.state = row.state;
       const text = make('div', undefined, 'setup-checklist-text');
-      text.append(make('span', row.state === 'done' ? 'Done: ' : row.state === 'checking' ? 'Checking: ' : 'To do: ', 'visually-hidden'), make('strong', row.label), make('span', row.detail, 'setup-checklist-detail'));
+      text.append(make('span', row.state === 'done' ? 'Done: ' : row.state === 'checking' ? 'Checking: ' : 'To do: ', 'visually-hidden'), make('strong', row.label),
+        make('span', row.step === 'studio' && row.state !== 'done' && code && justUpdated ? pairAfterInstallText(code) : row.detail, 'setup-checklist-detail'));
+      if (row.step === 'studio' && row.state !== 'done' && code) { const chip = make('code', code.slice(0, 3) + ' ' + code.slice(3), 'setup-checklist-code'); chip.setAttribute('aria-hidden', 'true'); text.append(chip); }
       item.append(tick(row.state === 'done'), text);
       if (row.action) {
         const button = make('button', row.action.kind === 'install-plugin' && pluginBusy ? 'Installing…' : row.action.label, 'secondary');
@@ -384,6 +403,9 @@ export function startSetupChecklist(doc: Document, options: SetupChecklistOption
   const act = (kind: string, event: Event) => {
     if (stopped || disposed || !event.isTrusted) return;
     if (kind === 'sign-in') {
+      // The sign-in card is right above: point at it rather than opening Settings behind it.
+      const gate = el('provider-login-gate'), start = el('provider-login-start') as HTMLButtonElement | null;
+      if (gate && !gate.hidden && start && !start.hidden) { try { gate.scrollIntoView({ block: 'nearest' }); } catch { /* Optional. */ } start.focus(); return; }
       let provider: 'codex' | 'claude' = 'codex'; try { provider = options.provider.selectedProvider(); } catch { /* Default provider. */ }
       dispatch('workspace:providersetup', { provider });
     } else if (kind === 'install-plugin') void installPlugin();

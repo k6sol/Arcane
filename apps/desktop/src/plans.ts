@@ -30,9 +30,13 @@ export interface PlansState {
 type Kind = 'plan' | 'pack' | 'credits';
 
 export const PLANS_SECTION_ID = 'settings-plans';
+/** What a person without a subscription needs next, after the gateway's own status line. */
+export const GATEWAY_NEXT_STEP: Readonly<Record<string, string>> = Object.freeze({
+  disabled: 'They need an Arcane Credits service, which this copy of Arcane does not have set up. Until it does, sign in with a ChatGPT or Claude subscription to build.',
+});
 const REFRESH_MS = 30000;
 const NOT_CONNECTED_TITLE = "Checkout isn't connected yet";
-const NOT_CONNECTED_TEXT = 'Nothing was charged. Connect an Arcane billing service to enable buying. The setup steps are in docs/ARCANE_CREDITS.md.';
+const NOT_CONNECTED_TEXT = 'Nothing was charged. Buying is not set up in this copy of Arcane yet, so nothing can be bought here for now.';
 
 const obj = (value: unknown): Record<string, unknown> | null => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
 const str = (value: unknown, max = 200): value is string => typeof value === 'string' && value.length <= max;
@@ -227,7 +231,7 @@ export function startPlans(doc: Document, options: PlansOptions) {
     const credits = el('plans-credits'); if (credits) credits.replaceChildren(...state.catalog.credits.offers.map(offer => offerCard('credits', offer, state)));
     const creditsBlurb = el('plans-credits-blurb'); if (creditsBlurb) creditsBlurb.textContent = state.catalog.credits.blurb;
     const gateway = el('plans-gateway-state');
-    if (gateway) { gateway.textContent = state.gateway.message; gateway.dataset.state = state.gateway.state; }
+    if (gateway) { gateway.textContent = state.gateway.message + (GATEWAY_NEXT_STEP[state.gateway.state] ? ' ' + GATEWAY_NEXT_STEP[state.gateway.state] : ''); gateway.dataset.state = state.gateway.state; }
   }
 
   async function refresh(): Promise<void> {
@@ -281,7 +285,7 @@ export function startPlans(doc: Document, options: PlansOptions) {
     else if (state === 'signed-in') notice('ready', 'Your Arcane account is connected', 'Credits and plan balances come from your Arcane account.');
     else if (state === 'cancelled') notice('info', 'Sign-in cancelled', 'Nothing changed.');
     else if (state === 'busy') notice('info', 'A sign-in is already in progress', 'Finish it in your browser first.');
-    else if (state === 'not-connected') notice('info', "Arcane Credits aren't connected yet", 'Connect an Arcane gateway first. The setup steps are in docs/ARCANE_CREDITS.md.');
+    else if (state === 'not-connected') notice('info', "Arcane Credits aren't connected yet", 'This copy of Arcane has no Arcane Credits service set up yet, so there is no account to connect. Sign in with a ChatGPT or Claude subscription to build for now.');
     else notice('info', 'Sign-in is unavailable right now', 'Try again in a moment.');
     await refresh();
   }

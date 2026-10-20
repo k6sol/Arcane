@@ -17,7 +17,8 @@ const ACCOUNT = 'arc_' + 'a'.repeat(40);
 const BASE = 'https://gateway.arcane.test';
 
 // Mock Arcane MCP server: initialize (with instructions), tools/list (two valid tools, one bad name, one oversized
-// schema), tools/call (echo; `leaky` repeats the credential it was started with; `slow` never answers).
+// schema), tools/call (echo; `leaky` repeats the credential it was started with; `slow` never answers; `capture` adds an
+// image block: 'png' and 'jpeg' are real signatures, 'gif' a refused type, 'url' a remote reference).
 const MCP_SCRIPT = String.raw`
 const readline = require('node:readline');
 const send = value => process.stdout.write(JSON.stringify(value) + '\n');
@@ -37,7 +38,11 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     const { name, arguments: args } = message.params;
     if (name === 'slow') return;
     const text = name === 'leaky' ? 'token=' + process.env.ARCANE_LOCAL_TOKEN : JSON.stringify({ ok: true, name, args, tokenSeen: process.env.ARCANE_LOCAL_TOKEN === '${CREDENTIAL}', daemon: process.env.ARCANE_DAEMON_URL });
-    send({ jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text }], ...(args && args.fail ? { isError: true } : {}) } });
+    const capture = args && args.capture, bytes = capture === 'png' ? Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from('capture fixture')])
+      : capture === 'jpeg' ? Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.from('capture fixture')]) : Buffer.from('GIF89a capture fixture');
+    const image = !capture ? [] : capture === 'url' ? [{ type: 'image', url: 'https://example.invalid/capture.png', mimeType: 'image/png' }]
+      : [{ type: 'image', data: bytes.toString('base64'), mimeType: capture === 'gif' ? 'image/gif' : 'image/' + capture }];
+    send({ jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text }, ...image], ...(args && args.fail ? { isError: true } : {}) } });
   }
 });
 `;
@@ -193,6 +198,25 @@ test('the loop is bounded: model rounds, tool calls, unknown tools and slow tool
   const toolMessages = (request: any) => request.body.messages.filter((m: any) => m.role === 'tool').map((m: any) => m.toolCallId + ':' + (m.isError ? 'error:' : '') + m.content.split(' ').slice(0, 3).join(' '));
   assert.deepEqual(toolMessages(second), ['c1:error:Unknown tool: nope.']);
   assert.deepEqual(toolMessages(third).slice(1), ['c2:error:The tool did', 'c3:error:Arcane reached the'], 'a slow tool times out; calls past the bound are refused');
+});
+
+test('a capture image from an Arcane MCP tool rides on the live tool event only (at most 4 per reply); the model and the transcript get text', async t => {
+  const f = await fixture(t);
+  const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from('capture fixture')]).toString('base64');
+  const jpeg = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.from('capture fixture')]).toString('base64');
+  f.replies.push(
+    () => sse(call('c1', 'scene_inspect', { capture: 'png' }), call('c2', 'scene_inspect', { capture: 'jpeg' }), call('c3', 'scene_inspect', { capture: 'gif' }),
+      call('c4', 'scene_inspect', { capture: 'url' }), call('c5', 'scene_inspect', { capture: 'png', fail: true }), done({ stopReason: 'tool_use' })),
+    () => sse(call('c6', 'scene_inspect', { capture: 'png' }), call('c7', 'scene_inspect', { capture: 'png' }), call('c8', 'scene_inspect', { capture: 'png' }), done({ stopReason: 'tool_use' })),
+    () => sse({ type: 'delta', text: 'Captured.' }, done()));
+  const sent = await f.chat.send(input('Capture the scene'));
+  assert.equal((await f.finished(sent.turnId)).ok, true);
+  const finished = f.events.filter(e => e.type === 'tool' && e.message.tool.status !== 'started').map(e => e.message.tool);
+  assert.deepEqual(finished.map(tool => tool.image ?? null), ['data:image/png;base64,' + png, 'data:image/jpeg;base64,' + jpeg, null, null, null,
+    'data:image/png;base64,' + png, 'data:image/png;base64,' + png, null], 'PNG/JPEG only, never a failed call or a URL, at most 4 per reply');
+  for (const request of f.chats()) assert.ok(!JSON.stringify(request.body).includes(png) && !JSON.stringify(request.body).includes(jpeg), 'the gateway never receives the image bytes');
+  const saved = await f.chat.history(sent.conversationId);
+  assert.ok(saved.messages.every((m: any) => !m.tool || !('image' in m.tool)), 'the transcript never keeps an image');
 });
 
 test('Stop aborts the open stream and the MCP child; the credential never appears in a reply or a tool result', async t => {

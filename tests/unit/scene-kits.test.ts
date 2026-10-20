@@ -2,11 +2,18 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { z } from 'zod';
 import { validateCommandArgs, sceneBuildInstanceCount } from '../../packages/core/src/studio-policy.js';
-import { READ_METHODS, WRITE_METHODS, SCENE_BUILD_LIMITS, type InstanceRef, type Json, type StudioSession } from '../../packages/protocol/src/studio.js';
+import { READ_METHODS, WRITE_METHODS, SCENE_BUILD_LIMITS, STUDIO_FEATURE_CAPABILITIES, type InstanceRef, type Json, type StudioSession } from '../../packages/protocol/src/studio.js';
 import { compileSceneBuild, sceneBuildShape, CORE, type SceneBuildInput } from '../../apps/mcp/src/scene-build.js';
 import { fromOrientation, toOrientation, tiltPrototype, forestOriginals, KIT_TRIANGLE_BUDGET } from '../../apps/mcp/src/scene-kits.js';
-import { proceduralInput } from '../../apps/mcp/src/procedural-tools.js';
+import { proceduralInput, proceduralStartBody } from '../../apps/mcp/src/procedural-tools.js';
+import { ForestMaps, fbm, voronoi, yawGap, NEIGHBOUR_SPACINGS, MIN_YAW_GAP } from '../../apps/mcp/src/spatial-maps.js';
+import { normalizeProcedural } from '../../packages/asset-pipeline/src/procedural.js';
 import { compileTerrain, terrainShape } from '../../apps/mcp/src/terrain-tool.js';
+import { lintLuau } from '../../apps/mcp/src/luau-lint.js';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 
 const ROOT_REF: InstanceRef = { instanceId: 'opaque-root', sessionId: 'kit-session', root: 'Workspace', pathSegments: [], className: 'Workspace' };
 const session = (): StudioSession => ({ id: 'kit-session', protocolVersion: 1, clientSessionId: 'lifetime', placeId: 0, universeId: 0, name: 'Fixture', pluginVersion: '0.2.0',
@@ -202,22 +209,23 @@ test('forest kit: <use>-<n> Blender original templates replace built-in species;
   const template = (id: string) => ({ ...ROOT_REF, instanceId: id, className: 'Model' });
   const kit = { kind: 'forest', at: [0, 0, 0], radius: 90, trees: 40, undergrowth: 60, seed: 7,
     species: [{ use: 'oak', share: 3, spacing: 14 }, { use: 'birch', share: 2, spacing: 8 }], cover: [{ use: 'bush', spacing: 3.2 }, { use: 'rock', spacing: 4, tris: 6000 }] };
-  // Step 1 recipe: deterministic names and seeds derived from the kit seed (3 oak + 2 birch + 2 bush + 3 rock).
+  // Step 1 recipe: one variant family per species, family seed from the kit seed (4 oak + 2 birch + 2 rock + 2 bush).
   const blockout = compile({ name: 'Draft', kits: [kit] }), draft = blockout.kits[0]!;
   assert.deepEqual(draft.blockouts, ['oak', 'birch', 'rock', 'bush']);
   assert.match(draft.note!, /Blockout primitives for oak, birch, rock, bush/);
   assert.match(draft.note!, /user approves/);
-  assert.deepEqual(draft.recipe!.map(r => `${r.name}:${r.seed}`), ['oak-1:701', 'oak-2:702', 'oak-3:703', 'birch-1:701', 'birch-2:702', 'rock-1:701', 'rock-2:702', 'rock-3:703', 'bush-1:701', 'bush-2:702']);
+  assert.deepEqual(draft.recipe!.map(r => `${r.name}:${r.seed}:${r.variant.join('/')}`), ['oak-1:701:1/4', 'oak-2:701:2/4', 'oak-3:701:3/4', 'oak-4:701:4/4', 'birch-1:701:1/2', 'birch-2:701:2/2',
+    'rock-1:701:1/2', 'rock-2:701:2/2', 'bush-1:701:1/2', 'bush-2:701:2/2']);
   assert.deepEqual(draft.recipe![0]!.generator, { kind: 'tree', species: 'oak', height: 6 });
   assert.equal(draft.originals, undefined);
   assert.deepEqual(compile({ name: 'Draft', kits: [kit] }).kits, blockout.kits, 'recipe is deterministic');
-  for (const r of draft.recipe!) assert.ok(proceduralInput.safeParse({ name: r.name, generator: r.generator, seed: r.seed }).success, `${r.name} is a valid assets_procedural call`);
+  for (const r of draft.recipe!) assert.ok(proceduralInput.safeParse({ name: r.name, generator: r.generator, seed: r.seed, variant: r.variant }).success, `${r.name} is a valid assets_procedural call`);
   // Step 2: approved, placed copies passed as templates are cloned (instanced), never blockouts.
   const templates = Object.fromEntries(draft.recipe!.map((r, i) => [r.name, template('t' + i)]));
   const built = compile({ name: 'Real', templates, kits: [kit] }), forest = built.kits[0]!, list = items(built.args);
   assert.equal(list.filter(i => i.kind === 'place').length, 0, 'no blockout prototypes');
   assert.equal(forest.blockouts, undefined); assert.equal(forest.recipe, undefined); assert.equal(forest.note, undefined);
-  assert.deepEqual(forest.originals, { oak: ['oak-1', 'oak-2', 'oak-3'], birch: ['birch-1', 'birch-2'], rock: ['rock-1', 'rock-2', 'rock-3'], bush: ['bush-1', 'bush-2'] });
+  assert.deepEqual(forest.originals, { oak: ['oak-1', 'oak-2', 'oak-3', 'oak-4'], birch: ['birch-1', 'birch-2'], rock: ['rock-1', 'rock-2'], bush: ['bush-1', 'bush-2'] });
   const names = built.args.templates as unknown as { instanceId: string }[], clones = list.filter(i => i.kind === 'clone');
   assert.equal(names.length, 10, 'each original is sent once');
   assert.equal(clones.length, forest.placed);
@@ -232,7 +240,7 @@ test('forest kit: <use>-<n> Blender original templates replace built-in species;
   assert.ok(partial.recipe!.every(r => !r.name.startsWith('oak')));
   // log uses the fallen-log generator (2 variants at its 4k default budget).
   const logs = compile({ name: 'Logs', kits: [{ ...kit, species: [{ use: 'oak', spacing: 14 }], cover: [{ use: 'log', spacing: 7 }] }] }).kits[0]!;
-  assert.deepEqual(logs.recipe!.map(r => r.name), ['oak-1', 'oak-2', 'oak-3', 'log-1', 'log-2']);
+  assert.deepEqual(logs.recipe!.map(r => r.name), ['oak-1', 'oak-2', 'oak-3', 'oak-4', 'log-1', 'log-2']);
   assert.deepEqual(logs.recipe!.at(-1)!.generator, { kind: 'log', species: 'oak', length: 3, radius: 0.25 });
   assert.ok(proceduralInput.safeParse({ name: 'log-1', generator: logs.recipe!.at(-1)!.generator, seed: 1 }).success);
   assert.deepEqual(logs.blockouts, ['oak', 'log']);
@@ -279,4 +287,145 @@ test('terrain pad base expands to grass, ground, mud and rock rings with noisy p
   assert.deepEqual(compileTerrain(z.strictObject(terrainShape).parse(plain) as Record<string, unknown>), JSON.parse(JSON.stringify(z.strictObject(terrainShape).parse(plain))));
   assert.throws(() => compileTerrain(z.strictObject(terrainShape).parse({ center: [0, 0], size: [256, 256],
     features: Array.from({ length: 30 }, () => ({ kind: 'plateau', center: [0, 0], radius: 40, level: 10, base: 8 })) }) as Record<string, unknown>), /max 32/);
+});
+
+test('plinth safeZone: a grounded tangent ring, soft boundary motes and a compiling, lint-clean no-damage server Script', () => {
+  const zone = (style?: 'glow' | 'stone') => compile({ name: 'Spawn', kits: [{ kind: 'plinth', key: 'P', at: [4, 32, -6], radius: 10, seed: 2, safeZone: { radius: 22, ...(style ? { style } : {}) } }] });
+  const built = zone(), list = items(built.args), kit = built.kits[0]!;
+  const ringProto = protoNames(built.args).indexOf('P-ring') + 1;
+  const ring = list.filter(i => i.kind === 'place' && i.template === ringProto) as (Wire & { yaw: number })[];
+  assert.equal(ring.length, kit.safeZone!.segments); assert.ok(ring.length >= 24 && ring.length <= 120);
+  for (const seg of ring) {
+    assert.ok(Math.abs(Math.hypot(seg.at![0]! - 4, seg.at![2]! + 6) - 22) < 0.02, 'every segment sits on the radius');
+    assert.equal(seg.ground, true, 'segments drop onto the ground');
+    // Local X (the segment length) follows the ring tangent, so the band reads as one continuous circle.
+    const m = fromOrientation([0, seg.yaw, 0]), axis = [m[0][0], m[2][0]], radial = [(seg.at![0]! - 4) / 22, (seg.at![2]! + 6) / 22];
+    assert.ok(Math.abs(axis[0]! * radial[0]! + axis[1]! * radial[1]!) < 0.01, 'segment axis is tangent');
+  }
+  const proto = (built.args.prototypes as { name: string; parts: { properties: Record<string, Json> }[] }[])[ringProto - 1]!;
+  assert.equal(proto.parts.length, 1); assert.equal(proto.parts[0]!.properties.Material, 'Neon'); assert.equal(proto.parts[0]!.properties.CanCollide, false);
+  const motes = list.find(i => i.name === 'BoundaryMotes')!;
+  assert.equal(list[motes.parent - 1]!.name, 'Boundary');
+  assert.ok(kit.safeZone!.particles > 0 && kit.safeZone!.particles <= 80, 'phone-budget boundary motes');
+  assert.deepEqual(kit.safeZone!.at, [4, 32, -6]); assert.equal(kit.safeZone!.radius, 22);
+  assert.ok(kit.safeZone!.top > kit.top! + 10 && kit.safeZone!.bottom < 32, 'the protected band covers the ground ring and the spawn on the summit');
+  assert.ok(validateCommandArgs('scene.build', built.args, { ...session(), capabilities: [...READ_METHODS, ...WRITE_METHODS, ...STUDIO_FEATURE_CAPABILITIES] }));
+  assert.equal(sceneBuildInstanceCount(built.args), built.instances);
+  // Stone style: an inset slate curb with a fine Neon thread, no particles.
+  const stone = zone('stone'), stoneKit = stone.kits[0]!;
+  const stoneProto = (stone.args.prototypes as { name: string; parts: { properties: Record<string, Json> }[] }[]).find(p => p.name === 'P-ring')!;
+  assert.deepEqual(stoneProto.parts.map(p => p.properties.Material), ['Slate', 'Neon']);
+  assert.equal(stoneKit.safeZone!.particles, 0); assert.ok(!items(stone.args).some(i => i.name === 'BoundaryMotes'));
+  // The script: exact zone constants, ForceField + health guard, only within the radius, server-side.
+  const source = kit.safeZone!.script.source;
+  assert.match(source, /local CENTER_X, CENTER_Z = 4, -6\n/); assert.match(source, /local RADIUS = 22\n/);
+  assert.match(source, new RegExp(`local BOTTOM, TOP = 26, ${kit.safeZone!.top}\n`));
+  for (const text of ['Instance.new("ForceField")', 'field.Visible = false', 'HealthChanged', 'dx * dx + dz * dz <= RADIUS * RADIUS', 'release(humanoid)', 'RunService.Heartbeat'])
+    assert.ok(source.includes(text), text);
+  assert.deepEqual(lintLuau(source).filter(a => a.severity === 'warning'), [], 'advisory lint is clean');
+  const compiler = process.env.ARCANE_LUAU_COMPILE;
+  if (compiler) {
+    const dir = mkdtempSync(join(tmpdir(), 'arcane-safezone-'));
+    try {
+      writeFileSync(join(dir, 'SafeZone.luau'), source);
+      const result = spawnSync(compiler, ['--null', join(dir, 'SafeZone.luau')], { encoding: 'utf8', timeout: 10000 });
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }
+  // Refusals: the ring must circle the base; forests take no safe zone; the ring prototype name is reserved.
+  assert.throws(() => compile({ name: 'S', kits: [{ kind: 'plinth', at: [0, 0, 0], radius: 10, safeZone: { radius: 11 } }] }), /at least 12\.5/);
+  assert.throws(() => compile({ name: 'S', kits: [{ kind: 'forest', at: [0, 0, 0], radius: 40, safeZone: { radius: 20 } }] }), /does not take safeZone/);
+  assert.throws(() => compile({ name: 'S', prototypes: { 'P-ring': { parts: [{ name: 'x' }] } }, items: [], kits: [{ kind: 'plinth', key: 'P', at: [0, 0, 0], radius: 10, safeZone: { radius: 20 } }] }), /reserved/);
+});
+
+// ---- spatial-map variation ----
+/** A 240-tree forest cloning age-ordered Blender variant families (the documented recipe), plus map-driven cover. */
+function variedForest(seed = 7) {
+  const template = (id: string) => ({ ...ROOT_REF, instanceId: id, className: 'Model' });
+  const recipe = forestOriginals(seed, ['pine', 'oak', 'birch', 'bush', 'fern', 'rock']);
+  const templates = Object.fromEntries(recipe.map((r, i) => [r.name, template('v' + i)]));
+  // 240 trees need lighter originals (triangleBudget 8000) to stay inside the kit triangle budget.
+  const input = { name: 'Varied', templates, kits: [{ kind: 'forest', key: 'Woods', at: [0, 0, 0], radius: 170, trees: 240, undergrowth: 200, seed,
+    clearing: { center: [0, 0], inner: 22, outer: 46 },
+    species: [{ use: 'pine', share: 5, spacing: 9, tris: 8000 }, { use: 'oak', share: 3, spacing: 13, tris: 8000 }, { use: 'birch', share: 2, spacing: 7, tris: 8000 }],
+    cover: [{ use: 'bush', share: 4, spacing: 3.2, tris: 3000 }, { use: 'fern', share: 4, spacing: 2.4, tris: 2500 }, { use: 'rock', share: 2, spacing: 3.6, tris: 3000 }] }] };
+  const built = compile(input), list = items(built.args), names = Object.keys(templates);
+  const group = (key: string) => list.findIndex(x => x.key === key) + 1;
+  const as = (i: Wire) => ({ x: i.at![0]!, z: i.at![2]!, yaw: (i as unknown as { yaw: number }).yaw, scale: i.scale!, name: names[i.template! - 1]!,
+    species: names[i.template! - 1]!.replace(/-\d+$/, ''), member: Number(/-(\d+)$/.exec(names[i.template! - 1]!)![1]) });
+  return { built, recipe, input, trees: list.filter(i => i.parent === group('Woods-trees')).map(as), cover: list.filter(i => i.parent === group('Woods-cover')).map(as) };
+}
+
+test('spatial maps: deterministic, bounded fields with stable Voronoi patches', () => {
+  const make = (seed: number) => new ForestMaps({ seed, center: [0, 0], radius: 170, clearing: { inner: 22, outer: 46 } });
+  const a = make(7), b = make(7), c = make(8);
+  const probe = (m: ForestMaps) => [[13, -40], [90, 75], [-120, 30]].map(([x, z]) => [m.age(x!, z!), m.moisture(x!, z!), m.elevation(x!, z!), m.heading(x!, z!), ...m.mix(x!, z!, ['pine', 'oak', 'birch'], [5, 3, 2])]);
+  assert.deepEqual(probe(a), probe(b), 'same seed, same maps');
+  assert.notDeepEqual(probe(a), probe(c), 'a new seed is a new map');
+  for (let x = -170; x <= 170; x += 17) for (let z = -170; z <= 170; z += 17) {
+    const n = fbm(3, x, z, 60); assert.ok(n >= -1.5 && n <= 1.5, 'fbm bounded');
+    for (const v of [a.age(x, z), a.moisture(x, z), a.elevation(x, z)]) assert.ok(v >= 0 && v <= 1);
+    const w = a.mix(x, z, ['pine', 'oak', 'birch'], [5, 3, 2]); assert.ok(Math.abs(w.reduce((s, v) => s + v, 0) - 1) < 1e-9);
+    const cell = voronoi(5, x, z, 40); assert.ok(cell.f1 <= cell.f2 && cell.id !== cell.next);
+  }
+  assert.ok(a.age(0, 30) < a.age(0, 110), 'saplings at the clearing edge, old growth inside');
+  // An optional terrain height sampler replaces the relief proxy: low ground is wetter.
+  const valley = new ForestMaps({ seed: 7, center: [0, 0], radius: 170, height: x => Math.abs(x) });
+  assert.ok(valley.elevation(0, 0) < 0.05 && valley.elevation(160, 0) > 0.9);
+  assert.ok(valley.moisture(0, 50) > valley.moisture(160, 50));
+});
+
+test('forest variation: neighbour rule, groves with transitions, age gradient, determinism and budget', () => {
+  const { built, recipe, input, trees, cover } = variedForest();
+  assert.equal(recipe.length, 16, 'six families fit the 16-template limit');
+  assert.deepEqual(compile(input).args, built.args, 'map-driven placement is deterministic');
+  const forest = built.kits[0]!;
+  assert.ok(trees.length >= 228 && cover.length >= 180, `placed ${trees.length} trees, ${cover.length} cover`);
+  assert.ok(forest.triangles < KIT_TRIANGLE_BUDGET, `budget ${forest.triangles}`);
+  // Neighbour rule: no two nearby copies of one variant at a similar rotation.
+  const spacing: Record<string, number> = { pine: 9, oak: 13, birch: 7, bush: 3.2, fern: 2.4, rock: 3.6 };
+  for (const set of [trees, cover]) for (const [i, a] of set.entries()) for (const b of set.slice(i + 1))
+    if (a.name === b.name && Math.hypot(a.x - b.x, a.z - b.z) < spacing[a.species]! * NEIGHBOUR_SPACINGS)
+      assert.ok(yawGap(a.yaw, b.yaw) >= MIN_YAW_GAP, `${a.name} twins at ${a.x},${a.z} / ${b.x},${b.z}`);
+  // Every family member is used (the youngest mostly at edges) and none dominates its species.
+  const all = [...trees, ...cover];
+  for (const r of recipe) {
+    const n = all.filter(t => t.name === r.name).length, of = all.filter(t => t.species === r.name.replace(/-\d+$/, '')).length;
+    assert.ok(n >= Math.max(2, of * 0.04) && n <= of * (1 / r.variant[1] + 0.3), `${r.name}: ${n} of ${of}`);
+  }
+  // Groves: a tree's nearest trees share its species far more often than a uniform mix would, yet patches still meet.
+  const share: Record<string, number> = {};
+  for (const t of trees) share[t.species] = (share[t.species] ?? 0) + 1 / trees.length;
+  const chance = Object.values(share).reduce((s, p) => s + p * p, 0);
+  let same = 0, mixed = 0;
+  for (const t of trees) {
+    const near = trees.filter(o => o !== t).sort((a, b) => Math.hypot(a.x - t.x, a.z - t.z) - Math.hypot(b.x - t.x, b.z - t.z)).slice(0, 5);
+    const k = near.filter(o => o.species === t.species).length; same += k / 5; if (k < 5) mixed++;
+  }
+  assert.ok(same / trees.length > chance + 0.12, `clustered ${(same / trees.length).toFixed(2)} vs chance ${chance.toFixed(2)}`);
+  assert.ok(mixed > trees.length * 0.25, `transitions: ${mixed} trees border another species`);
+  // Age gradient: interior trees are older family members and larger than those at the clearing edge.
+  const radius = (t: { x: number; z: number }) => Math.hypot(t.x, t.z);
+  const size = (species: string) => recipe.filter(v => v.name.startsWith(species + '-')).length;
+  const band = (lo: number, hi: number) => trees.filter(t => radius(t) >= lo && radius(t) < hi);
+  const mean = (list: typeof trees, f: (t: (typeof trees)[number]) => number) => list.reduce((s, t) => s + f(t), 0) / list.length;
+  const age = (t: (typeof trees)[number]) => (t.member - 1) / (size(t.species) - 1);
+  assert.ok(mean(band(22, 60), age) + 0.15 < mean(band(85, 135), age), `older inside: ${mean(band(22, 60), age).toFixed(2)} < ${mean(band(85, 135), age).toFixed(2)}`);
+  assert.ok(mean(band(22, 60), t => t.scale) < mean(band(85, 135), t => t.scale), 'bigger inside');
+  // Lean: at the clearing edge, variants turn their baked +X lean towards the open clearing (the light).
+  const edge = band(22, 52), toward = edge.filter(t => { const h = -t.yaw * Math.PI / 180; return Math.cos(h) * -t.x + Math.sin(h) * -t.z > 0; }).length;
+  assert.ok(toward > edge.length * 0.6, `${toward}/${edge.length} edge trees lean into the clearing`);
+});
+
+test('variant families: assets_procedural carries [i, n] to the worker; columns and bad indices are refused', () => {
+  const body = proceduralStartBody(proceduralInput.parse({ name: 'oak-2', seed: 701, variant: [2, 4], generator: { kind: 'tree', species: 'oak', height: 6 } }));
+  assert.deepEqual((body.procedural as { variant: number[] }).variant, [2, 4]);
+  assert.equal('variant' in body, false, 'variant lives inside the generator spec');
+  const spec = normalizeProcedural(body.procedural);
+  assert.deepEqual(spec.variant, [2, 4]);
+  assert.deepEqual(normalizeProcedural(spec), spec, 'canonical: a stored spec re-normalizes to itself');
+  assert.equal('variant' in normalizeProcedural({ kind: 'tree' }), false, 'legacy requests keep their exact bytes');
+  assert.throws(() => normalizeProcedural({ kind: 'column', variant: [1, 2] }), /no variant family/);
+  for (const bad of [[0, 4], [5, 4], [1, 1], [1, 17], [1.5, 4], 'x']) assert.throws(() => normalizeProcedural({ kind: 'rock', variant: bad }), /variant must be/);
+  assert.equal(proceduralInput.safeParse({ name: 'x', variant: [1, 17], generator: { kind: 'tree' } }).success, false);
 });

@@ -1642,6 +1642,7 @@ function Operations:terrainGenerate(command: any, args: any, guard: () -> ()): a
 		return item
 	end
 	resolve("Air"); resolve("Water"); resolve(plan.deep)
+	if plan.caves then resolve(plan.caves.floor); resolve(plan.caves.wall) end
 	-- Field synthesis is pure CPU before the recording opens; it yields between rows when long.
 	guard()
 	local slice = self:slicer(guard)

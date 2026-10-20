@@ -2245,7 +2245,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   if (chatLink && (window as unknown as { arcaneDesktop?: { arcaneChat?: unknown } }).arcaneDesktop?.arcaneChat) void import('./arcane-chat.js').then(module => {
     if (claudeChatStopped) return;
     const chat = arcaneChat = new module.ArcaneChat(document);
-    chat.subscribeModels(() => providerSetup.setArcaneAvailable(chat.usable()));
+    // The sign-in card offers Arcane Credits when usable, or says plainly what is missing (an account, or the service).
+    chat.subscribeModels(() => { providerSetup.setArcaneAvailable(chat.usable()); providerSetup.setArcaneSetup?.(chat.arcaneStatus()?.state === 'signed-out' ? 'signed-out' : 'none'); });
     chatLink.setArcane(chat); void chat.loadModels();
   }).catch(() => { /* Arcane Credits chat is optional; ChatGPT and Claude are unaffected. */ });
   void import('./desktop-update.js').then(module=>{

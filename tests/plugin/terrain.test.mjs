@@ -244,6 +244,50 @@ local waterY = math.floor(surfaceTop / 4) + 2
 check(wetChunk.mats[cx][waterY][cz] == "Water" and wetChunk.occs[cx][waterY][cz] > 0, "water voxels fill above the lake bed")
 local summary = T.summary(fp, ff, chunks)
 check(summary.voxels == fp.voxels and summary.chunks == 6 and summary.waterColumns == ff.wet and summary.region.size[1] == 600, "receipt summary")
+check(summary.caves == nil, "no cave summary without caves")
+
+-- 8. Caves: sphere nodes carve air inside the solid field, leave a Slate floor and Rock walls/roof, and never touch keep-out columns.
+local caveArgs = {center = {0, 0}, size = {128, 128}, height = 96, baseHeight = 60, seed = 2,
+  caves = {nodes = {{2, 40, 2, 10}, {14, 40, 2, 8}, {-30, 40, 2, 8}}, avoid = {{-30, 2, 12}}}}
+local function carve(args: any): (any, any, any)
+  local plan = T.plan(args)
+  local field = T.field(plan)
+  local out = {}
+  local count = T.write(plan, field, {resolve = function(name: string): string return name end,
+    write = function(low: any, high: any, mats: any, occs: any): () table.insert(out, {low = low, mats = mats, occs = occs}) end, yield = function(): () end})
+  return plan, out[1], T.summary(plan, field, count)
+end
+local cvp, cw, cs = carve(caveArgs)
+local function voxel(x: number, y: number, z: number): (string, number)
+  local ix, iy, iz = math.floor((x - cvp.x0) / 4) + 1, math.floor(y / 4) + 1, math.floor((z - cvp.z0) / 4) + 1
+  return cw.mats[ix][iy][iz], cw.occs[ix][iy][iz]
+end
+local m0, o0 = voxel(2, 38, 2)
+check(m0 == "Air" and o0 == 0, "chamber core is carved to air")
+local m1, o1 = voxel(14, 42, 2)
+check(m1 == "Air" and o1 == 0, "overlapping tunnel node is carved too")
+local mf, of = voxel(2, 26, 2)
+check(mf == "Slate" and of == 1, "solid floor under the chamber is Slate")
+local mp, op = voxel(2, 30, 2)
+check(mp == "Slate" and op > 0 and op < 1, "the floor surface voxel is partially occupied (smooth floor)")
+local mr, orr = voxel(2, 54, 2)
+check(mr == "Rock" and orr == 1, "the roof above the chamber is Rock wall")
+local mk, ok = voxel(-30, 38, 2)
+check(ok == 1 and mk ~= "Air", "keep-out columns are never carved")
+local mu, ou = voxel(40, 38, 40)
+check(ou == 1 and mu == "Rock", "rock far from the cave is untouched")
+check(cs.caves.nodes == 3 and cs.caves.carved > 50, "receipt counts cave nodes and carved voxels")
+local _, _, again = carve(caveArgs)
+check(again.caves.carved == cs.caves.carved, "carving is deterministic")
+local function caveWith(patch: any): any local args = table.clone(caveArgs); args.caves = patch; return args end
+refuses("INPUT", function() return T.plan(caveWith({nodes = {{0, 40, 0, 40}}})) end, "cave node radius")
+refuses("INPUT", function() return T.plan(caveWith({nodes = {{0, 400, 0, 8}}})) end, "cave node y")
+refuses("INPUT", function() return T.plan(caveWith({nodes = {{0, 40, 0}}})) end, "[x, y, z, radius]")
+refuses("PROPERTY", function() return T.plan(caveWith({nodes = {{0, 40, 0, 8}}, floor = "Water"})) end)
+refuses("INPUT", function() return T.plan(caveWith({nodes = {{0, 40, 0, 8}}, script = "x"})) end)
+local tooMany = {}
+for index = 1, T.LIMITS.caveNodes + 1 do tooMany[index] = {0, 40, 0, 4} end
+refuses("INPUT", function() return T.plan(caveWith({nodes = tooMany})) end)
 print("Arcane terrain generator checks passed: " .. checks)
 `;
 
@@ -284,6 +328,10 @@ check(mutation.after.voxels == 75 * 16 * 35 and mutation.after.chunks == 2 and m
 check(voxelWrites[1].region.low.X == -148 and voxelWrites[1].region.low.Y == 0 and voxelWrites[1].region.high.Y == 64, "regions are snapped Region3 boxes")
 local again = run(args)
 check(V.equal(again.mutation.after, mutation.after), "same seed, same receipt")
+local cavedArgs = table.clone(args); cavedArgs.caves = {nodes = {{-100, 14, -50, 6}, {-92, 14, -50, 6}}, floor = "Slate", wall = "Basalt"}
+local caved = run(cavedArgs)
+check(caved.mutation.after.caves.nodes == 2 and caved.mutation.after.caves.carved > 0 and caved.mutation.after.voxels == mutation.after.voxels, "caves carve inside the same recording and report their voxels")
+refuses("PROPERTY", function() local bad = table.clone(cavedArgs); bad.caves = {nodes = {{0, 14, 0, 6}}, wall = "Plastic"}; return run(bad) end)
 refuses("RECEIPT", function() return ops:execute({id = "terrain-restore", method = "scene.restore", args = {receiptCommandId = "terrain-4", mutation = mutation}}, function() end) end, "Unsupported mutation receipt")
 
 -- A lease lost between chunks leaves a committed (undoable) partial write and reports PARTIAL.

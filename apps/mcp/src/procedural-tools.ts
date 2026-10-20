@@ -7,7 +7,8 @@ import { BridgeError, type CommandOutcome, type DaemonClient } from './daemon-cl
 import { assetSlug, boundedVector } from './assembly-schemas.js';
 import { assetJobId, nativeAssetJobId } from './asset-schemas.js';
 import { id, ref } from './schemas.js';
-import { COLUMN_BASES, COLUMN_CAPITALS, DEADWOOD_SPECIES, FOLIAGE_STYLES, LOG_ENDS, PROCEDURAL_FINISHES, PROCEDURAL_LIMITS as L, STUMP_TOPS, TREE_SPECIES } from '../../../packages/asset-pipeline/src/procedural.js';
+import { COLUMN_BASES, COLUMN_CAPITALS, DEADWOOD_SPECIES, FOLIAGE_STYLES, LOG_ENDS, PROCEDURAL_FINISHES, PROCEDURAL_LIMITS as L, PROCEDURAL_VARIANTS, ROCK_FORMS, STUMP_TOPS, TREE_SPECIES } from '../../../packages/asset-pipeline/src/procedural.js';
+import { MODEL_FINISHES, MODEL_LIMITS } from '../../../packages/asset-pipeline/src/model-spec.js';
 
 /** Procedural Blender meshes: start (assets_procedural), look (assets_preview) and, for native
  * sessions, place the reconstructed meshes as MeshParts (assets_place_studio_import). */
@@ -31,7 +32,9 @@ const tree = z.strictObject({ kind: z.literal('tree'), finish, species: z.enum(T
   leafDensity: between(0, 1).optional(), trunkRadius: between(...L.trunkRadius).optional().describe('Metres; default from species and height.'),
   secondaryColor: color.optional().describe('Leaf colour, linear RGB 0..1 (default per species).') });
 const rock = z.strictObject({ kind: z.literal('rock'), finish, size: z.tuple([between(...L.rockSize), between(...L.rockSize), between(...L.rockSize)]).default([1.6, 1.2, 0.9]).describe('[x,y,z] metres; z is height.'),
-  roughness: between(0, 1).optional().describe('0 smooth boulder .. 1 jagged, faceted crag.') });
+  roughness: between(0, 1).optional().describe('0 smooth boulder .. 1 jagged, faceted crag.'),
+  form: z.enum(ROCK_FORMS).default('boulder').describe('boulder; outcrop: steep stratified cliff face (front -Y); cave: outcrop with a recessed cave mouth.'),
+  moss: z.boolean().optional().describe('Moss cap on the upper sky-facing rock (default false).') });
 const column = z.strictObject({ kind: z.literal('column'), finish, radius: between(...L.columnRadius).default(0.35), height: between(...L.columnHeight).default(4),
   flutes: z.number().int().min(0).max(L.flutes[1]).optional().describe('0 smooth or 8..32 flutes (default 20).'),
   base: z.enum(COLUMN_BASES).optional(), capital: z.enum(COLUMN_CAPITALS).optional() });
@@ -42,13 +45,22 @@ const log = z.strictObject({ kind: z.literal('log'), finish, species: z.enum(DEA
   radius: between(...L.logRadius).default(0.25), ends: z.enum(LOG_ENDS).optional().describe('Sawn, snapped or mixed (default) ends.'), moss });
 const stump = z.strictObject({ kind: z.literal('stump'), finish, species: z.enum(DEADWOOD_SPECIES).default('oak'), radius: between(...L.stumpRadius).default(0.35),
   height: between(...L.stumpHeight).default(0.5), top: z.enum(STUMP_TOPS).optional(), moss });
+// Model spec: the part graph is validated in full by the host (packages/asset-pipeline/src/model-spec.ts), so the advertised schema stays compact.
+const unit = between(0, 1).optional();
+const spec = z.strictObject({ kind: z.literal('spec'), finish, size: z.tuple([between(...MODEL_LIMITS.size), between(...MODEL_LIMITS.size), between(...MODEL_LIMITS.size)]).describe('Real-world [x,y,z] metres; Z up, front -Y.'),
+  materials: z.array(z.strictObject({ id: z.string().regex(/^[a-z][a-z0-9]{0,15}$/), finish: z.enum(MODEL_FINISHES), color: color.optional(), roughness: unit, metallic: unit, wear: unit, cavity: unit })).min(1).max(3),
+  parts: z.array(z.record(z.string(), z.unknown())).min(1).max(MODEL_LIMITS.parts).describe('Part graph {id, op, material, at, rot, ...}; format: skills_get arcane-blender-props reference model-spec.'),
+  pivot: z.enum(['base', 'origin']).optional(), smoothAngle: between(0, 180).optional() });
 
 export const proceduralInput = z.strictObject({
   name: assetSlug.describe('Lowercase slug, e.g. "oak-large".'),
-  generator: z.discriminatedUnion('kind', [tree, rock, column, foliage, log, stump]),
+  generator: z.discriminatedUnion('kind', [tree, rock, column, foliage, log, stump, spec]),
   seed: z.number().int().min(0).max(2147483647).optional().describe('Same seed + parameters = identical mesh; vary for variants.'),
+  // Identical members keep the advertised schema a compact [int x2]; n >= 2 and i <= n are checked by normalizeProcedural.
+  variant: z.tuple([z.number().int().min(1).max(PROCEDURAL_VARIANTS), z.number().int().min(1).max(PROCEDURAL_VARIANTS)]).optional()
+    .describe('[i,n]: member i of the n-member variant family of this seed+params: evenly spread, correlated (older = taller, mossier), never near-duplicates; i=1 youngest. Not column.'),
   color: color.optional().describe('Primary colour (bark/rock/stone/foliage), linear RGB 0..1.'),
-  triangleBudget: z.number().int().min(L.minTriangles).max(L.maxTriangles).optional().describe('Whole asset, 2500..20000 (defaults: tree 16000, rock 6000, column 12000, foliage 8000, log/stump 4000).'),
+  triangleBudget: z.number().int().min(L.minTriangles).max(L.maxTriangles).optional().describe('Whole asset, 2500..20000 (defaults: tree 16000, rock 6000, column 12000, foliage 8000, log/stump 4000, spec 8000).'),
   renderResolution: z.number().int().min(128).max(768).optional().describe('Preview PNG size (default 512).'),
   timeoutMs: wait(20_000),
 });
@@ -65,14 +77,17 @@ export const placeInput = z.strictObject({
 });
 
 const PROCEDURAL = 'Write: generate an original bounded mesh in the local Blender worker from a bundled parameterised generator (no code accepted): ' +
-  'tree (species pine/oak/birch/palm, height, trunkTaper, branchLevels 1-3, leafDensity; tapered branching limbs and thin curved closed leaves), rock (size, roughness; noise + chiselled facets, flat base), ' +
+  'tree (species pine/oak/birch/palm, height, trunkTaper, branchLevels 1-3, leafDensity; tapered branching limbs and thin curved closed leaves), rock (size, roughness, form boulder/outcrop/cave, moss; noise, bevelled fracture planes, strata, flat base, ≤6,000 triangles), ' +
   'column (radius, height, 0/8-32 flutes with entasis, base none/plinth/attic, capital none/doric/ionic/corinthian), foliage clump (bush/grass/fern), ' +
   'fallen log (oak/birch, length, radius, sawn/broken ends, moss) or stump (oak/birch, root flare, cut/broken top, moss; log/stump ≤4,000 triangles). ' +
+  'spec: ANY other original object as a declarative part graph (box/cylinder/sphere/revolve/extrude/loft/sweep/sdf parts; mirror/radial/array/scatter; csg weld/cut; noise; ≤3 materials wood/stone/metal/... with edge wear and cavity); load the model-spec reference first. ' +
+  'It compiles to a watertight, budgeted, auto-smoothed, base-pivoted mesh with a packed UV0 atlas and baked PBR; assets_preview then returns review metrics (size vs spec, watertight, thickness, silhouette, floating parts, hints): build, look, adjust the spec. ' +
   'Output: one optimised GLB, one mesh per material (≤20,000 triangles total, analytic UV0, original 256px opaque colour/normal/roughness/metalness maps; finish flat selects solid materials), a box/trunk collision proxy, and two preview renders. Deterministic per seed. ' +
   'Use for original hero/organic assets. Toolbox models require an explicit user request; inspect the actual preview before calling any result realistic. Returns a job acknowledgement: poll assets_jobs until succeeded (usually 15-90 s), then assets_preview to look at it. ' +
   'Open the 3D preview for human Approve; agents cannot approve. Studio delivery (native sessions): assets_prepare_studio_import → assets_stage_studio_import → assets_reconstruct_studio_import → assets_place_studio_import. Never auto-retry; on timeout inspect assets_jobs.';
 const PREVIEW = 'Read: see the Blender review render(s) of a completed asset job as PNG (hero three-quarter and/or side view, ortho camera, studio lighting). ' +
-  'Critique silhouette, proportions, density and colour, then regenerate with adjusted parameters or a new seed if needed. A render is not Studio evidence.';
+  'Critique silhouette, proportions, density and colour, then regenerate with adjusted parameters or a new seed if needed. A render is not Studio evidence. ' +
+  'Spec jobs: side is a 2x2 sheet (front, right, top, wireframe) and the result includes measured review metrics and hints.';
 const PLACE = 'Write: turn the reconstructed meshes of this exact job (after assets_reconstruct_studio_import succeeded in the same Studio session) into MeshParts via AssetService:CreateMeshPartAsync, ' +
   'then adopt them like studio_asset_insert in one undo step: authored UV0 and bounded embedded PNG colour, tangent normal, roughness and metalness through SurfaceAppearance, plus flat material factors when no maps were authored; invisible collision proxy, ' +
   'anchored, fitted (maxSize) or true scale (1 m ≈ 3.57 studs), bottom-centre pivot, grounded, parented; returns a receipt (receipt_restore removes it). ' +
@@ -96,11 +111,24 @@ function receipt(outcome: CommandOutcome): Record<string, unknown> {
     ...(outcome.nextStep ? { nextStep: outcome.nextStep } : {}) };
 }
 
+/** Model spec self-check (audit.json review) for the spec loop; absent for other jobs. Compact: no per-candidate UV detail. */
+const REVIEW_KEYS = ['size', 'triangles', 'watertight', 'thickness', 'silhouette', 'floating', 'uv', 'surfaces', 'lod', 'parts', 'warnings', 'hints'] as const;
+export async function specReview(client: Pick<DaemonClient, 'assetsManifest'>, jobId: string, options: { timeoutMs: number; signal?: AbortSignal }): Promise<Record<string, unknown> | undefined> {
+  try {
+    const { manifest } = await client.assetsManifest(jobId, options);
+    const review = 'validation' in manifest ? (manifest.validation as { review?: Record<string, unknown> }).review : undefined;
+    if (!review || typeof review !== 'object') return undefined;
+    const out: Record<string, unknown> = Object.fromEntries(REVIEW_KEYS.filter(key => key in review).map(key => [key, review[key]]));
+    if (out.uv && typeof out.uv === 'object') { const { candidates: _c, quality: _q, ...uv } = out.uv as Record<string, unknown>; out.uv = uv; }
+    return out;
+  } catch { return undefined; }
+}
+
 /** Pure mapping, exported for tests: typed tool input -> shared assets_start body. */
 export function proceduralStartBody(input: z.output<typeof proceduralInput>): Record<string, unknown> {
-  const { timeoutMs: _wait, generator, ...rest } = input;
+  const { timeoutMs: _wait, generator, variant, ...rest } = input;
   const drop = (value: Record<string, unknown>) => Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined));
-  return drop({ template: 'procedural', ...rest, procedural: drop(generator as Record<string, unknown>) });
+  return drop({ template: 'procedural', ...rest, procedural: drop({ ...generator, variant }) });
 }
 
 export function registerProceduralTools(server: McpServer, client: DaemonClient, scope = ''): void {
@@ -122,8 +150,9 @@ export function registerProceduralTools(server: McpServer, client: DaemonClient,
       for (const path of paths) images.push({ path, bytes: await client.assetsPreview(a.jobId, path, { timeoutMs: a.timeoutMs, signal: extra.signal }) });
       const total = images.reduce((sum, image) => sum + image.bytes.length, 0);
       if (total > 1_500_000) throw new BridgeError('RESPONSE_LIMIT', 'Previews exceed the image budget; request one view or a lower renderResolution.');
+      const review = await specReview(client, a.jobId, { timeoutMs: a.timeoutMs, signal: extra.signal });
       const summary = { jobId: a.jobId, previews: images.map(image => ({ path: image.path, bytes: image.bytes.length, sha256: createHash('sha256').update(image.bytes).digest('hex') })),
-        evidence: 'blender-review-render' };
+        evidence: 'blender-review-render', ...(review ? { review } : {}) };
       return { content: [{ type: 'text', text: JSON.stringify(summary) }, ...images.map(image => ({ type: 'image' as const, data: image.bytes.toString('base64'), mimeType: 'image/png' }))],
         structuredContent: summary };
     } catch (error) { return failure(client, error); }

@@ -17,6 +17,9 @@ import { DaemonClient } from '../../apps/mcp/src/daemon-client.js';
 import { productInstructions, recommendSkills, SKILL_ROUTER_LIMITS } from '../../apps/mcp/src/skill-router.js';
 import { SkillRegistry } from '../../apps/mcp/src/skills.js';
 import { z } from 'zod';
+import { AjvJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/ajv';
+import { target, ref } from '../../apps/mcp/src/schemas.js';
+import { TERRAIN_TOOL, terrainShape } from '../../apps/mcp/src/terrain-tool.js';
 
 const ROOT_REF: InstanceRef = { instanceId: 'opaque-root', sessionId: 'build-session', root: 'Workspace', pathSegments: [], className: 'Workspace' };
 const session = (capabilities: string[] = [...READ_METHODS, ...WRITE_METHODS], roots: StudioSession['allowedRoots'] = ['Workspace', 'Lighting']): StudioSession => ({
@@ -251,4 +254,69 @@ test('route protection preserves clearance when crowded and bounds malformed pat
     {avoidPaths: [{points: [[0, 0], [10, 20]], width: 8, source: 'ignored?'}]},
     {footprintRadius: -1}, {footprintRadius: 513},
   ]) assert.throws(() => parse({name: 'InvalidRoute', scatter: [{use: 'Tree', count: 10, center: [0, 0, 0], radius: 80, minSpacing: 4, ...patch}]}));
+});
+
+test('advertised scene_build and terrain_generate schemas accept and refuse a corpus exactly as server validation does', async t => {
+  const mcp = createMcpServer({ client: new DaemonClient({ url: 'http://127.0.0.1:1', token: 'synthetic-corpus-bearer' }), projectRoot: process.cwd() });
+  const client = new Client({ name: 'schema-corpus', version: '1.0.0' });
+  const [a, b] = InMemoryTransport.createLinkedPair(); await mcp.connect(a); await client.connect(b);
+  t.after(async () => { await client.close(); await mcp.close(); });
+  const tools = (await client.listTools()).tools, validator = new AjvJsonSchemaValidator();
+  const check = (name: string, strict: z.ZodType, base: Record<string, unknown>, valid: Record<string, unknown>[], invalid: Record<string, unknown>[]) => {
+    const tool = tools.find(item => item.name === name)!, schema = JSON.stringify(tool.inputSchema);
+    // Annotation-only "default" values that an omitted flag or list already means are not advertised.
+    assert.ok(!schema.includes('"default":false') && !schema.includes('"default":[]'), name);
+    const advertised = validator.getValidator(tool.inputSchema as never);
+    for (const [expected, patches] of [[true, valid], [false, invalid]] as const) for (const patch of patches) {
+      const input = { ...base, ...patch }, label = `${name} ${expected ? 'accepts' : 'refuses'} ${JSON.stringify(patch).slice(0, 160)}`;
+      assert.equal(advertised(input).valid, expected, 'advertised ' + label);
+      assert.equal(strict.safeParse(input).success, expected, 'server ' + label);
+    }
+  };
+  const pine = { parts: [{ name: 'Trunk', props: { Shape: 'Cylinder', Size: [5, 1.6, 1.6], Position: [0, 2.5, 0], Orientation: [0, 0, 90], Color: '#5a4030', Material: 'Wood' }, tint: false },
+    { name: 'Crown', className: 'WedgePart', props: { Color: [0.2, 0.4, 0.2], Transparency: 0.1, Reflectance: 0, CanCollide: false, CastShadow: false, Anchored: true } }], weld: true };
+  const scatter = { use: 'Pine', in: 'Trees', count: 20, center: [0, 0, 0], radius: 50, minSpacing: 6 };
+  const build = { sessionId: 'build-session', parent: ROOT_REF, name: 'Forest', defaults: { Material: 'Wood' }, prototypes: { Pine: pine },
+    items: [{ key: 'Trees', className: 'Model', name: 'Trees' }, { use: 'Pine', in: 'Trees', at: [1, 2, 3], yaw: 45, scale: 1.5, tint: [1, 0.9, 1.1], ground: true }], scatter: [scatter] };
+  const plinth = { kind: 'plinth', key: 'Spawn', at: [0, 0, 0], radius: 12, seed: 4, style: 'fluted', tiers: 3, height: 20, material: 'Marble', color: '#c8c1b2',
+    weathering: 0.4, spawn: true, life: 'dusk', safeZone: { radius: 15, style: 'glow' } };
+  const forest = { kind: 'forest', at: [0, 0, 0], radius: 200, trees: 120, undergrowth: 200, species: [{ use: 'pine', share: 2, spacing: 9, tris: 16000 }],
+    cover: [{ use: 'fern', spacing: 2.4 }], paths: [{ points: [[0, 0], [50, 60]], width: 8 }], clearing: { center: [0, 0], inner: 20, outer: 50 } };
+  const { radius: _radius, ...area } = scatter;
+  const rich = { ...area, use: ['Pine', 'Pine', 'Oak'], innerRadius: 4, size: [80, 60], clusters: 4, clusterSpread: 20, avoid: [{ at: [5, 5], radius: 3 }],
+    avoidPaths: [{ points: [[0, 0], [10, 20]], width: 8 }], footprintRadius: 3, yaw: [-180, 180], scale: [0.75, 1.25], tint: { min: [0.9, 0.9, 0.9], max: [1.1, 1.1, 1.1] },
+    seed: 9, ground: true, edge: 12, tilt: 4, hug: 0.5, clearing: { inner: 10, outer: 30 } };
+  const { center: _center, ...centreless } = scatter;
+  const { at: _at, ...unplaced } = forest;
+  check('scene_build', z.strictObject({ ...target, parent: ref, ...sceneBuildShape }), build, [
+    {}, { timeoutMs: 5000, container: 'Folder' }, { kits: [plinth, forest] }, { scatter: [scatter, rich] },
+    { container: 'ScreenGui', screen: { IgnoreGuiInset: true }, prototypes: { Card: { ui: [{ name: 'Root', className: 'Frame' }, { name: 'Title', className: 'TextLabel', in: 'Root', ui: { Text: 'Hi' } }] } },
+      items: [{ use: 'Card', ui: { Position: [0.5, 0, 0.5, 0] } }, { key: 'Glow', className: 'PointLight', fx: { Brightness: 2 } }], scatter: [] },
+  ], [
+    { extra: 1 }, { parent: { ...ROOT_REF, extra: 1 } }, { container: 'Part' }, { defaults: { Material: 'Lava' } }, { defaults: { Size: [1, 5] } }, { defaults: { Color: '#zzzzzz' } },
+    { defaults: { Transparency: 2 } }, { prototypes: { 'bad name': pine } }, { prototypes: { Pine: { ...pine, extra: true } } }, { prototypes: { Pine: { parts: [] } } },
+    { prototypes: { Pine: { parts: [{ name: 'Trunk', className: 'Model' }] } } }, { templates: { 'a b': ROOT_REF } },
+    { items: [{ use: 'Pine', yaw: 400 }] }, { items: [{ use: 'Pine', scale: 0.05 }] }, { items: [{ use: 'Pine', tint: [3, 1, 1] }] }, { items: [{ key: 'a b' }] }, { items: [{ use: 'Pine', extra: 1 }] },
+    { scatter: [{ ...scatter, count: 0 }] }, { scatter: [{ ...scatter, minSpacing: 0.1 }] }, { scatter: [centreless] }, { scatter: [{ ...scatter, use: [] }] },
+    { scatter: [{ ...scatter, hug: 1.5 }] }, { scatter: [{ ...scatter, tilt: 30 }] }, { scatter: [{ ...scatter, seed: -1 }] }, { scatter: [{ ...scatter, size: [10] }] },
+    { scatter: [{ ...scatter, clearing: { inner: 10 } }] }, { scatter: [{ ...scatter, avoidPaths: [{ points: [[0, 0]], width: 8 }] }] }, { scatter: [{ ...scatter, avoidPaths: [{ points: [[0, 0], [1, 1]], width: 0 }] }] },
+    { scatter: [{ ...scatter, tint: { min: [1, 1, 1] } }] }, { scatter: Array.from({ length: 17 }, () => scatter) },
+    { kits: [{ ...plinth, kind: 'castle' }] }, { kits: [{ ...plinth, material: 'Wood' }] }, { kits: [{ ...plinth, safeZone: { radius: 15, extra: 1 } }] }, { kits: [{ ...plinth, tiers: 7 }] },
+    { kits: [{ ...forest, species: [] }] }, { kits: [{ ...forest, cover: [{ use: 'fern' }] }] }, { kits: [unplaced] }, { kits: [plinth, plinth, plinth, plinth, forest] },
+    { timeoutMs: 50 },
+  ]);
+  const valley = { sessionId: 'terrain-session', center: [0, 0], size: [512, 512] };
+  const terrain = { floor: -20, height: 192, baseHeight: 32, seed: 3, noise: { type: 'ridged', octaves: 6, frequency: 3, amplitude: 20, persistence: 0.5 }, edge: 64, snowLine: 150,
+    features: [{ kind: 'mountain', center: [100, 100], radius: 80, height: 120, roughness: 0.6 }, { kind: 'flatten', center: [0, 0], radius: 40, blend: 8, material: 'LeafyGrass', base: 12 },
+      { kind: 'plateau', center: [60, -60], radius: 30, level: 40 }, { kind: 'lake', center: [-150, 50], radius: 60, level: 20, depth: 8, material: 'Mud' },
+      { kind: 'river', points: [[-200, 0], [0, -100], [200, -50]], width: 16, depth: 6, bank: 10, material: 'Pebble' }],
+    materials: { rules: [{ material: 'Rock', minSlope: 35 }, { material: 'Snow', minHeight: 150, maxHeight: 512, maxSlope: 60, minNoise: -0.5, maxNoise: 1, nearWater: 4 }], fallback: 'Grass', deep: 'Basalt' },
+    caves: { at: [150, -150], radius: 90, rise: 56, entrances: 2, chambers: 2, tunnel: 6, floor: 'Slate', avoid: [[0, 0, 40]] } };
+  check(TERRAIN_TOOL, z.strictObject({ ...target, ...terrainShape }), valley, [{}, terrain, { caves: { at: [0, 0] } }], [
+    { extra: 1 }, { size: [9000, 10] }, { center: [0, 0, 0] }, { floor: 20000 }, { height: 4 }, { noise: { type: 'perlin' } }, { noise: { octaves: 2, extra: 1 } },
+    { features: [{ kind: 'lake', center: [0, 0], radius: 60 }] }, { features: [{ kind: 'volcano', center: [0, 0], radius: 60, height: 9 }] },
+    { features: [{ kind: 'river', points: [[0, 0]], width: 8 }] }, { features: [{ kind: 'hill', center: [0, 0], radius: 40, height: 9, level: 3 }] },
+    { materials: { fallback: 'Lava' } }, { materials: { rules: [{ material: 'Rock', extra: 1 }] } }, { materials: { rules: [{ material: 'Rock', minNoise: -2 }] } },
+    { caves: { at: [0, 0], tunnel: 20 } }, { caves: { at: [0, 0], avoid: [[0, 0]] } }, { caves: { at: [0, 0], entrances: 0 } }, { caves: {} },
+  ]);
 });

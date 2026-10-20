@@ -1,7 +1,7 @@
 /// <reference lib="dom" />
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { startProviderSetup, PROVIDER_PRESENTATION_KEY, type ProviderSetupState, type SetupProvider } from '../../apps/desktop/src/provider-setup.js';
+import { startProviderSetup, ARCANE_CREDITS_OFFER, ARCANE_CREDITS_TARGET, PROVIDER_PRESENTATION_KEY, type ProviderSetupState, type SetupProvider } from '../../apps/desktop/src/provider-setup.js';
 import type { ProviderConnectionStatus } from '../../apps/desktop/src/codex-chat.js';
 
 // In-memory DOM/bridge doubles only: no browser, native CLI, network or credentials.
@@ -26,7 +26,8 @@ function fixture(options: { autoSelect?: boolean; preferred?: SetupProvider; sta
   const elements = new Map(['provider-setup-panel', 'provider-login-gate', 'provider-setup-provider',
     'provider-login-start', 'provider-login-refresh', 'provider-login-codex', 'provider-login-claude',
     'provider-login-message', 'provider-setup-status', 'provider-setup-details', 'provider-setup-refresh',
-    'provider-setup-login', 'provider-setup-install', 'provider-setup-launch', 'workspace-stage', 'codex-connect', 'codex-disconnect'].map(id => [id, new Control()]));
+    'provider-setup-login', 'provider-setup-install', 'provider-setup-launch', 'workspace-stage', 'codex-connect', 'codex-disconnect',
+    'provider-login-credits', 'provider-login-credits-note'].map(id => [id, new Control()]));
   const doc = new EventTarget() as EventTarget & { getElementById(id: string): Control | null; defaultView: unknown };
   doc.getElementById = id => elements.get(id) ?? null;
   const stored = new Map<string, string>();
@@ -377,4 +378,35 @@ test('explicit disconnect is retained across background status checks',async t=>
   f.control('provider-setup-refresh').emit('click');await settled();
   t.mock.timers.tick(120000);await settled();assert.equal(attempts,1);
   assert.ok(f.calls.every(call=>call==='status:codex'));
+});
+
+test('first run without a CLI or subscription: the card offers the install steps, an honest API-key note and Arcane Credits', async t => {
+  // Not installed: one click opens the official install steps (native confirm), then the card checks again.
+  const f = fixture({ state: { installed: false, auth: 'unknown', cliVersion: null } }); t.after(() => f.controller.cleanup()); await settled();
+  const start = f.control('provider-login-start');
+  assert.equal(start.textContent, 'Get Codex'); assert.equal(start.disabled, false);
+  assert.match(f.control('provider-login-message').textContent, /^Codex is not installed on this PC yet\. Click Get Codex/);
+  start.emit('click'); await settled();
+  assert.deepEqual(f.calls, ['status:codex', 'install:codex']);
+  assert.equal(start.textContent, 'Check sign-in', 'after the install steps open, the next click re-checks');
+  start.emit('click'); await settled();
+  assert.deepEqual(f.calls.at(-1), 'status:codex'); assert.equal(start.textContent, 'Get Codex', 'still missing: offer the steps again');
+  start.emit('click', false); await settled(); assert.equal(f.calls.length, 3, 'synthetic clicks do nothing');
+  // An API-key or cloud sign-in is not a subscription: say so and offer the subscription sign-in instead of a check loop.
+  f.state({ installed: true, auth: 'api-or-cloud', cliVersion: '1.0.0' }); f.control('provider-setup-refresh').emit('click'); await settled();
+  assert.equal(start.textContent, 'Sign in with ChatGPT'); assert.match(f.control('provider-login-message').textContent, /API key or cloud account.*ChatGPT subscription.*Arcane Credits/);
+  assert.equal(f.controller.isSignedIn(), false);
+
+  // No subscription: a plain line about what Arcane Credits still need, then the account step, then a one-click switch.
+  const credits = f.control('provider-login-credits'), note = f.control('provider-login-credits-note');
+  const requests: unknown[] = []; f.doc.addEventListener('workspace:settingsrequest', event => requests.push((event as CustomEvent).detail));
+  assert.equal(note.textContent, ARCANE_CREDITS_OFFER.none.note); assert.match(note.textContent, /not connected to an Arcane Credits service/);
+  credits.emit('click'); assert.deepEqual(requests, [{ target: ARCANE_CREDITS_TARGET }]); assert.equal(f.controller.chatSurface(), 'codex');
+  f.controller.setArcaneSetup?.('signed-out');
+  assert.equal(credits.textContent, 'Connect Arcane account'); assert.equal(note.textContent, ARCANE_CREDITS_OFFER['signed-out'].note);
+  f.controller.setArcaneAvailable(true);
+  assert.equal(credits.textContent, 'Use Arcane Credits');
+  credits.emit('click', false); assert.equal(f.controller.chatSurface(), 'codex', 'synthetic clicks never switch');
+  credits.emit('click'); assert.equal(f.controller.chatSurface(), 'arcane'); assert.equal(f.control('provider-login-gate').hidden, true);
+  assert.equal(requests.length, 1);
 });

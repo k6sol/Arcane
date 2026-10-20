@@ -7,7 +7,7 @@
   "entry": "ArcaneLocalBridge",
   "runtimeIdentity": {
     "scheme": "arcane-plugin-source-v1",
-    "sha256": "b722dab0d017dac0500eb0d413fed552ce6f8ad50d339860bd5b82c1b4fefbf2"
+    "sha256": "298e53b43eb4c7f822b4dbba18245fecc35e25d1b5deaa5dff9d2911f2c73c6a"
   },
   "sources": [
     {
@@ -22,8 +22,8 @@
     },
     {
       "path": "src/Validation.luau",
-      "bytes": 23523,
-      "sha256": "43b2fd9e4cb52b2e227e35b37a1d21e57a75cd6d1ec3d86304e39d89a6930976"
+      "bytes": 23579,
+      "sha256": "6b25afac8928d1a5bddefdede9f438b077aaab682b398c1eda5dc7d4ddd693bd"
     },
     {
       "path": "src/Registry.luau",
@@ -37,8 +37,8 @@
     },
     {
       "path": "src/Operations.luau",
-      "bytes": 111556,
-      "sha256": "e2440a9d41808deeb73c981d3706380560576990b84f38fb61e662dc22692ddf"
+      "bytes": 111632,
+      "sha256": "9ffd37c63a7bf81a138a427b709fd9406df0b9a1ed4b9de3ab8efed94c2ce7bf"
     },
     {
       "path": "src/Transport.luau",
@@ -92,22 +92,22 @@
     },
     {
       "path": "src/TerrainGen.luau",
-      "bytes": 23425,
-      "sha256": "40a31c450526b05a97b14c63ed7ce243da88ff2477348925a730f5d945a7ce34"
+      "bytes": 27550,
+      "sha256": "901b45b369f48f58848ba7a51cbb6c4960d85a993ea6d57029f04fd785fe5b55"
     }
   ],
   "artifacts": [
     {
       "name": "ArcaneLocalBridge.rbxm",
       "format": "roblox-xml-v4",
-      "bytes": 419548,
-      "sha256": "613758bcd20050a25903721ccec182e378a09cdab4bdeac7cff25df0eba1fe98"
+      "bytes": 423805,
+      "sha256": "f58f4a839a568270423b9622a4cf8ffe5183762b3154e33be9c27a902c7a03b4"
     },
     {
       "name": "ArcaneLocalBridge.rbxmx",
       "format": "roblox-xml-v4",
-      "bytes": 419548,
-      "sha256": "613758bcd20050a25903721ccec182e378a09cdab4bdeac7cff25df0eba1fe98"
+      "bytes": 423805,
+      "sha256": "f58f4a839a568270423b9622a4cf8ffe5183762b3154e33be9c27a902c7a03b4"
     }
   ]
 }

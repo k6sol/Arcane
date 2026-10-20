@@ -11,7 +11,7 @@ const memory = () => { const map = new Map<string, string>(); return { getItem: 
 test('tour content: 3-4 short steps in Arcane voice that point at real studio.html controls', async () => {
   const html = await readFile('apps/desktop/public/studio.html', 'utf8');
   assert.ok(TOUR_STEPS.length >= 3 && TOUR_STEPS.length <= 4);
-  assert.deepEqual(TOUR_STEPS.map(s => s.id), ['model', 'playtest', 'setup', 'starters']);
+  assert.deepEqual(TOUR_STEPS.map(s => s.id), ['setup', 'starters', 'model', 'playtest'], 'in the order a new user needs them: connect Studio first');
   for (const step of TOUR_STEPS) {
     assert.ok(step.title.length <= 28 && step.body.length <= 140, step.id + ' stays short');
     assert.ok(step.targets.length >= 1);
@@ -116,43 +116,44 @@ test('real Edge tour: waits for sign-in, spotlights real controls, traps focus, 
   await signIn();
   await page.waitForFunction(() => !(document.getElementById('welcome-tour') as HTMLElement).hidden);
 
-  // Step 1: model picker.
-  assert.equal(await page.locator('#welcome-tour-title').textContent(), 'Pick your model');
+  // Step 1: welcome, then the setup checklist (connect Studio comes first).
+  assert.equal(await page.locator('#welcome-tour-title').textContent(), 'First, connect Studio');
+  assert.match(await page.locator('#welcome-tour-body').textContent() ?? '', /^Welcome to Arcane!/);
   assert.equal(await page.locator('#welcome-tour-count').textContent(), 'Step 1 of 4');
   assert.equal(await active(), 'welcome-tour-next');
   assert.equal(await page.locator('#welcome-tour-back').isVisible(), false);
-  assert.equal(await overlaps('#codex-model-trigger'), true);
+  assert.equal(await overlaps('#setup-checklist'), true);
   assert.equal(await cardInside(), true);
   assert.deepEqual(await page.evaluate(() => getComputedStyle(document.getElementById('welcome-tour-card')!).transitionDuration.split(',').every(v => parseFloat(v) === 0)), true);
-  if (shots) await page.screenshot({ path: join(shots, 'welcome-tour-1-model.png') });
+  if (shots) await page.screenshot({ path: join(shots, 'welcome-tour-1-setup.png') });
   // Focus trap: Tab and Shift+Tab stay inside the card.
   for (let i = 0; i < 4; i++) { await page.keyboard.press('Tab'); assert.ok((await active()).startsWith('welcome-tour-'), 'Tab stays in the card'); }
   for (let i = 0; i < 4; i++) { await page.keyboard.press('Shift+Tab'); assert.ok((await active()).startsWith('welcome-tour-'), 'Shift+Tab stays in the card'); }
 
-  // Step 2 via ArrowRight: Playtest switch.
+  // Step 2 via ArrowRight: starter gallery.
   await page.keyboard.press('ArrowRight');
+  assert.equal(await page.locator('#welcome-tour-title').textContent(), 'Then start from an idea');
+  assert.equal(await overlaps('#starter-gallery'), true);
+  assert.equal(await cardInside(), true);
+  if (shots) await page.screenshot({ path: join(shots, 'welcome-tour-2-starters.png') });
+
+  // Step 3 via Enter on Next: model picker.
+  await page.locator('#welcome-tour-next').focus(); await page.keyboard.press('Enter');
+  assert.equal(await page.locator('#welcome-tour-title').textContent(), 'Pick your model');
+  assert.equal(await overlaps('#codex-model-trigger'), true);
+  assert.equal(await cardInside(), true);
+  if (shots) await page.screenshot({ path: join(shots, 'welcome-tour-3-model.png') });
+  await page.keyboard.press('ArrowLeft');
+  assert.equal(await page.locator('#welcome-tour-title').textContent(), 'Then start from an idea');
+  await page.locator('#welcome-tour-next').click();
+  await page.locator('#welcome-tour-next').click();
+
+  // Step 4: Playtest switch, then Done.
   assert.equal(await page.locator('#welcome-tour-title').textContent(), 'Let Arcane playtest');
   assert.equal(await overlaps('#playtest-toggle'), true);
-  assert.equal(await cardInside(), true);
-  if (shots) await page.screenshot({ path: join(shots, 'welcome-tour-2-playtest.png') });
-
-  // Step 3 via Enter on Next: setup checklist.
-  await page.locator('#welcome-tour-next').focus(); await page.keyboard.press('Enter');
-  assert.equal(await page.locator('#welcome-tour-title').textContent(), 'Connect Studio');
-  assert.equal(await overlaps('#setup-checklist'), true);
-  assert.equal(await cardInside(), true);
-  if (shots) await page.screenshot({ path: join(shots, 'welcome-tour-3-setup.png') });
-  await page.keyboard.press('ArrowLeft');
-  assert.equal(await page.locator('#welcome-tour-title').textContent(), 'Let Arcane playtest');
-  await page.locator('#welcome-tour-next').click();
-  await page.locator('#welcome-tour-next').click();
-
-  // Step 4: starter gallery, then Done.
-  assert.equal(await page.locator('#welcome-tour-title').textContent(), 'Start from an idea');
-  assert.equal(await overlaps('#starter-gallery'), true);
   assert.equal(await page.locator('#welcome-tour-next').textContent(), 'Done');
   assert.equal(await cardInside(), true);
-  if (shots) await page.screenshot({ path: join(shots, 'welcome-tour-4-starters.png') });
+  if (shots) await page.screenshot({ path: join(shots, 'welcome-tour-4-playtest.png') });
   await page.locator('#welcome-tour-next').click();
   assert.equal(await shown(), false);
   assert.deepEqual(await page.evaluate((key: string) => JSON.parse(localStorage.getItem(key)!), WELCOME_TOUR_KEY), { version: 1, seen: true, how: 'finished' });
@@ -165,7 +166,7 @@ test('real Edge tour: waits for sign-in, spotlights real controls, traps focus, 
   await page.evaluate(() => { (document.getElementById('settings-drawer') as HTMLDialogElement).showModal(); document.getElementById('welcome-tour-replay')!.click(); });
   await page.waitForFunction(() => !(document.getElementById('welcome-tour') as HTMLElement).hidden);
   assert.equal(await page.evaluate(() => (document.getElementById('settings-drawer') as HTMLDialogElement).open), false);
-  assert.equal(await page.locator('#welcome-tour-title').textContent(), 'Pick your model');
+  assert.equal(await page.locator('#welcome-tour-title').textContent(), 'First, connect Studio');
   await page.keyboard.press('Escape');
   assert.equal(await shown(), false);
   assert.equal(await page.evaluate((key: string) => JSON.parse(localStorage.getItem(key)!).how, WELCOME_TOUR_KEY), 'skipped');

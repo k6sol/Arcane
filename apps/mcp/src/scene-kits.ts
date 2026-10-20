@@ -8,6 +8,7 @@
 import { SCENE_BUILD_LIMITS } from '../../../packages/protocol/src/studio.js';
 import { PROCEDURAL_LIMITS } from '../../../packages/asset-pipeline/src/procedural.js';
 import { BridgeError } from './daemon-client.js';
+import { ForestMaps, Neighbours, mapField, type ScatterField } from './spatial-maps.js';
 import type { SceneBuildInput } from './scene-build.js';
 
 type Vec = [number, number, number];
@@ -16,13 +17,16 @@ type Proto = NonNullable<SceneBuildInput['prototypes']>[string];
 type ProtoPart = NonNullable<Proto['parts']>[number];
 type Item = SceneBuildInput['items'][number];
 type Scatter = SceneBuildInput['scatter'][number];
+/** A kit scatter layer with its spatial-map field (internal; never part of the tool schema or wire form). */
+export type FieldScatter = Scatter & { field?: ScatterField };
 export type Kit = NonNullable<SceneBuildInput['kits']>[number];
 type Layer = NonNullable<Kit['species']>[number] & { footprint?: number };
 /** A plinth kit with every default resolved. */
 interface PlinthKit { kind: 'plinth'; key?: string | undefined; in?: string | undefined; name?: string | undefined; at: Vec; seed: number; radius: number;
   tiers: number; riser: number; style: 'fluted' | 'smooth' | 'platform'; height: number; flutes: number; column?: string | undefined;
-  material: NonNullable<Props['Material']>; trim: NonNullable<Props['Material']>; color?: unknown; weathering: number; spawn: boolean; life?: 'day' | 'dusk' | undefined }
-const PLINTH_ONLY = ['style', 'tiers', 'height', 'column', 'material', 'color', 'weathering', 'spawn', 'life'] as const;
+  material: NonNullable<Props['Material']>; trim: NonNullable<Props['Material']>; color?: unknown; weathering: number; spawn: boolean; life?: 'day' | 'dusk' | undefined;
+  safeZone?: { radius: number; style: 'glow' | 'stone' } | undefined }
+const PLINTH_ONLY = ['style', 'tiers', 'height', 'column', 'material', 'color', 'weathering', 'spawn', 'life', 'safeZone'] as const;
 const FOREST_ONLY = ['clearing', 'trees', 'undergrowth', 'species', 'cover', 'paths'] as const;
 function only(kit: Kit, label: string, forbidden: readonly string[]) {
   const extra = forbidden.filter(field => (kit as Record<string, unknown>)[field] !== undefined);
@@ -33,9 +37,11 @@ function resolvePlinth(kit: Kit, label: string): PlinthKit {
   const radius = kit.radius ?? 10;
   if (radius > 60) throw new BridgeError('INPUT', `Plinth "${label}": radius must be at most 60.`);
   const material = kit.material ?? 'Limestone', style = kit.style ?? 'smooth';
+  if (kit.safeZone && kit.safeZone.radius < radius + 2.5) throw new BridgeError('INPUT', `Plinth "${label}": safeZone.radius must be at least ${radius + 2.5} (plinth radius + 2.5) so the ring circles the base.`);
   return { kind: 'plinth', key: kit.key, in: kit.in, name: kit.name, at: kit.at as Vec, seed: kit.seed, radius, tiers: kit.tiers ?? 3, riser: 1, style,
     height: kit.height ?? 18, flutes: style === 'fluted' ? 16 : 0, column: kit.column, material, trim: material === 'Limestone' ? 'Marble' : material,
-    color: kit.color, weathering: kit.weathering ?? 0.5, spawn: kit.spawn ?? true, life: kit.life };
+    color: kit.color, weathering: kit.weathering ?? 0.5, spawn: kit.spawn ?? true, life: kit.life,
+    safeZone: kit.safeZone ? { radius: kit.safeZone.radius, style: kit.safeZone.style ?? 'glow' } : undefined };
 }
 
 /** Per-kit summary returned with the build receipt (a template clone counts the layer's `tris`, else its recipe generator's
@@ -44,6 +50,9 @@ export interface KitReport { kind: 'plinth' | 'forest'; key: string; parts: numb
   spawn?: { at: number[]; top: number }; top?: number; placed?: number; requested?: number;
   /** Plinth ambient life: effect/sound instance count and the steady-state particle budget (sum of Rate x max Lifetime). */
   life?: { instances: number; particles: number; sounds: string[] };
+  /** Plinth safe zone: the ring's centre/radius, the protected world-Y band and the server Script to install (scene_create Script,
+   * script_update with this source, script_set_enabled). */
+  safeZone?: { at: number[]; radius: number; style: string; bottom: number; top: number; segments: number; particles: number; script: { name: string; source: string } };
   /** Forest layers cloned from Blender original template variants (`<use>-<n>`), and the ones that fell back to blockouts. */
   originals?: Record<string, string[]>; blockouts?: string[]; note?: string; recipe?: OriginalVariant[] }
 /** Internal bookkeeping consumed by compileSceneBuild: which items/scatter specs belong to each kit. */
@@ -172,23 +181,26 @@ function builtin(kind: string): Proto | undefined {
 export const BUILTIN_SPECIES = ['pine', 'oak', 'birch', 'bush', 'fern', 'rock', 'log'] as const;
 
 /** One assets_procedural call for a forest original; its name is also the scene_build template name. */
-export interface OriginalVariant { name: string; seed: number; generator: Record<string, string | number> }
-/** Original Blender variants per built-in forest species (log: the fallen-log generator; stumps are user templates). */
+export interface OriginalVariant { name: string; seed: number; variant: [number, number]; generator: Record<string, string | number> }
+/** Original Blender variant families per built-in forest species (log: the fallen-log generator; stumps are user templates).
+ * Counts keep the default six-species forest within the 16-template build limit. */
 export const ORIGINAL_VARIANTS: Record<string, { count: number; generator: Record<string, string | number> }> = {
-  oak: { count: 3, generator: { kind: 'tree', species: 'oak', height: 6 } }, birch: { count: 2, generator: { kind: 'tree', species: 'birch', height: 7 } },
-  pine: { count: 3, generator: { kind: 'tree', species: 'pine', height: 8 } }, bush: { count: 2, generator: { kind: 'foliage', style: 'bush' } },
-  fern: { count: 2, generator: { kind: 'foliage', style: 'fern', radius: 0.5, height: 0.4 } }, rock: { count: 3, generator: { kind: 'rock' } },
+  oak: { count: 4, generator: { kind: 'tree', species: 'oak', height: 6 } }, birch: { count: 2, generator: { kind: 'tree', species: 'birch', height: 7 } },
+  pine: { count: 4, generator: { kind: 'tree', species: 'pine', height: 8 } }, bush: { count: 2, generator: { kind: 'foliage', style: 'bush' } },
+  fern: { count: 2, generator: { kind: 'foliage', style: 'fern', radius: 0.5, height: 0.4 } }, rock: { count: 2, generator: { kind: 'rock' } },
   log: { count: 2, generator: { kind: 'log', species: 'oak', length: 3, radius: 0.25 } },
 };
 /**
- * Deterministic assets_procedural plan for a forest kit's species: `<use>-<n>` names, natural finish (the default),
- * seed = kit seed x 100 + n. Placing each user-approved result once and passing it as templates[`<use>-<n>`] makes the
- * kit clone those variants instead of blockouts.
+ * Deterministic assets_procedural plan for a forest kit's species: one variant family per species (family seed =
+ * kit seed x 100 + 1, `variant` [n, count]), named `<use>-<n>` with n = 1 the youngest member, natural finish (the default).
+ * Placing each user-approved result once and passing it as templates[`<use>-<n>`] makes the kit clone those variants
+ * (chosen per point from the age map) instead of blockouts.
  */
 export function forestOriginals(seed: number, uses: readonly string[]): OriginalVariant[] {
   return uses.flatMap(use => {
     const spec = ORIGINAL_VARIANTS[use];
-    return spec ? Array.from({ length: spec.count }, (_, i) => ({ name: `${use}-${i + 1}`, seed: (seed * 100 + i + 1) % 2 ** 31, generator: { ...spec.generator } })) : [];
+    return spec ? Array.from({ length: spec.count }, (_, i) => ({ name: `${use}-${i + 1}`, seed: (seed * 100 + 1) % 2 ** 31,
+      variant: [i + 1, spec.count] as [number, number], generator: { ...spec.generator } })) : [];
   });
 }
 
@@ -209,7 +221,7 @@ export function triangles(proto: Proto | undefined): { parts: number; tris: numb
 }
 
 // ---- plinth ----
-interface Built { items: Item[]; report: KitReport }
+interface Built { items: Item[]; report: KitReport; prototypes?: Record<string, Proto> }
 function plinth(kit: PlinthKit, index: number): Built {
   const random = mulberry32(kit.seed * 7919 + 13), w = kit.weathering, key = kit.key ?? `plinth${index}`;
   const [x0, y0, z0] = kit.at, R = kit.radius, T = kit.tiers, rise = kit.riser;
@@ -270,7 +282,7 @@ function plinth(kit: PlinthKit, index: number): Built {
     parts.push(column('Moss' + (m + 1), rr * Math.cos(a), (tier === 0 ? 0 : tier * rise) + 0.05, rr * Math.sin(a), 0.1, d, { Material: 'Grass', Color: jitter([0.3, 0.42, 0.21], random, 1), ...SMALL }));
   }
   for (let f = 0; f < fragments; f++) {
-    const a = random() * Math.PI * 2, rr = R + 1 + random() * 3.5, s = 0.5 + random() * 1.1;
+    const a = random() * Math.PI * 2, rr = R + 1 + random() * Math.min(3.5, kit.safeZone ? kit.safeZone.radius - R - 2.2 : 3.5), s = 0.5 + random() * 1.1;
     parts.push(block('Fragment' + (f + 1), [s * 1.3, s * 0.8, s], [rr * Math.cos(a), s * 0.22, rr * Math.sin(a)], [random() * 30 - 15, random() * 360 - 180, random() * 30 - 15],
       { Material: kit.material, Color: jitter(stone.map(v => v * 0.85) as Vec, random, w) }));
   }
@@ -289,7 +301,123 @@ function plinth(kit: PlinthKit, index: number): Built {
     report.spawn = { at: [r2(x0), r2(sy), r2(z0)], top: r2(sy + 0.5) };
   }
   if (kit.life) items.push(...ambientLife(kit, key, report));
+  if (kit.safeZone) return { items: [...items, ...safeZone(kit, key, report, y0 + surface)], report, prototypes: { [key + '-ring']: ringSegment(kit) } };
   return { items, report };
+}
+
+// ---- safe zone ----
+const segmentsFor = (radius: number) => clamp(Math.round(2 * Math.PI * radius / 3.5), 24, 120);
+/** One ring segment, its X axis along the ring tangent: a faint translucent Neon band (glow) or an inset slate curb with a fine Neon thread (stone). */
+function ringSegment(kit: PlinthKit): Proto {
+  const Rz = kit.safeZone!.radius, n = segmentsFor(Rz), length = r2(2 * Rz * Math.sin(Math.PI / n) * 1.06);
+  const thread = (y: number, width: number, transparency: number): ProtoPart => ({ name: 'Glow', className: 'Part', tint: false,
+    props: { Size: [length, 0.06, width], Position: [0, y, 0], Material: 'Neon', Color: '#cfe9ff', Transparency: transparency, ...SMALL } });
+  if (kit.safeZone!.style === 'glow') return { parts: [thread(0.05, 0.45, 0.55)], weld: false };
+  return { parts: [{ name: 'Curb', className: 'Part', tint: false, props: { Size: [length, 0.6, 1.4], Position: [0, 0.08, 0], Material: 'Slate', Color: '#5f5c57', CanCollide: false } },
+    thread(0.39, 0.16, 0.45)], weld: false };
+}
+/** Ring placements dropped onto the ground (one per segment, tangent yaw), the glow style's soft rising boundary motes and the report. */
+function safeZone(kit: PlinthKit, key: string, report: KitReport, summit: number): Item[] {
+  const [x0, y0, z0] = kit.at, { radius: Rz, style } = kit.safeZone!, n = segmentsFor(Rz), zone = key + '-safe';
+  const items: Item[] = [{ key: zone, className: 'Model', name: 'SafeZone', in: key }];
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * Math.PI * 2, yaw = ((-(a / DEG) - 90) % 360 + 540) % 360 - 180;
+    items.push({ name: 'Ring' + (i + 1), in: zone, use: key + '-ring', at: [r2(x0 + Rz * Math.cos(a)), r2(y0), r2(z0 + Rz * Math.sin(a))], yaw: r2(yaw), scale: 1, ground: true });
+  }
+  let particles = 0;
+  if (style === 'glow') {
+    const rate = clamp(Math.round(2 * Math.PI * Rz / 10), 6, 20);
+    items.push({ key: zone + '-edge', name: 'Boundary', className: 'Part', in: zone, props: { Size: [r2(Rz * 2), 0.2, r2(Rz * 2)], Position: [r2(x0), r2(y0 + 0.3), r2(z0)],
+      Transparency: 1, CanCollide: false, CastShadow: false } },
+    { name: 'BoundaryMotes', className: 'ParticleEmitter', in: zone + '-edge', fx: { Texture: 'rbxasset://textures/particles/sparkles_main.dds', Rate: rate, Lifetime: [2.5, 4],
+      Speed: [0.4, 0.9], SpreadAngle: [8, 8], Acceleration: [0, 0.3, 0], Shape: 'Disc', ShapeStyle: 'Surface', EmissionDirection: 'Top', Size: [[0, 0.12], [0.5, 0.2], [1, 0]],
+      Transparency: [[0, 1], [0.25, 0.55], [0.75, 0.6], [1, 1]], Color: '#cfeeff', LightEmission: 0.6, LightInfluence: 0.4, Drag: 0.4 } });
+    particles = rate * 4; report.parts++;
+  }
+  const bottom = r2(y0 - 6), top = r2(summit + 14);
+  report.safeZone = { at: [r2(x0), r2(y0), r2(z0)], radius: Rz, style, bottom, top, segments: n, particles, script: { name: 'SafeZone', source: safeZoneScript(x0, z0, Rz, bottom, top) } };
+  return items;
+}
+const lua = (value: number) => String(r2(value));
+/** Server-authoritative no-damage zone: an invisible ForceField (blocks Humanoid:TakeDamage) plus a health guard that undoes direct
+ * Health drops, only while the character root is inside this cylinder; both end on leaving, death or despawn. */
+export function safeZoneScript(x: number, z: number, radius: number, bottom: number, top: number): string {
+  return `--!strict
+-- Arcane safe zone (server Script). A character whose HumanoidRootPart is inside this zone gets an invisible
+-- ForceField (Humanoid:TakeDamage does nothing) and a health guard that undoes direct Health drops. Both end when
+-- the character leaves, dies or despawns. Only this cylinder is protected: RADIUS studs around (CENTER_X, CENTER_Z)
+-- between world Y BOTTOM and TOP.
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+
+local CENTER_X, CENTER_Z = ${lua(x)}, ${lua(z)}
+local RADIUS = ${lua(radius)}
+local BOTTOM, TOP = ${lua(bottom)}, ${lua(top)}
+local FIELD = "ArcaneSafeZone"
+local CHECK_SECONDS = 0.2
+
+local guarded: {[Humanoid]: number} = {}
+local watched: {[Humanoid]: RBXScriptConnection} = {}
+
+local function inside(position: Vector3): boolean
+	local dx, dz = position.X - CENTER_X, position.Z - CENTER_Z
+	return position.Y >= BOTTOM and position.Y <= TOP and dx * dx + dz * dz <= RADIUS * RADIUS
+end
+
+local function release(humanoid: Humanoid)
+	guarded[humanoid] = nil
+	local connection = watched[humanoid]
+	if connection then
+		connection:Disconnect()
+		watched[humanoid] = nil
+	end
+	local character = humanoid.Parent
+	local field = if character then character:FindFirstChild(FIELD) else nil
+	if field then field:Destroy() end
+end
+
+local function protect(character: Model, humanoid: Humanoid)
+	if not character:FindFirstChild(FIELD) then
+		local field = Instance.new("ForceField")
+		field.Name = FIELD
+		field.Visible = false
+		field.Parent = character
+	end
+	if watched[humanoid] then return end
+	guarded[humanoid] = humanoid.Health
+	watched[humanoid] = humanoid.HealthChanged:Connect(function(health: number)
+		local safe = guarded[humanoid]
+		if safe == nil then return end
+		if health > 0 and health < safe then
+			humanoid.Health = safe
+		else
+			guarded[humanoid] = health
+		end
+	end)
+end
+
+local elapsed = 0
+RunService.Heartbeat:Connect(function(step: number)
+	elapsed += step
+	if elapsed < CHECK_SECONDS then return end
+	elapsed = 0
+	for humanoid in pairs(watched) do
+		if humanoid.Health <= 0 or not humanoid:IsDescendantOf(workspace) then release(humanoid) end
+	end
+	for _, player in Players:GetPlayers() do
+		local character = player.Character
+		local humanoid = if character then character:FindFirstChildOfClass("Humanoid") else nil
+		local root = if character then character:FindFirstChild("HumanoidRootPart") else nil
+		if character and humanoid and root and root:IsA("BasePart") and humanoid.Health > 0 then
+			if inside(root.Position) then
+				protect(character, humanoid)
+			elseif watched[humanoid] then
+				release(humanoid)
+			end
+		end
+	end
+end)
+`;
 }
 
 /** Optional plinth ambience (`life`), budgeted for phones: clearing dust motes (vfx Dust motes preset, Rate x max Lifetime <= 100),
@@ -361,6 +489,10 @@ export function expandKits(input: SceneBuildInput): { input: SceneBuildInput; pl
       const kit = resolvePlinth(raw, raw.key ?? `plinth${index}`);
       if (kit.column) ensure(kit.column);
       const built = plinth(kit, index);
+      for (const [name, proto] of Object.entries(built.prototypes ?? {})) {
+        if (declared(name)) throw new BridgeError('INPUT', `Prototype "${name}" is reserved for the plinth safe-zone ring; rename it.`);
+        prototypes[name] = proto;
+      }
       items.push(...built.items);
       plans.push({ report: built.report, items: [start, items.length], scatter: [], tris: new Map() });
       continue;
@@ -387,19 +519,25 @@ export function expandKits(input: SceneBuildInput): { input: SceneBuildInput; pl
     const avoid = plinths.map(p => ({ at: [p.at[0]!, p.at[2]!] as [number, number], radius: p.radius + 2 })).slice(0, 32);
     const tint = { min: [0.86, 0.9, 0.85] as Vec, max: [1.08, 1.1, 1.04] as Vec };
     const edge = kit.edge;
-    const layer = (l: Layer, count: number, group: string, i: number, under: boolean): Scatter => {
+    // World-space maps (groves, age, moisture, lean heading) drive every layer; one neighbour record spans the kit.
+    const maps = new ForestMaps({ seed, center: [kit.center[0], kit.center[2]], radius: kit.radius, clearing }), neighbours = new Neighbours();
+    const layer = (l: Layer, count: number, group: string, i: number, under: boolean, pool: Layer[]): FieldScatter => {
       const uses = resolve(l.use);
       // Recipe originals default to their generator's assets_procedural budget (a 16k-triangle tree, not the 8k guess).
       const kind = originals[l.use] ? ORIGINAL_VARIANTS[l.use]?.generator.kind as keyof typeof PROCEDURAL_LIMITS.defaultTriangles | undefined : undefined;
       const each = l.tris ?? (kind ? PROCEDURAL_LIMITS.defaultTriangles[kind] : undefined);
       if (each !== undefined) for (const use of uses) tris.set(use, each);
       return { use: uses.length === 1 ? uses[0]! : uses, in: group, count, center: kit.center, radius: kit.radius, minSpacing: l.spacing,
-        // Each species gets its own grove centres (own seed), so species zone naturally instead of mixing uniformly.
-        ...(under ? { hug: 0.75 } : { clusters: Math.max(2, Math.round(kit.radius / 45)) }),
+        // Species zone by the region map (warped Voronoi groves with soft transitions), not by an even mix.
+        ...(under ? { hug: 0.75 } : {}),
         ...(clearing ? { clearing: under ? { center: clearing.center, inner: clearing.inner * 0.85, outer: clearing.inner + (clearing.outer - clearing.inner) * 0.6 } : clearing } : {}),
         ...(avoid.length ? { avoid } : {}), ...(kit.paths ? { avoidPaths: kit.paths } : {}),
-        footprintRadius: l.footprint ?? l.spacing * (under ? 0.3 : 0.4), edge, scale: under ? [0.6, 1.4] : [0.72, 1.3],
-        tint, seed: (seed * 1009 + i * 97 + (under ? 53 : 0)) % 2 ** 31, ground: kit.ground, tilt: under ? 0 : 4 };
+        footprintRadius: l.footprint ?? l.spacing * (under ? 0.3 : 0.4), edge,
+        // Blender families already vary in size with age, so their clones jitter less than blockouts.
+        scale: under ? [0.6, 1.4] : originals[l.use] ? [0.84, 1.18] : [0.72, 1.3],
+        tint, seed: (seed * 1009 + i * 97 + (under ? 53 : 0)) % 2 ** 31, ground: kit.ground, tilt: under ? 0 : 4,
+        field: mapField({ maps, neighbours, names: pool.map(p => p.use), shares: pool.map(p => p.share ?? 1), layer: pool.indexOf(l), spacing: l.spacing,
+          seed: seed * 31 + i, tint, family: !!originals[l.use], under }) };
     };
     const species = kit.species ?? DEFAULT_SPECIES, cover = kit.cover ?? DEFAULT_COVER;
     const treeLayers = split(kit.trees, species).map((count, i) => ({ l: species[i]!, count, i })).filter(s => s.count > 0)
@@ -407,8 +545,8 @@ export function expandKits(input: SceneBuildInput): { input: SceneBuildInput; pl
     const under = split(kit.undergrowth, cover).map((count, i) => ({ l: cover[i]!, count, i })).filter(s => s.count > 0)
       .sort((a, b) => b.l.spacing - a.l.spacing || a.i - b.i);
     const indices: number[] = [];
-    for (const t of treeLayers) { indices.push(scatter.length); scatter.push(layer(t.l, t.count, key + '-trees', t.i, false)); }
-    for (const u of under) { indices.push(scatter.length); scatter.push(layer(u.l, u.count, key + '-cover', u.i, true)); }
+    for (const t of treeLayers) { indices.push(scatter.length); scatter.push(layer(t.l, t.count, key + '-trees', t.i, false, species)); }
+    for (const u of under) { indices.push(scatter.length); scatter.push(layer(u.l, u.count, key + '-cover', u.i, true, cover)); }
     const report: KitReport = { kind: 'forest', key, parts: 0, triangles: 0, placed: 0, requested: treeLayers.reduce((s, t) => s + t.count, 0) + under.reduce((s, u) => s + u.count, 0) };
     if (Object.keys(originals).length) report.originals = originals;
     if (blockouts.size) {

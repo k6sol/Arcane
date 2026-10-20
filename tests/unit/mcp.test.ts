@@ -316,6 +316,10 @@ test('token-lean schemas: string enums/consts drop the implied type and identica
   assert.deepEqual(compactToolSchema({ type: 'string', enum: ['a', 'b'] }), { enum: ['a', 'b'] });
   assert.deepEqual(compactToolSchema({ type: 'string', const: 'x' }), { const: 'x' });
   assert.deepEqual(compactToolSchema({ type: 'number', enum: [1, 2] }), { type: 'number', enum: [1, 2] });
+  // Annotation-only defaults that omission already means, and cleared descriptions, are not advertised; other defaults stay.
+  assert.deepEqual(compactToolSchema({ type: 'object', properties: { a: { type: 'boolean', default: false }, b: { type: 'array', items: { type: 'number' }, default: [] },
+    c: { type: 'boolean', default: true, description: '' }, d: { type: 'integer', default: 0 } } }),
+  { type: 'object', properties: { a: { type: 'boolean' }, b: { type: 'array', items: { type: 'number' } }, c: { type: 'boolean', default: true }, d: { type: 'integer', default: 0 } } });
   const json = (name: string) => ({ anyOf: [{ type: 'string' }, { type: 'array', items: { $ref: '#/definitions/' + name } }] });
   const merged = hoistRepeatedSchemas({ type: 'object', properties: { a: { $ref: '#/definitions/__schema0' }, b: { $ref: '#/definitions/__schema1' } }, definitions: { __schema0: json('__schema0'), __schema1: json('__schema1') } });
   assert.deepEqual(merged, { type: 'object', properties: { a: { $ref: '#/definitions/__schema0' }, b: { $ref: '#/definitions/__schema0' } }, definitions: { __schema0: json('__schema0') } });

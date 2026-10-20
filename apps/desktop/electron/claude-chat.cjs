@@ -199,6 +199,32 @@ function toolResultDetail(content, secret) {
   const line = text.replace(CONTROL_ALL, ' ').replace(/\s+/g, ' ').trim().slice(0, TOOL_TEXT_CHARS);
   return line && !(secret && line.includes(secret)) ? line : null;
 }
+/**
+ * Display-only images an Arcane tool returned (a Studio viewport capture): image/png or image/jpeg only, canonical base64
+ * whose decoded bytes start with that format's signature, at most 1.5 MiB each and 4 per reply. Accepts the MCP image
+ * block ({type:'image', data, mimeType}) and the Messages API form Claude Code reports ({type:'image', source:{type:'base64',
+ * media_type, data}}); URL sources and every other type are ignored. The first valid image becomes a data: URL for the
+ * live event only (the renderer shows it through a blob: URL); it is never written to the transcript.
+ */
+const TOOL_IMAGE_LIMITS = Object.freeze({ bytes: 1536 * 1024, perTurn: 4 });
+const TOOL_IMAGE_SIGNATURES = Object.freeze({ 'image/png': PNG_MAGIC, 'image/jpeg': Buffer.from([0xff, 0xd8, 0xff]) });
+const TOOL_IMAGE_CHARS = Math.ceil(TOOL_IMAGE_LIMITS.bytes / 3) * 4;
+function toolResultImage(content) {
+  if (!Array.isArray(content)) return null;
+  for (const block of content.slice(0, 64)) {
+    if (!block || typeof block !== 'object' || block.type !== 'image') continue;
+    const source = Object.hasOwn(block, 'source') ? block.source : null;
+    if (source !== null && (!source || typeof source !== 'object' || source.type !== 'base64')) continue;
+    const mime = source ? source.media_type : block.mimeType, data = source ? source.data : block.data;
+    if (typeof mime !== 'string' || !Object.hasOwn(TOOL_IMAGE_SIGNATURES, mime) || typeof data !== 'string' || !data || data.length > TOOL_IMAGE_CHARS || data.length % 4 || !BASE64.test(data)) continue;
+    const bytes = Buffer.from(data, 'base64'), signature = TOOL_IMAGE_SIGNATURES[mime];
+    if (bytes.length <= signature.length || bytes.length > TOOL_IMAGE_LIMITS.bytes || !bytes.subarray(0, signature.length).equals(signature) || bytes.toString('base64') !== data) continue;
+    return 'data:' + mime + ';base64,' + data;
+  }
+  return null;
+}
+/** A public tool message with its live display image (when there is one). */
+const withToolImage = (m, image) => image && m.tool ? { ...m, tool: { ...m.tool, image } } : m;
 /** name/status plus the optional bounded display details. */
 const toolCopy = t => ({ name: t.name, status: t.status, ...(typeof t.input === 'string' ? { input: t.input } : {}), ...(typeof t.result === 'string' ? { result: t.result } : {}) });
 const isoNow = now => new Date(now()).toISOString();
@@ -681,7 +707,7 @@ function createClaudeChat(options) {
     if (byConversation.has(conversationId)) fail('busy');
     if (turns.size >= limits.turns) fail('full');
     const turn = { turnId: randomUUID(), conversationId, model: v.model, effort: v.effort, child: null, stopped: false, finished: false, timer: null,
-      sessionId: entry?.sessionId ?? null, credential: null, result: null, tools: new Map(), overflow: false, limit: null, seed: '', images: v.images ?? [], playtest: v.playtest };
+      sessionId: entry?.sessionId ?? null, credential: null, result: null, tools: new Map(), arcaneCalls: new Set(), toolImages: 0, overflow: false, limit: null, seed: '', images: v.images ?? [], playtest: v.playtest };
     turns.set(turn.turnId, turn); byConversation.set(conversationId, turn);
     let user = null;
     try {
@@ -846,6 +872,7 @@ function createClaudeChat(options) {
           const name = toolName(block.name), input = toolDetail(block.input, turn.credential?.env?.ARCANE_LOCAL_TOKEN);
           const m = message('tool', name, { name, status: 'started', ...(input ? { input } : {}) });
           turn.tools.set(block.id, m);
+          if (block.name.startsWith('mcp__' + MCP_SERVER + '__')) turn.arcaneCalls.add(block.id);
           void store.put(turn.conversationId, m).catch(() => {});
           emit({ ...base, type: 'tool', message: publicMessage(m) });
         }
@@ -858,7 +885,10 @@ function createClaudeChat(options) {
         m.tool = { ...toolCopy(m.tool), status: block.is_error === true ? 'failed' : 'finished', ...(result ? { result } : {}) };
         if (block.is_error === true && !turn.studioOffline && studioOfflineResult(block.content)) { turn.studioOffline = true; killTree(turn.child); }
         void store.put(turn.conversationId, { ...m, tool: toolCopy(m.tool) }).catch(() => {});
-        emit({ ...base, type: 'tool', message: publicMessage(m) });
+        // A capture from Arcane's own MCP server rides on this live event only (bounded per reply); the store keeps none.
+        const image = block.is_error !== true && turn.arcaneCalls.has(block.tool_use_id) && turn.toolImages < TOOL_IMAGE_LIMITS.perTurn ? toolResultImage(block.content) : null;
+        if (image) turn.toolImages++;
+        emit({ ...base, type: 'tool', message: withToolImage(publicMessage(m), image) });
       }
     } else if (event.type === 'result') {
       const u = event.usage && typeof event.usage === 'object' ? event.usage : null;
@@ -941,4 +971,4 @@ function installClaudeChatIpc(ipcMain, { getSession, getHost }) {
 
 module.exports = { createClaudeChat, installClaudeChatIpc,
   // Shared with the Arcane chat host (arcane-chat.cjs): the same transcript store and bounded display details.
-  createChatStore: createStore, toolDetail, toolResultDetail, toolCopy, boundedText: bounded, parseChoices, sendInput, playtestNote, appendedSystemPrompt, withoutSharedGuidance, GUIDANCE_START, MANAGED_TAIL_START, projectMemorySection, PROJECT_MEMORY_GUIDANCE, streamJsonMessage, rewindSeed, resolveAliases, CLAUDE_ALIAS_MODELS: ALIAS_MODELS, safeResultText, usageLimitResult, CLAUDE_CHAT_LIMITS: LIMITS, CLAUDE_CHAT_MESSAGES: MESSAGES, CLAUDE_CHAT_EVENT: EVENT_CHANNEL };
+  createChatStore: createStore, toolDetail, toolResultDetail, toolResultImage, withToolImage, TOOL_IMAGE_LIMITS, toolCopy, boundedText: bounded, parseChoices, sendInput, playtestNote, appendedSystemPrompt, withoutSharedGuidance, GUIDANCE_START, MANAGED_TAIL_START, projectMemorySection, PROJECT_MEMORY_GUIDANCE, streamJsonMessage, rewindSeed, resolveAliases, CLAUDE_ALIAS_MODELS: ALIAS_MODELS, safeResultText, usageLimitResult, CLAUDE_CHAT_LIMITS: LIMITS, CLAUDE_CHAT_MESSAGES: MESSAGES, CLAUDE_CHAT_EVENT: EVENT_CHANNEL };

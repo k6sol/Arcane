@@ -15,7 +15,16 @@ const states = (s: ChecklistSignals) => Object.fromEntries(checklistRows(s).map(
 test('checklist rows map each signal to done/todo with its one-click fix', () => {
   assert.deepEqual(states(ready), { provider: ['done', null], plugin: ['done', null], studio: ['done', null], project: ['done', null] });
   assert.deepEqual(states({ ...ready, signedIn: false, plugin: { state: 'missing', pluginVersion: '0.1.9', message: '' }, studioConnected: false, projectPath: null }),
-    { provider: ['todo', 'sign-in'], plugin: ['todo', 'install-plugin'], studio: ['todo', 'show-key'], project: ['todo', 'open-project'] });
+    { provider: ['todo', 'sign-in'], plugin: ['todo', 'install-plugin'], studio: ['todo', null], project: ['todo', 'open-project'] });
+  // In order: Studio connects through the plugin, so the Studio row waits for the install (with or without one-click pairing).
+  for (const pairing of [null, { phase: 'idle', code: null, message: '' } as const]) {
+    const row = checklistRows({ ...ready, plugin: { state: 'missing', pluginVersion: '0.1.9', message: '' }, studioConnected: false, pairing })[2]!;
+    assert.deepEqual([row.state, row.action, row.detail], ['todo', null, 'Install the plugin first. Then connect Studio here with a 6-digit code.']);
+  }
+  assert.equal(checklistRows({ ...ready, plugin: { state: 'missing', pluginVersion: '0.1.9', message: '' }, studioConnected: false, pairing: { phase: 'waiting', code: '042718', message: '' } })[2]!.action?.kind, 'show-key', 'A code already waiting stays visible.');
+  assert.equal(checklistRows({ ...ready, plugin: { state: 'outdated', pluginVersion: '0.1.9', message: '' }, studioConnected: false })[2]!.action?.kind, 'show-key', 'An older plugin can still connect.');
+  assert.equal(checklistRows({ ...ready, signedIn: false })[0]!.detail, 'Use a ChatGPT or Claude subscription, or Arcane Credits.');
+  assert.equal(checklistRows({ ...ready, providerName: 'Arcane' })[0]!.detail, 'Using Arcane Credits.');
   assert.equal(checklistRows({ ...ready, plugin: { state: 'outdated', pluginVersion: '0.1.9', message: '' } })[1]!.action?.label, 'Update plugin');
   assert.deepEqual(states({ ...ready, plugin: { state: 'unavailable', pluginVersion: null, message: 'Studio plugin setup is unavailable.' } }).plugin, ['unavailable', 'check-plugin']);
   assert.deepEqual(states({ ...ready, plugin: null, studioConnected: null }).plugin, ['checking', null]);
@@ -128,14 +137,18 @@ test('real Edge checklist: status reads only, one-click actions, persistence and
   assert.equal(await page.locator('#studio-plugin-state').textContent(), 'Not installed');
   if (shots) await page.locator('.codex-panel').screenshot({ path: join(shots, 'setup-checklist-first-run.png') });
 
-  // Actions: sign in opens provider setup for the selected provider; pairing opens the key card; open project asks the host.
+  // Actions: sign in opens provider setup for the selected provider; open project asks the host. Connecting Studio waits
+  // for the plugin (no action until it is installed); then the key card is one click away.
   await page.locator('#setup-checklist [data-setup-action=sign-in]').click();
-  await page.locator('#setup-checklist [data-setup-action=show-key]').click();
+  assert.equal(await page.locator('#setup-checklist [data-step=studio] button').count(), 0);
+  assert.match(await page.locator('#setup-checklist [data-step=studio]').innerText(), /Install the plugin first/);
   await page.locator('#setup-checklist [data-setup-action=open-project]').click();
-  assert.deepEqual(await page.evaluate(() => (window as any).events), [['workspace:providersetup', { provider: 'claude' }], ['workspace:settingsrequest', { target: 'settings-key-heading' }]]);
+  assert.deepEqual(await page.evaluate(() => (window as any).events), [['workspace:providersetup', { provider: 'claude' }]]);
   await page.locator('#setup-checklist [data-setup-action=install-plugin]').click();
   await page.waitForFunction(() => document.querySelector('#setup-checklist [data-step=plugin]')?.getAttribute('data-state') === 'done');
   assert.deepEqual(await page.evaluate(() => (window as any).calls), ['status', 'open', 'install', 'status'], 'Install is re-verified by a fresh status read.');
+  await page.locator('#setup-checklist [data-setup-action=show-key]').click();
+  assert.deepEqual(await page.evaluate(() => (window as any).events), [['workspace:providersetup', { provider: 'claude' }], ['workspace:settingsrequest', { target: 'settings-key-heading' }]]);
   assert.match(await page.locator('#setup-checklist-notice').textContent() ?? '', /Restart Roblox Studio/);
   assert.equal(await page.locator('#studio-plugin-state').textContent(), 'Installed');
   // Synthetic clicks never trigger native actions.
@@ -173,6 +186,7 @@ test('real Edge checklist: status reads only, one-click actions, persistence and
   await page.evaluate(async () => { const w = window as any; w.signedIn = true; w.studio = true; w.project = 'C:\\Games\\Obby'; w.plugin = 'installed'; await w.controller.refreshPlugin(); w.notify(); });
   await page.waitForFunction(() => document.getElementById('setup-checklist')!.hidden);
   assert.deepEqual(JSON.parse(await page.evaluate((k: string) => localStorage.getItem(k), SETUP_CHECKLIST_KEY) ?? 'null'), { version: 1, completed: true, dismissed: false });
+  assert.equal(await page.evaluate(() => document.getElementById('setup-ready')!.hidden), false, 'Finishing setup in this visit says what to do next.');
   await page.evaluate(() => { const w = window as any; w.studio = false; }); await boot();
   assert.equal(await page.locator('#setup-checklist').isVisible(), false, 'A returning user who finished setup skips it.');
 

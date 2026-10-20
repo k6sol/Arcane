@@ -1,5 +1,5 @@
 import { ArcaneError } from '../../protocol/src/providers.js';
-import { object, TERRAIN_LIMITS as L, type Json, type StudioSession } from '../../protocol/src/studio.js';
+import { object, TERRAIN_LIMITS as L, STUDIO_TERRAIN_CAVES_CAPABILITY, type Json, type StudioSession } from '../../protocol/src/studio.js';
 
 /** Wire validation for terrain.generate. The plugin (TerrainGen.luau) re-validates every field,
  * snaps the region to the 4-stud voxel grid and owns the engine writes. */
@@ -55,9 +55,31 @@ function feature(raw: unknown): void {
   }
 }
 
+/** caves: explicit subtractive sphere nodes [x, y above floor, z, r] carved inside the solid field, floor/wall materials and
+ * keep-out circles [x, z, r] the plugin never carves (spawn pads, safe zones). The MCP tool compiles the compact cave plan. */
+function caves(raw: unknown, height: number): void {
+  const c = object(raw, 'terrain caves'); keys(c, ['nodes', 'floor', 'wall', 'avoid'], 'caves');
+  if (!Array.isArray(c.nodes) || c.nodes.length < 1 || c.nodes.length > L.caveNodes) throw new ArcaneError('INPUT', `Caves need 1..${L.caveNodes} nodes.`);
+  for (const node of c.nodes) {
+    if (!Array.isArray(node) || node.length !== 4) throw new ArcaneError('INPUT', 'A cave node is [x, y, z, radius].');
+    num(node[0], -L.coordinate, L.coordinate, 'cave node x'); num(node[1], 0, height, 'cave node y'); num(node[2], -L.coordinate, L.coordinate, 'cave node z');
+    num(node[3], 2, L.caveRadius, 'cave node radius');
+  }
+  material(c.floor, 'cave floor material'); material(c.wall, 'cave wall material');
+  if (c.avoid !== undefined) {
+    if (!Array.isArray(c.avoid) || c.avoid.length > L.caveAvoid) throw new ArcaneError('INPUT', `Use at most ${L.caveAvoid} cave keep-out circles.`);
+    for (const circle of c.avoid) {
+      if (!Array.isArray(circle) || circle.length !== 3) throw new ArcaneError('INPUT', 'A cave keep-out circle is [x, z, radius].');
+      num(circle[0], -L.coordinate, L.coordinate, 'keep-out x'); num(circle[1], -L.coordinate, L.coordinate, 'keep-out z'); num(circle[2], 1, L.extent, 'keep-out radius');
+    }
+  }
+}
+
 export function validateTerrainGenerate(a: Record<string, Json>, session: StudioSession): Record<string, Json> {
-  keys(a, ['center', 'size', 'floor', 'height', 'baseHeight', 'seed', 'noise', 'edge', 'snowLine', 'features', 'materials'], 'terrain');
+  keys(a, ['center', 'size', 'floor', 'height', 'baseHeight', 'seed', 'noise', 'edge', 'snowLine', 'features', 'materials', 'caves'], 'terrain');
   if (!session.allowedRoots.includes('Workspace')) throw new ArcaneError('SCOPE', 'Terrain requires the Workspace grant.');
+  if (a.caves !== undefined && !session.capabilities.includes(STUDIO_TERRAIN_CAVES_CAPABILITY)) throw new ArcaneError('PLUGIN_UPDATE_REQUIRED',
+    `The connected Arcane Studio plugin (${session.pluginVersion}) predates terrain caves. Update the Studio plugin from Arcane, restart Studio and connect again. No command was queued.`);
   pair(a.center, -L.coordinate, L.coordinate, 'Terrain center');
   pair(a.size, L.minExtent, L.extent, 'Terrain size');
   const height = num(a.height, L.minHeight, L.height, 'Terrain height');
@@ -89,6 +111,7 @@ export function validateTerrainGenerate(a: Record<string, Json>, session: Studio
       }
     }
   }
+  if (a.caves !== undefined) caves(a.caves, cells(height) * L.voxel);
   if (terrainVoxelCount(a) > L.voxels) throw new ArcaneError('BODY_LIMIT', 'Terrain region exceeds the voxel budget.');
   return a;
 }

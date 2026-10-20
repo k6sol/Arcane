@@ -193,7 +193,7 @@ test('Edge: Playtest switch in the composer and grouped tool cards', { skip: !br
     assert.equal(await group.locator('.tool-group-count').innerText(), '8 steps');
     assert.equal(await group.locator('.codex-message.tool').count(), 8, 'each call keeps its own line');
     assert.equal(await group.locator('.codex-message.tool .tool-details').count(), 8, 'and its own Details');
-    assert.equal(await page.locator('#codex-messages > .codex-message.tool').count(), 1, 'the single read stays on its own line');
+    assert.equal(await page.locator('#codex-messages .build-progress-items > .codex-message.tool').count(), 1, 'the single read stays on its own line in the turn\'s build progress group');
     assert.equal(await group.evaluate(node => (node as HTMLDetailsElement).open), false, 'collapsed by default');
     await group.scrollIntoViewIfNeeded();
     await page.locator('#codex-messages').screenshot({ path: join(shots, 'grouped-card-collapsed-' + scheme + '.png') });
@@ -209,7 +209,7 @@ test('Edge: Playtest switch in the composer and grouped tool cards', { skip: !br
     });
     await page.locator('#codex-messages .chat-change-card').waitFor();
     assert.equal(await page.locator('#codex-messages .chat-change-summary').innerText(), '7 created');
-    assert.equal(await group.locator('.tool-group-text').innerText(), 'Created 7 parts in Workspace.Forest · 1 failed', 'stable once settled');
+    assert.equal(await group.locator('.tool-group-text').textContent(), 'Created 7 parts in Workspace.Forest · 1 failed', 'stable once settled (inside the collapsed build progress group)');
     await page.locator('#codex-messages').screenshot({ path: join(shots, 'grouped-card-with-changes-' + scheme + '.png') });
     // Phone width: the switch stays on the bar without overlapping the model picker or the send button.
     await page.setViewportSize({ width: 390, height: 844 }); await composer.focus();

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join, relative, resolve, sep } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -24,6 +25,7 @@ import { READ_METHODS, WRITE_METHODS, STUDIO_FEATURE_CAPABILITIES, SCENE_BUILD_L
 import { VIEWPORT_CAMERA_READ_PROGRAM } from '../../packages/studio-test-controller/src/viewport.js';
 import { encodeRgbPng } from '../../packages/studio-test-controller/src/viewport-image.js';
 import { refuseNativeCodex, noProviderProbe } from './native-fixture-refusal.js';
+import { lintLuau } from '../../apps/mcp/src/luau-lint.js';
 
 // Offline benchmark scenario: the tool calls a good agent makes for the benchmark prompt, played through the real
 // MCP server, DaemonClient, daemon HTTP routes, SQLite StudioStore and wire validation against a simulated plugin,
@@ -43,6 +45,7 @@ function simulatedPlugin(store: StudioStore, options: { pluginVersion: string; a
     identity: { clientSessionId, placeId: 0, universeId: 0, name: PLACE, pluginVersion: options.pluginVersion } });
   store.authenticate(pair.sessionId, pair.token);
   const sessionId = pair.sessionId, nodes = new Map<string, FakeNode>(), commands: StudioCommand[] = [], failures: string[] = [];
+  const scripts = new Map<string, { source: string; enabled: boolean }>();
   const log: { seq: number; level: string; message: string }[] = [];
   const print = (level: string, message: string) => { log.push({ seq: log.length + 1, level, message }); };
   print('info', 'Arcane bridge connected to ' + PLACE);
@@ -110,9 +113,32 @@ function simulatedPlugin(store: StudioStore, options: { pluginVersion: string; a
         return { ref: n.ref, name: n.name, className: n.className, childCount: 0, properties: { Name: n.name }, ...(a.bounds ? { bounds: { center, size, space: 'world-aabb' } } : {}) } as unknown as Json;
       }
       case 'scene.build': return build(a) as unknown as Json;
+      case 'scene.create': {
+        const parent = a.parent as unknown as InstanceRef, ref = add(mkRef(parent.root, [...parent.pathSegments, a.name as string], a.className as string), a.name as string, parent.instanceId);
+        if (a.className === 'Script') scripts.set(ref.instanceId, { source: '', enabled: false });
+        return { ref, mutation: { kind: 'scene.create', ref, before: null, after: { className: a.className, name: a.name } } } as unknown as Json;
+      }
+      case 'script.read': {
+        const ref = a.ref as unknown as InstanceRef, script = scripts.get(ref.instanceId)!;
+        return { ref, source: script.source, enabled: script.enabled } as unknown as Json;
+      }
+      case 'script.update': {
+        const ref = a.ref as unknown as InstanceRef, script = scripts.get(ref.instanceId)!;
+        if (script.source !== a.expectedSource) throw new Error('Stale script baseline.');
+        script.source = a.source as string;
+        return { ref, mutation: { kind: 'script.update', ref, before: { source: a.expectedSource }, after: { source: a.source } } } as unknown as Json;
+      }
+      case 'script.set_enabled': {
+        const ref = a.ref as unknown as InstanceRef, script = scripts.get(ref.instanceId)!;
+        if (script.source !== a.expectedSource || script.enabled !== a.expectedEnabled) throw new Error('Stale execution baseline.');
+        script.enabled = a.enabled as boolean;
+        return { ref, mutation: { kind: 'script.set_enabled', ref, before: { source: a.expectedSource, enabled: a.expectedEnabled }, after: { source: a.expectedSource, enabled: a.enabled } } } as unknown as Json;
+      }
       case 'terrain.generate': {
         const ref = { ...rootRef('Workspace'), instanceId: 'terrain-1', pathSegments: ['Terrain'], className: 'Terrain' };
-        const after = { voxels: terrainVoxelCount(a), chunks: 4, seed: a.seed, features: (a.features as Json[] | undefined)?.length ?? 0, waterColumns: 0 };
+        const caves = a.caves as { nodes: unknown[] } | undefined;
+        const after = { voxels: terrainVoxelCount(a), chunks: 4, seed: a.seed, features: (a.features as Json[] | undefined)?.length ?? 0, waterColumns: 0,
+          ...(caves ? { caves: { nodes: caves.nodes.length, carved: caves.nodes.length * 40 } } : {}) };
         return { ref, mutation: { kind: 'terrain.generate', ref, before: null, after } } as unknown as Json;
       }
       case 'environment.apply': {
@@ -145,7 +171,7 @@ function simulatedPlugin(store: StudioStore, options: { pluginVersion: string; a
     setTimeout(tick, 5);
   };
   tick();
-  return { sessionId, clientSessionId, nodes, commands, failures, log, print, placeOriginal, stop: () => { stopped = true; } };
+  return { sessionId, clientSessionId, nodes, commands, failures, log, print, placeOriginal, scripts, stop: () => { stopped = true; } };
 }
 
 // ---------------------------------------------------------------- simulated built-in Studio MCP peer (viewport only)
@@ -247,7 +273,17 @@ test('benchmark scene: pillar + circular spawn + forest + lighting play end to e
   const native = await nativeStudio();
   let plugin: ReturnType<typeof simulatedPlugin> | null = null;
   const lab = await createConnectionLab({ cwd: ROOT, stateDirectory: join(dir, 'lab'), projectPath: project, studioStore: studio, workStore: work, assetService: assets.service,
-    codexConnect: refuseNativeCodex, probe: noProviderProbe,
+    codexConnect: refuseNativeCodex, probe: noProviderProbe, scriptSourceVerifier: {
+      async verify(source: string) {
+        const compiler = process.env.ARCANE_LUAU_COMPILE;
+        if (compiler) {
+          const file = join(dir, 'verify-' + randomUUID() + '.luau'); await writeFile(file, source);
+          const compiled = spawnSync(compiler, ['--null', file], { encoding: 'utf8', timeout: 10_000 });
+          await rm(file, { force: true });
+          if (compiled.status !== 0) throw new Error('Syntax error: ' + compiled.stdout + compiled.stderr);
+        }
+        return { sourceSha256: createHash('sha256').update(source).digest('hex'), compilerSha256: 'f'.repeat(64), syntaxVerified: true as const, elapsedMs: 1 };
+      }, dispose() {} },
     studioTestConnect: async () => { const { client, server } = await native.connect();
       return { client, evidence: 'fixture' as const, async witness() { const s = studio.session(plugin!.sessionId);
         return { placeId: 0, universeId: 0, placeName: s.name, sessionId: s.id, clientLifetimeId: s.clientSessionId, pluginArtifactHash: artifactHash }; },
@@ -290,7 +326,8 @@ test('benchmark scene: pillar + circular spawn + forest + lighting play end to e
   const PLINTH: Vec = [0, 32, 0], R = 12;
   const terrain = await call('2 terrain', 'terrain_generate', { sessionId, center: [0, 0], size: [512, 512], height: 128, baseHeight: 32, seed: 7,
     noise: { amplitude: 10, frequency: 3 }, edge: 64,
-    features: [{ kind: 'plateau', center: [0, 0], radius: 44, level: 32, blend: 18, base: R }, { kind: 'hill', center: [150, -120], radius: 90, height: 26 }] });
+    features: [{ kind: 'plateau', center: [0, 0], radius: 44, level: 32, blend: 18, base: R }, { kind: 'hill', center: [150, -120], radius: 90, height: 26 }],
+    caves: { at: [-150, 130], radius: 100, rise: 60, entrances: 2, chambers: 2 } });
   assert.equal(terrain.state, 'succeeded');
   const terrainCommand = plugin.commands.find(c => c.method === 'terrain.generate')!;
   const rings = (terrainCommand.args.features as { kind: string; material?: string; radius: number; level?: number }[]).filter(f => f.kind === 'plateau');
@@ -298,10 +335,18 @@ test('benchmark scene: pillar + circular spawn + forest + lighting play end to e
   assert.ok(rings.every(f => f.level === 32), 'every ring sits at the plinth ground level');
   assert.ok(rings.at(-1)!.radius > R && rings.at(-1)!.radius < R + 3, 'the Rock ring hugs the plinth footprint');
   assert.equal(terrain.command.result.mutation.after.voxels, terrainVoxelCount(terrainCommand.args));
+  // Caves: one outcrop, winding tunnels with two hillside mouths, two chambers; nothing is carved under the spawn clearing.
+  const caveWire = terrainCommand.args.caves as unknown as { nodes: number[][]; floor: string; avoid: number[][] };
+  assert.equal(caveWire.floor, 'Slate'); assert.equal(terrain.command.result.mutation.after.caves.nodes, caveWire.nodes.length);
+  assert.ok(caveWire.nodes.every(([x, , z, r]) => Math.hypot(x!, z!) >= 44 + r!), 'no cave node reaches the spawn clearing or safe zone');
+  assert.ok(caveWire.avoid.some(([x, z, r]) => x === 0 && z === 0 && r! >= 44), 'the plugin is told to keep the clearing out');
+  const caves = terrain.caves;
+  assert.equal(caves.mouths.length, 2); assert.equal(caves.chambers.length, 2);
+  assert.equal(JSON.stringify(terrain).includes(JSON.stringify(caveWire.nodes[0])), false, 'node lists stay out of model context');
 
   // 3. scene_build: plinth kit with the circular SpawnLocation on top.
   const monument = await call('3 plinth', 'scene_build', { sessionId, parent: workspace, name: 'Monument',
-    kits: [{ kind: 'plinth', key: 'plinth', at: PLINTH, radius: R, tiers: 3, style: 'smooth', material: 'Limestone', weathering: 0.6, seed: 7, life: 'day' }] });
+    kits: [{ kind: 'plinth', key: 'plinth', at: PLINTH, radius: R, tiers: 3, style: 'smooth', material: 'Limestone', weathering: 0.6, seed: 7, life: 'day', safeZone: { radius: R + 10 } }] });
   assert.equal(monument.state, 'succeeded');
   const plinthReport = monument.kits[0];
   assert.equal(plinthReport.kind, 'plinth'); assert.ok(plinthReport.spawn, 'a spawn is built by default');
@@ -315,7 +360,7 @@ test('benchmark scene: pillar + circular spawn + forest + lighting play end to e
   const sp = spawn.properties!, spawnAt = (sp.Position as { value: number[] }).value, spawnSize = (sp.Size as { value: number[] }).value;
   assert.equal(sp.Shape, 'Cylinder', 'the spawn is circular'); assert.deepEqual((sp.Orientation as { value: number[] }).value, [0, 0, 90]);
   assert.equal(spawnSize[1], spawnSize[2]); assert.ok(spawnAt.every((v, i) => Math.abs(v - plinthReport.spawn.at[i]) < 1e-4), `wire spawn ${spawnAt} = reported ${plinthReport.spawn.at}`);
-  const structural = plinthArgs.items.filter(i => i.kind === 'part' && i.className !== 'SpawnLocation' && !/^(Moss|Fragment)\d+$|^MoteVolume$/.test(i.name));
+  const structural = plinthArgs.items.filter(i => i.kind === 'part' && i.className !== 'SpawnLocation' && !/^(Moss|Fragment)\d+$|^MoteVolume$|^Boundary$/.test(i.name));
   assert.ok(structural.every(i => i.properties!.Shape === 'Cylinder'), 'tiers, trim, drums and capital are all round');
   const tops = structural.map(i => { const p = i.properties!, at = (p.Position as { value: number[] }).value, size = (p.Size as { value: number[] }).value; return { top: at[1]! + size[0]! / 2, radius: size[1]! / 2, name: i.name }; });
   const summit = Math.max(...tops.map(x => x.top)), capital = tops.filter(x => Math.abs(x.top - summit) < 0.01);
@@ -326,23 +371,51 @@ test('benchmark scene: pillar + circular spawn + forest + lighting play end to e
   assert.ok(plinthReport.triangles < KIT_TRIANGLE_BUDGET);
   const plinthRef = monument.command.result.refs.plinth;
   assert.equal(plinthRef.className, 'Model'); assert.equal(monument.command.result.refs['plinth-spawn'].className, 'SpawnLocation');
+  // Visible safe zone: a grounded glowing ring at R + 10 around the plinth with soft boundary motes.
+  const zone = plinthReport.safeZone;
+  assert.deepEqual([zone.at, zone.radius, zone.style], [PLINTH, R + 10, 'glow']);
+  const ring = (plinthArgs.items as unknown as { kind: string; at?: number[]; ground?: boolean; parent: number }[]).filter(i => i.kind === 'place' && plinthArgs.items[i.parent - 1]!.name === 'SafeZone');
+  assert.equal(ring.length, zone.segments);
+  assert.ok(ring.every(i => i.ground === true && Math.abs(Math.hypot(i.at![0]! - PLINTH[0], i.at![2]! - PLINTH[2]) - (R + 10)) < 0.02), 'the ring lies on the ground at the zone radius');
+  assert.ok(plinthArgs.items.some(i => i.className === 'ParticleEmitter' && i.name === 'BoundaryMotes'));
+  // The no-damage Script: create (starts disabled), read the baseline, write the source (lint clean), enable (syntax verified).
+  assert.deepEqual(lintLuau(zone.script.source).filter(a => a.severity === 'warning'), []);
+  const created = await call('3 safe-zone script', 'scene_create', { sessionId, parent: plinthRef, className: 'Script', name: zone.script.name });
+  const scriptRef = created.command.result.ref;
+  const baseline = (await call('3 script read', 'script_read', { sessionId, ref: scriptRef })).command.result;
+  assert.deepEqual([baseline.source, baseline.enabled], ['', false]);
+  const written = await call('3 script write', 'script_update', { sessionId, ref: scriptRef, expectedSource: '', source: zone.script.source });
+  assert.equal(written.state, 'succeeded'); assert.equal(written.luauAdvisories, undefined, 'no advisory findings');
+  const enabled = await call('3 script enable', 'script_set_enabled', { sessionId, ref: scriptRef, expectedSource: zone.script.source, expectedEnabled: false, enabled: true });
+  assert.equal(enabled.state, 'succeeded');
+  assert.deepEqual(plugin.scripts.get(scriptRef.instanceId), { source: zone.script.source, enabled: true }, 'the zone Script is live in the plinth');
 
-  // Forest originals follow the documented recipe (<use>-<n>, seed = kit seed x 100 + n). Cover drops the log layer,
+  // 3b. Cave fixtures from the terrain result: stalactites under chamber roofs and dim lights in chambers and mouths.
+  const fixtures = await call('3 cave fixtures', 'scene_build', { sessionId, parent: workspace, ...caves.fixtures });
+  assert.equal(fixtures.state, 'succeeded');
+  const fixtureArgs = plugin.commands.filter(c => c.method === 'scene.build').at(-1)!.args as unknown as { items: { kind: string; className?: string; properties?: Record<string, Json> }[] };
+  const caveLights = fixtureArgs.items.filter(i => i.className === 'PointLight');
+  assert.equal(caveLights.length, 4); assert.ok(caveLights.every(l => (l.properties!.Brightness as number) <= 0.35));
+  assert.ok(fixtureArgs.items.filter(i => i.kind === 'place').length >= 4, 'stalactites hang in the chambers');
+
+  // Forest originals follow the documented recipe (<use>-<n> variant families, seed = kit seed x 100 + 1, variant [n, count]). Cover drops the log layer,
   // which has no Blender generator and would stay a blockout.
-  const forestKit = { kind: 'forest', key: 'forest', at: PLINTH, radius: 180, seed: 7, trees: 80,
+  const mouthPaths = (caves.mouths as number[][]).map(([x, , z]) => ({ points: [[x!, z!], [x! * 0.8, z! * 0.8]], width: 14 }));
+  // The plinth was built in its own call, so the forest names its clearing (a same-build plinth would supply it).
+  const forestKit = { kind: 'forest', key: 'forest', at: PLINTH, radius: 180, seed: 7, trees: 80, paths: mouthPaths, clearing: { center: [PLINTH[0], PLINTH[2]], inner: R + 8, outer: R + 30 },
     cover: [{ use: 'bush', share: 4, spacing: 3.2 }, { use: 'fern', share: 4, spacing: 2.4 }, { use: 'rock', share: 2, spacing: 3.6 }] };
   const recipe = forestOriginals(7, ['pine', 'oak', 'birch', 'bush', 'fern', 'rock']);
-  assert.equal(recipe.length, 15); assert.ok(recipe.length <= 16, 'every original fits the 16-template limit');
+  assert.equal(recipe.length, 16); assert.ok(recipe.length <= 16, 'every original fits the 16-template limit');
 
   // 4. Blender originals via assets_procedural, then poll and look at each preview.
   const jobIds: Record<string, string> = {};
   for (const variant of recipe) {
-    const started = await call('4 procedural ' + variant.name, 'assets_procedural', { name: variant.name, seed: variant.seed, generator: variant.generator });
+    const started = await call('4 procedural ' + variant.name, 'assets_procedural', { name: variant.name, seed: variant.seed, variant: variant.variant, generator: variant.generator });
     assert.equal(started.job.state, 'running'); assert.match(started.nextStep, /assets_jobs/);
     jobIds[variant.name] = started.job.jobId;
   }
   const page = await call('4 jobs', 'assets_jobs', { limit: 32 });
-  assert.equal(page.jobs.length, 15); assert.ok(page.jobs.every((job: any) => job.state === 'succeeded'));
+  assert.equal(page.jobs.length, 16); assert.ok(page.jobs.every((job: any) => job.state === 'succeeded'));
   for (const job of page.jobs) { assert.ok(job.triangleBudget <= PROCEDURAL_LIMITS.maxTriangles); assert.match(job.kind, /^(tree|foliage):[a-z]+$|^rock$/); }
   for (const job of page.jobs) assert.ok(Buffer.byteLength(JSON.stringify(job)) <= 250, 'a compact history job stays within 250 bytes: ' + JSON.stringify(job));
   const preview = await call('4 preview', 'assets_preview', { jobId: jobIds['oak-1'], view: 'hero' });
@@ -354,7 +427,7 @@ test('benchmark scene: pillar + circular spawn + forest + lighting play end to e
   // 5. Forest kit cloning the originals; refs come from a class search of the template Folder.
   const found = await call('5 templates', 'scene_search', { sessionId, root: 'ServerStorage', className: 'Model', limit: 50 });
   const templates = Object.fromEntries(found.command.result.items.map((item: any) => [item.name ?? item.ref.path.split('/').at(-1), item.ref]));
-  assert.equal(Object.keys(templates).length, 15);
+  assert.equal(Object.keys(templates).length, 16);
   const refused = await call('5 forest (default policy)', 'scene_build', { sessionId, parent: workspace, name: 'Forest', templates, kits: [forestKit] }, true);
   assert.equal(refused.error.code, 'TEMPLATE_SOURCE', 'unrecorded templates are refused before anything is queued');
   steps.pop(); // an expected refusal, not part of the agent's happy path
@@ -380,6 +453,7 @@ test('benchmark scene: pillar + circular spawn + forest + lighting play end to e
   assert.ok(Math.min(...trees.map(distance)) >= clearing, `nearest tree ${Math.min(...trees.map(distance))} keeps the clearing ${clearing}`);
   assert.ok(Math.min(...cover.map(distance)) >= R + 2, `nearest undergrowth ${Math.min(...cover.map(distance))} stays off the plinth`);
   assert.ok(Math.max(...[...trees, ...cover].map(distance)) <= 180);
+  for (const [mx, , mz] of caves.mouths as number[][]) assert.ok(trees.every(i => Math.hypot(i.at![0]! - mx!, i.at![2]! - mz!) > 7), 'cave mouths stay open');
   const templateNames = forestArgs.templates.map(ref => [...plugin!.nodes.values()].find(n => n.ref.instanceId === ref.instanceId)!.name);
   assert.ok(new Set(trees.map(i => templateNames[i.template! - 1]!.replace(/-\d+$/, ''))).size === 3, 'pine, oak and birch groves');
   // Original meshes: the kit budget prices each clone at its real assets_procedural triangle budget.
@@ -424,9 +498,9 @@ test('benchmark scene: pillar + circular spawn + forest + lighting play end to e
   assert.deepEqual(plugin.failures, [], 'the plugin refused nothing');
   assert.ok(steps.every(s => !s.isError));
   const methods = plugin.commands.map(c => c.method);
-  for (const method of ['terrain.generate', 'scene.build', 'environment.apply', 'scene.inspect', 'output.read']) assert.ok(methods.includes(method as never), method);
+  for (const method of ['terrain.generate', 'scene.build', 'environment.apply', 'scene.inspect', 'output.read', 'scene.create', 'script.update', 'script.set_enabled']) assert.ok(methods.includes(method as never), method);
   // Token budgets: guidance is the one large read; a history page is compact (about 200 bytes per job; detail:true has the full records); the rest stay small.
-  const budget = (s: Step) => s.tool === 'skills_recommend' ? 64 * 1024 : s.tool === 'assets_jobs' ? 15 * 256 : 8 * 1024;
+  const budget = (s: Step) => s.tool === 'skills_recommend' ? 64 * 1024 : s.tool === 'assets_jobs' ? 16 * 256 : 8 * 1024;
   for (const s of steps) assert.ok(s.textBytes < budget(s), `${s.step} result is ${s.textBytes} bytes`);
   assert.ok(shot.viewport.bytes < 600 * 1024 && steps.find(s => s.tool === 'studio_viewport_capture')!.imageBytes > 0);
   if (process.env.ARCANE_BENCHMARK_REPORT) await writeFile(process.env.ARCANE_BENCHMARK_REPORT, JSON.stringify({ steps, plinth: plinthReport, forest: { ...forestReport, originals: undefined },

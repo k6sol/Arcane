@@ -6,7 +6,8 @@ local V = require(script.Parent.Validation)
 local TerrainGen = {}
 
 TerrainGen.LIMITS = table.freeze({extent = 2048, minExtent = 16, height = 512, minHeight = 8, coordinate = 100000, floor = 10000,
-	features = 32, points = 32, rules = 16, octaves = 8, voxel = 4, chunkColumns = 64, voxels = 33554432, chunkVoxels = 524288})
+	features = 32, points = 32, rules = 16, octaves = 8, voxel = 4, chunkColumns = 64, voxels = 33554432, chunkVoxels = 524288,
+	caveNodes = 160, caveAvoid = 16, caveRadius = 32})
 -- Surface materials (never Air or Water); the daemon policy carries the same list.
 TerrainGen.MATERIALS = table.freeze({"Grass", "LeafyGrass", "Ground", "Mud", "Rock", "Slate", "Sand", "Sandstone", "Limestone", "Basalt", "Granite", "Pebble", "Snow", "Ice", "Glacier", "Salt", "Cobblestone", "Asphalt", "Concrete", "Brick", "WoodPlanks", "CrackedLava"})
 TerrainGen.FEATURES = table.freeze({"hill", "mountain", "valley", "crater", "plateau", "flatten", "lake", "river", "path"})
@@ -110,10 +111,31 @@ local function defaultRules(snowLine: number?): {any}
 	return rules
 end
 
+-- caves (terrain.caves): subtractive sphere nodes {x, y above floor, z, r}, floor/wall materials and keep-out circles {x, z, r}.
+local function caves(raw: any, L: any, height: number): any
+	local c = V.fields(raw, {"nodes", "floor", "wall", "avoid"}, "terrain caves")
+	local out: any = {nodes = {}, avoid = {}, floor = material(c.floor, "cave floor material", "Slate"), wall = material(c.wall, "cave wall material", "Rock")}
+	for _, raw in ipairs(V.list(c.nodes, L.caveNodes, "cave nodes")) do
+		local node = V.list(raw, 4, "cave node")
+		if #node ~= 4 then V.fail("INPUT", "A cave node is [x, y, z, radius].") end
+		table.insert(out.nodes, {V.number(node[1], -L.coordinate, L.coordinate, "cave node x"), V.number(node[2], 0, height, "cave node y"),
+			V.number(node[3], -L.coordinate, L.coordinate, "cave node z"), V.number(node[4], 2, L.caveRadius, "cave node radius")})
+	end
+	if c.avoid ~= nil then
+		for _, raw in ipairs(V.list(c.avoid, L.caveAvoid, "cave keep-out circles")) do
+			local circle = V.list(raw, 3, "cave keep-out circle")
+			if #circle ~= 3 then V.fail("INPUT", "A cave keep-out circle is [x, z, radius].") end
+			table.insert(out.avoid, {V.number(circle[1], -L.coordinate, L.coordinate, "keep-out x"), V.number(circle[2], -L.coordinate, L.coordinate, "keep-out z"),
+				V.number(circle[3], 1, L.extent, "keep-out radius")})
+		end
+	end
+	return out
+end
+
 -- Validates wire arguments and snaps the region to the 4-stud voxel grid. The daemon policy mirrors this.
 function TerrainGen.plan(args: any): any
 	local L = TerrainGen.LIMITS
-	V.fields(args, {"center", "size", "floor", "height", "baseHeight", "seed", "noise", "edge", "snowLine", "features", "materials"}, "terrain arguments")
+	V.fields(args, {"center", "size", "floor", "height", "baseHeight", "seed", "noise", "edge", "snowLine", "features", "materials", "caves"}, "terrain arguments")
 	local center = pair(args.center, -L.coordinate, L.coordinate, "terrain center")
 	local size = pair(args.size, L.minExtent, L.extent, "terrain size")
 	local plan: any = {}
@@ -155,6 +177,7 @@ function TerrainGen.plan(args: any): any
 		deep = material(m.deep, "deep material", deep) :: string
 	end
 	plan.rules, plan.fallback, plan.deep = rules or defaultRules(plan.snowLine), fallback, deep
+	if args.caves ~= nil then plan.caves = caves(args.caves, L, plan.height) end
 	return plan
 end
 
@@ -407,6 +430,21 @@ function TerrainGen.chunk(plan: any, field: any, ix0: number, iz0: number, width
 	local air, waterMaterial, deep = resolve("Air"), resolve("Water"), resolve(plan.deep)
 	local cache: {[string]: any} = {}
 	local materials, occupancies = table.create(width), table.create(width)
+	-- Cave nodes that can reach this chunk (sphere plus the one-voxel floor/wall shell).
+	local nodes: {any} = {}
+	local cave = plan.caves
+	local shell = VOXEL * 1.5
+	if cave then
+		local xa, za = plan.x0 + ix0 * VOXEL, plan.z0 + iz0 * VOXEL
+		local xb, zb = xa + width * VOXEL, za + depth * VOXEL
+		for _, node in ipairs(cave.nodes) do
+			local reach = node[4] + shell
+			if node[1] + reach >= xa and node[1] - reach <= xb and node[3] + reach >= za and node[3] - reach <= zb then table.insert(nodes, node) end
+		end
+		if #nodes > 0 and field.caveVoxels == nil then field.caveVoxels = 0 end
+	end
+	local floorMaterial = if #nodes > 0 then resolve(cave.floor) else nil
+	local wallMaterial = if #nodes > 0 then resolve(cave.wall) else nil
 	for x = 1, width do
 		local mx, ox = table.create(ny), table.create(ny)
 		for y = 1, ny do mx[y] = table.create(depth, air); ox[y] = table.create(depth, 0) end
@@ -430,6 +468,41 @@ function TerrainGen.chunk(plan: any, field: any, ix0: number, iz0: number, width
 					ox[y][z] = math.min(1, (level - bottom) / VOXEL)
 				else
 					break
+				end
+			end
+			if #nodes > 0 then
+				-- Carve: occupancy follows the signed distance into the sphere union; the remaining solid shell
+				-- reads as floor (below a node's lower third) or wall/roof. Keep-out columns are never touched.
+				local cx, cz = plan.x0 + (ix0 + x - 0.5) * VOXEL, plan.z0 + (iz0 + z - 0.5) * VOXEL
+				local kept = false
+				for _, circle in ipairs(cave.avoid) do
+					if (cx - circle[1]) ^ 2 + (cz - circle[2]) ^ 2 < circle[3] ^ 2 then kept = true; break end
+				end
+				local near: {any} = {}
+				if not kept then
+					for _, node in ipairs(nodes) do
+						if (cx - node[1]) ^ 2 + (cz - node[3]) ^ 2 < (node[4] + shell) ^ 2 then table.insert(near, node) end
+					end
+				end
+				if #near > 0 then
+					local low, high = math.huge, -math.huge
+					for _, node in ipairs(near) do low, high = math.min(low, node[2] - node[4] - shell), math.max(high, node[2] + node[4] + shell) end
+					for y = math.max(1, math.floor(low / VOXEL) + 1), math.min(ny, math.ceil(high / VOXEL)) do
+						local occupancy = ox[y][z]
+						if occupancy > 0 and mx[y][z] ~= waterMaterial then
+							local cy = (y - 0.5) * VOXEL
+							local best, owner = -math.huge, near[1]
+							for _, node in ipairs(near) do
+								local inside = node[4] - math.sqrt((cx - node[1]) ^ 2 + (cy - node[2]) ^ 2 + (cz - node[3]) ^ 2)
+								if inside > best then best, owner = inside, node end
+							end
+							local remaining = math.min(occupancy, 1 - clamp(best / VOXEL + 0.5, 0, 1))
+							if remaining < occupancy then field.caveVoxels += 1 end
+							ox[y][z] = remaining
+							if remaining <= 0 then mx[y][z] = air
+							elseif best > -shell then mx[y][z] = if cy < owner[2] - owner[4] * 0.35 then floorMaterial else wallMaterial end
+						end
+					end
 				end
 			end
 		end
@@ -465,9 +538,11 @@ function TerrainGen.summary(plan: any, field: any, chunks: number): any
 		if field.water[i] <= field.heights[i] then surface[field.materials[i]] = (surface[field.materials[i]] or 0) + 1 end
 	end
 	local function hundredth(value: number): number return round(value * 100) / 100 end
-	return {region = {origin = V.array({plan.x0, plan.y0, plan.z0}), size = V.array({plan.nx * VOXEL, plan.ny * VOXEL, plan.nz * VOXEL})},
+	local summary: any = {region = {origin = V.array({plan.x0, plan.y0, plan.z0}), size = V.array({plan.nx * VOXEL, plan.ny * VOXEL, plan.nz * VOXEL})},
 		voxels = plan.voxels, chunks = chunks, seed = plan.seed, features = #plan.features, waterColumns = field.wet,
 		surfaceRange = V.array({hundredth(field.low), hundredth(field.high)}), surface = surface}
+	if plan.caves then summary.caves = {nodes = #plan.caves.nodes, carved = field.caveVoxels or 0} end
+	return summary
 end
 
 return table.freeze(TerrainGen)

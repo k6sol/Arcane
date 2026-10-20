@@ -40,7 +40,8 @@ export const ENVIRONMENT_LIMITS = Object.freeze({ terrainShapes: 128, extent: 20
 /** terrain.generate: one seeded heightfield (noise + landform/water features + material rules) written to
  * a 4-stud-grid region in bounded WriteVoxels chunks, one undo recording. Reverted with Studio Undo only. */
 export const TERRAIN_LIMITS = Object.freeze({ extent: 2048, minExtent: 16, height: 512, minHeight: 8, coordinate: 100000, floor: 10000,
-  features: 32, points: 32, rules: 16, octaves: 8, voxel: 4, voxels: 33_554_432, chunkVoxels: 524_288 });
+  features: 32, points: 32, rules: 16, octaves: 8, voxel: 4, voxels: 33_554_432, chunkVoxels: 524_288,
+  caveNodes: 160, caveAvoid: 16, caveRadius: 32 });
 /** Non-method plugin capability: effects classes in scene.create/scene.build, environment presets,
  * Lighting.Technology, Terrain.Decoration, MaterialVariants and scene.inspect bounds. Older plugins never advertise it. */
 export const STUDIO_EFFECTS_CAPABILITY = 'scene.effects' as const;
@@ -60,11 +61,14 @@ export const STUDIO_SEARCH_CLASS_CAPABILITY = 'scene.search.class' as const;
 /** Non-method feature capability: environment.apply forest looks (forest-* presets), the depthOfField and sky
  * Lighting-child sections and Lighting.GeographicLatitude. Older plugins never advertise it. */
 export const STUDIO_ENVIRONMENT_FOREST_CAPABILITY = 'environment.forest' as const;
+/** Non-method feature capability: terrain.generate `caves` (chains of subtractive spheres carved inside the heightfield,
+ * with floor/wall materials and keep-out circles). Older plugins never advertise it. */
+export const STUDIO_TERRAIN_CAVES_CAPABILITY = 'terrain.caves' as const;
 /** Most capability strings one pairing may advertise (methods + feature capabilities + diagnostics), with headroom
  * so a new method or feature never makes pairing reject a current plugin. */
 export const STUDIO_PAIRING_CAPABILITY_LIMIT = 64;
 /** Every non-method feature capability a plugin may advertise at pairing (anything else must be a known method). */
-export const STUDIO_FEATURE_CAPABILITIES: readonly string[] = Object.freeze([STUDIO_EFFECTS_CAPABILITY, STUDIO_GUI_CAPABILITY, STUDIO_GUI_FLEX_CAPABILITY, STUDIO_GUI_EDIT_CAPABILITY, STUDIO_CHARACTERS_CAPABILITY, 'asset.mesh_parts', STUDIO_SEARCH_CLASS_CAPABILITY, STUDIO_ENVIRONMENT_FOREST_CAPABILITY]);
+export const STUDIO_FEATURE_CAPABILITIES: readonly string[] = Object.freeze([STUDIO_EFFECTS_CAPABILITY, STUDIO_GUI_CAPABILITY, STUDIO_GUI_FLEX_CAPABILITY, STUDIO_GUI_EDIT_CAPABILITY, STUDIO_CHARACTERS_CAPABILITY, 'asset.mesh_parts', STUDIO_SEARCH_CLASS_CAPABILITY, STUDIO_ENVIRONMENT_FOREST_CAPABILITY, STUDIO_TERRAIN_CAVES_CAPABILITY]);
 /** GUI value bounds: Text/PlaceholderText UTF-8 bytes, UDim scale magnitude and integer pixel-offset magnitude. */
 export const GUI_LIMITS = Object.freeze({ textBytes: 2000, udimScale: 10, udimOffset: 10000 });
 /** Host-owned intake and detached reconstruction. Neither is a generic agent

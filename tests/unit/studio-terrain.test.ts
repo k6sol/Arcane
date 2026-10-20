@@ -12,9 +12,10 @@ import { CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js';
 import { StudioStore } from '../../packages/storage/src/studio-store.js';
 import { validateCommandArgs } from '../../packages/core/src/studio-policy.js';
 import { TERRAIN_SURFACE_MATERIALS, TERRAIN_FEATURE_KINDS, terrainVoxelCount } from '../../packages/core/src/terrain-policy.js';
-import { READ_METHODS, WRITE_METHODS, TERRAIN_LIMITS, type Json, type StudioCommand, type StudioSession } from '../../packages/protocol/src/studio.js';
+import { READ_METHODS, WRITE_METHODS, TERRAIN_LIMITS, STUDIO_FEATURE_CAPABILITIES, type Json, type StudioCommand, type StudioSession } from '../../packages/protocol/src/studio.js';
 import { ARCANE_TOOL_NAMES, ARCANE_NATIVE_TOOL_NAMES, ARCANE_TASK_INSTRUCTIONS } from '../../packages/protocol/src/arcane-tools.js';
-import { terrainShape, compileTerrain, TERRAIN_TOOL } from '../../apps/mcp/src/terrain-tool.js';
+import { terrainShape, compileTerrain, compileTerrainPlan, TERRAIN_TOOL } from '../../apps/mcp/src/terrain-tool.js';
+import { compileSceneBuild, sceneBuildShape, type SceneBuildInput } from '../../apps/mcp/src/scene-build.js';
 import { createMcpServer } from '../../apps/mcp/src/server.js';
 import { DaemonClient } from '../../apps/mcp/src/daemon-client.js';
 import { productInstructions } from '../../apps/mcp/src/skill-router.js';
@@ -73,6 +74,7 @@ test('MCP schema: compact typed input with defaults; plugin and daemon share the
   for (const [key, value] of Object.entries({ extent: 2048, height: 512, features: 32, points: 32, rules: 16, voxels: 33554432, chunkVoxels: 524288 }))
     assert.equal((TERRAIN_LIMITS as Record<string, number>)[key], value, key);
   assert.ok(lua.includes('voxels = 33554432, chunkVoxels = 524288'), 'plugin limits match the protocol');
+  assert.ok(lua.includes(`caveNodes = ${TERRAIN_LIMITS.caveNodes}, caveAvoid = ${TERRAIN_LIMITS.caveAvoid}, caveRadius = ${TERRAIN_LIMITS.caveRadius}`), 'cave limits match the protocol');
 });
 
 test('tool surface: terrain_generate is a reviewed build tool and the instructions put terrain first', () => {
@@ -139,8 +141,62 @@ test('MCP terrain_generate: one command with the compiled wire args; compact adv
   assert.equal(tool.inputSchema.additionalProperties, false);
   assert.match(tool.description!, /Studio Undo/);
   const advertised = JSON.stringify(tool.inputSchema).length + tool.description!.length;
-  assert.ok(advertised < 6000, `token-lean tool listing (${advertised} chars)`);
+  assert.ok(advertised < 7500, `token-lean tool listing (${advertised} chars)`);
   const rejected = CallToolResultSchema.parse(await client.callTool({ name: TERRAIN_TOOL, arguments: { sessionId: 'terrain-session', center: [0, 0], size: [9000, 10] } }));
   assert.equal(rejected.isError, true);
   assert.equal(posted.length, 1, 'schema rejection never reaches the daemon');
+  // Caves: the wire carries every node; the model sees the node count plus mouths, chambers and fixtures.
+  const caved = CallToolResultSchema.parse(await client.callTool({ name: TERRAIN_TOOL, arguments: { sessionId: 'terrain-session', ...caveBrief } }));
+  assert.notEqual(caved.isError, true, JSON.stringify(caved.content));
+  const text = (caved.content[0] as { text: string }).text, data = JSON.parse(text);
+  const wireCaves = (posted.at(-1)!.args as unknown as { caves: Cave }).caves;
+  assert.ok(data.command.args === undefined || data.command.args.caves.nodes === wireCaves.nodes.length, 'node lists never echo back');
+  assert.ok(!text.includes(JSON.stringify(wireCaves.nodes[3])), 'node lists never echo back');
+  assert.equal(data.caves.nodes, wireCaves.nodes.length); assert.equal(data.caves.mouths.length, 2);
+  assert.ok(Buffer.byteLength(text) < 8 * 1024, `compact cave result (${Buffer.byteLength(text)} bytes)`);
+});
+
+/** The benchmark brief's caves: an outcrop beside the spawn clearing with two hillside mouths and two chambers. */
+const caveBrief = { center: [0, 0], size: [768, 768], height: 192, baseHeight: 32, seed: 11, noise: { amplitude: 8, frequency: 3 },
+  features: [{ kind: 'plateau', center: [0, 0], radius: 44, level: 32, blend: 18, base: 12 }],
+  caves: { at: [190, 140], radius: 110, rise: 64, entrances: 2, chambers: 2, avoid: [[0, 0, 30]] } };
+const plan = (input: Record<string, unknown>) => compileTerrainPlan(z.strictObject(terrainShape).parse(input) as Record<string, unknown>);
+type Cave = { nodes: [number, number, number, number][]; floor: string; wall: string; avoid: [number, number, number][] };
+
+test('caves: seeded winding tunnels and chambers compile to bounded wire nodes that never reach the spawn pad', () => {
+  const first = plan(caveBrief), again = plan(caveBrief), other = plan({ ...caveBrief, seed: 12 });
+  assert.deepEqual(first, again, 'same seed, same caves');
+  const cave = first.args.caves as unknown as Cave;
+  assert.notDeepEqual((other.args.caves as unknown as Cave).nodes, cave.nodes, 'another seed winds differently');
+  assert.ok(cave.nodes.length >= 30 && cave.nodes.length <= TERRAIN_LIMITS.caveNodes, `${cave.nodes.length} nodes`);
+  assert.equal(cave.floor, 'Slate'); assert.equal(cave.wall, 'Rock');
+  const outcrop = (first.args.features as { kind: string; center: number[]; height?: number }[])[0]!;
+  assert.deepEqual([outcrop.kind, outcrop.center, outcrop.height], ['mountain', [190, 140], 64], 'a rock outcrop is raised for the mouths');
+  // Keep-outs: the user circle plus the plateau pad (its ground rings collapse into it); no node reaches either.
+  assert.ok(cave.avoid.some(([x, z, r]) => x === 0 && z === 0 && r >= 44), 'the spawn clearing is a keep-out');
+  for (const [x, , z, r] of cave.nodes) for (const [ax, az, ar] of cave.avoid) assert.ok(Math.hypot(x - ax, z - az) >= ar + r, 'node clear of keep-out');
+  // One connected system: overlapping spheres link every mouth tunnel to the chambers.
+  const parent = cave.nodes.map((_, i) => i), find = (i: number): number => parent[i] === i ? i : (parent[i] = find(parent[i]!));
+  cave.nodes.forEach((a, i) => cave.nodes.forEach((b, j) => { if (j > i && Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]) < a[3] + b[3]) parent[find(i)] = find(j); }));
+  assert.equal(new Set(cave.nodes.map((_, i) => find(i))).size, 1, 'tunnels and chambers form one cave system');
+  // Chambers sit below the ground under a roof; mouths are on the outcrop flank at walking level.
+  const report = first.caves!;
+  assert.equal(report.mouths.length, 2); assert.equal(report.chambers.length, 2); assert.equal(report.nodes, cave.nodes.length);
+  for (const [x, y, z] of report.mouths) { const d = Math.hypot(x! - 190, z! - 140); assert.ok(d > 25 && d < 110, `mouth on the flank (${d})`); assert.ok(Math.abs(y! - 31) < 4, `mouth floor ${y}`); }
+  for (const [, y, , r] of report.chambers) { assert.ok(y! < 32, 'chamber floor below the surrounding ground'); assert.ok(r! >= 6 && r! <= 16); }
+  assert.deepEqual(validateCommandArgs('terrain.generate', first.args, session([...READ_METHODS, ...WRITE_METHODS, 'terrain.caves'])), first.args);
+  assert.throws(() => validateCommandArgs('terrain.generate', first.args, session()), { code: 'PLUGIN_UPDATE_REQUIRED' }, 'old plugins are told to update');
+  const bad = (caves: unknown) => validateCommandArgs('terrain.generate', { ...first.args, caves } as Record<string, Json>, session([...READ_METHODS, ...WRITE_METHODS, 'terrain.caves']));
+  assert.throws(() => bad({ nodes: [] }), /1\.\.160 nodes/);
+  assert.throws(() => bad({ nodes: [[0, 10, 0, 40]] }), /cave node radius/);
+  assert.throws(() => bad({ nodes: [[0, 10, 0, 8]], floor: 'Water' }), { code: 'PROPERTY' });
+  assert.throws(() => bad({ nodes: [[0, 10, 0, 8]], script: 'x' }), /Unexpected caves field/);
+  assert.throws(() => plan({ ...caveBrief, caves: { ...caveBrief.caves, at: [10, 10] } }), /keep-out/);
+  // Fixtures: stalactites hang from chamber roofs and dim lights; the scene_build compiler and daemon accept them.
+  const fixtures = compileSceneBuild(z.strictObject(sceneBuildShape).parse(report.fixtures) as SceneBuildInput, { instanceId: 'w', sessionId: 'terrain-session', root: 'Workspace', pathSegments: [], className: 'Workspace' } as unknown as Json);
+  const wire = fixtures.args.items as { kind: string; className?: string; properties?: Record<string, Json> }[];
+  const lights = wire.filter(i => i.className === 'PointLight');
+  assert.equal(lights.length, 4); assert.ok(lights.every(l => (l.properties!.Brightness as number) <= 0.35), 'cave lights stay dim');
+  assert.ok(wire.filter(i => i.kind === 'place').length >= 4, 'stalactites placed');
+  assert.ok(validateCommandArgs('scene.build', fixtures.args, session([...READ_METHODS, ...WRITE_METHODS, ...STUDIO_FEATURE_CAPABILITIES])));
 });

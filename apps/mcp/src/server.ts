@@ -16,7 +16,7 @@ import { registerViewportTool } from './viewport-tool.js';
 import { registerNativeAssetTools } from './native-asset-tools.js';
 import { registerProceduralTools, registerProceduralPlaceTool } from './procedural-tools.js';
 import { compactAssetJobPage, compactOutcome, serveCompactRefs, serveCompactToolList } from './token-lean.js';
-import { TERRAIN_TOOL, TERRAIN_DESCRIPTION, terrainShape, compileTerrain } from './terrain-tool.js';
+import { TERRAIN_TOOL, TERRAIN_DESCRIPTION, terrainShape, compileTerrainPlan } from './terrain-tool.js';
 import { lintLuau } from './luau-lint.js';
 
 const READ: ToolAnnotations = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
@@ -140,7 +140,7 @@ export function createMcpServer(options: { client: DaemonClient; projectRoot: st
       }
       return client.execute(sessionId, 'scene.update', args as Record<string, Json>, { timeoutMs, signal });
     });
-  register('scene_build', sceneBuildDescription() + ' Effects: effect className, name, in (group/part/Attachment key), fx. GUI (scene.gui): container ScreenGui or world GUIs; GUI className + ui; stamp a ui prototype (e.g. a button) N times via use; then only interaction logic via script_update.',
+  register('scene_build', sceneBuildDescription(),
     z.strictObject({ ...target, parent: ref, ...sceneBuildShape }), { ...WRITE, destructiveHint: false },
     async ({ sessionId, timeoutMs, parent, ...input }, signal) => {
       const compiled = compileSceneBuild(input as SceneBuildInput, parent as Json);
@@ -213,7 +213,15 @@ export function createMcpServer(options: { client: DaemonClient; projectRoot: st
   registerProceduralTools(server, client, assetScope);
   // Appended last in ARCANE_TOOL_NAMES, so it is registered after the procedural tools.
   register(TERRAIN_TOOL, TERRAIN_DESCRIPTION, z.strictObject({ ...target, ...terrainShape }), WRITE,
-    ({ sessionId, timeoutMs, ...input }, signal) => client.execute(sessionId, 'terrain.generate', compileTerrain(input), { timeoutMs, signal }));
+    async ({ sessionId, timeoutMs, ...input }, signal) => {
+      const plan = compileTerrainPlan(input);
+      const outcome = await client.execute(sessionId, 'terrain.generate', plan.args, { timeoutMs, signal });
+      if (!plan.caves) return outcome;
+      // Cave nodes stay out of model context; the plan summary carries mouths, chambers and the fixture build.
+      const caves = (outcome.command?.args as { caves?: { nodes?: unknown[] } } | undefined)?.caves;
+      const command = outcome.command && caves ? { ...outcome.command, args: { ...outcome.command.args, caves: { nodes: caves.nodes?.length ?? 0 } } } : outcome.command;
+      return { ...outcome, command, caves: plan.caves };
+    });
   if (client.assetAudience === 'native-session') {
     register('assets_adopt_glb','Write: adopt an owned project-relative GLB file into an immutable chat asset for interactive preview (bounded bytes and embedded images validated; ordinary file only; no links, URLs, scripts or authority fields). Provenance is adopted, never bundled-Blender evidence; engine import/upload is unavailable. Returns a job acknowledgement, not engine acceptance; on ambiguity inspect assets_jobs, never auto-retry.'+assetScope,
       nativeAdoptGlbInput, { ...WRITE,destructiveHint:false },

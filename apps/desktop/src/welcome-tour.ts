@@ -1,6 +1,6 @@
 /// <reference lib="dom" />
-// Optional first-launch welcome tour: four short coach marks that point at real controls (model picker, Playtest,
-// setup checklist or Connect Studio, starter gallery). Shown once after sign-in, never over the sign-in screen, and
+// Optional first-launch welcome tour: four short coach marks that point at real controls (setup checklist or Connect Studio,
+// starter gallery, model picker, Playtest). Shown once after sign-in, never over the sign-in screen, and
 // replayable from Settings › Guide. Nothing here sends, saves or requests anything except one local "seen" flag.
 // Static by design: no transitions or animations, so reduced motion needs no special case.
 
@@ -14,19 +14,20 @@ export interface TourStep {
   targets: readonly string[];
 }
 
+// In the order a new user needs them: connect Studio first, then what to build, then the optional controls.
 export const TOUR_STEPS: readonly TourStep[] = Object.freeze([
+  { id: 'setup', title: 'First, connect Studio',
+    body: 'Welcome to Arcane! Install the plugin here, then click Connect Studio. Arcane builds straight into your open place.',
+    targets: ['#setup-checklist', '#key-setup-gate', '#welcome-connect', '.app-sidebar [data-workspace-target="workspace-settings"]'] },
+  { id: 'starters', title: 'Then start from an idea',
+    body: 'Pick a starter to fill the message box, or just describe your game. Nothing sends until you do.',
+    targets: ['#starter-gallery', '#codex-composer'] },
   { id: 'model', title: 'Pick your model',
-    body: 'ChatGPT and Claude models sit side by side here. Choose one and set how hard it thinks. Ctrl+Shift+M opens it anytime.',
+    body: 'Every model you can use sits here. Choose one and set how hard it thinks. Ctrl+Shift+M opens it anytime.',
     targets: ['#codex-model-trigger'] },
   { id: 'playtest', title: 'Let Arcane playtest',
     body: 'Turn on Playtest to ask Arcane to check gameplay after a build.',
     targets: ['#playtest-toggle'] },
-  { id: 'setup', title: 'Connect Studio',
-    body: 'Finish setup here: install the plugin, then click Connect Studio. Arcane builds straight into your open place.',
-    targets: ['#setup-checklist', '#key-setup-gate', '#welcome-connect', '.app-sidebar [data-workspace-target="workspace-settings"]'] },
-  { id: 'starters', title: 'Start from an idea',
-    body: 'Pick a starter to fill the message box, or just describe your game. Nothing sends until you do.',
-    targets: ['#starter-gallery', '#codex-composer'] },
 ]);
 
 type TourStorage = Pick<Storage, 'getItem' | 'setItem'>;

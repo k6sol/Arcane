@@ -1135,7 +1135,17 @@ export interface ToolGroupInfo {
   /** Dotted Studio container the calls target, or null. */
   container:string|null;
 }
-export interface ToolActivity { text:string; change:ToolChange|null; group?:ToolGroupInfo|null }
+export interface ToolActivity {
+  text:string; change:ToolChange|null; group?:ToolGroupInfo|null;
+  /** Arcane tool name (no MCP prefix), for retry counting in the build progress group. */
+  tool?:string;
+  /** Short result facts shown as chips, e.g. ['240 trees','11.5k tris']. */
+  facts?:readonly string[];
+  /** Short failure reason for a failed call. */
+  reason?:string|null;
+  /** PNG returned by the call (viewport capture), as base64 without a prefix. */
+  image?:string|null;
+}
 const activityRecord=(value:unknown):Record<string,unknown>|null=>value&&typeof value==='object'&&!Array.isArray(value)?value as Record<string,unknown>:null;
 const activityText=(value:unknown,max=100):string|null=>typeof value==='string'&&value.trim()&&!/[\x00-\x1f\x7f]/.test(value)?value.trim().slice(0,max):null;
 /** Parses a bounded JSON tool detail; anything else is null. */
@@ -1152,7 +1162,8 @@ export function studioRefPath(value:unknown):string|null {
 }
 const STUDIO_METHOD_TOOLS:Record<string,string>={'scene.children':'scene_children','scene.inspect':'scene_inspect','scene.search':'scene_search','selection.read':'selection_read',
   'script.read':'script_read','script.search':'script_search','script.update':'script_update','script.set_enabled':'script_set_enabled','scene.create':'scene_create',
-  'scene.update':'scene_update','scene.restore':'receipt_restore','output.read':'studio_output_read'};
+  'scene.update':'scene_update','scene.restore':'receipt_restore','output.read':'studio_output_read','scene.build':'scene_build','terrain.generate':'terrain_generate',
+  'environment.apply':'environment_apply'};
 /** Arcane tool name without an MCP server prefix (mcp__arcane__scene_create -> scene_create). */
 export function arcaneToolName(name:string):string {
   const short=/^mcp__[A-Za-z0-9_-]+?__(.+)$/.exec(name)?.[1]??name;
@@ -1183,14 +1194,29 @@ function toolPhrase(tool:string,args:Record<string,unknown>|null):string {
       return 'Creating '+kind+(name?' '+quoted(name):'')+(parent?' in '+parent:'');
     }
     case 'scene_update':return 'Updating '+(ref??'an instance')+propertyList(args);
-    case 'scene_build':{const parent=studioRefPath(args?.parent);return 'Building a scene'+(parent?' in '+parent:'');}
-    case 'environment_apply':return 'Shaping terrain and lighting';
-    case 'terrain_generate':return 'Generating terrain';
-    case 'studio_viewport_capture':return 'Looking at the scene';
+    case 'scene_build':{
+      const kinds=new Set((Array.isArray(args?.kits)?args.kits.slice(0,16):[]).map(kit=>activityRecord(kit)?.kind));
+      if(kinds.has('forest'))return 'Placing forest'+(kinds.has('plinth')?' and spawn plinth':'');
+      if(kinds.has('plinth'))return 'Building the spawn plinth';
+      const parent=studioRefPath(args?.parent);return 'Building a scene'+(parent?' in '+parent:'');
+    }
+    case 'environment_apply':{
+      const preset=activityText(args?.preset,40);
+      if(preset&&/^forest-/.test(preset))return 'Applying forest lighting';
+      return preset&&/^[a-z][a-z0-9-]{0,39}$/.test(preset)?'Applying '+preset.replace(/-/g,' ')+' lighting':'Shaping terrain and lighting';
+    }
+    case 'terrain_generate':return activityRecord(args?.caves)?'Carving caves':'Generating terrain';
+    case 'studio_viewport_capture':return 'Capturing viewport';
     case 'studio_asset_search':{const query=activityText(args?.query,60);return 'Searching the Creator Store'+(query?' for '+quoted(query):'');}
     case 'studio_asset_insert':return 'Placing a Creator Store asset';
     case 'studio_asset_generate':return 'Generating '+(activityText(args?.kind,20)??'an asset');
-    case 'assets_procedural':return 'Modelling a procedural mesh';
+    case 'assets_procedural':{
+      const generator=activityRecord(args?.generator),kind=activityText(generator?.kind,20),species=activityText(generator?.species,20);
+      if(!kind||!/^[a-z]{1,20}$/.test(kind))return 'Modelling a procedural mesh';
+      return 'Generating '+(kind==='tree'&&species&&/^[a-z]{1,20}$/.test(species)?species:kind)+' model';
+    }
+    case 'assets_jobs':return 'Checking Blender progress';
+    case 'assets_manifest':return 'Reading the model manifest';
     case 'assets_preview':return 'Previewing a mesh';
     case 'assets_place_studio_import':return 'Placing a mesh in Studio';
     case 'receipt_status':return 'Checking a change receipt';
@@ -1212,7 +1238,105 @@ function toolPhrase(tool:string,args:Record<string,unknown>|null):string {
  */
 export function describeToolActivity(name:string,input:unknown,result:unknown,state:ToolActivityState):ToolActivity {
   const activity=describeToolCall(name,input,result,state),tool=arcaneToolName(name),command=activityRecord(activityRecord(result)?.command);
-  return {...activity,group:toolGroupInfo(tool,activityRecord(input)??activityRecord(command?.args))};
+  const args=activityRecord(input)??activityRecord(command?.args);
+  return {...activity,group:toolGroupInfo(tool,args),tool,facts:state==='finished'?toolResultFacts(tool,args,result):[],
+    reason:state==='failed'&&!/ — /.test(activity.text)?toolFailureReason(result):null,image:state==='finished'?toolResultImage(result):null};
+}
+// ---- Result facts: a few plain numbers from the compact tool results (never the raw JSON). ----
+const activityNumber=(value:unknown):number|null=>typeof value==='number'&&Number.isFinite(value)?value:null;
+/** 240 -> '240', 11500 -> '11.5k', 240000 -> '240k'. */
+export function compactCount(value:number):string {
+  const n=Math.max(0,value);
+  if(n<1000)return String(Math.round(n));
+  if(n<100000)return (n/1000).toFixed(1).replace(/\.0$/,'')+'k';
+  if(n<1e6)return Math.round(n/1000)+'k';
+  return (n/1e6).toFixed(1).replace(/\.0$/,'')+'M';
+}
+const countFact=(value:unknown,one:string,many:string):string|null=>{const n=activityNumber(value);return n!==null&&n>0?compactCount(n)+' '+(n===1?one:many):null;};
+/** The plugin's own result inside a daemon outcome ({command:{result}}), or a bare result. */
+function pluginResult(outcome:Record<string,unknown>|null):Record<string,unknown>|null {
+  return activityRecord(activityRecord(outcome?.command)?.result)??activityRecord(outcome?.result);
+}
+/**
+ * Up to four short facts for a finished call, read from fields the Arcane tools really return: kit reports (trees placed,
+ * triangles, spawn height), cave plans (chambers, entrances), terrain size, created counts, Output errors, capture size and
+ * Blender job states. Anything unrecognised yields no facts.
+ */
+export function toolResultFacts(tool:string,args:Record<string,unknown>|null,result:unknown):string[] {
+  const outcome=activityRecord(result);if(!outcome)return [];
+  const plugin=pluginResult(outcome),after=activityRecord(activityRecord(plugin?.mutation)?.after);
+  const facts:(string|null)[]=[];
+  const list=(value:unknown,max=64)=>Array.isArray(value)?value.slice(0,max):[];
+  switch(tool){
+    case 'scene_build':{
+      const kits=list(outcome.kits,16).map(activityRecord).filter((kit):kit is Record<string,unknown>=>!!kit);
+      for(const kit of kits){
+        if(kit.kind==='forest')facts.push(countFact(kit.placed,'tree','trees'));
+        const spawn=activityNumber(activityRecord(kit.spawn)?.top);if(spawn!==null)facts.push('spawn at '+Math.round(spawn)+' studs');
+      }
+      const tris=kits.reduce((sum,kit)=>sum+(activityNumber(kit.triangles)??0),0);if(tris>0)facts.push(compactCount(tris)+' tris');
+      if(kits.some(kit=>Object.keys(activityRecord(kit.originals)??{}).length))facts.push('Blender originals');
+      if(!kits.length){
+        const placed=list(outcome.scatter).reduce((sum:number,row)=>sum+(activityNumber(activityRecord(row)?.placed)??0),0);
+        facts.push(countFact(activityRecord(plugin?.created)?.count??after?.count??outcome.plannedInstances,'instance','instances'),placed>0?compactCount(placed)+' scattered':null);
+      }
+      break;
+    }
+    case 'terrain_generate':{
+      const caves=activityRecord(outcome.caves),size=Array.isArray(after?.size)?after.size:null;
+      if(caves){facts.push(countFact(list(caves.chambers).length,'chamber','chambers'),countFact(list(caves.mouths).length,'entrance','entrances'));}
+      const x=activityNumber(size?.[0]),z=activityNumber(size?.[2]);if(x&&z)facts.push(Math.round(x)+'×'+Math.round(z)+' studs');
+      facts.push(countFact(after?.features,'feature','features'));
+      break;
+    }
+    case 'studio_output_read':{
+      const entries=list(plugin?.entries??outcome.entries,4096).map(activityRecord);
+      const errors=entries.filter(entry=>/error/i.test(String(entry?.kind??entry?.level??entry?.messageType??''))).length;
+      facts.push(countFact(entries.length,'line','lines'),errors?countFact(errors,'error','errors'):entries.length?'no errors':null);
+      break;
+    }
+    case 'studio_viewport_capture':{
+      const view=activityRecord(outcome.viewport),w=activityNumber(view?.width),h=activityNumber(view?.height);
+      if(w&&h)facts.push(Math.round(w)+'×'+Math.round(h));
+      break;
+    }
+    case 'assets_preview':facts.push(countFact(list(outcome.previews).length,'render','renders'));break;
+    case 'assets_jobs':{
+      const jobs=list(outcome.jobs??outcome.items).map(activityRecord),count=(test:(state:string)=>boolean)=>jobs.filter(job=>test(String(job?.state??''))).length;
+      facts.push(countFact(count(state=>/^(queued|running|started|pending)$/.test(state)),'running','running'),countFact(count(state=>state==='succeeded'),'done','done'),countFact(count(state=>state==='failed'),'failed','failed'));
+      break;
+    }
+    case 'scene_create':case 'scene_update':case 'script_update':break;
+    default:{const tris=activityNumber(outcome.triangles)??activityNumber(plugin?.triangles);if(tris)facts.push(compactCount(tris)+' tris');}
+  }
+  return [...new Set(facts.filter((fact):fact is string=>!!fact))].slice(0,4);
+}
+/** A short, single-line reason for a failed call: the error message the tool returned, or its plain-text excerpt. */
+export function toolFailureReason(result:unknown):string|null {
+  const outcome=activityRecord(result),command=activityRecord(outcome?.command);
+  const raw=typeof result==='string'?result:[activityRecord(outcome?.error)?.message,outcome?.error,activityRecord(command?.error)?.message,command?.error,outcome?.message]
+    .find(value=>typeof value==='string'&&value.trim());
+  if(typeof raw!=='string')return null;
+  let line=raw.replace(/[\x00-\x1f\x7f]+/g,' ').replace(/\s+/g,' ').trim();
+  if(!line||parseToolDetail(line)!==null)return null;
+  const sentence=/^(.{12,}?[.!?])(\s|$)/.exec(line)?.[1];if(sentence)line=sentence;
+  return line.length>96?line.slice(0,95).trimEnd()+'…':line;
+}
+// PNG (iVBORw0KGgo = 89 50 4E 47 0D 0A 1A 0A) or JPEG (/9j/ = FF D8 FF) base64, at most 1.5 MiB decoded.
+const IMAGE_BASE64=/^(?:iVBORw0KGgo|\/9j\/)[A-Za-z0-9+/]*={0,2}$/,IMAGE_CHARS=Math.ceil(1536*1024/3)*4;
+/** The PNG or JPEG a call returned (an MCP image block, a viewport `data` field or a data URL), as base64; otherwise null. */
+export function toolResultImage(result:unknown):string|null {
+  const outcome=activityRecord(result);if(!outcome)return null;
+  const base64=(value:unknown,declared?:unknown):string|null=>{
+    if(typeof value!=='string'||value.length>IMAGE_CHARS+23)return null;
+    const prefix=/^data:image\/(png|jpeg);base64,/.exec(value),data=prefix?value.slice(prefix[0].length):value,type=prefix?'image/'+prefix[1]:declared;
+    if(data.length>IMAGE_CHARS||data.length%4!==0||!IMAGE_BASE64.test(data))return null;
+    // A declared type (data URL or image block) must match the bytes' signature.
+    return type===undefined||(type==='image/png'?data.startsWith('iVBORw0KGgo'):type==='image/jpeg'&&data.startsWith('/9j/'))?data:null;
+  };
+  const blocks=Array.isArray(outcome.content)?outcome.content.slice(0,8).map(activityRecord):[];
+  const block=blocks.find(item=>item?.type==='image'&&(item.mimeType==='image/png'||item.mimeType==='image/jpeg'));
+  return base64(block?.data,block?.mimeType)??(activityRecord(outcome.viewport)?base64(outcome.data):null)??base64(outcome.image)??base64(outcome.dataUrl);
 }
 /** "MeshPart" -> ['mesh part','mesh parts']. */
 function classNoun(className:string|null):[string,string] {
@@ -1231,10 +1355,9 @@ function toolGroupInfo(tool:string,args:Record<string,unknown>|null):ToolGroupIn
   switch(tool){
     case 'scene_create':return make(['Creating','Created'],classNoun(activityText(args?.className,64)),studioRefPath(args?.parent));
     case 'scene_update':return make(['Updating','Updated'],['instance','instances'],parentPath(ref));
-    case 'scene_build':return make(['Building','Built'],['scene','scenes'],studioRefPath(args?.parent));
-    case 'environment_apply':return make(['Shaping','Shaped'],['environment','environments'],null);
-    case 'terrain_generate':return make(['Generating','Generated'],['terrain region','terrain regions'],null);
-    case 'studio_viewport_capture':return make(['Capturing','Captured'],['view','views'],null);
+    // Long build steps (scene kits, terrain and caves, lighting, captures) keep their own labelled line in the build
+    // progress group, so a retry or a second capture stays readable instead of folding into a count.
+    case 'scene_build':case 'environment_apply':case 'terrain_generate':case 'studio_viewport_capture':return null;
     case 'studio_asset_search':return make(['Searching','Searched'],['asset search','asset searches'],null);
     case 'studio_asset_insert':return make(['Placing','Placed'],['asset','assets'],null);
     case 'studio_asset_generate':return make(['Generating','Generated'],['asset','assets'],null);
@@ -1292,25 +1415,83 @@ export function renderToolActivity(doc:Document,activity:ToolActivity,state:Tool
   const label=doc.createElement('span');label.className='message-text tool-activity-text';label.textContent=activity.text;
   const status=doc.createElement('span');status.className='visually-hidden';status.textContent=' · '+STATE_WORDS[state];
   line.append(mark,label,status);
+  if(activity.tool)line.dataset.toolName=activity.tool;
+  const facts=activity.facts??[];
+  if(facts.length){
+    const chips=doc.createElement('span');chips.className='tool-facts';
+    const lead=doc.createElement('span');lead.className='visually-hidden';lead.textContent=' · ';chips.append(lead);
+    for(const fact of facts){const chip=doc.createElement('span');chip.className='tool-fact';chip.textContent=fact;chips.append(chip);}
+    line.append(chips);
+  }
+  // Elapsed time is filled in by the build progress group (groupBuildProgress); empty lines hide it.
+  const time=doc.createElement('span');time.className='tool-activity-time';line.append(time);
   const group=activity.group;
   if(group){line.dataset.toolGroup=group.key;line.dataset.toolVerbs=group.verbs.join('|');line.dataset.toolNoun=group.noun.join('|');if(group.container)line.dataset.toolContainer=group.container;}
+  const out:HTMLElement[]=[line];
+  if(state==='failed'&&activity.reason){const reason=doc.createElement('p');reason.className='tool-activity-reason';reason.textContent=activity.reason;out.push(reason);}
+  const thumb=activity.image?renderToolThumbnail(doc,activity.image,activity.facts?.[0]??null):null;if(thumb)out.push(thumb);
   const more=doc.createElement('details');more.className='message-details tool-details';
   const summary=doc.createElement('summary');summary.textContent='Details';
   const pre=doc.createElement('pre');pre.className='hint mono';pre.textContent=details;
   more.append(summary,pre);
-  return [line,more];
+  out.push(more);
+  return out;
+}
+// Captured PNG/JPEG images are shown through blob: URLs (the page allows blob: images, not data: URLs). Bounded; oldest revoked.
+const thumbnailUrls=new Map<string,string>();
+function pngObjectUrl(doc:Document,base64:string):string|null {
+  const view=doc.defaultView as (Window&typeof globalThis)|null,known=thumbnailUrls.get(base64);
+  if(known)return known;
+  if(!view?.URL?.createObjectURL||!view.Blob||!view.atob)return null;
+  try{
+    const raw=view.atob(base64),bytes=new Uint8Array(raw.length);for(let i=0;i<raw.length;i++)bytes[i]=raw.charCodeAt(i);
+    const url=view.URL.createObjectURL(new view.Blob([bytes],{type:base64.startsWith('/9j/')?'image/jpeg':'image/png'}));
+    thumbnailUrls.set(base64,url);
+    while(thumbnailUrls.size>8){const [oldest,href]=thumbnailUrls.entries().next().value!;thumbnailUrls.delete(oldest);view.URL.revokeObjectURL(href);}
+    return url;
+  }catch{return null;}
+}
+/** A viewport capture thumbnail: a button that toggles between a small preview and the full-width image. */
+export function renderToolThumbnail(doc:Document,base64:string,size:string|null):HTMLElement|null {
+  const url=pngObjectUrl(doc,base64);if(!url)return null;
+  const button=doc.createElement('button');button.type='button';button.className='tool-thumb';button.setAttribute('aria-expanded','false');
+  const name='Studio viewport capture'+(size?' ('+size+')':'');
+  button.setAttribute('aria-label','Enlarge '+name);button.title='Click to enlarge';
+  const image=doc.createElement('img');image.src=url;image.alt=name;image.decoding='async';
+  button.append(image);
+  const toggle=(open:boolean)=>{button.setAttribute('aria-expanded',String(open));button.setAttribute('aria-label',(open?'Shrink ':'Enlarge ')+name);button.title=open?'Click to shrink':'Click to enlarge';};
+  button.addEventListener('click',()=>toggle(button.getAttribute('aria-expanded')!=='true'));
+  button.addEventListener('keydown',event=>{if(event.key==='Escape'&&button.getAttribute('aria-expanded')==='true'){event.preventDefault();event.stopPropagation();toggle(false);}});
+  return button;
 }
 /**
  * A Codex transcript tool message as article.codex-message.tool: the same activity line, state and Details the Claude
  * chat renders for its tool events. Saved history keeps only the result text; an Arcane Studio result names its command.
  */
-export function renderCodexToolArticle(doc:Document,message:Pick<ChatMessage,'scope'|'text'|'toolState'|'toolCall'>,safe:(value:string)=>string=value=>value):{article:HTMLElement;change:ToolChange|null} {
+/** A result that does not name its command, recognised by the fields only one Arcane tool returns; otherwise null. */
+export function inferToolFromResult(result:unknown):string|null {
+  const r=activityRecord(result);if(!r)return null;
+  if(activityRecord(r.viewport))return 'studio_viewport_capture';
+  if(Array.isArray(r.kits)||Array.isArray(r.scatter)||typeof r.plannedInstances==='number')return 'scene_build';
+  if(activityRecord(r.caves))return 'terrain_generate';
+  if(Array.isArray(r.previews)&&typeof r.jobId==='string')return 'assets_preview';
+  if(Array.isArray(r.entries)&&typeof r.latest==='number')return 'studio_output_read';
+  if(Array.isArray(r.jobs))return 'assets_jobs';
+  return null;
+}
+export function renderCodexToolArticle(doc:Document,message:Pick<ChatMessage,'scope'|'text'|'toolState'|'toolCall'>&{key?:string},safe:(value:string)=>string=value=>value):{article:HTMLElement;change:ToolChange|null} {
   const read=message.text?readToolResultText(message.text):null,state:ToolActivityState=message.toolState??read?.state??'finished';
-  // A result that names its own command wins; otherwise the live identity (tool name + display args) describes the call.
-  const live=message.toolCall,activity=read?.name?describeToolActivity(read.name,read.input,read.result,state)
-    :live?describeToolActivity(live.name,live.input,read?.result??null,state):{text:message.text?'Tool output':state==='started'?'Using an Arcane tool…':'Used an Arcane tool',change:null};
+  // A failed call's plain-text result is its reason.
+  const result=read?.result??(state==='failed'&&message.text?message.text:null);
+  // A result that names its own command wins; otherwise the live identity (tool name + display args) describes the call,
+  // then a result recognised by its shape; a bare result stays a generic step.
+  const live=message.toolCall,inferred=!read?.name&&!live?inferToolFromResult(read?.result):null;
+  const activity:ToolActivity=read?.name?describeToolActivity(read.name,read.input,read.result,state)
+    :live?describeToolActivity(live.name,live.input,result,state):inferred?describeToolActivity(inferred,null,read?.result,state)
+    :{text:message.text?state==='failed'?'A step failed':'Finished a step':state==='started'?'Using an Arcane tool…':'Used an Arcane tool',change:null,reason:state==='failed'?toolFailureReason(result):null};
   const article=doc.createElement('article');article.className='codex-message tool';
   article.setAttribute('data-role','tool');article.setAttribute('aria-label','Tool activity');article.dataset.toolState=state;
+  if(message.key)article.dataset.toolKey=message.key.slice(0,512);
   article.append(...renderToolActivity(doc,activity,state,safe(message.scope+(message.text?'\n'+message.text:''))));
   return {article,change:activity.change};
 }
@@ -1356,7 +1537,7 @@ function paintToolGroup(group:HTMLElement,members:readonly HTMLElement[]):void {
  * line (with its own Details) inside the card's expandable list, and unwraps a run that shrinks to one line. Idempotent:
  * a second call on an unchanged transcript changes nothing. `open` restores which cards were expanded (by group id).
  */
-export function groupToolCards(container:HTMLElement,open:ReadonlySet<string>=new Set()):void {
+export function groupToolCards(container:HTMLElement,open:ReadonlySet<string>=new Set(),prefix=''):void {
   const doc=container.ownerDocument;
   interface Entry { article:HTMLElement; key:string|null; top:Element; group:HTMLElement|null }
   const entries:(Entry|null)[]=[];
@@ -1383,7 +1564,7 @@ export function groupToolCards(container:HTMLElement,open:ReadonlySet<string>=ne
     }
     const ordinal=ordinals.get(key)??0;ordinals.set(key,ordinal+1);
     let group=members.find(entry=>entry.group&&!used.has(entry.group))?.group??null;
-    if(!group){const created=makeToolGroup(doc,key,key+'#'+ordinal);created.open=open.has(created.dataset.groupId!);group=created;}
+    if(!group){const created=makeToolGroup(doc,key,prefix+key+'#'+ordinal);created.open=open.has(created.dataset.groupId!);group=created;}
     used.add(group);
     const first=members[0]!.top;
     if(first!==group)container.insertBefore(group,first);
@@ -1394,27 +1575,192 @@ export function groupToolCards(container:HTMLElement,open:ReadonlySet<string>=ne
   }
   for(const child of [...container.children])if(child.classList.contains('tool-group')&&!used.has(child))child.remove();
 }
+// ---- Build progress: one compact group per assistant turn that ran tools, live while the turn runs. ----
+// Each call keeps its own line (label, state mark, fact chips, elapsed time, Details); the group's header says what is
+// running and for how long, and collapses to one summary line ("Built in 2m 14s · 9 steps · 1 retried") when the turn ends.
+// Liveness comes from #codex-messages[data-turn-live], which each chat sets while its visible turn runs.
+/** Calls needed in one turn before its lines move into a build progress group. */
+export const BUILD_PROGRESS_MIN=2;
+/** Tools that change the place or make assets: a turn with one reads "Built", otherwise "Done". */
+const BUILDING_TOOLS=new Set(['scene_create','scene_update','scene_build','scene_delete','environment_apply','terrain_generate','studio_asset_insert',
+  'assets_procedural','assets_place_studio_import','assets_adopt_glb','script_update','script_set_enabled','receipt_restore']);
+/** 900 -> '<1s', 42000 -> '42s', 134000 -> '2m 14s', 3900000 -> '1h 05m'. */
+export function formatElapsed(ms:number):string {
+  if(!(ms>=0))return '';
+  const seconds=Math.floor(ms/1000);if(seconds<1)return '<1s';if(seconds<60)return seconds+'s';
+  const minutes=Math.floor(seconds/60);if(minutes<60)return minutes+'m '+String(seconds%60).padStart(2,'0')+'s';
+  return Math.floor(minutes/60)+'h '+String(minutes%60).padStart(2,'0')+'m';
+}
+export interface BuildProgressRow { tool:string|null; text:string; state:ToolActivityState }
+export interface BuildProgressSummary { title:string; meta:string; state:ToolActivityState; steps:number; retried:number; failed:number }
+/**
+ * The group header for a turn's calls. Live: "Build progress" plus the running step, the step count and the elapsed time.
+ * Ended: one line, e.g. "Built in 2m 14s · 9 steps · 1 retried". A failed call counts as retried when a later call of the
+ * same tool finished; otherwise it is failed. `elapsed` is null when the time was not observed (saved history).
+ */
+export function buildProgressSummary(rows:readonly BuildProgressRow[],live:boolean,elapsed:number|null):BuildProgressSummary {
+  const steps=rows.length,plural=(n:number,word:string)=>n+' '+word+(n===1?'':'s');
+  let retried=0,failed=0;
+  rows.forEach((row,index)=>{
+    if(row.state!=='failed')return;
+    if(row.tool&&rows.slice(index+1).some(later=>later.tool===row.tool&&later.state==='finished'))retried++;else failed++;
+  });
+  const building=rows.some(row=>!!row.tool&&BUILDING_TOOLS.has(row.tool)),time=elapsed===null?'':formatElapsed(elapsed);
+  if(live){
+    const running=rows.filter(row=>row.state==='started').at(-1);
+    const meta=[running?running.text.replace(/…$/,'')+'…':'',plural(steps,'step'),retried?retried+' retried':'',failed?failed+' failed':'',time].filter(Boolean).join(' · ');
+    return {title:building?'Build progress':'Working',meta,state:'started',steps,retried,failed};
+  }
+  const unfinished=rows.filter(row=>row.state==='started').length;
+  const lead=(failed&&failed===steps?'Stopped':building?'Built':'Done')+(time?' in '+time:'');
+  const title=[lead,plural(steps,'step'),retried?retried+' retried':'',failed?failed+' failed':'',unfinished?unfinished+' unfinished':''].filter(Boolean).join(' · ');
+  return {title,meta:'',state:failed||unfinished?'failed':'finished',steps,retried,failed};
+}
+interface ToolTime { start:number|null; end:number|null }
+const toolTimes=new WeakMap<Document,Map<string,ToolTime>>();
+const timesOf=(doc:Document)=>{let map=toolTimes.get(doc);if(!map){map=new Map();toolTimes.set(doc,map);}return map;};
+const remember=(map:Map<string,ToolTime>,key:string,time:ToolTime)=>{map.set(key,time);while(map.size>2048)map.delete(map.keys().next().value!);return time;};
+const isBuildGroup=(node:Element)=>node.classList.contains('build-progress');
+const rowArticles=(row:Element):HTMLElement[]=>isToolArticle(row)?[row]:row.classList.contains('tool-group')?[...(row.querySelector('.tool-group-items')?.children??[])].filter(isToolArticle):[];
+const buildArticles=(group:Element)=>[...(group.querySelector('.build-progress-items')?.children??[])].flatMap(rowArticles);
+/** Start/end per call key: observed live (Claude's start time when it has one), unknown for saved history. */
+function trackToolTimes(doc:Document,articles:readonly HTMLElement[],live:boolean,now:number):void {
+  const map=timesOf(doc);
+  for(const article of articles){
+    const key=article.dataset.toolKey;if(!key)continue;
+    const state=articleState(article),known=map.get(key);
+    if(!known){
+      const at=Date.parse(article.dataset.toolAt??''),start=Number.isFinite(at)&&at<=now&&now-at<86_400_000?at:now;
+      remember(map,key,state==='started'?{start,end:null}:live?{start:now,end:now}:{start:null,end:null});
+    }else if(known.end===null&&known.start!==null&&state!=='started')known.end=now;
+  }
+}
+function makeBuildGroup(doc:Document,id:string):HTMLDetailsElement {
+  const group=doc.createElement('details');group.className='build-progress';group.dataset.groupId=id;
+  const summary=doc.createElement('summary');summary.className='build-progress-summary';
+  const mark=doc.createElement('span');mark.className='tool-activity-mark';mark.setAttribute('aria-hidden','true');
+  const text=doc.createElement('span');text.className='build-progress-text';
+  const title=doc.createElement('span');title.className='build-progress-title';
+  const meta=doc.createElement('span');meta.className='build-progress-meta';
+  text.append(title,meta);
+  const facts=doc.createElement('span');facts.className='build-progress-facts';
+  const status=doc.createElement('span');status.className='visually-hidden build-progress-status';
+  const chevron=doc.createElement('span');chevron.className='build-progress-chevron';chevron.setAttribute('aria-hidden','true');
+  summary.append(mark,text,facts,status,chevron);
+  const items=doc.createElement('div');items.className='build-progress-items';
+  group.append(summary,items);return group;
+}
+/** Repaints a group's header and its lines' elapsed times from the recorded times. Moves no nodes. */
+function paintBuildGroup(group:HTMLElement,live:boolean,now:number):void {
+  const doc=group.ownerDocument,map=timesOf(doc),articles=buildArticles(group);
+  const set=(node:Element|null,value:string)=>{if(node&&node.textContent!==value)node.textContent=value;};
+  for(const article of articles){
+    const time=article.dataset.toolKey?map.get(article.dataset.toolKey):undefined,running=articleState(article)==='started';
+    let ms:number|null=null;
+    if(time&&time.start!==null){if(time.end!==null)ms=time.end-time.start;else if(running&&live)ms=now-time.start;}
+    set(article.querySelector('.tool-activity-time'),ms!==null&&ms>=1000?formatElapsed(ms):'');
+  }
+  const groupTime=map.get('group:'+group.dataset.groupId);
+  let elapsed:number|null=null;
+  if(groupTime&&groupTime.start!==null){if(live)elapsed=now-groupTime.start;else if(groupTime.end!==null)elapsed=groupTime.end-groupTime.start;}
+  const rows=articles.map(article=>({tool:toolLine(article)?.dataset.toolName??null,text:article.querySelector('.tool-activity-text')?.textContent??'',state:articleState(article)}));
+  const summary=buildProgressSummary(rows,live,elapsed);
+  set(group.querySelector('.build-progress-title'),summary.title);
+  set(group.querySelector('.build-progress-meta'),summary.meta);
+  set(group.querySelector('.build-progress-status'),' · '+STATE_WORDS[summary.state]);
+  if(group.dataset.toolState!==summary.state)group.dataset.toolState=summary.state;
+  const mark=group.querySelector<HTMLElement>('.build-progress-summary>.tool-activity-mark');if(mark&&mark.dataset.toolState!==summary.state)mark.dataset.toolState=summary.state;
+  // The turn's key facts stay readable while the group is collapsed: the headline fact of each build step first.
+  const firsts=(building:boolean)=>articles.filter(article=>BUILDING_TOOLS.has(toolLine(article)?.dataset.toolName??'')===building)
+    .map(article=>article.querySelector('.tool-fact')?.textContent??'').filter(Boolean);
+  const facts=[...new Set([...firsts(true),...firsts(false)])].slice(0,3);
+  const holder=group.querySelector<HTMLElement>('.build-progress-facts');
+  if(holder&&holder.dataset.facts!==facts.join('\n')){
+    holder.dataset.facts=facts.join('\n');
+    holder.replaceChildren(...facts.map(fact=>{const chip=doc.createElement('span');chip.className='tool-fact';chip.textContent=fact;return chip;}));
+  }
+}
+/**
+ * Moves each turn's tool lines (and grouped cards) into one build progress group placed where its first call appeared,
+ * groups same-kind runs inside it, unwraps a turn that shrinks below BUILD_PROGRESS_MIN calls and collapses a group when its
+ * turn ends. Idempotent: a second call on an unchanged transcript moves nothing. `open` keeps groups a person expanded.
+ */
+export function groupBuildProgress(container:HTMLElement,open:ReadonlySet<string>=new Set(),now=Date.now()):void {
+  const doc=container.ownerDocument,flag=container.dataset.turnLive,map=timesOf(doc);
+  interface Segment { rows:Element[]; tops:Element[]; groups:HTMLElement[] }
+  const segments:Segment[]=[{rows:[],tops:[],groups:[]}];
+  for(const child of [...container.children]){
+    const segment=segments.at(-1)!;
+    if(child.classList.contains('human')){segments.push({rows:[],tops:[],groups:[]});continue;}
+    if(isBuildGroup(child)){segment.groups.push(child as HTMLElement);segment.tops.push(child);segment.rows.push(...(child.querySelector('.build-progress-items')?.children??[]));}
+    else if(isToolArticle(child)||child.classList.contains('tool-group')){segment.rows.push(child);segment.tops.push(child);}
+  }
+  const used=new Set<Element>();
+  segments.forEach((segment,index)=>{
+    const articles=segment.rows.flatMap(rowArticles);
+    const live=index===segments.length-1&&(flag!==undefined?flag==='true':articles.some(article=>articleState(article)==='started'));
+    // Times are recorded from a turn's first call, before it has enough calls for a group.
+    trackToolTimes(doc,articles,live,now);
+    if(articles.length<BUILD_PROGRESS_MIN){
+      for(const group of segment.groups)for(const row of [...(group.querySelector('.build-progress-items')?.children??[])])container.insertBefore(row,group);
+      return;
+    }
+    const id='build:'+(articles[0]!.dataset.toolKey??'turn-'+index);
+    let group:HTMLElement|null=segment.groups[0]??null;
+    if(!group){const created=makeBuildGroup(doc,id);created.open=live||open.has(id);created.dataset.live=String(live);group=created;}
+    used.add(group);
+    if(segment.tops[0]!==group)container.insertBefore(group,segment.tops[0]!);
+    const items=group.querySelector('.build-progress-items')!,current=[...items.children];
+    if(current.length<=segment.rows.length&&current.every((node,at)=>node===segment.rows[at]))items.append(...segment.rows.slice(current.length));
+    else items.replaceChildren(...segment.rows);
+    groupToolCards(items as HTMLElement,open,id+'/');
+    const key='group:'+group.dataset.groupId;
+    const time=map.get(key)??remember(map,key,{start:live?Math.min(now,...articles.map(article=>map.get(article.dataset.toolKey??'')?.start??now)):null,end:null});
+    if(!live&&time.start!==null&&time.end===null)time.end=now;
+    // The turn just ended: fold the group to its one-line summary.
+    if(group.dataset.live==='true'&&!live)(group as HTMLDetailsElement).open=false;
+    group.dataset.live=String(live);
+    paintBuildGroup(group,live,now);
+  });
+  for(const child of [...container.children])if(isBuildGroup(child)&&!used.has(child)){
+    for(const row of [...(child.querySelector('.build-progress-items')?.children??[])])container.insertBefore(row,child);
+    child.remove();
+  }
+}
 const groupedTranscripts=new WeakSet<Element>();
-/** Keeps the shared transcript (#codex-messages, used by both providers) grouped as lines arrive. Presentation only. */
+/** Keeps the shared transcript (#codex-messages, used by every chat) grouped as lines arrive. Presentation only. */
 export function installToolGrouping(doc:Document):void {
   try{
-    const container=doc.getElementById('codex-messages'),Observer=doc.defaultView?.MutationObserver;
-    if(!container||!Observer||groupedTranscripts.has(container))return;
+    const container=doc.getElementById('codex-messages'),view=doc.defaultView,Observer=view?.MutationObserver;
+    if(!container||!view||!Observer||groupedTranscripts.has(container))return;
     groupedTranscripts.add(container);
     const open=new Set<string>();
     container.addEventListener('toggle',event=>{
-      const target=event.target as HTMLDetailsElement|null,id=target?.classList?.contains('tool-group')?target.dataset.groupId:undefined;
+      const target=event.target as HTMLDetailsElement|null,id=target?.classList?.contains('tool-group')||target?.classList?.contains('build-progress')?target.dataset.groupId:undefined;
       if(id){if(target!.open)open.add(id);else open.delete(id);}
     },true);
+    // Live groups tick once a second (elapsed times only); the ticker stops when no group is live.
+    let ticker:number|null=null;
+    const tick=()=>{
+      const live=[...container.querySelectorAll<HTMLElement>('.build-progress[data-live="true"]')];
+      if(!live.length){if(ticker!==null){view.clearInterval(ticker);ticker=null;}return;}
+      const now=Date.now();for(const group of live)paintBuildGroup(group,true,now);
+    };
     let busy=false;
-    const observer=new Observer(records=>{
-      if(busy||!records.some(record=>record.target===container||(record.target as Element|null)?.closest?.('.tool-group')))return;
+    const run=()=>{
       busy=true;
-      try{groupToolCards(container,open);}catch{/* Grouping is presentation only. */}
+      try{groupBuildProgress(container,open);groupToolCards(container,open);}catch{/* Grouping is presentation only. */}
       finally{observer.takeRecords();busy=false;}
+      if(ticker===null&&container.querySelector('.build-progress[data-live="true"]'))ticker=view.setInterval(tick,1000);
+    };
+    // Timer repaints (elapsed text) are not structure changes.
+    const own=(target:Node)=>!!(target as Element).closest?.('.tool-activity-time,.build-progress-summary')||!!target.parentElement?.closest?.('.tool-activity-time,.build-progress-summary');
+    const observer=new Observer(records=>{
+      if(busy||!records.some(record=>(record.target===container||!!(record.target as Element|null)?.closest?.('.tool-group,.build-progress'))&&!own(record.target)))return;
+      run();
     });
-    observer.observe(container,{childList:true,subtree:true});
-    groupToolCards(container,open);
+    observer.observe(container,{childList:true,subtree:true,attributes:true,attributeFilter:['data-turn-live']});
+    run();
   }catch{/* Grouping is presentation only. */}
 }
 /** Pretty raw detail text for the collapsed Details: JSON is indented, other text kept as is. */
@@ -3153,6 +3499,8 @@ export class CodexChat {
     const usage=this.replyUsage?this.replyUsageVersion+JSON.stringify([[...this.transcript.finishedTurns],[...this.transcript.turnUsage]]):'';
     // A long transcript shows its last turns until "Show earlier messages" is chosen for this conversation.
     const view=this.tabs?.active()?.key??'thread:'+(t?.threadId??'');
+    // The build progress group stays live while this thread's turn runs (presentation only).
+    if(!this.surfaceYielded){const box=this.doc.getElementById('codex-messages'),live=String(!!t&&['starting','inProgress'].includes(t.turnStatus));if(box?.dataset&&box.dataset.turnLive!==live)box.dataset.turnLive=live;}
     const displayedMessages=this.displayMessages(),messageSignature=JSON.stringify(displayedMessages)+usage+(this.earlierView===view?'\0all':'');
     if(!this.surfaceYielded&&messageSignature!==this.messageSignature){
     const reset=!this.messageSignature;this.messageSignature=messageSignature;

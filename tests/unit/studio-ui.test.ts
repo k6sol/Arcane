@@ -665,8 +665,15 @@ test('real browser and daemon: human API keys, key connection and revocation, du
   const page = await browser.newPage({ viewport: { width: 1440, height: 1100 } });
   // Validated GET metadata supplies synthetic sign-in evidence. No native
   // provider executable, connection action, thread or inference is started.
+  // Each lab instance has its own origin and control token. A page polls with the token of the lab that served it, so the
+  // route checks the request against the token of the request's own origin (the restart below starts a second lab), and a
+  // request to a lab that is no longer current is refused like the closed server it addresses.
+  const labTokens = new Map<string, string>([[app.origin, app.token]]);
   await page.route('**/v1/codex/state', async (route: any) => {
-    assert.equal(route.request().method(), 'GET'); assert.equal(route.request().headers().authorization, 'Bearer ' + app.token);
+    const request = route.request(), origin = new URL(request.url()).origin;
+    assert.equal(request.method(), 'GET'); assert.ok(labTokens.has(origin), 'Provider state is only read from a lab origin.');
+    assert.equal(request.headers().authorization, 'Bearer ' + labTokens.get(origin));
+    if (origin !== app.origin) { await route.abort('connectionrefused'); return; }
     await route.fulfill({ json: { state: syntheticProviderState(directory) } });
   });
   if (process.env.ARCANE_UI_BUILD_DIR) for (const name of ['studio', 'codex-chat', 'codex-history', 'workspace-shell', 'asset-downloads', 'asset-viewer', 'automatic-asset-previews', 'glb-preflight', 'learning-panel', 'provider-setup', 'desktop-verification', 'studio-key-settings', 'workflow-panel', 'playtest-panel', 'playtest-toggle', 'chat-tabs', 'chat-attachments', 'task-usage', 'task-usage-ui', 'claude-chat', 'arcane-chat', 'setup-checklist', 'starter-gallery', 'starter-prompts', 'welcome-tour', 'studio-diagnostics', 'plans', 'editor-drafts', 'project-memory', 'script-editor-drafts', 'script-sync', 'desktop-update', 'mesh-keep', 'notifications', 'arcane-dialog', 'script-diff']) {
@@ -749,9 +756,12 @@ test('real browser and daemon: human API keys, key connection and revocation, du
   await page.locator('#work-create').click(); await text('#work-unknown-message', 'Outcome unknown'); assert.equal(await page.locator('#work-create').isDisabled(), true); assert.equal(workStore.runs().length, 2); assert.equal(createPosts, 1);
   await page.unroute('**/v1/work/create'); await page.locator('#work-refresh').click(); await page.waitForFunction(() => !(document.getElementById('work-acknowledge') as HTMLButtonElement).disabled); await page.locator('#work-acknowledge').click(); assert.equal(workStore.runs().length, 2);
   await page.reload(); await text('#work-status', 'WorkStore responding'); await openAdvancedSettings(page, 'auto-refresh'); await page.locator('#auto-refresh').uncheck(); await openAdvancedSettings(page); assert.equal(await page.locator('#native-token-result').isVisible(), false); assert.equal(await page.locator('#native-token').textContent(), ''); await text('#work-tasks', 'complete');
+  // Restart: the old document is closed before its lab, so none of its polls outlive the server that issued its token.
+  await page.goto('about:blank');
   await app.close(); workStore.close(); studioStore.close();
   studioStore = new StudioStore({ directory: join(directory, 'studio') }); workStore = new WorkStore({ directory: join(directory, 'work'), projectPath: directory });
   app = await createConnectionLab({ cwd: resolve('.'), projectPath: directory, stateDirectory: join(directory, 'preferences'), studioStore, workStore, probe: async () => [], codexConnect: refuseNativeCodex });
+  labTokens.set(app.origin, app.token);
   await page.goto(app.origin + '/studio#' + app.token); await text('#work-status', 'WorkStore responding'); await openAdvancedSettings(page, 'auto-refresh'); await page.locator('#auto-refresh').uncheck(); await openAdvancedSettings(page); await text('#work-tasks', 'complete');
   assert.equal(studioStore.keys().length, 2); assert.ok(studioStore.keys().find(key => key.keyId === issued.keyId)?.revokedAt); assert.ok(studioStore.keys().find(key => key.keyId === rotated.keyId)?.revokedAt); assert.equal((await page.locator('body').textContent()).includes(issued.apiKey), false);
   assert.equal(workStore.runs().length, 2); assert.equal(workStore.task(first.id).reviewNote, 'Reviewed the revised proof and acceptance criteria');

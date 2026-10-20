@@ -322,7 +322,11 @@ const claudeChatChoice = value => typeof value === 'string' && /^[A-Za-z0-9][A-Z
 const claudeChatTime = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value);
 const claudeChatText = (value, max) => typeof value === 'string' && value.length <= max;
 const claudeChatList = (value, max) => Array.isArray(value) && Object.getPrototypeOf(value) === Array.prototype && value.length <= max;
-const claudeChatMessage = value => {
+// A live tool event may carry one display image (a Studio viewport capture from Arcane's own tools): a PNG or JPEG data:
+// URL of canonical base64, at most 1.5 MiB decoded (claude-chat.cjs toolResultImage). Saved history never carries one.
+const CLAUDE_CHAT_TOOL_IMAGE = /^data:image\/(?:png|jpeg);base64,(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+const CLAUDE_CHAT_TOOL_IMAGE_CHARS = 'data:image/jpeg;base64,'.length + Math.ceil(1536 * 1024 / 3) * 4;
+const claudeChatMessage = (value, live = false) => {
   if (!value || typeof value !== 'object' || !claudeChatId(value.id) || !['user', 'assistant', 'tool', 'error'].includes(value.role) ||
       !claudeChatText(value.text, 65536) || !claudeChatTime(value.at)) claudeChatUnavailable();
   const out = { id: value.id, role: value.role, text: value.text, at: value.at };
@@ -337,6 +341,9 @@ const claudeChatMessage = value => {
       if (!claudeChatText(detail, 4096)) claudeChatUnavailable();
       out.tool[key] = detail;
     }
+    // Anything else in that field is dropped; the status update itself still reaches the renderer.
+    const image = live ? value.tool.image : undefined;
+    if (out.tool.status === 'finished' && typeof image === 'string' && image.length <= CLAUDE_CHAT_TOOL_IMAGE_CHARS && CLAUDE_CHAT_TOOL_IMAGE.test(image)) out.tool.image = image;
   }
   return out;
 };
@@ -412,7 +419,7 @@ const claudeChatEvent = value => {
   const base = { turnId: value.turnId, conversationId: value.conversationId };
   try {
     if (value.type === 'delta') return claudeChatText(value.text, 65536) ? { ...base, type: 'delta', text: value.text } : null;
-    if (value.type === 'message' || value.type === 'tool') return { ...base, type: value.type, message: claudeChatMessage(value.message) };
+    if (value.type === 'message' || value.type === 'tool') return { ...base, type: value.type, message: claudeChatMessage(value.message, value.type === 'tool') };
     if (value.type === 'done') {
       const u = value.usage, number = n => Number.isSafeInteger(n) && n >= 0;
       if (typeof value.ok !== 'boolean' || !(value.error === null || claudeChatText(value.error, 512)) ||
@@ -519,7 +526,7 @@ const arcaneChatEvent = value => {
   const base = { turnId: value.turnId, conversationId: value.conversationId };
   try {
     if (value.type === 'delta') return claudeChatText(value.text, 65536) ? { ...base, type: 'delta', text: value.text } : null;
-    if (value.type === 'message' || value.type === 'tool') return { ...base, type: value.type, message: claudeChatMessage(value.message) };
+    if (value.type === 'message' || value.type === 'tool') return { ...base, type: value.type, message: claudeChatMessage(value.message, value.type === 'tool') };
     if (value.type === 'done') {
       const u = value.usage;
       if (typeof value.ok !== 'boolean' || !(value.error === null || claudeChatText(value.error, 512)) ||

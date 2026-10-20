@@ -131,12 +131,16 @@ export const nativeAssetCancel = boundedNativeRecord(JOB_JOURNAL_BYTES).pipe(z.u
   z.strictObject({ jobId: nativeAssetJobId, state: z.literal('unknown'), retry: z.literal(false) }),
 ]));
 
+// Measured UV quality of natural-finish parts (bounded numbers/null plus the verdict lists).
+const uvQuality = z.object({ intent: z.enum(['unique', 'periodic', 'tiled', 'atlas']), errors: z.array(text).max(32), warnings: z.array(text).max(32) })
+  .catchall(z.union([z.number().finite(), z.null()]));
 const mesh = z.object({ name: id, role: z.enum(['render', 'lod1', 'collision']), vertices: count, edges: count, faces: count, triangles: count,
   nonManifoldEdges: count, looseVertices: count, looseEdges: count, duplicateVertices: count, duplicateFaces: count, degenerateFaces: count,
   inconsistentNormals: count, invertedComponents: count, finitePositions: z.boolean(), uvLayers: count, uvLoops: count, invalidUVs: count,
   degenerateUVFaces: count, dimensions: vector, scale: vector, rotation: vector, materials: z.array(id).max(32), errors: z.array(text).max(128),
   geometrySha256: hash.optional(), bounds: geometryBounds.optional(), position: boundedVector(-60, 60).optional(), materialProperties: z.array(materialEvidence).max(8).optional(),
-}).transform(({ geometrySha256, bounds, position, materialProperties, ...value }) => ({ ...value,
+  uvQuality: uvQuality.optional(),
+}).transform(({ geometrySha256, bounds, position, materialProperties, uvQuality, ...value }) => ({ ...value, ...(uvQuality === undefined ? {} : { uvQuality }),
   ...(geometrySha256 === undefined ? {} : { geometrySha256 }), ...(bounds === undefined ? {} : { bounds }),
   ...(position === undefined ? {} : { position }), ...(materialProperties === undefined ? {} : { materialProperties }) }));
 const exported = z.object({ path: artifactName, objects: count, triangles: count, materials: count, finitePositions: z.boolean(),
@@ -147,7 +151,9 @@ const audit = z.object({ schemaVersion: z.literal(1), template, meshes: z.array(
   renders: z.array(z.object({ path: artifactName, width: count, height: count, finitePixels: z.boolean(), minLuminance: finite, maxLuminance: finite,
     meanLuminance: finite, standardDeviation: finite })).max(32), exports: z.array(exported).max(32),
   savedSceneReopened: z.boolean(), errors: z.array(text).max(128), warnings: z.array(text).max(128), assembly: assemblyEvidence.optional(),
-}).transform(({ assembly, ...value }) => ({ ...value, ...(assembly === undefined ? {} : { assembly }) }));
+  // Model spec self-check metrics (workers/blender/grammar/model_review.py): bounded, informational.
+  review: z.record(z.string(), z.unknown()).refine(value => Buffer.byteLength(JSON.stringify(value)) <= 64 * 1024, 'Review metrics exceed 64 KiB.').optional(),
+}).transform(({ assembly, review, ...value }) => ({ ...value, ...(assembly === undefined ? {} : { assembly }), ...(review === undefined ? {} : { review }) }));
 const generatedAssetManifest: z.ZodType<AssetManifest> = z.object({
   schemaVersion: z.union([z.literal(1), z.literal(2)]), jobId: assetJobId, createdAt: id, request: assetRequest, runtime, templateSha256: hash,
   sourceRequestSha256: hash.optional(), assembly: assemblyEvidence.optional(),
