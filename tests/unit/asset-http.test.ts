@@ -408,7 +408,7 @@ test('artifact GET accepts only human bearer and exact loopback browser context'
 
 test('artifact GET rejects traversal, arbitrary formats, extra queries, unknown jobs and incorrect methods', async t => {
   const h = await harness(t, true), f = h.fixture!;
-  for (const path of ['../asset.glb', '/asset.glb', 'C:\\asset.glb', 'asset.glb:stream', 'asset.glb\u0000', 'ASSET.GLB', 'asset.glb\r\nX-Test: injected', 'asset.obj', 'asset.mtl', 'asset.html', 'asset.js', 'blockout.blend', 'preview-hero.png', 'manifest.json', 'audit.json', 'request.json', 'asset_worker.py', 'https://evil.invalid/asset.glb', 'constructor', '__proto__']) {
+  for (const path of ['../asset.glb', '/asset.glb', 'C:\\asset.glb', 'asset.glb:stream', 'asset.glb\u0000', 'ASSET.GLB', 'asset.glb\r\nX-Test: injected', 'asset.obj', 'asset.mtl', 'asset.html', 'asset.js', 'blockout.blend', 'preview-hero.png', 'manifest.json', 'input.json', 'other.json', '../audit.json', 'audit.json:stream', 'AUDIT.JSON', 'asset_worker.py', 'https://evil.invalid/asset.glb', 'constructor', '__proto__']) {
     assert.equal((await h.call(artifactUrl(f.jobId, path))).status, 400, path);
   }
   for (const query of ['jobId=' + f.jobId, 'path=asset.glb', 'jobId=' + f.jobId + '&path=asset.glb&path=asset.fbx', 'jobId=' + f.jobId + '&jobId=' + f.jobId + '&path=asset.glb', 'jobId=' + f.jobId + '&path=asset.glb&token=' + TOKEN, 'jobId=../escape&path=asset.glb']) {
@@ -428,10 +428,10 @@ test('artifact GET rejects traversal, arbitrary formats, extra queries, unknown 
 test('artifact GET rejects terminal failure even when unapproved export bytes exist', async t => {
   const h = await harness(t);
   const job = await h.service.start({ template: 'hero-prop', name: 'pending-export' });
-  assert.equal((await h.call(artifactUrl(job.jobId))).status, 409);
+  for (const path of ['asset.glb', 'request.json', 'audit.json']) assert.equal((await h.call(artifactUrl(job.jobId, path))).status, 409);
   await h.service.cancel(job.jobId);
   await writeFile(join(job.directory, 'asset.glb'), 'unapproved pending bytes');
-  assert.equal((await h.call(artifactUrl(job.jobId))).status, 409);
+  for (const path of ['asset.glb', 'request.json', 'audit.json']) assert.equal((await h.call(artifactUrl(job.jobId, path))).status, 409);
 });
 
 test('artifact GET rejects manifest role, identity, hash and byte-count tampering without a filesystem fallback', async t => {
@@ -583,4 +583,85 @@ test('worker status check route: human control only, exact {jobId}, fixed refusa
   await assert.rejects(service.start(request), (e: unknown) => (e as { code?: string }).code === 'RECONCILIATION');
   // No native or generic agent action exists for this operation.
   assert.equal((await post({ jobId: closedId }, { Authorization: 'Bearer ' + AGENT_TOKEN }, '/v1/assets/native/resolve-interrupted')).status, 404);
+});
+
+test('request and audit evidence download as exact human-only JSON attachments', async t => {
+  const h = await harness(t, true), f = h.fixture!;
+  for (const path of ['request.json', 'audit.json']) {
+    const artifact = f.manifest.artifacts.find(row => row.path === path)!;
+    const expected = await readFile(join(f.directory, path));
+    assert.equal(expected.length, artifact.bytes); assert.equal(sha256(expected), artifact.sha256);
+    assert.equal((await h.call(artifactUrl(f.jobId, path), { headers: { Authorization: 'Bearer ' + AGENT_TOKEN } })).status, 401);
+    const response = await h.call(artifactUrl(f.jobId, path));
+    assert.equal(response.status, 200); assert.equal(response.headers.get('content-type'), 'application/json');
+    assert.equal(response.headers.get('content-length'), String(artifact.bytes));
+    assert.equal(response.headers.get('content-disposition'), 'attachment; filename="' + path + '"');
+    assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    assert.equal(response.headers.get('content-security-policy'), "default-src 'none'; sandbox");
+    const actual = Buffer.from(await response.arrayBuffer());
+    assert.deepEqual(actual, expected); assert.equal(sha256(actual), artifact.sha256);
+    assert.equal(actual.includes(Buffer.from(f.directory)), false);
+  }
+});
+
+test('JSON evidence rejects changed bytes and manifest roles without serving an attachment', async t => {
+  const h = await harness(t, true), f = h.fixture!, originalManifest = JSON.stringify(f.manifest);
+  for (const path of ['request.json', 'audit.json']) {
+    const original = await readFile(join(f.directory, path)), changed = Buffer.from(original);
+    changed[0] = changed[0]! ^ 1;
+    await writeFile(join(f.directory, path), changed);
+    const changedResponse = await h.call(artifactUrl(f.jobId, path));
+    assert.equal(changedResponse.status, 422); assert.equal(changedResponse.headers.get('content-disposition'), null);
+    await writeFile(join(f.directory, path), original);
+    const manifest = structuredClone(f.manifest); manifest.artifacts.find(row => row.path === path)!.role = 'worker';
+    await writeFile(join(f.directory, 'manifest.json'), JSON.stringify(manifest));
+    const roleResponse = await h.call(artifactUrl(f.jobId, path));
+    assert.equal(roleResponse.status, 422); assert.equal(roleResponse.headers.get('content-disposition'), null);
+    await writeFile(join(f.directory, 'manifest.json'), originalManifest);
+  }
+});
+
+test('JSON evidence downloads retain hardlink refusal for both fixed files', async t => {
+  const h = await harness(t, true), f = h.fixture!;
+  for (const path of ['request.json', 'audit.json']) {
+    const target = join(f.directory, path), saved = join(h.dir, 'saved-' + path);
+    await rename(target, saved); await link(saved, target);
+    const response = await h.call(artifactUrl(f.jobId, path));
+    assert.equal(response.status, 422); assert.equal(response.headers.get('content-disposition'), null);
+    await rm(target); await rename(saved, target);
+  }
+});
+
+async function assertJsonEvidenceContentMismatch(t: test.TestContext, path: 'request.json' | 'audit.json'): Promise<void> {
+  const h = await harness(t, true), f = h.fixture!, manifest = structuredClone(f.manifest);
+  const original = await readFile(join(f.directory, path));
+  const changed = Buffer.from(JSON.stringify(path === 'request.json'
+    ? { ...f.manifest.request, seed: f.manifest.request.seed + 1 }
+    : { ...f.manifest.validation, warnings: [...f.manifest.validation.warnings, 'Changed fixture audit evidence.'] }));
+  assert.notDeepEqual(JSON.parse(changed.toString('utf8')), JSON.parse(original.toString('utf8')));
+  const artifact = manifest.artifacts.find(row => row.path === path)!;
+  artifact.bytes = changed.length; artifact.sha256 = sha256(changed);
+  assert.deepEqual(manifest.request, f.manifest.request, 'the manifest request remains the original normalized request');
+  assert.deepEqual(manifest.validation, f.manifest.validation, 'the manifest audit remains the original validation');
+  await writeFile(join(f.directory, path), changed);
+  await writeFile(join(f.directory, 'manifest.json'), JSON.stringify(manifest));
+  const saved = await readFile(join(f.directory, path));
+  assert.equal(saved.length, artifact.bytes); assert.equal(sha256(saved), artifact.sha256, 'the artifact size and hash match the changed JSON');
+  const response = await h.call(artifactUrl(f.jobId, path));
+  assert.equal(response.status, 422); assert.equal(response.headers.get('content-disposition'), null);
+  const error = await response.json() as { error: string; message: string };
+  assert.equal(error.error, 'MANIFEST'); assert.match(error.message, /Manifest request\/audit differs from the original evidence/);
+  await writeFile(join(f.directory, path), original);
+  await writeFile(join(f.directory, 'manifest.json'), JSON.stringify(f.manifest));
+  const restored = await h.call(artifactUrl(f.jobId, path));
+  assert.equal(restored.status, 200); assert.deepEqual(Buffer.from(await restored.arrayBuffer()), original);
+}
+
+test('request JSON with matching artifact hash must still match the original normalized manifest request', async t => {
+  await assertJsonEvidenceContentMismatch(t, 'request.json');
+});
+
+test('audit JSON with matching artifact hash must still match the original manifest validation', async t => {
+  await assertJsonEvidenceContentMismatch(t, 'audit.json');
 });

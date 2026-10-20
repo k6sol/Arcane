@@ -122,7 +122,9 @@ const DOWNLOADS = new Map([
   ['collision.glb', { role: 'export', contentType: 'model/gltf-binary' }],
   ['asset-lod1.glb', { role: 'export', contentType: 'model/gltf-binary' }],
   ['asset.fbx', { role: 'export', contentType: 'application/octet-stream' }],
-  ['asset.blend', { role: 'scene', contentType: 'application/octet-stream' }]
+  ['asset.blend', { role: 'scene', contentType: 'application/octet-stream' }],
+  ['request.json', { role: 'request', contentType: 'application/json' }],
+  ['audit.json', { role: 'audit', contentType: 'application/json' }]
 ]);
 async function unchangedFile(path: string, before: Stats): Promise<void> {
   await noLinks(path);
@@ -1037,7 +1039,7 @@ export async function createAssetService(options: AssetServiceOptions) {
       return retainedRead([id(jobId)],async()=>{
       ensureOpen();
       const download = typeof path === 'string' ? DOWNLOADS.get(path) : undefined;
-      if (!download) throw new ArcaneError('INPUT', 'Only the fixed GLB, FBX and completed Blender scene artifacts may be downloaded.');
+      if (!download) throw new ArcaneError('INPUT', 'Only the fixed GLB, FBX, completed Blender scene, request.json and audit.json artifacts may be downloaded.');
       const e = await loadEntry(jobId);
       if (!e.job.manifestAvailable || e.job.state !== 'succeeded') throw new ArcaneError('JOB_STATE', 'Artifact downloads require a verified completed job.');
       if (artifactReadActive) throw new AssetError('BUSY', 'An artifact download is already being verified.');

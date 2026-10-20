@@ -37,3 +37,29 @@ test('short, oversized, refused and already-aborted downloads do not yield a sav
 test('render-only panel tolerates absent optional DOM and never fetches automatically',()=>{
  const doc={getElementById:()=>null} as unknown as Document;const panel=new ArtifactDownloads(doc,TOKEN);panel.clear();panel.show(manifest(),JOB);panel.clear();
 });
+
+test('request and audit downloads preserve exact JSON evidence bytes and attachment metadata',async()=>{
+ for(const [path,role] of [['request.json','request'],['audit.json','audit']] as const){
+  const evidence=new TextEncoder().encode(JSON.stringify({kind:role,note:'<script>not executed</script>'})),digest=createHash('sha256').update(evidence).digest('hex');
+  const artifact=readDownloadArtifacts(manifest([{path,role,bytes:evidence.length,sha256:digest}]),JOB)[0]!;
+  assert.equal(artifact.path,path);assert.equal(artifact.filename,'crate-'+path);assert.equal(artifact.contentType,'application/json');
+  let calls=0;
+  const blob=await fetchVerifiedArtifact(artifact,TOKEN,new AbortController().signal,(async(input:RequestInfo|URL,init?:RequestInit)=>{
+   calls++;assert.equal(input,'/v1/assets/artifact?jobId='+JOB+'&path='+path);assert.equal(init?.redirect,'error');assert.equal(init?.credentials,'omit');
+   return new Response(new Uint8Array(evidence).buffer,{headers:{'Content-Type':'application/json','Content-Length':String(evidence.length),'Content-Disposition':'attachment; filename="'+path+'"'}});
+  }) as typeof fetch);
+  assert.equal(calls,1);assert.equal(blob.type,'application/json');assert.deepEqual(new Uint8Array(await blob.arrayBuffer()),evidence);
+ }
+});
+
+test('JSON evidence still requires the fixed filename, exact role, hash and attachment response',async()=>{
+ for(const [path,role] of [['request.json','request'],['audit.json','audit']] as const){
+  assert.throws(()=>readDownloadArtifacts(manifest([{path,role:'worker',bytes:bytes.length,sha256:hash}]),JOB),/Invalid/);
+  const artifact=readDownloadArtifacts(manifest([{path,role,bytes:bytes.length,sha256:hash}]),JOB)[0]!;
+  for(const headers of [{'Content-Type':'text/html'},{'Content-Disposition':'inline'}]){
+   await assert.rejects(fetchVerifiedArtifact(artifact,TOKEN,new AbortController().signal,(async()=>response(bytes,{'Content-Type':'application/json',...headers})) as typeof fetch),/headers/);
+  }
+  await assert.rejects(fetchVerifiedArtifact(artifact,TOKEN,new AbortController().signal,(async()=>response(new Uint8Array([1,2,3,4,5,6,7,8]),{'Content-Type':'application/json'})) as typeof fetch),/checksum/);
+ }
+ for(const path of ['manifest.json','input.json','other.json','../audit.json','audit.json:stream','AUDIT.JSON'])assert.deepEqual(readDownloadArtifacts(manifest([{path,role:'audit',bytes:bytes.length,sha256:hash}]),JOB),[]);
+});

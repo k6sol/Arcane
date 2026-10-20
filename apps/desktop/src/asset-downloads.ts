@@ -4,6 +4,7 @@ const FORMATS = new Map([
   ['asset.glb', ['export', 'model/gltf-binary']], ['collision.glb', ['export', 'model/gltf-binary']],
   ['asset-lod1.glb', ['export', 'model/gltf-binary']], ['asset.fbx', ['export', 'application/octet-stream']],
   ['asset.blend', ['scene', 'application/octet-stream']],
+  ['request.json', ['request', 'application/json']], ['audit.json', ['audit', 'application/json']],
 ]);
 const object = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 export interface DownloadArtifact { jobId: string; path: string; bytes: number; sha256: string; filename: string; contentType: string }
