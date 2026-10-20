@@ -89,7 +89,16 @@ test('real Node protocol + HTTP + SQLite carries exact selection, read-only thre
   assert.equal((await f.call('/v1/codex/action',{...input,text:'Different intent'})).status,409);
   const log=await readFile(join(f.directory,'receipt-1.jsonl'),'utf8');const rows=log.trim().split('\n').map(line=>JSON.parse(line));
   const turns=rows.filter(row=>row.message?.method==='turn/start');assert.equal(turns.length,1);assert.equal(turns[0].message.params.model,'fixture-sol');assert.equal(turns[0].message.params.effort,'ultra');assert.equal(turns[0].message.params.sandboxPolicy.type,'readOnly');
-  const database=await readFile(join(f.directory,'codex-actions.sqlite-wal'));assert.ok(!database.includes(Buffer.from('Synthetic test only')));
+  // Lifecycle receipts contain metadata; submitted prompts have their own conversation-scoped transcript.
+  const journal=new DatabaseSync(join(f.directory,'codex-actions.sqlite'),{readOnly:true});
+  try {
+    const actions=journal.prepare('SELECT payload FROM actions').all() as {payload:string}[];
+    assert.ok(actions.every(row=>!row.payload.includes(input.text)));
+    const submitted=journal.prepare('SELECT thread_id,session_id,payload FROM submitted_chat_messages WHERE request_id=?').get(input.requestId) as {thread_id:string;session_id:string|null;payload:string};
+    assert.equal(submitted.thread_id,f.threadId);
+    assert.equal(submitted.session_id,first.state.snapshot!.thread!.sessionId);
+    assert.equal(JSON.parse(submitted.payload).text,input.text);
+  } finally {journal.close();}
   assert.equal(first.state.snapshot!.provenance,'spawned-node-fixture');
 });
 

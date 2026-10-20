@@ -33,7 +33,6 @@ export function createMcpServer(options: { client: DaemonClient; projectRoot: st
   const skills = options.skillRegistry ?? new SkillRegistry();
   // Learned preferences fill omitted tool arguments (explicit arguments win); primed once so skill boosts need no per-call read.
   const learned = createLearnedDefaults(options.learnedDefaults === true && typeof (client as { learnedBias?: unknown }).learnedBias === 'function' ? client : null);
-  if (options.learnedDefaults === true) void learned.bias();
   const server = new McpServer({ name: 'arcane-studio', version: '0.1.0' }, {
     maxToolInputElements: 100_000,
     instructions: productInstructions(),

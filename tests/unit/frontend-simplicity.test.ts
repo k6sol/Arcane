@@ -43,7 +43,9 @@ test('manual workflows stay in Advanced settings and New chat is disabled until 
   assert.equal(html.split('id="workflow-panel"').length-1,1);
   assert.match(html,/<button id="new-chat"[^>]*data-chat-action="new"[^>]*aria-label="New chat"[^>]*disabled/);
   const boot=await source('apps/desktop/src/studio.ts');
-  assert.match(boot,/beforeNewChat:\s*\(\)\s*=>\s*workspaceShell\.showConversation\(\)/);
+  const beforeNewChat=boot.match(/beforeNewChat:\s*\(\)\s*=>\s*\{([^}]+)\}/)?.[1]??'';
+  assert.match(beforeNewChat,/sharedConversations\?\.beginNewConversation\(\)/);
+  assert.match(beforeNewChat,/workspaceShell\.showConversation\(\)/);
 });
 
 test('owned Edge chat navigation: real controllers preserve drafts, close settings and never submit native work',
