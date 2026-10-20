@@ -941,7 +941,7 @@ export class StudioWorkbench {
   private on(id: string, event: string, action: (event: Event) => void) { this.el(id).addEventListener(event, action); }
 
   async start(): Promise<void> {
-    this.el<HTMLAnchorElement>('providers-link').href = this.token ? '/#' + this.token : '/';
+    this.el<HTMLAnchorElement>('providers-link').href = this.token ? '/diagnostics#' + this.token : '/diagnostics';
     this.text('native-setup', "$env:ARCANE_DAEMON_URL = '" + this.origin + "'\n$env:ARCANE_LOCAL_TOKEN = '<SCOPED_AGENT_TOKEN>'\nnpm run launch:native");
     this.on('go-work', 'click', () => { this.clearStudioKey(); this.el('work-heading').scrollIntoView({ block: 'start' }); this.el('work-heading').focus(); });
     this.on('go-assets', 'click', () => { this.clearStudioKey(); this.el('asset-heading').scrollIntoView({ block: 'start' }); this.el('asset-heading').focus(); });

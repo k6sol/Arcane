@@ -66,6 +66,23 @@ test('features do not claim image/design/voice tools are embedded or unrestricte
     for(const id of ['image-generation','design','voice-video','plugins']) assert.notEqual(features.find(f=>f.id===id)?.state,'available');
   }
 });
+test('provider feature metadata preserves coding handoff and does not infer MCP readiness from installation or auth', () => {
+  for (const provider of ['codex', 'claude'] as const) {
+    for (const installed of [false, true]) {
+      for (const auth of ['unknown', 'signed-out', 'api-or-cloud', 'subscription'] as const) {
+        const connection: Connection = { ...emptyConnection(provider), installed, auth, features: featuresFor(provider, installed) };
+        reconcileFeatureStates(connection);
+        const coding = connection.features.filter(feature => feature.id === 'coding');
+        const mcp = connection.features.filter(feature => feature.id === 'mcp');
+        assert.equal(coding.length, 1); assert.equal(mcp.length, 1);
+        assert.equal(coding[0]!.route, 'native-client');
+        assert.equal(coding[0]!.state, installed ? 'native-handoff' : 'requires-setup');
+        assert.equal(mcp[0]!.route, 'native-client');
+        assert.equal(mcp[0]!.state, installed ? 'unverified' : 'requires-setup');
+      }
+    }
+  }
+});
 test('failed native discovery removes available selection/auth claims', () => {
   const c=emptyConnection('codex'); c.installed=true; c.features=featuresFor('codex',true); reconcileFeatureStates(c);
   assert.equal(c.features.find(f=>f.id==='auth-status')?.state,'unverified');

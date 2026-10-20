@@ -580,7 +580,11 @@ test('browser HTTP fixtures: API keys, masks, copy, dismissal, navigation, revoc
   await page.route('**/v1/studio/keys/rotate', async (route: any) => { const response = await route.fetch(); keyAccepted(); await keyHeld; await route.fulfill({ response }); });
   await page.locator('#key-issue').click(); await keyStored; await page.locator('[data-settings-close]').click(); await page.locator('#go-assets').click(); releaseKey(); await expectText('#key-notice', 'secret was cleared by navigation');
   assert.equal(await page.locator('#key-secret').textContent(), ''); assert.equal(await page.locator('#key-result').isVisible(), false); await page.unroute('**/v1/studio/keys/rotate');
-  await expectText('#build-tasks', 'Authored fixture board'); assert.equal(await page.locator('#providers-link').getAttribute('href'), '/#' + TOKEN);
+  await expectText('#build-tasks', 'Authored fixture board');
+  const diagnosticsHref = await page.locator('#providers-link').getAttribute('href');
+  assert.equal(diagnosticsHref, '/diagnostics#' + TOKEN);
+  const diagnosticsUrl = new URL(diagnosticsHref!, origin);
+  assert.equal(diagnosticsUrl.origin, origin); assert.equal(diagnosticsUrl.pathname, '/diagnostics'); assert.equal(diagnosticsUrl.hash, '#' + TOKEN);
   await openAdvancedSettings(page, 'session-heading'); await page.locator('#session-picker').selectOption(readonly.id); await openAdvancedSettings(page); await expectText('#session-mode', 'Read-only'); await expectText('#command-status', 'Read ready');
   await page.locator('#method').selectOption('scene.create'); assert.equal(await page.locator('#send').isDisabled(), true); await expectText('#command-validation', 'read-only');
   await page.locator('#method').selectOption('scene.children'); await page.locator('#send').click(); await expectText('#receipt-state', 'succeeded');
