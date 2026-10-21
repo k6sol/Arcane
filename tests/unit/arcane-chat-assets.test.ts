@@ -91,7 +91,8 @@ async function fixture(t:TestContext,options:FixtureOptions={}){
   });
   t.after(async()=>{for(const gate of Object.values(options.gates??{}))gate?.resolve();await chat.dispose();for(const child of children)child.physicalClose();await fs.rm(root,{recursive:true,force:true,maxRetries:10,retryDelay:10});});
   const finished=async(id:string)=>{await wait('done:'+id);return events.find(e=>e.type==='done'&&e.turnId===id);};
-  return {chat,trace,calls,events,issues,bindings,spawns,children,wait,finished,config,configBytes,setCurrent(value:boolean){current=value;},note};
+  const child=()=>{const selected=children[0];assert.ok(selected,'Expected the owned MCP child.');return selected;};
+  return {chat,trace,calls,events,issues,bindings,spawns,children,child,wait,finished,config,configBytes,setCurrent(value:boolean){current=value;},note};
 }
 
 test('Arcane assets: absent trusted seam preserves legacy chat and never forwards inherited asset credentials',{timeout:5000},async t=>{
@@ -142,7 +143,7 @@ test('Arcane assets: explicit final spawn env alone receives the 64hex credentia
 test('Arcane assets: normal completion retires without cancellation and waits for actual MCP close',{timeout:5000},async t=>{
   const f=await fixture(t,{autoClose:false});const sent=await f.chat.send(input());assert.equal((await f.finished(sent.turnId)).ok,true);
   await f.wait('retire');assert.ok(!f.calls.some(c=>c.cancel));assert.ok(!f.trace.includes('transportClosed'));
-  assert.deepEqual(f.calls.filter(c=>c.ended),[{ended:sent.turnId}]);f.children[0].physicalClose();await f.wait('transportClosed');
+  assert.deepEqual(f.calls.filter(c=>c.ended),[{ended:sent.turnId}]);f.child().physicalClose();await f.wait('transportClosed');
 });
 
 test('Arcane assets: explicit Stop uses incarnation and immediate local stop while an underlying fetch is held',{timeout:5000},async t=>{
@@ -163,8 +164,8 @@ test('Arcane assets: runtime dispose fences and retires without cancelling accep
 
 test('Arcane assets: MCP error and logical kill are not physical child closure',{timeout:5000},async t=>{
   const f=await fixture(t,{autoClose:false});const sent=await f.chat.send(input());await f.finished(sent.turnId);await f.wait('retire');
-  f.children[0].emit('error',new Error('synthetic error'));assert.ok(!f.trace.includes('transportClosed'));
-  f.children[0].physicalClose();await f.wait('transportClosed');
+  f.child().emit('error',new Error('synthetic error'));assert.ok(!f.trace.includes('transportClosed'));
+  f.child().physicalClose();await f.wait('transportClosed');
 });
 
 test('Arcane assets: synchronous no-child spawn failure can retire and close its exact context',{timeout:5000},async t=>{
@@ -176,9 +177,9 @@ test('Arcane assets: timed out tool replies only drain custody and never resume 
   let round=0;const f=await fixture(t,{autoClose:false,noToolReply:true,limits:{toolTimeoutMs:1},
     reply:()=>new Response(encode(...(round++===0?[{type:'tool_call',id:'call',name:'fixture_tool',arguments:{}},done]:[done])))});
   const sent=await f.chat.send(input());await f.finished(sent.turnId);await f.wait('retire');
-  const request=f.children[0].sent.find((r:any)=>r.method==='tools/call');assert.ok(request);assert.ok(!f.trace.includes('transportClosed'));
-  const before=JSON.stringify(f.events);f.children[0].answer(request.id,{content:[{type:'text',text:'late result'}]});
-  assert.equal(JSON.stringify(f.events),before);f.children[0].physicalClose();await f.wait('transportClosed');
+  const request=f.child().sent.find((r:any)=>r.method==='tools/call');assert.ok(request);assert.ok(!f.trace.includes('transportClosed'));
+  const before=JSON.stringify(f.events);f.child().answer(request.id,{content:[{type:'text',text:'late result'}]});
+  assert.equal(JSON.stringify(f.events),before);f.child().physicalClose();await f.wait('transportClosed');
   assert.equal(f.trace.filter(x=>x==='gateway').length,2);
 });
 
@@ -186,8 +187,8 @@ test('Arcane assets: exact original request budget is at most initialize plus4li
   let round=0;const f=await fixture(t,{pages:4,noToolReply:true,limits:{toolTimeoutMs:1},
     reply:()=>new Response(encode(...(round++===0?[...Array.from({length:25},(_,i)=>({type:'tool_call',id:'c'+i,name:'fixture_tool',arguments:{}})),done]:[done])))});
   const sent=await f.chat.send(input());await f.finished(sent.turnId);await f.wait('transportClosed');
-  assert.equal(f.children[0].sent.filter((r:any)=>typeof r.id==='number').length,29);
-  assert.equal(f.children[0].sent.filter((r:any)=>r.method==='tools/call').length,24);
+  assert.equal(f.child().sent.filter((r:any)=>typeof r.id==='number').length,29);
+  assert.equal(f.child().sent.filter((r:any)=>r.method==='tools/call').length,24);
 });
 
 test('Arcane assets: unresolved gateway cleanup stays pinned at the existing turn capacity',{timeout:5000},async t=>{
@@ -229,7 +230,7 @@ test('Arcane assets: tool arguments, results, instructions and image metadata re
     toolResult:{content:[{type:'text',text:ASSET+' '+CORE},{type:'image',mimeType:'image/png',data:bytes.toString('base64')}]},
     reply:()=>new Response(encode(...(round++===0?[{type:'tool_call',id:'call',name:'fixture_tool',arguments:{hint:ASSET+' '+CORE}},done]:[done]))) });
   const sent=await f.chat.send(input());await f.finished(sent.turnId);await f.wait('transportClosed');
-  const call=f.children[0].sent.find((r:any)=>r.method==='tools/call');assert.deepEqual(call.params.arguments,{hint:'[redacted] [redacted]'});
+  const call=f.child().sent.find((r:any)=>r.method==='tools/call');assert.deepEqual(call.params.arguments,{hint:'[redacted] [redacted]'});
   for(const value of [f.events,await f.chat.history(sent.conversationId),f.calls.filter(c=>c.gateway)]){const json=JSON.stringify(value);assert.ok(!json.includes(ASSET)&&!json.includes(CORE));}
   assert.ok(f.events.filter(e=>e.type==='tool').every(e=>!e.message.tool.image),'encoded image metadata cannot carry a bearer');
 });
@@ -260,8 +261,8 @@ test('Arcane assets: Stop while tools/call is pending never revives its late rep
   const f=await fixture(t,{autoClose:false,noToolReply:true,reply:()=>new Response(encode({type:'tool_call',id:'call',name:'fixture_tool',arguments:{}},done))});
   const sent=await f.chat.send(input());await f.wait('tool:1');assert.equal(await f.chat.stop(sent.turnId),true);await f.finished(sent.turnId);
   assert.deepEqual(f.calls.filter(c=>c.cancel),[{cancel:'incarnation'}]);assert.ok(!f.trace.includes('transportClosed'));
-  const before=JSON.stringify(f.events),request=f.children[0].sent.find((r:any)=>r.method==='tools/call');
-  f.children[0].answer(request.id,{content:[{type:'text',text:'late private result'}]});
-  assert.equal(JSON.stringify(f.events),before);f.children[0].physicalClose();await f.wait('transportClosed');
+  const before=JSON.stringify(f.events),request=f.child().sent.find((r:any)=>r.method==='tools/call');
+  f.child().answer(request.id,{content:[{type:'text',text:'late private result'}]});
+  assert.equal(JSON.stringify(f.events),before);f.child().physicalClose();await f.wait('transportClosed');
   assert.equal(f.trace.filter(x=>x==='gateway').length,1);
 });

@@ -2289,7 +2289,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       reviewSelection.update(empty ? null :
         provider === 'codex' ? { provider: 'codex' } : { provider: provider === 'claude' ? 'claude-code' : 'arcane', conversationId: id }, key);
       if (!empty && transcript?.projectPath && id) {
-        const scope = provider === 'codex' && native ? native : { provider: provider === 'claude' ? 'claude-code' as const : 'arcane' as const,
+        const scope = provider === 'codex' && native ? { ...native, projectPath: transcript.projectPath } : { provider: provider === 'claude' ? 'claude-code' as const : 'arcane' as const,
           threadId: 'app:' + id, sessionId: null, projectPath: transcript.projectPath };
         void reviewSelection.ready().then(current => {
           if (!current() || key !== reviewFocusSignature || reviewSelectionPaused) return;
