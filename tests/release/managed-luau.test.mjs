@@ -213,9 +213,10 @@ test('actual root-project cold-start bootstrap emits managed adapter fields with
   assert.ok(begin >= 0 && end > begin);
   const moduleLoad = "await import(require('node:url').pathToFileURL(join(productRoot, 'scripts/managed-luau-compiler.mjs')).href)";
   const bootstrap = source.slice(begin, end); assert.ok(bootstrap.includes(moduleLoad));
-  // Only Electron's module loader and daemon process are boundary doubles. All
-  // bootstrap files, directory ownership, policy, host settings and managed pins are real.
-  const child = new EventEmitter(), calls = [], warnings = [];
+  // Electron's module loader, daemon process and app-asset startup port are
+  // boundary doubles. Bootstrap files, directory ownership, policy, host settings
+  // and managed pins remain real.
+  const child = new EventEmitter(), calls = [], warnings = [], assetStarts = [];
   const context = { fs, Buffer, join, resolve, createHash, policy, managedBootstrap: managed, codeVerification: f.codeVerification,
     process: { platform: process.platform, env: { SystemRoot: process.env.SystemRoot,
       ARCANE_LUAU_COMPILER_PATH: 'C:\\foreign.exe', ARCANE_LUAU_COMPILER_SHA256: 'b'.repeat(64) } },
@@ -227,11 +228,19 @@ test('actual root-project cold-start bootstrap emits managed adapter fields with
     ownedDirectory: async full => { await policy.directPath(full, 'directory', true); fs.mkdirSync(full, { recursive: true, mode: 0o700 }); return policy.directPath(full); },
     smoke: false, window: null, nativeHandoff: null, providerSetup: { cancelPending() {} },
     recordStartupDiagnostic() {}, attachDiagnosticChild() {},
+    // Managed compiler proof does not grant asset authority. This ordered port
+    // witnesses the awaited startup seam; main-app-assets tests the real broker.
+    async startAppAssets(ownedChild, epoch) {
+      assert.equal(ownedChild, child); assert.equal(context.child, child); assert.equal(epoch, context.projectSession);
+      assert.equal(epoch.projectPath, context.projectPath); assert.equal(context.origin, 'http://127.0.0.1:45873'); assert.equal(context.token, 'a'.repeat(64));
+      assetStarts.push('begin'); await Promise.resolve(); assetStarts.push('ready');
+    },
     // Managed compiler wiring is the boundary under test. The separate handoff suite
     // executes its actual broker; here the newly mounted host capability has no actions.
     require(name) {
       assert.equal(name, './native-handoff-host.cjs');
       return { createNativeHandoffHost(ports) {
+        assert.deepEqual(assetStarts, ['begin', 'ready'], 'native handoff construction follows the awaited startup witness');
         assert.deepEqual(Object.keys(ports).sort(), ['confirm', 'getChoices', 'getSession', 'launchTerminal']);
         assert.equal(ports.getSession(), null, 'A compiler fixture has no desktop window.');
         return Object.freeze({ dispose: async () => ({ revoked: 0, unknown: 0, retained: 0 }), cancelPending() {} });
@@ -245,6 +254,7 @@ test('actual root-project cold-start bootstrap emits managed adapter fields with
   vm.createContext(context);
   vm.runInContext(bootstrap.replace(moduleLoad, 'managedBootstrap') + '\nglobalThis.coldStart = startDaemon;', context);
   await context.coldStart(f.project.projectPath);
+  assert.deepEqual(assetStarts, ['begin', 'ready']);
   assert.equal(calls.length, 1); assert.deepEqual(warnings, []);
   const env = calls[0].options.env;
   assert.equal(env.ARCANE_LUAU_COMPILER_PATH, join(f.productRoot, managed.MANAGED_LUAU_FILES[0]));

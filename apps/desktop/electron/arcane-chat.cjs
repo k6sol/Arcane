@@ -3,8 +3,8 @@
 // Main-process host for the in-app Arcane chat (Arcane Credits). The user's Arcane gateway proxies raw model APIs, so
 // there is no agent loop on the other side: this host runs a small, bounded tool-use loop itself. Each turn
 //   1. reads the signed-in account's gateway client (billing.cjs accountCredential, never sent to the renderer);
-//   2. mints ONE scoped, revocable daemon credential through the same native handoff path as Claude chat and starts
-//      Arcane's own MCP server from that owned config (stdio, JSON-RPC), so tools run with exactly Claude chat's scope;
+//   2. mints the scoped core project credential through the existing native handoff and starts its owned stdio MCP;
+//      an optional trusted appAssets port separately binds a64hex asset credential to this durable app chat/turn;
 //   3. offers the MCP tools to the model in the gateway's provider-neutral function-calling format, streams the reply
 //      through POST /v1/chat/stream, runs each requested tool through the MCP server and feeds the result back, until
 //      the model stops or a fixed bound (model rounds, tool calls, time) is reached.
@@ -167,11 +167,19 @@ function gatewayFailure(error) {
  * Minimal MCP client over the server's stdio (newline-delimited JSON-RPC 2.0): initialize, tools/list, tools/call.
  * Output is bounded per line and in total; stderr is drained and never read; the server cannot call back into the host.
  */
-function createMcpClient(child, { limits, onExit }) {
+function createMcpClient(child, { limits, onPhysicalClose }) {
   const pending = new Map();
-  let seq = 0, closed = false, total = 0, chunks = [], chunkBytes = 0, skipping = false;
-  const reject = error => { for (const entry of pending.values()) { clearTimeout(entry.timer); entry.reject(error); } pending.clear(); };
-  const finish = () => { if (closed) return; closed = true; reject(new ArcaneChatError('tools')); onExit?.(); };
+  let seq = 0, closed = false, physicalClosed = false, started = false, total = 0, chunks = [], chunkBytes = 0, skipping = false;
+  let spawnResolve, spawnReject;
+  const spawned = new Promise((resolve, reject) => { spawnResolve = resolve; spawnReject = reject; });
+  void spawned.catch(() => {});
+  const settle = (entry, value, error, failed) => {
+    if (entry.settled) return; entry.settled = true; clearTimeout(entry.timer);
+    if (failed) entry.reject(error); else entry.resolve(value);
+  };
+  const reject = error => { for (const entry of pending.values()) settle(entry, null, error, true); };
+
+  const finish = () => { if (closed) return; closed = true; if (!started) spawnReject(new ArcaneChatError('tools')); reject(new ArcaneChatError('tools')); };
   const send = value => { if (closed) throw new ArcaneChatError('tools'); child.stdin.write(JSON.stringify(value) + '\n', 'utf8'); };
   const line = buffer => {
     if (!buffer.length) return;
@@ -184,8 +192,9 @@ function createMcpClient(child, { limits, onExit }) {
     }
     const entry = typeof message.id === 'number' ? pending.get(message.id) : undefined;
     if (!entry) return;
-    pending.delete(message.id); clearTimeout(entry.timer);
-    if (message.error) entry.reject(new ArcaneChatError('tools')); else entry.resolve(message.result);
+    pending.delete(message.id);
+    // Timed-out replies drain custody without reviving their logical outcome.
+    settle(entry, message.result, new ArcaneChatError('tools'), !!message.error);
   };
   child.stdout.on('data', data => {
     let chunk = Buffer.isBuffer(data) ? data : Buffer.from(data);
@@ -202,19 +211,23 @@ function createMcpClient(child, { limits, onExit }) {
   });
   child.stderr?.on('data', () => {});
   for (const stream of [child.stdout, child.stderr, child.stdin]) stream?.on?.('error', () => {});
-  child.once('error', finish); child.once('close', finish);
+  child.once('spawn', () => { started = true; spawnResolve(); });
+  child.once('error', finish);
+  child.once('close', () => { if (physicalClosed) return; physicalClosed = true; finish(); pending.clear(); onPhysicalClose?.(); });
   function request(method, params, timeoutMs) {
     return new Promise((resolve, reject) => {
-      if (closed) { reject(new ArcaneChatError('tools')); return; }
-      const id = ++seq, timer = setTimeout(() => { pending.delete(id); reject(new ArcaneChatError('tools')); }, timeoutMs);
-      pending.set(id, { resolve, reject, timer });
+      // Fixed original bound: initialize + four list pages +24 tool calls.
+      if (closed || pending.size >= 29 || seq >= Number.MAX_SAFE_INTEGER) { reject(new ArcaneChatError('tools')); return; }
+      const id = ++seq, entry = { resolve, reject, timer: null, settled: false };
+      entry.timer = setTimeout(() => settle(entry, null, new ArcaneChatError('tools'), true), timeoutMs);
+      pending.set(id, entry);
       try { send({ jsonrpc: '2.0', id, method, ...(params === undefined ? {} : { params }) }); }
-      catch (error) { pending.delete(id); clearTimeout(timer); reject(error); }
+      catch (error) { settle(entry, null, error, true); /* a partial write remains owned until close */ }
     });
   }
   function notify(method) { send({ jsonrpc: '2.0', method }); }
-  function close() { if (!closed) { closed = true; reject(new ArcaneChatError('tools')); } try { child.stdin.end(); } catch { /* closed */ } try { child.kill(); } catch { /* closed */ } }
-  return { request, notify, close, closed: () => closed };
+  function close() { finish(); try { child.stdin.end(); } catch { /* closed */ } try { child.kill(); } catch { /* closed */ } }
+  return { request, notify, close, closed: () => closed, spawned: () => spawned, inFlight: () => pending.size };
 }
 
 function createArcaneChat(options) {
@@ -227,19 +240,81 @@ function createArcaneChat(options) {
   const randomUUID = options.randomUUID ?? nativeUUID, handoff = options.handoff;
   const limits = Object.freeze({ ...LIMITS, ...(options.limits ?? {}) });
   const projectPath = options.projectPath;
+  const appAssets = options.appAssets === undefined ? null : options.appAssets;
+  if (options.appAssets !== undefined && (!appAssets || typeof appAssets.issue !== 'function' || typeof appAssets.isCurrent !== 'function')) fail('unavailable');
+  const assetConnectionId = appAssets ? randomUUID() : null, assetTurns = new Set();
+  const assetCurrent = () => { try { return !appAssets || appAssets.isCurrent() === true; } catch { return false; } };
+  const assetMethods = ['launchEnvironment', 'bind', 'grantNextIntent', 'dispatched', 'ended', 'cancelWork', 'retire', 'transportClosed'];
+  function scrub(value, secrets) {
+    let encoded; try { encoded = JSON.stringify(value); } catch { return null; }
+    if (encoded === undefined) return null;
+    for (const secret of secrets) encoded = encoded.split(secret).join('[redacted]');
+    try { return JSON.parse(encoded); } catch { return null; }
+  }
+  function deltaRedactor(secrets) {
+    let held = '';
+    return text => {
+      held += text;
+      for (const secret of secrets) held = held.split(secret).join('[redacted]');
+      let keep = 0;
+      for (const secret of secrets) for (let n = 1; n < secret.length && n <= held.length; n++) if (held.endsWith(secret.slice(0, n))) keep = Math.max(keep, n);
+      const safe = held.slice(0, held.length - keep); held = keep ? held.slice(-keep) : ''; return safe;
+    };
+  }
+  function maybeCloseAssets(turn) {
+    const a = turn.asset;
+    if (!a || !a.loopSettled) return;
+    if (!a.context) { assetTurns.delete(turn); return; }
+    if (!a.deliverySettled || !a.cleanupSettled || !a.childClosed || a.client?.inFlight() || a.gateway.size || a.closeSent) return;
+    a.closeSent = true;
+    // One attempt only. Unknown acknowledgement keeps this bounded owner pinned.
+    void Promise.resolve().then(() => a.context.transportClosed()).then(() => { a.secret = null; assetTurns.delete(turn); }, () => { a.unknown = true; });
+  }
+  function cleanupAssets(turn) {
+    const a = turn.asset;
+    if (!a || a.cleanupStarted || !a.context) return;
+    a.cleanupStarted = true;
+    const attempt = async action => { try { await action(); } catch { a.unknown = true; } };
+    // Invoke in private channel order without awaiting: retire fences the local
+    // capability synchronously even if an earlier cleanup ACK is held/lost.
+    const pending = [];
+    if (a.cancel) pending.push(attempt(() => a.cancel));
+    if (a.dispatched) pending.push(attempt(() => a.context.ended(turn.turnId)));
+    pending.push(attempt(() => a.context.retire()));
+    void Promise.all(pending).then(() => { a.cleanupSettled = true; maybeCloseAssets(turn); });
+  }
+  async function issueAssets(turn) {
+    if (!appAssets) return;
+    if (interrupted(turn) || turns.get(turn.turnId) !== turn || turn.finished) fail('closed');
+    const context = await appAssets.issue({conversationId: turn.conversationId, connectionId: assetConnectionId});
+    turn.asset.context = context;
+    if (!context || assetMethods.some(name => typeof context[name] !== 'function')) fail('credential');
+    if (interrupted(turn) || turns.get(turn.turnId) !== turn || turn.finished) { cleanupAssets(turn); fail('closed'); }
+    const overlay = context.launchEnvironment(), d = overlay && Object.getOwnPropertyDescriptor(overlay, 'ARCANE_ASSET_TOKEN');
+    if (!d || !Object.hasOwn(d, 'value') || d.enumerable || typeof d.value !== 'string' || !/^[0-9a-f]{64}$/.test(d.value)) { cleanupAssets(turn); fail('credential'); }
+    turn.asset.secret = d.value;
+  }
+  async function assetAck(turn, name, value) {
+    if (!turn.asset) return;
+    if (interrupted(turn) || turn.finished || turns.get(turn.turnId) !== turn) fail('closed');
+    if (name === 'dispatched') turn.asset.dispatched = true;
+    await turn.asset.context[name](...(value === undefined ? [] : [value]));
+    if (interrupted(turn) || turn.finished || turns.get(turn.turnId) !== turn) fail('closed');
+  }
   const store = shared.createChatStore({ fs, p, directory: options.stateDirectory, now, limits, modelPattern: MODEL_ID });
   const turns = new Map(), byConversation = new Map(), credentials = new Set();
   let disposed = false, statusCache = null, statusRun = null, approval = null, approved = false, credential = null, minting = null, instructions = null;
 
   function emit(event) {
     try {
+      if (appAssets && event.type !== 'done') { const turn = turns.get(event.turnId); if (!turn || interrupted(turn)) return; }
       const window = options.getWindow();
       if (!window || window.isDestroyed?.() || !window.webContents || window.webContents.isDestroyed?.()) return;
       window.webContents.send(EVENT_CHANNEL, event);
     } catch { /* A closed renderer misses the event; the transcript keeps it. */ }
   }
   /** The MCP child's environment: a short allowlist of the host's variables plus the scoped credential overlay. */
-  function childEnvironment(overlay) {
+  function childEnvironment(overlay, assetSecret) {
     const output = {};
     const names = ['SystemRoot', 'WINDIR', 'USERPROFILE', 'HOME', 'HOMEDRIVE', 'HOMEPATH', 'LOCALAPPDATA', 'APPDATA', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL', 'PATH'];
     for (const name of names) {
@@ -247,7 +322,9 @@ function createArcaneChat(options) {
       const value = key === undefined ? undefined : env[key];
       if (typeof value === 'string' && !CONTROL.test(value) && Buffer.byteLength(value) <= 32768) output[name] = value;
     }
-    return { ...output, ARCANE_DAEMON_URL: overlay.ARCANE_DAEMON_URL, ARCANE_LOCAL_TOKEN: overlay.ARCANE_LOCAL_TOKEN };
+    // Explicit copy from the nonenumerable launch overlay into final spawn env only.
+    return { ...output, ARCANE_DAEMON_URL: overlay.ARCANE_DAEMON_URL, ARCANE_LOCAL_TOKEN: overlay.ARCANE_LOCAL_TOKEN,
+      ...(assetSecret ? {ARCANE_ASSET_TOKEN: assetSecret, ARCANE_ASSET_AUDIENCE: 'native-session'} : {}) };
   }
 
   // ---- Status: the account's models (with credit prices) and balance; nothing is requested while disabled ----------
@@ -389,14 +466,18 @@ function createArcaneChat(options) {
   }
   async function startTools(turn) {
     const launch = await mcpLaunch(turn.credential.configPath);
-    if (!launch || turn.stopped || disposed) return null;
+    if (!launch || interrupted(turn) || turn.finished) return null;
+    if (turn.asset && [launch.command, ...launch.args].some(value => value.includes(turn.asset.secret) || value.includes(turn.credential.env.ARCANE_LOCAL_TOKEN))) return null;
     let child;
-    try { child = spawn(launch.command, launch.args, { cwd: projectPath, env: childEnvironment(turn.credential.env), shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] }); }
+    try { child = spawn(launch.command, launch.args, { cwd: projectPath, env: childEnvironment(turn.credential.env, turn.asset?.secret), shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] }); }
     catch { return null; }
-    const client = createMcpClient(child, { limits });
-    turn.mcp = client;
+    if (turn.asset) turn.asset.childClosed = false;
+    const client = createMcpClient(child, { limits, onPhysicalClose() { if (turn.asset) { turn.asset.childClosed = true; maybeCloseAssets(turn); } } });
+    turn.mcp = client; if (turn.asset) turn.asset.client = client;
     try {
-      const init = await client.request('initialize', { protocolVersion: MCP_PROTOCOL, capabilities: {}, clientInfo: { name: 'arcane-desktop-chat', version: '1.0.0' } }, limits.mcpStartMs);
+      const initializing = client.request('initialize', { protocolVersion: MCP_PROTOCOL, capabilities: {}, clientInfo: { name: 'arcane-desktop-chat', version: '1.0.0' } }, limits.mcpStartMs);
+      const [init] = await Promise.all([initializing, ...(turn.asset ? [client.spawned()] : [])]);
+      if (turn.asset) await assetAck(turn, 'bind', {kind: 'arcane-gateway-loop', incarnationId: turn.asset.loopId});
       client.notify('notifications/initialized');
       const listed = [];
       let cursor;
@@ -420,16 +501,18 @@ function createArcaneChat(options) {
   async function send(input) {
     if (disposed) fail('unavailable');
     const v = sendInput(input);
-    if (turns.size >= limits.turns) fail('full');
+    if (turns.size >= limits.turns || appAssets && assetTurns.size >= limits.turns) fail('full');
     let entry = null;
     if (v.conversationId !== null) { entry = await store.get(v.conversationId); if (!entry) fail('missing'); }
     const conversationId = entry ? entry.conversationId : randomUUID();
     if (disposed) fail('unavailable');
     if (byConversation.has(conversationId)) fail('busy');
-    if (turns.size >= limits.turns) fail('full');
+    if (turns.size >= limits.turns || appAssets && assetTurns.size >= limits.turns) fail('full');
     const turn = { turnId: randomUUID(), conversationId, model: v.model, stopped: false, finished: false, timedOut: false, timer: null, credential: null, mcp: null,
-      controller: new AbortController(), playtest: v.playtest, history: [] };
-    turns.set(turn.turnId, turn); byConversation.set(conversationId, turn);
+      controller: new AbortController(), playtest: v.playtest, history: [],
+      asset: appAssets ? {loopId: randomUUID(), context: null, secret: null, client: null, childClosed: true, gateway: new Set(),
+        loopSettled: false, deliverySettled: false, cleanupStarted: false, cleanupSettled: false, dispatched: false, cancel: null, closeSent: false, unknown: false} : null };
+    turns.set(turn.turnId, turn); byConversation.set(conversationId, turn); if (turn.asset) assetTurns.add(turn);
     let user = null;
     try {
       const at = isoNow(now);
@@ -444,10 +527,14 @@ function createArcaneChat(options) {
       user.delivery={...turn.delivery};turn.userMessage=user;
       if (!await store.put(conversationId, user)) fail('missing');
     } catch (error) {
-      turns.delete(turn.turnId); byConversation.delete(conversationId);
+      turns.delete(turn.turnId); byConversation.delete(conversationId); assetTurns.delete(turn);
       throw error instanceof ArcaneChatError ? error : new ArcaneChatError('unavailable');
     }
-    void runTurn(turn, v.text);
+    const running = runTurn(turn, v.text);
+    if (turn.asset) {
+      const settled = () => { turn.asset.loopSettled = true; cleanupAssets(turn); maybeCloseAssets(turn); };
+      void running.then(settled, settled);
+    } else void running;
     return Object.freeze({ turnId: turn.turnId, conversationId, messageId: user.id });
   }
   async function rewind(input) {
@@ -461,7 +548,7 @@ function createArcaneChat(options) {
   }
   async function finish(turn, ok, error, usage = null, limit = false) {
     if (turn.finished) return; turn.finished = true;
-    clearTimeout(turn.timer); turn.mcp?.close(); turn.mcp = null;
+    clearTimeout(turn.timer); turn.mcp?.close(); turn.mcp = null; cleanupAssets(turn);
     releaseCredential(turn.credential); turn.credential = null;
     // Balance changed (or sign-in may have): the next status read asks the gateway again.
     statusCache = null;
@@ -473,15 +560,17 @@ function createArcaneChat(options) {
     turns.delete(turn.turnId); if (byConversation.get(turn.conversationId) === turn) byConversation.delete(turn.conversationId);
     emit({ turnId: turn.turnId, conversationId: turn.conversationId, type: 'done', ok, error: ok ? null : error ?? MESSAGES.failed, usage,
       usageLimit: ok || !limit ? null : { resetsAt: null } });
+    if (turn.asset) { turn.asset.deliverySettled = true; maybeCloseAssets(turn); }
   }
-  const interrupted = turn => turn.stopped || disposed || turn.timedOut;
-  const stopMessage = turn => disposed ? MESSAGES.closed : turn.timedOut ? MESSAGES.timeout : MESSAGES.stopped;
+  const interrupted = turn => turn.stopped || disposed || turn.timedOut || turn.finished || !assetCurrent();
+  const stopMessage = turn => disposed || !assetCurrent() ? MESSAGES.closed : turn.timedOut ? MESSAGES.timeout : MESSAGES.stopped;
 
   async function runTurn(turn, text) {
     const usage = { inputTokens: 0, outputTokens: 0, costUsd: null, credits: null };
     const reported = () => usage.inputTokens || usage.outputTokens || usage.credits !== null ? { ...usage } : null;
     try {
-      turn.timer = setTimeout(() => { if (!turn.finished) { turn.timedOut = true; turn.controller.abort(); turn.mcp?.close(); } }, limits.turnTimeoutMs);
+      turn.timer = setTimeout(() => { if (!turn.finished) { turn.timedOut = true; turn.controller.abort(); turn.mcp?.close(); if (turn.asset) void finish(turn, false, MESSAGES.timeout); } }, limits.turnTimeoutMs);
+      if (interrupted(turn)) return finish(turn, false, stopMessage(turn));
       let gateway = null; try { gateway = await options.gateway(); } catch { gateway = null; }
       if (interrupted(turn)) return finish(turn, false, stopMessage(turn));
       if (!gateway) return finish(turn, false, MESSAGES.notConnected);
@@ -491,40 +580,56 @@ function createArcaneChat(options) {
       if (!s.models.some(model => model.id === turn.model)) return finish(turn, false, MESSAGES.selection);
       if (!await ensureApproval()) return finish(turn, false, disposed ? MESSAGES.closed : MESSAGES.declined);
       if (interrupted(turn)) return finish(turn, false, stopMessage(turn));
-      turn.credential = await acquireCredential();
+      const acquired = await acquireCredential();
+      if (turn.asset && turn.finished) { releaseCredential(acquired); return; }
+      turn.credential = acquired;
       if (interrupted(turn)) return finish(turn, false, stopMessage(turn));
       if (!turn.credential) return finish(turn, false, MESSAGES.credential);
+      await issueAssets(turn);
       const tools = await startTools(turn);
       if (interrupted(turn)) return finish(turn, false, stopMessage(turn));
       if (!tools) return finish(turn, false, MESSAGES.tools);
-      const secret = turn.credential.env.ARCANE_LOCAL_TOKEN, leaks = value => typeof value === 'string' && value.includes(secret);
+      const secret = turn.credential.env.ARCANE_LOCAL_TOKEN, secrets = [turn.asset?.secret, secret].filter(Boolean).sort((a, b) => b.length - a.length);
+      const clean = value => turn.asset ? scrub(value, secrets) : value;
+      const leaks = value => typeof value === 'string' && secrets.some(secret => value.includes(secret));
       // The server instructions carry the shared guidance block, so the task instructions' copy of it is left out.
-      const own = await loadInstructions(), server = tools.serverInstructions;
+      const own = clean(await loadInstructions()), server = clean(tools.serverInstructions);
       const system = (server.includes(shared.GUIDANCE_START) ? shared.withoutSharedGuidance(own) : own) + (server ? '\n\n' + server : '') + shared.projectMemorySection(await loadProjectMemory()) + shared.learnedPreferenceSection(await loadLearned());
       const messages = [{ role: 'system', content: system }, ...turn.history, { role: 'user', content: text + shared.playtestNote(turn.playtest) }];
+      if (turn.asset) { await assetAck(turn, 'grantNextIntent'); await assetAck(turn, 'dispatched', turn.turnId); }
       const base = { turnId: turn.turnId, conversationId: turn.conversationId };
       let calls = 0, imagesShown = 0;
       for (let round = 0; ; round++) {
         if (interrupted(turn)) return finish(turn, false, stopMessage(turn), reported());
         if (round >= limits.rounds) return finish(turn, false, MESSAGES.steps, reported());
         let reply = '', done = null;
-        const requested = [];
+        const requested = [], redactDelta = turn.asset ? deltaRedactor(secrets) : null;
+        const hold = turn.asset ? {settled: false, observed: false, closed: false} : null;
+        if (hold) turn.asset.gateway.add(hold);
+        const drain = () => { if (hold && hold.settled && hold.closed) { turn.asset.gateway.delete(hold); maybeCloseAssets(turn); } };
         try {
-          for await (const chunk of gateway.streamChat({ model: turn.model, messages, tools: tools.tools, conversationId: turn.conversationId, turnId: turn.turnId }, turn.controller.signal)) {
+          if (interrupted(turn)) { if (hold) turn.asset.gateway.delete(hold); return finish(turn, false, stopMessage(turn), reported()); }
+          for await (const chunk of gateway.streamChat({ model: turn.model, messages: clean(messages), tools: clean(tools.tools), conversationId: turn.conversationId, turnId: turn.turnId }, turn.controller.signal,
+            hold ? value => {
+              if (hold.observed) return; hold.observed = true;
+              hold.closed = Object.isFrozen(value) && value?.state === 'closed'; drain();
+            } : undefined)) {
+            if (interrupted(turn)) return finish(turn, false, stopMessage(turn), reported());
             if (chunk.type === 'delta') {
-              if (typeof chunk.text !== 'string' || !chunk.text || leaks(chunk.text)) continue;
-              reply += chunk.text; emit({ ...base, type: 'delta', text: chunk.text.slice(0, limits.deltaChars) });
-            } else if (chunk.type === 'tool_call') requested.push(chunk.call);
+              if (typeof chunk.text !== 'string' || !chunk.text || !redactDelta && leaks(chunk.text)) continue;
+              const safe = redactDelta ? redactDelta(chunk.text) : chunk.text;
+              reply += safe; if (safe) emit({ ...base, type: 'delta', text: safe.slice(0, limits.deltaChars) });
+            } else if (chunk.type === 'tool_call') requested.push(clean(chunk.call));
             else if (chunk.type === 'done') done = chunk;
             else if (chunk.type === 'error') { done = null; reply = reply || ''; throw Object.assign(new Error('stream'), { streamMessage: chunk.message }); }
           }
         } catch (error) {
           if (interrupted(turn)) return finish(turn, false, stopMessage(turn), reported());
           if (reply.trim() && !leaks(reply)) { const m = message('assistant', reply); await store.put(turn.conversationId, m).catch(() => {}); emit({ ...base, type: 'message', message: publicMessage(m) }); }
-          if (error && typeof error === 'object' && 'streamMessage' in error) return finish(turn, false, shared.safeResultText(error.streamMessage) ?? MESSAGES.failed, reported());
+          if (error && typeof error === 'object' && 'streamMessage' in error) return finish(turn, false, shared.safeResultText(clean(error.streamMessage)) ?? MESSAGES.failed, reported());
           const failure = gatewayFailure(error);
           return finish(turn, false, MESSAGES[failure.key], reported(), failure.limit);
-        }
+        } finally { if (hold) { hold.settled = true; drain(); } }
         if (done) {
           usage.inputTokens += count(done.inputTokens); usage.outputTokens += count(done.outputTokens);
           if (typeof done.creditsUsed === 'number' && Number.isFinite(done.creditsUsed) && done.creditsUsed >= 0) usage.credits = (usage.credits ?? 0) + done.creditsUsed;
@@ -539,7 +644,7 @@ function createArcaneChat(options) {
         messages.push({ role: 'assistant', content: leaks(reply) ? '' : reply, toolCalls: requested.map(call => ({ id: call.id, name: call.name, arguments: call.arguments })) });
         for (const call of requested) {
           if (interrupted(turn)) return finish(turn, false, stopMessage(turn), reported());
-          const name = toolName(call.name), input = shared.toolDetail(call.arguments, secret);
+          const name = toolName(call.name), input = shared.toolDetail(clean(call.arguments), secret);
           const m = message('tool', name, { name, status: 'started', ...(input ? { input } : {}) });
           await store.put(turn.conversationId, m).catch(() => {});
           emit({ ...base, type: 'tool', message: publicMessage(m) });
@@ -548,9 +653,12 @@ function createArcaneChat(options) {
           else if (!tools.names.has(call.name)) content = 'Unknown tool: ' + name + '. Use only the tools offered.';
           else {
             try {
-              result = await tools.client.request('tools/call', { name: call.name, arguments: call.arguments }, limits.toolTimeoutMs);
+              if (interrupted(turn)) return finish(turn, false, stopMessage(turn), reported());
+              result = clean(await tools.client.request('tools/call', { name: call.name, arguments: clean(call.arguments) }, limits.toolTimeoutMs));
+              if (interrupted(turn)) return finish(turn, false, stopMessage(turn), reported());
               isError = result?.isError === true; content = toolResultText(result, secret, limits.toolResultChars);
             } catch {
+              if (turn.asset && turn.finished) return;
               if (interrupted(turn)) { m.tool = { ...shared.toolCopy(m.tool), status: 'failed' }; await store.put(turn.conversationId, { ...m }).catch(() => {}); emit({ ...base, type: 'tool', message: publicMessage(m) }); return finish(turn, false, stopMessage(turn), reported()); }
               content = 'The tool did not answer. It may still be running in Studio; check before repeating it.';
               if (tools.client.closed()) { m.tool = { ...shared.toolCopy(m.tool), status: 'failed' }; await store.put(turn.conversationId, { ...m }).catch(() => {}); emit({ ...base, type: 'tool', message: publicMessage(m) }); return finish(turn, false, MESSAGES.tools, reported()); }
@@ -560,7 +668,10 @@ function createArcaneChat(options) {
           m.tool = { ...shared.toolCopy(m.tool), status: isError ? 'failed' : 'finished', ...(detail ? { result: detail } : {}) };
           await store.put(turn.conversationId, { ...m, tool: shared.toolCopy(m.tool) }).catch(() => {});
           // Every offered tool is one of Arcane's own MCP server's; a capture rides on this live event only, bounded per reply.
-          const image = result && !isError && imagesShown < shared.TOOL_IMAGE_LIMITS.perTurn ? shared.toolResultImage(result.content) : null;
+          let image = result && !isError && imagesShown < shared.TOOL_IMAGE_LIMITS.perTurn ? shared.toolResultImage(result.content) : null;
+          if (image && turn.asset) {
+            try { const bytes = Buffer.from(image.slice(image.indexOf(',') + 1), 'base64'); if (secrets.some(secret => bytes.includes(Buffer.from(secret)))) image = null; } catch { image = null; }
+          }
           if (image) imagesShown++;
           emit({ ...base, type: 'tool', message: shared.withToolImage(publicMessage(m), image) });
           messages.push({ role: 'tool', toolCallId: call.id, content, ...(isError ? { isError: true } : {}) });
@@ -582,19 +693,28 @@ function createArcaneChat(options) {
     if (!messages) fail('missing');
     return Object.freeze({ conversationId, messages: messages.map(publicMessage) });
   }
-  function halt(turn) { turn.stopped = true; turn.controller.abort(); turn.mcp?.close(); }
+  function halt(turn, explicit = false) {
+    turn.stopped = true;
+    if (explicit && turn.asset?.context && !turn.asset.cancel) {
+      try { turn.asset.cancel = Promise.resolve(turn.asset.context.cancelWork('incarnation')); }
+      catch (error) { turn.asset.cancel = Promise.reject(error); }
+      void turn.asset.cancel.catch(() => {});
+    }
+    turn.controller.abort(); turn.mcp?.close();
+    if (turn.asset) void finish(turn, false, stopMessage(turn));
+  }
   function stop(turnId) {
     if (!isId(turnId)) fail('unavailable');
     const turn = turns.get(turnId);
     if (!turn || turn.finished) return Promise.resolve(false);
-    halt(turn);
+    halt(turn, true);
     return Promise.resolve(true);
   }
   async function remove(conversationId) {
     if (disposed) fail('unavailable');
     if (!isId(conversationId)) fail('unavailable');
     const turn = byConversation.get(conversationId);
-    if (turn) halt(turn);
+    if (turn) halt(turn, true);
     return store.remove(conversationId);
   }
   /** App quit / project switch: stop every turn, close its MCP child and revoke the credentials this host minted. */

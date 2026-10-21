@@ -373,7 +373,8 @@ test('preload exposes immutable identity and only the bounded Luau verification 
       return { contextBridge: { exposeInMainWorld(name, value) { assert.equal(name, 'arcaneDesktop'); exposed = value; } } };
     },
   });
-  assert.deepEqual(Object.keys(exposed).sort(), ['arcaneChat', 'billing', 'chatQueue', 'claudeChat', 'claudePreferences', 'codeVerification', 'conversationLibrary', 'dialogs', 'meshKeep', 'nativeHandoff', 'notifications', 'platform', 'projectPermissions', 'providerSetup', 'runtime', 'runtimeRecovery', 'setupChecklist', 'studioKeys', 'studioPlugin', 'toolDrafts', 'updates', 'version', 'welcomeTour', 'workspacePreferences', 'workspaceProject']);
+  assert.deepEqual(Object.keys(exposed).sort(), ['arcaneChat', 'billing', 'chatQueue', 'claudeChat', 'claudePreferences', 'codeVerification', 'conversationLibrary', 'dialogs', 'meshKeep', 'nativeHandoff', 'notifications', 'platform', 'projectPermissions', 'providerSetup', 'runtime', 'runtimeRecovery', 'selectAssetConversation', 'setupChecklist', 'studioKeys', 'studioPlugin', 'toolDrafts', 'updates', 'version', 'welcomeTour', 'workspacePreferences', 'workspaceProject']);
+  assert.equal(typeof exposed.selectAssetConversation, 'function');
   assert.equal(Object.isFrozen(exposed.conversationLibrary), true);
   assert.deepEqual(Object.keys(exposed.conversationLibrary).sort(), ['read', 'save', 'version']);
   assert.equal(exposed.conversationLibrary.version, 1);
@@ -454,8 +455,12 @@ function stopFixture(child) {
   const begin = mainSource.indexOf('async function stopDaemon()');
   const end = mainSource.indexOf('async function startDaemon(', begin);
   assert.ok(begin >= 0 && end > begin, 'Expected the named desktop shutdown boundary.');
-  const context = { child, token, origin, nativeHandoff: null, loginCancellations: 0, providerSetup: null, setTimeout: () => 1, clearTimeout() {}, retireDiagnosticChild() {} };
-  context.providerSetup = { cancelPending() { context.loginCancellations++; } };
+  const assetEvents = [];
+  const assets = { fence() { assetEvents.push('fence'); }, close() { assetEvents.push('close'); },
+    transportClosed() { assert.fail('Desktop shutdown cannot claim an app-provider child has closed.'); } };
+  const context = { child, token, origin, nativeHandoff: null, appAssets: assets, assetSelectionGeneration: 7, assetSelectionReady: true, assetEvents,
+    loginCancellations: 0, providerSetup: null, setTimeout: () => 1, clearTimeout() {}, retireDiagnosticChild() {} };
+  context.providerSetup = { cancelPending() { assert.deepEqual(assetEvents, ['fence'], 'asset admission is fenced before provider cancellation'); context.loginCancellations++; } };
   vm.createContext(context);
   vm.runInContext(mainSource.slice(begin, end) + '\nglobalThis.stopOwned = stopDaemon;', context);
   return context;
@@ -469,6 +474,8 @@ test('private stop revokes the host credential immediately and waits for the own
   const fixture = stopFixture(child);
   let settled = false;
   const stopped = fixture.stopOwned().then(clean => { settled = true; return clean; });
+  assert.equal(fixture.appAssets, null); assert.equal(fixture.assetSelectionReady, false); assert.equal(fixture.assetSelectionGeneration, 8);
+  assert.deepEqual(fixture.assetEvents, ['fence'], 'asset authority is fenced synchronously before daemon quiescence');
   await Promise.resolve();
   assert.equal(fixture.token, '');
   assert.equal(fixture.origin, '');
@@ -478,12 +485,14 @@ test('private stop revokes the host credential immediately and waits for the own
   child.exitCode = 0;
   child.emit('close', 0);
   assert.equal(await stopped, true);
+  assert.deepEqual(fixture.assetEvents, ['fence', 'close'], 'broker close follows the owned daemon close');
 });
 
 test('regression: an already failed owned child cannot count as clean quiescence', async () => {
   const fixture = stopFixture({ exitCode: 9, connected: false });
   assert.equal(await fixture.stopOwned(), false, 'Failed shutdown must not authorize a new project runtime.');
   assert.equal(fixture.loginCancellations, 1);
+  assert.deepEqual(fixture.assetEvents, ['fence', 'close'], 'failed child cleanup still fences and closes its exact private broker');
 });
 
 test('regression: post-idle shutdown fences fresh requests before awaiting child cleanup', async () => {
@@ -492,7 +501,7 @@ test('regression: post-idle shutdown fences fresh requests before awaiting child
   const end = labSource.indexOf('\n    }', begin);
   assert.ok(begin >= 0 && end > begin, 'Expected the connection lab lifecycle boundary.');
   const member = labSource.slice(begin, end + '\n    }'.length);
-  let release, appAssetsFenced = false, nativeAssetsFenced = false, taskAdmissionFenced = false, handoffsFenced = false;
+  let release, humanSelectionFenced = false, appAssetsFenced = false, nativeAssetsFenced = false, taskAdmissionFenced = false, handoffsFenced = false;
   const childCleanup = new Promise(resolve => { release = resolve; });
   const server = {
     accepting: true,
@@ -502,7 +511,8 @@ test('regression: post-idle shutdown fences fresh requests before awaiting child
   };
   const cleanup = vm.runInNewContext(stripTypeScriptTypes('let cleanup=null,shuttingDown=false; const fixture = { ' + member + ' }; fixture.close.bind(fixture);'), {
     server, workflow: null, modelReviews: null, associations: null, ownsAssociations: false, ArcaneError: Error,
-    appAssets: { close() { appAssetsFenced = true; } },
+    humanAssetSelection: { close() { humanSelectionFenced = true; } },
+    appAssets: { close() { assert.equal(humanSelectionFenced, true, 'human selection is fenced before private app admission'); appAssetsFenced = true; } },
     fenceTasks() { assert.equal(appAssetsFenced, true, 'Private app asset admission is fenced before task cleanup'); taskAdmissionFenced = true; return []; },
     handoffs: { close() { assert.equal(taskAdmissionFenced, true, 'Task admission is fenced before handoff retirement'); handoffsFenced = true; } },
     ownedTests: { lifecycle: { close: async () => { assert.equal(taskAdmissionFenced, true, 'Task admission is fenced before test terminal publication'); assert.equal(nativeAssetsFenced, true, 'Native authority is fenced before test cleanup'); assert.equal(handoffsFenced,true,'Handoff authority is fenced before test cleanup'); } } },
@@ -515,6 +525,7 @@ test('regression: post-idle shutdown fences fresh requests before awaiting child
   try {
     await Promise.resolve();
     assert.equal(server.accepting, false, 'A holder of the old agent bearer can currently open a fresh socket while shutdown waits.');
+    assert.equal(humanSelectionFenced, true, 'Shutdown invalidates human selection before awaiting child cleanup');
     assert.equal(taskAdmissionFenced, true, 'Shutdown fences tasks while child cleanup is still held');
     assert.equal(appAssetsFenced, true, 'Shutdown fences private app assets while child cleanup is still held');
     assert.equal(nativeAssetsFenced, true, 'Shutdown retires native authority while child cleanup is still held');

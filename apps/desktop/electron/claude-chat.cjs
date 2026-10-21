@@ -188,6 +188,7 @@ const isId = value => typeof value === 'string' && UUID.test(value);
 // long strings are replaced by their length. A detail that does not fit is omitted, never cut mid-JSON.
 const TOOL_DETAIL_CHARS = 4096, TOOL_TEXT_CHARS = 1024, BULKY_FIELDS = new Set(['source', 'expectedSource']);
 const CONTROL_ALL = /[\u0000-\u001f\u007f-\u009f‪-‮⁦-⁩]/gu;
+const containsSecret = (text, secret) => typeof text === 'string' && (Array.isArray(secret) ? secret : [secret]).some(value => typeof value === 'string' && value.length > 0 && text.includes(value));
 function toolDetail(value, secret) {
   try {
     let nodes = 0;
@@ -196,7 +197,7 @@ function toolDetail(value, secret) {
       if (typeof item === 'string' && (BULKY_FIELDS.has(key) || item.length > 512)) return '[' + item.length + ' characters]';
       return item;
     });
-    if (typeof text !== 'string' || text === '{}' || text.length > TOOL_DETAIL_CHARS || secret && text.includes(secret)) return null;
+    if (typeof text !== 'string' || text === '{}' || text.length > TOOL_DETAIL_CHARS || containsSecret(text, secret)) return null;
     return text;
   } catch { return null; }
 }
@@ -207,7 +208,7 @@ function toolResultDetail(content, secret) {
   if (!text || text.length > 4 * 1048576) return null;
   try { return toolDetail(JSON.parse(text), secret); } catch { /* plain text */ }
   const line = text.replace(CONTROL_ALL, ' ').replace(/\s+/g, ' ').trim().slice(0, TOOL_TEXT_CHARS);
-  return line && !(secret && line.includes(secret)) ? line : null;
+  return line && !containsSecret(line, secret) ? line : null;
 }
 /**
  * Display-only images an Arcane tool returned (a Studio viewport capture): image/png or image/jpeg only, canonical base64
@@ -219,7 +220,7 @@ function toolResultDetail(content, secret) {
 const TOOL_IMAGE_LIMITS = Object.freeze({ bytes: 1536 * 1024, perTurn: 4 });
 const TOOL_IMAGE_SIGNATURES = Object.freeze({ 'image/png': PNG_MAGIC, 'image/jpeg': Buffer.from([0xff, 0xd8, 0xff]) });
 const TOOL_IMAGE_CHARS = Math.ceil(TOOL_IMAGE_LIMITS.bytes / 3) * 4;
-function toolResultImage(content) {
+function toolResultImage(content, secret) {
   if (!Array.isArray(content)) return null;
   for (const block of content.slice(0, 64)) {
     if (!block || typeof block !== 'object' || block.type !== 'image') continue;
@@ -229,6 +230,7 @@ function toolResultImage(content) {
     if (typeof mime !== 'string' || !Object.hasOwn(TOOL_IMAGE_SIGNATURES, mime) || typeof data !== 'string' || !data || data.length > TOOL_IMAGE_CHARS || data.length % 4 || !BASE64.test(data)) continue;
     const bytes = Buffer.from(data, 'base64'), signature = TOOL_IMAGE_SIGNATURES[mime];
     if (bytes.length <= signature.length || bytes.length > TOOL_IMAGE_LIMITS.bytes || !bytes.subarray(0, signature.length).equals(signature) || bytes.toString('base64') !== data) continue;
+    if (containsSecret(data, secret) || (Array.isArray(secret) ? secret : [secret]).some(value => typeof value === 'string' && value.length > 0 && bytes.includes(Buffer.from(value)))) continue;
     return 'data:' + mime + ';base64,' + data;
   }
   return null;
@@ -572,6 +574,18 @@ function createClaudeChat(options) {
   const p = platform === 'win32' ? nativePath.win32 : nativePath.posix;
   const env = { ...(options.env ?? process.env) }, home = options.homedir ?? (() => os.homedir()), now = options.now ?? (() => Date.now());
   const randomUUID = options.randomUUID ?? nativeUUID, handoff = options.handoff;
+  // Main supplies this fixed-provider closure for its exact owned daemon/project
+  // epoch. Neither the port nor its authority is accepted from renderer input.
+  let appAssets = null;
+  if (options.appAssets !== undefined) {
+    const offered = options.appAssets;
+    if (!offered || typeof offered !== 'object' || types.isProxy(offered)) fail('unavailable');
+    const issue = Object.getOwnPropertyDescriptor(offered, 'issue'), current = Object.getOwnPropertyDescriptor(offered, 'isCurrent');
+    if (!issue || !Object.hasOwn(issue, 'value') || typeof issue.value !== 'function' ||
+        !current || !Object.hasOwn(current, 'value') || typeof current.value !== 'function') fail('unavailable');
+    appAssets = Object.freeze({ issue: input => issue.value.call(offered, input), isCurrent: () => current.value.call(offered) });
+  }
+  const assetConnectionId = appAssets ? randomUUID() : null, assetOwners = new Set();
   const limits = Object.freeze({ ...LIMITS, ...(options.limits ?? {}) });
   const projectPath = options.projectPath;
   const store = createStore({ fs, p, directory: options.stateDirectory, now, limits });
@@ -589,6 +603,105 @@ function createClaudeChat(options) {
       if (!window || window.isDestroyed?.() || !window.webContents || window.webContents.isDestroyed?.()) return;
       window.webContents.send(EVENT_CHANNEL, event);
     } catch { /* A closed renderer misses the event; the transcript keeps it. */ }
+  }
+  function assetsCurrent() { try { return !appAssets || appAssets.isCurrent() === true; } catch { return false; } }
+  function assetLive(turn) {
+    return !turn.finished && !turn.stopped && !disposed && !turn.result && !turn.limit && !turn.failure &&
+      !turn.timedOut && !turn.overflow && !turn.studioOffline && !turn.assets?.retired &&
+      turns.get(turn.turnId) === turn && byConversation.get(turn.conversationId) === turn && assetsCurrent();
+  }
+  function outputLive(turn) {
+    if (turn.finished) return false;
+    if (!turn.assets) return true;
+    const live = !turn.stopped && !disposed && !turn.assets.retired && assetsCurrent() &&
+      turns.get(turn.turnId) === turn && byConversation.get(turn.conversationId) === turn;
+    if (!live) turn.deltaCarry = '';
+    return live;
+  }
+  function assetContext(value) {
+    if (!value || typeof value !== 'object' || types.isProxy(value)) fail('unavailable');
+    const captured = {};
+    for (const name of ['launchEnvironment', 'bind', 'grantNextIntent', 'dispatched', 'ended', 'cancelWork', 'retire', 'transportClosed']) {
+      const d = Object.getOwnPropertyDescriptor(value, name);
+      if (!d || !Object.hasOwn(d, 'value') || typeof d.value !== 'function') fail('unavailable');
+      captured[name] = (...args) => d.value.apply(value, args);
+    }
+    return Object.freeze(captured);
+  }
+  // Cleanup remains independent of logical finish and never blocks or retries
+  // the user's turn. Actual broker calls are bounded and keep unknown receipts.
+  function cleanupAssets(a) {
+    if (!a) return;
+    if (a.closed && a.turn.finished) { a.secret = null; a.turn.redactions = []; a.turn.deltaCarry = ''; }
+    if (!a.context) return;
+    const call = (flag, method, args = []) => {
+      if (a[flag]) return; a[flag] = true;
+      try { void Promise.resolve(a.context[method](...args)).catch(() => {}); } catch { /* Unknown cleanup; never repeat. */ }
+    };
+    if (a.stop) call('cancelSent', 'cancelWork', ['incarnation']);
+    if (a.retired && a.dispatchAttempted) call('endSent', 'ended', [a.turn.turnId]);
+    if (a.retired) call('retireSent', 'retire');
+    if (a.closed) { call('closeSent', 'transportClosed'); assetOwners.delete(a); }
+  }
+  function retireAssets(turn, { stop = false, noChild = false, closed = false } = {}) {
+    const a = turn.assets; if (!a) return;
+    a.retired = true; a.stop ||= stop; turn.deltaCarry = '';
+    // Callers supply noChild only before a launch attempt, or after synchronous
+    // spawn refusal. A kill, result, error or timeout is never transport closure.
+    a.closed ||= closed || noChild;
+    a.abortLaunch?.(); cleanupAssets(a);
+  }
+  async function issueAssets(turn) {
+    if (!appAssets) return;
+    if (!assetLive(turn) || assetOwners.size >= 128) fail('unavailable');
+    const a = { turn, context: null, child: null, retired: false, closed: false, stop: false,
+      dispatchAttempted: false, spawnAttempted: false, spawned: false, inputSent: false, abortLaunch: null };
+    turn.assets = a; assetOwners.add(a);
+    try {
+      const value = await appAssets.issue({ conversationId: turn.conversationId, connectionId: assetConnectionId });
+      a.context = assetContext(value);
+      if (!assetLive(turn)) { retireAssets(turn, { noChild: true }); fail('unavailable'); }
+      const overlay = a.context.launchEnvironment();
+      if (!overlay || typeof overlay !== 'object' || types.isProxy(overlay)) fail('unavailable');
+      const d = Object.getOwnPropertyDescriptor(overlay, 'ARCANE_ASSET_TOKEN');
+      if (!d || !Object.hasOwn(d, 'value') || d.enumerable || typeof d.value !== 'string' || !/^[a-f0-9]{64}$/.test(d.value)) fail('unavailable');
+      a.secret = d.value; turn.redactions.push(d.value);
+    } catch (error) {
+      // A rejected/unknown issue is never repeated. The broker owns its missing
+      // issue cleanup; a received context that never launched can be closed.
+      a.retired = true; a.closed = true; cleanupAssets(a); assetOwners.delete(a); throw error;
+    }
+  }
+  function assertAssetLive(turn) { if (!assetLive(turn)) fail('unavailable'); }
+  function spawnWitness(turn, child) {
+    const a = turn.assets;
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const settle = ok => {
+        if (settled) return; settled = true;
+        child.removeListener('spawn', ready); child.removeListener('error', refused); child.removeListener('close', refused);
+        a.abortLaunch = null; if (ok) resolve(); else reject(new ClaudeChatError('unavailable'));
+      };
+      const ready = () => { a.spawned = true; settle(true); }, refused = () => settle(false);
+      a.abortLaunch = refused;
+      child.once('spawn', ready); child.once('error', refused); child.once('close', refused);
+    });
+  }
+  function deltaText(turn, text) {
+    if (!outputLive(turn)) return;
+    const base = { turnId: turn.turnId, conversationId: turn.conversationId, type: 'delta' };
+    if (!turn.assets) { if (text && !containsSecret(text, turn.redactions)) emit({ ...base, text }); return; }
+    // Assistant/result boundaries do not make a possible bearer prefix safe.
+    // Retain that suffix across boundaries; retirement discards an unresolved
+    // prefix instead of publishing fragments that later events could complete.
+    let pending = turn.deltaCarry + text;
+    for (const secret of [...turn.redactions].sort((a, b) => b.length - a.length)) pending = pending.replaceAll(secret, '[redacted]');
+    let keep = 0;
+    for (const secret of turn.redactions) for (let n = 1; n < secret.length && n <= pending.length; n++)
+      if (pending.endsWith(secret.slice(0, n))) keep = Math.max(keep, n);
+    const length = Math.max(0, pending.length - keep), safe = pending.slice(0, length);
+    turn.deltaCarry = pending.slice(length);
+    if (safe) emit({ ...base, text: safe });
   }
   function nativeEnvironment() {
     const output = {};
@@ -816,7 +929,7 @@ function createClaudeChat(options) {
     if (byConversation.has(conversationId)) fail('busy');
     if (turns.size >= limits.turns) fail('full');
     const turn = { turnId: randomUUID(), conversationId, model: v.model, effort: v.effort, child: null, stopped: false, finished: false, timer: null,
-      sessionId: entry?.sessionId ?? null, credential: null, result: null, tools: new Map(), arcaneCalls: new Set(), toolImages: 0, overflow: false, limit: null, seed: '', images: v.images ?? [], playtest: v.playtest };
+      sessionId: entry?.sessionId ?? null, credential: null, redactions: [], deltaCarry: '', assets: null, result: null, tools: new Map(), arcaneCalls: new Set(), toolImages: 0, overflow: false, limit: null, seed: '', images: v.images ?? [], playtest: v.playtest };
     turns.set(turn.turnId, turn); byConversation.set(conversationId, turn);
     let user = null;
     try {
@@ -856,7 +969,10 @@ function createClaudeChat(options) {
   }
 
   async function finish(turn, ok, error, usage = null, limit = null) {
-    if (turn.finished) return; turn.finished = true;
+    if (turn.finished) return;
+    if (containsSecret(error, turn.redactions)) error = MESSAGES.failed;
+    turn.finished = true;
+    retireAssets(turn, { noChild: !!turn.assets && !turn.assets.spawnAttempted });
     clearTimeout(turn.timer); releaseCredential(turn.credential); turn.credential = null;
     if (!ok) statusCache = null; // the next turn re-reads native sign-in status
     try {
@@ -881,12 +997,14 @@ function createClaudeChat(options) {
       turn.credential = await acquireCredential(turn.model, turn.effort);
       if (turn.stopped || disposed) return finish(turn, false, disposed ? closedMessage() : MESSAGES.stopped);
       if (!turn.credential) return finish(turn, false, MESSAGES.credential);
+      turn.redactions.push(turn.credential.env.ARCANE_LOCAL_TOKEN);
       // Stable system prompt (cacheable across turns); the per-turn Playtest note goes on the user message.
       // ARCANE.md rides after the static instructions, so the prompt stays byte-identical until that file changes.
       const prompt = (await loadInstructions()) + projectMemorySection(await loadProjectMemory()) + learnedPreferenceSection(await loadLearned()), input = text + playtestNote(turn.playtest);
       if (turn.stopped || disposed) return finish(turn, false, disposed ? closedMessage() : MESSAGES.stopped);
       // Every turn sends its message as one stream-json user message (PNG references first) and keeps stdin open until the
       // turn's result, so steering messages can join the running turn (steer). Ending stdin then lets Claude Code exit.
+      if (appAssets) { await issueAssets(turn); assertAssetLive(turn); }
       const images = turn.images; turn.images = [];
       const args = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
         // Only the user's own Claude Code settings load: a project's .claude/settings*.json (hooks, apiKeyHelper, env such as
@@ -894,15 +1012,26 @@ function createClaudeChat(options) {
         '--mcp-config', turn.credential.configPath, '--strict-mcp-config', '--setting-sources', 'user', '--model', turn.model, '--effort', turn.effort,
         '--permission-mode', 'default', '--tools', '', '--allowedTools', 'mcp__' + MCP_SERVER, '--append-system-prompt', prompt,
         ...(turn.sessionId ? ['--resume', turn.sessionId] : [])];
-      if (args.some(value => value.includes(turn.credential.env.ARCANE_LOCAL_TOKEN))) return finish(turn, false, MESSAGES.start);
+      if (args.some(value => containsSecret(value, turn.redactions))) return finish(turn, false, MESSAGES.start);
       let child;
+      const childEnv = { ...nativeEnvironment(), ...turn.credential.env };
+      if (turn.assets) {
+        assertAssetLive(turn);
+        // Explicit final consumption: spreading the launch overlay omits its
+        // hidden secret. Config/argv/transcripts never receive this bearer.
+        childEnv.ARCANE_ASSET_TOKEN = turn.assets.secret;
+        childEnv.ARCANE_ASSET_AUDIENCE = 'native-session';
+        turn.assets.spawnAttempted = true;
+      }
       try {
-        child = spawn(command, args, { cwd: projectPath, env: { ...nativeEnvironment(), ...turn.credential.env }, shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
-      } catch { return finish(turn, false, MESSAGES.start); }
+        child = spawn(command, args, { cwd: projectPath, env: childEnv, shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+      } catch { retireAssets(turn, { noChild: true }); return finish(turn, false, MESSAGES.start); }
       turn.child = child;
+      if (turn.assets) turn.assets.child = child;
+      const spawned = turn.assets ? spawnWitness(turn, child) : null;
       // A reply is also bounded by its credential's remaining lifetime, so its tools never expire mid-reply.
       const budget = Math.max(1000, Math.min(limits.turnTimeoutMs, remainingMs(turn.credential) - limits.credentialSlackMs));
-      turn.timer = setTimeout(() => { if (!turn.finished) { turn.timedOut = true; killTree(child); } }, budget);
+      turn.timer = setTimeout(() => { if (!turn.finished) { turn.timedOut = true; retireAssets(turn); killTree(child); } }, budget);
       let pending = [], pendingBytes = 0, skipping = false, total = 0;
       const line = buffer => {
         if (!buffer.length) return;
@@ -911,10 +1040,10 @@ function createClaudeChat(options) {
         try { handle(turn, value); } catch { /* unknown shapes are ignored */ }
       };
       child.stdout.on('data', data => {
-        if (turn.finished) return;
+        if (!outputLive(turn)) return;
         let chunk = Buffer.isBuffer(data) ? data : Buffer.from(data);
         total += chunk.length;
-        if (total > limits.stdoutBytes) { turn.overflow = true; killTree(child); return; }
+        if (total > limits.stdoutBytes) { turn.overflow = true; retireAssets(turn); killTree(child); return; }
         for (let at = chunk.indexOf(10); at >= 0; at = chunk.indexOf(10)) {
           const head = chunk.subarray(0, at); chunk = chunk.subarray(at + 1);
           if (!skipping && pendingBytes + head.length <= limits.lineBytes) line(Buffer.concat([...pending, head]));
@@ -927,12 +1056,14 @@ function createClaudeChat(options) {
       // stderr may contain account details or secrets: it is drained and discarded, never stored or forwarded.
       child.stderr.on('data', () => {});
       for (const stream of [child.stdout, child.stderr]) stream?.on?.('error', () => {});
-      child.stdin.on('error', () => { turn.inputOpen = false; });
-      child.once('error', () => { void finish(turn, false, turn.stopped ? MESSAGES.stopped : MESSAGES.start); });
+      child.stdin.on('error', () => { turn.inputOpen = false; retireAssets(turn); });
+      child.once('error', () => { retireAssets(turn); if (turn.assets) killTree(child); void finish(turn, false, turn.stopped ? MESSAGES.stopped : MESSAGES.start); });
       child.once('close', code => {
         turn.inputOpen = false;
-        if (!skipping && pending.length) line(Buffer.concat(pending));
+        if (!turn.finished && !skipping && pending.length) line(Buffer.concat(pending));
         pending = [];
+        if (!turn.finished) deltaText(turn, '');
+        retireAssets(turn, { closed: true });
         const r = turn.result;
         if (turn.stopped) return void finish(turn, false, disposed ? closedMessage() : MESSAGES.stopped, r?.usage ?? null);
         // Studio went offline: the turn was stopped at the first refused command so no more commands are issued.
@@ -948,15 +1079,29 @@ function createClaudeChat(options) {
         if (r) return void finish(turn, false, safeResultText(r.text) ?? MESSAGES.failed, r.usage);
         void finish(turn, false, code === 0 ? MESSAGES.noReply : MESSAGES.exited);
       });
+      if (spawned) {
+        await spawned; assertAssetLive(turn);
+        await turn.assets.context.bind({ kind: 'claude-code-process', incarnationId: randomUUID(), nativeSessionId: null });
+        assertAssetLive(turn);
+        await turn.assets.context.grantNextIntent(); assertAssetLive(turn);
+        turn.assets.dispatchAttempted = true;
+        await turn.assets.context.dispatched(turn.turnId); assertAssetLive(turn);
+        turn.assets.inputSent = true;
+      }
       turn.inputOpen = true;
       child.stdin.write(streamJsonMessage(images, input), 'utf8');
-    } catch { await finish(turn, false, MESSAGES.failed); }
+    } catch {
+      retireAssets(turn, { noChild: !!turn.assets && !turn.assets.spawnAttempted });
+      if (turn.assets && !turn.finished && !turn.stopped) killTree(turn.child);
+      await finish(turn, false, disposed ? closedMessage() : turn.stopped ? MESSAGES.stopped : turn.assets && !turn.assets.inputSent ? MESSAGES.credential : MESSAGES.failed);
+    }
   }
 
   /** Stream-json events observed from Claude Code 2.1.301; anything else is ignored. */
   function handle(turn, event) {
+    if (!outputLive(turn)) return;
     const base = { turnId: turn.turnId, conversationId: turn.conversationId };
-    const secret = turn.credential?.env?.ARCANE_LOCAL_TOKEN, leaksToken = text => typeof secret === 'string' && secret.length > 0 && text.includes(secret);
+    const leaksToken = text => containsSecret(text, turn.redactions);
     if (isId(event.session_id) && (event.type === 'system' && event.subtype === 'init' || event.type === 'result') && turn.sessionId !== event.session_id) {
       turn.sessionId = event.session_id;
       void store.update(turn.conversationId, { sessionId: turn.sessionId, rewound: false }).catch(() => {});
@@ -976,17 +1121,18 @@ function createClaudeChat(options) {
     if (event.type === 'assistant' && typeof event.error === 'string' && !turn.failure) turn.failure = providerFailure(null, '', event.error);
     if (event.type === 'stream_event') {
       const e = event.event;
-      if (e?.type === 'content_block_delta' && e.delta?.type === 'text_delta' && typeof e.delta.text === 'string' && e.delta.text && !leaksToken(e.delta.text))
-        emit({ ...base, type: 'delta', text: e.delta.text.slice(0, limits.deltaChars) });
+      if (e?.type === 'content_block_delta' && e.delta?.type === 'text_delta' && typeof e.delta.text === 'string' && e.delta.text)
+        deltaText(turn, e.delta.text.slice(0, limits.deltaChars));
     } else if (event.type === 'assistant' && Array.isArray(event.message?.content)) {
       for (const block of event.message.content.slice(0, 256)) {
         if (block?.type === 'text' && typeof block.text === 'string' && block.text.trim()) {
-          if (leaksToken(block.text)) continue; // a reply that echoes the project credential is never shown or stored
+          deltaText(turn, ''); // a native message boundary cannot release a possible bearer prefix
+          if (leaksToken(block.text)) continue; // neither scoped bearer is ever shown or stored
           const m = {...message('assistant', block.text),...(turn.delivery?{delivery:{...turn.delivery,state:'completed',finishedAt:isoNow(now)}}:{})};
           void store.put(turn.conversationId, m).catch(() => {});
           emit({ ...base, type: 'message', message: publicMessage(m) });
         } else if (block?.type === 'tool_use' && typeof block.name === 'string' && typeof block.id === 'string' && block.id.length <= 256 && !turn.tools.has(block.id) && turn.tools.size < 4096) {
-          const name = toolName(block.name), input = toolDetail(block.input, turn.credential?.env?.ARCANE_LOCAL_TOKEN);
+          const name = leaksToken(block.name) ? 'Tool' : toolName(block.name), input = toolDetail(block.input, turn.redactions);
           const m = message('tool', name, { name, status: 'started', ...(input ? { input } : {}) });
           turn.tools.set(block.id, m);
           if (block.name.startsWith('mcp__' + MCP_SERVER + '__')) turn.arcaneCalls.add(block.id);
@@ -998,12 +1144,12 @@ function createClaudeChat(options) {
       for (const block of event.message.content.slice(0, 256)) {
         const m = block?.type === 'tool_result' ? turn.tools.get(block.tool_use_id) : undefined;
         if (!m || m.tool.status !== 'started') continue;
-        const result = toolResultDetail(block.content, turn.credential?.env?.ARCANE_LOCAL_TOKEN);
+        const result = toolResultDetail(block.content, turn.redactions);
         m.tool = { ...toolCopy(m.tool), status: block.is_error === true ? 'failed' : 'finished', ...(result ? { result } : {}) };
-        if (block.is_error === true && !turn.studioOffline && studioOfflineResult(block.content)) { turn.studioOffline = true; killTree(turn.child); }
+        if (block.is_error === true && !turn.studioOffline && studioOfflineResult(block.content)) { turn.studioOffline = true; retireAssets(turn); killTree(turn.child); }
         void store.put(turn.conversationId, { ...m, tool: toolCopy(m.tool) }).catch(() => {});
         // A capture from Arcane's own MCP server rides on this live event only (bounded per reply); the store keeps none.
-        const image = block.is_error !== true && turn.arcaneCalls.has(block.tool_use_id) && turn.toolImages < TOOL_IMAGE_LIMITS.perTurn ? toolResultImage(block.content) : null;
+        const image = block.is_error !== true && turn.arcaneCalls.has(block.tool_use_id) && turn.toolImages < TOOL_IMAGE_LIMITS.perTurn ? toolResultImage(block.content, turn.redactions) : null;
         if (image) turn.toolImages++;
         emit({ ...base, type: 'tool', message: withToolImage(publicMessage(m), image) });
       }
@@ -1015,12 +1161,13 @@ function createClaudeChat(options) {
       // the last result, its tokens are the sum, and its cost is the last (Claude Code reports the process total).
       const before = turn.result?.usage ?? null;
       const usage = u ? { inputTokens: count(u.input_tokens) + count(u.cache_creation_input_tokens) + count(u.cache_read_input_tokens), outputTokens: count(u.output_tokens), costUsd: cost } : null;
-      turn.result = { isError: event.is_error === true || event.subtype !== 'success', text: event.result,
+      turn.result = { isError: event.is_error === true || event.subtype !== 'success', text: leaksToken(event.result) ? null : event.result,
         status: Number.isInteger(event.api_error_status) ? event.api_error_status : null,
         // Structured reset times win: the result's epoch, then the rejected rate_limit_event, then the sentence's clock time.
         limit: limit ? limitOf(limit.resetsAt ?? turn.limit?.resetsAt ?? limit.parsed ?? null, limit.window ?? turn.limit?.window ?? null) : null,
         usage: before && usage ? { inputTokens: before.inputTokens + usage.inputTokens, outputTokens: before.outputTokens + usage.outputTokens, costUsd: usage.costUsd ?? before.costUsd } : usage ?? before };
       // The turn is over: no more steering. Messages Claude Code already holds still run before it exits.
+      deltaText(turn, '');
       closeInput(turn);
     }
   }
@@ -1041,6 +1188,7 @@ function createClaudeChat(options) {
     const v = steerInput(input);
     const turn = turns.get(v.turnId);
     if (!turn || turn.finished || turn.stopped || !turn.inputOpen || !turn.child || turn.result || turn.limit) return false;
+    if (appAssets) assertAssetLive(turn);
     const m = { ...message('user', v.text), steered: true };
     // Start the write before awaiting. A successful callback confirms the pipe accepted it, not that the CLI acted on it.
     // An attempted write that fails has an uncertain outcome: reject instead of returning false (which queues a resend).
@@ -1058,6 +1206,7 @@ function createClaudeChat(options) {
       try { stream.write(steerJsonMessage(v.text, m.id), 'utf8', error => settle(!error)); } catch { settle(false); }
     });
     try { await store.put(turn.conversationId, m); } catch { /* The pipe accepted it; do not send it twice. */ }
+    if (appAssets) assertAssetLive(turn); // accepted pipe text is never replayed after an epoch change
     return Object.freeze({ messageId: m.id });
   }
 
@@ -1078,20 +1227,23 @@ function createClaudeChat(options) {
     if (!isId(turnId)) fail('unavailable');
     const turn = turns.get(turnId);
     if (!turn || turn.finished) return Promise.resolve(false);
-    turn.stopped = true; turn.inputOpen = false; killTree(turn.child);
+    turn.stopped = true; turn.inputOpen = false; retireAssets(turn, { stop: true, noChild: !!turn.assets && !turn.assets.spawnAttempted }); killTree(turn.child);
     return Promise.resolve(true);
   }
   async function remove(conversationId) {
     if (disposed) fail('unavailable');
     if (!isId(conversationId)) fail('unavailable');
     const turn = byConversation.get(conversationId);
-    if (turn) { turn.stopped = true; killTree(turn.child); }
+    if (turn) { turn.stopped = true; retireAssets(turn, { noChild: !!turn.assets && !turn.assets.spawnAttempted }); killTree(turn.child); }
     return store.remove(conversationId);
   }
   /** App quit / project switch: stop every turn this host spawned and revoke the credentials it minted. */
   async function dispose(reason) {
     if (disposed) return; disposed = true; disposeReason = reason === 'interrupted' ? 'interrupted' : null;
-    for (const turn of turns.values()) { turn.stopped = true; killTree(turn.child); }
+    for (const turn of turns.values()) { turn.stopped = true; retireAssets(turn, { noChild: !!turn.assets && !turn.assets.spawnAttempted }); killTree(turn.child); }
+    // A logical error may already have removed a still-owned physical child
+    // from turns. Keep those lifetime observers until actual close too.
+    for (const a of assetOwners) if (turns.get(a.turn.turnId) !== a.turn) { retireAssets(a.turn, { noChild: !a.spawnAttempted }); killTree(a.child); }
     const owned = [...credentials]; credential = null;
     for (const c of owned) c.retired = true;
     await Promise.all(owned.map(retire));

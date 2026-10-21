@@ -882,4 +882,25 @@ const runtimeRecovery = Object.freeze({ version: 1,
   onState: listener => recoveryListen('arcane:runtime-recovery-state', listener),
   onCheckpoint: listener => recoveryListen('arcane:runtime-recovery-checkpoint', listener, true),
 });
-contextBridge.exposeInMainWorld('arcaneDesktop', Object.freeze({ version: '0.1.0', platform: 'win32', runtime: 'desktop', codeVerification, providerSetup, nativeHandoff, studioKeys, conversationLibrary, chatQueue, workspacePreferences, claudePreferences, toolDrafts, welcomeTour, setupChecklist, claudeChat, arcaneChat, studioPlugin, workspaceProject, dialogs, projectPermissions, billing, notifications, meshKeep, updates, runtimeRecovery }));
+// This selects human review context only; it never grants a model permission.
+const selectAssetConversation = async (...args) => {
+  try {
+    if (args.length !== 1) throw new Error();
+    const value = args[0]; let selection = null;
+    if (value !== null) {
+      const provider = value && typeof value === 'object' ? Object.getOwnPropertyDescriptor(value, 'provider') : null;
+      if (!provider || !Object.hasOwn(provider, 'value')) throw new Error();
+      if (provider.value === 'codex') { handoffFields(value, ['provider']); selection = { provider: 'codex' }; }
+      else {
+        handoffFields(value, ['provider', 'conversationId']);
+        if (!['claude-code', 'arcane'].includes(provider.value) || typeof value.conversationId !== 'string' ||
+            !/^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}(?![\s\S])/.test(value.conversationId)) throw new Error();
+        selection = { provider: provider.value, conversationId: value.conversationId };
+      }
+    }
+    const reply = handoffFields(await ipcRenderer.invoke('arcane:asset-conversation-select', selection), ['state']);
+    if (reply.state !== 'selected' && reply.state !== 'unavailable') throw new Error();
+    return { state: reply.state };
+  } catch { throw new Error('Model review conversation is unavailable.'); }
+};
+contextBridge.exposeInMainWorld('arcaneDesktop', Object.freeze({ version: '0.1.0', platform: 'win32', runtime: 'desktop', selectAssetConversation, codeVerification, providerSetup, nativeHandoff, studioKeys, conversationLibrary, chatQueue, workspacePreferences, claudePreferences, toolDrafts, welcomeTour, setupChecklist, claudeChat, arcaneChat, studioPlugin, workspaceProject, dialogs, projectPermissions, billing, notifications, meshKeep, updates, runtimeRecovery }));

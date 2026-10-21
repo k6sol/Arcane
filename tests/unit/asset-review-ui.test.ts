@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { AssetReviewApi, AssetReviewCard, AssetReviewRequestError, readAssetReviewStatus } from '../../apps/desktop/src/asset-review.js';
+import { AssetReviewApi, AssetReviewCard, AssetReviewRequestError, readAssetReviewStatus, installAssetReviewSelection } from '../../apps/desktop/src/asset-review.js';
 import { LearningDocument, learningTick } from './learning-ui-fixture.js';
 const JOB = '11111111-1111-4111-8111-111111111111', REVIEW = '22222222-2222-4222-8222-222222222222';
+const WITNESS = '88888888-8888-4888-8888-888888888888';
 const KEY = '33333333-3333-4333-8333-333333333333', TOKEN = 'a'.repeat(64), ORIGIN = 'http://127.0.0.1:32123';
 const viewed = { jobId: JOB, sha256: 'd'.repeat(64), bytes: 256 };
 const canonical = (value: any): string => Array.isArray(value) ? '[' + value.map(canonical).join(',') + ']' : value && typeof value === 'object' ?
@@ -15,7 +16,7 @@ function status(change: (subject: any) => void = () => {}) {
   change(subject);
   const subjectDigest = createHash('sha256').update(canonical(subject)).digest('hex');
   const review = { reviewId: REVIEW, subject, subjectDigest, status: 'pending', revision: 0, preparedAt: '2026-10-19T00:00:00.000Z', decidedAt: null };
-  return { subject, subjectDigest, review, retry: false };
+  return { subject, subjectDigest, review, openWitness: WITNESS, retry: false };
 }
 
 test('recorded model decisions emit the exact verified job; mismatched receipts emit no learning event', async t => {
@@ -81,7 +82,7 @@ test('unknown decision acknowledgements are classified without any transport rep
     () => Promise.resolve(new Response('{}', { headers: { 'Content-Type': 'application/json', 'Content-Length': '999999' } })),
   ]) {
     let calls = 0; const api = new AssetReviewApi(TOKEN, ORIGIN, () => ORIGIN, async () => { calls++; return make(); });
-    await assert.rejects(api.request('decide', { reviewId: REVIEW, decision: 'approved', idempotencyKey: KEY }, new AbortController().signal),
+    await assert.rejects(api.request('decide', { reviewId: REVIEW, decision: 'approved', idempotencyKey: KEY, openWitness: WITNESS }, new AbortController().signal),
       (e: unknown) => e instanceof AssetReviewRequestError && e.unknownOutcome && !/PRIVATE/.test(e.message));
     assert.equal(calls, 1);
   }
@@ -90,9 +91,9 @@ test('client decision and observation routes reject caller hashes, targets and e
   let calls = 0;
   const api = new AssetReviewApi(TOKEN, ORIGIN, () => ORIGIN, async () => { calls++; return Response.json({}); });
   for (const body of [
-    { reviewId: REVIEW, decision: 'approved', idempotencyKey: KEY, sha256: viewed.sha256 },
-    { reviewId: REVIEW, decision: 'approved', idempotencyKey: KEY, target: 'Studio' },
-    { jobId: JOB }, { reviewId: REVIEW, decision: 'approve', idempotencyKey: KEY },
+    { reviewId: REVIEW, decision: 'approved', idempotencyKey: KEY, openWitness: WITNESS, sha256: viewed.sha256 },
+    { reviewId: REVIEW, decision: 'approved', idempotencyKey: KEY, openWitness: WITNESS, target: 'Studio' },
+    { jobId: JOB }, { reviewId: REVIEW, decision: 'approve', idempotencyKey: KEY, openWitness: WITNESS },
   ]) await assert.rejects(api.request('decide', body as any, new AbortController().signal));
   await assert.rejects(api.request('../start' as any, { jobId: JOB }, new AbortController().signal));
   await assert.rejects(api.request('status', { jobId: JOB, subjectDigest: viewed.sha256 } as any, new AbortController().signal));
@@ -101,13 +102,100 @@ test('client decision and observation routes reject caller hashes, targets and e
 test('decision timeout aborts the original request, and receipt/status reads never replay it', async () => {
   let signal: AbortSignal | undefined, calls = 0;
   const api = new AssetReviewApi(TOKEN, ORIGIN, () => ORIGIN, async (_path, init) => { calls++; signal = init!.signal!; return new Promise<Response>(() => {}); }, 10);
-  await assert.rejects(api.request('decide', { reviewId: REVIEW, decision: 'rejected', idempotencyKey: KEY }, new AbortController().signal),
+  await assert.rejects(api.request('decide', { reviewId: REVIEW, decision: 'rejected', idempotencyKey: KEY, openWitness: WITNESS }, new AbortController().signal),
     (e: unknown) => e instanceof AssetReviewRequestError && e.unknownOutcome);
   assert.equal(signal!.aborted, true); assert.equal(calls, 1);
   const seen: string[] = [], reads = new AssetReviewApi(TOKEN, ORIGIN, () => ORIGIN, async (path, init) => { seen.push(String(path)); assert.equal(init!.method, 'POST'); return Response.json({}); });
   await reads.request('receipt', { reviewId: REVIEW, idempotencyKey: KEY }, new AbortController().signal);
   await reads.request('status', { jobId: JOB }, new AbortController().signal);
   assert.deepEqual(seen, ['/v1/assets/review/receipt', '/v1/assets/review/status']);
+});
+
+test('review open witnesses are exact server values and status alone cannot enable decisions', async t => {
+  for (const openWitness of [undefined, '', '../open', 'a'.repeat(64), 1]) {
+    await assert.rejects(readAssetReviewStatus({ ...status(), openWitness }, viewed));
+  }
+  const observation = { ...status(), openWitness: null };
+  assert.equal((await readAssetReviewStatus(observation, viewed)).openWitness, null);
+  await assert.rejects(readAssetReviewStatus({ ...status(), review: null }, viewed));
+  const doc = new LearningDocument(ORIGIN), calls: string[] = [];
+  const card = new AssetReviewCard(doc.asDocument(), TOKEN, { tokenOrigin: ORIGIN, transport: async path => {
+    calls.push(String(path)); return Response.json(observation);
+  } });
+  t.after(() => card.clear());
+  await card.show(doc.root as unknown as HTMLElement, viewed, new AbortController().signal, () => true);
+  for (const label of ['Approve model', 'Reject model']) {
+    const button = doc.root.querySelectorAll('button').find(node => node.textContent === label)!;
+    assert.equal(button.disabled, true); button.trustedClick();
+  }
+  assert.deepEqual(calls, ['/v1/assets/review/prepare']);
+});
+
+test('review waits for the current parent selection and drops a held opening on chat change', { timeout: 5000 }, async t => {
+  const doc = new LearningDocument(ORIGIN), calls: string[] = [];
+  let release!: (lease: () => boolean) => void, invalidate: (() => void) | null = null, live = true;
+  const ready = new Promise<() => boolean>(resolve => { release = resolve; });
+  const unbind = installAssetReviewSelection(doc.asDocument(), { ready: () => ready, subscribeInvalidate: listener => {
+    invalidate = listener; return () => { invalidate = null; };
+  } });
+  const card = new AssetReviewCard(doc.asDocument(), TOKEN, { tokenOrigin: ORIGIN, transport: async path => {
+    calls.push(String(path)); return Response.json(status());
+  } });
+  t.after(() => { card.clear(); unbind(); });
+  const opening = card.show(doc.root as unknown as HTMLElement, viewed, new AbortController().signal, () => true);
+  assert.deepEqual(calls, []); assert.equal(doc.root.querySelectorAll('button')[0]!.disabled, true);
+  live = false; (invalidate as (() => void) | null)?.(); release(() => live); await opening;
+  assert.deepEqual(calls, [], 'obsolete selection never prepares a model review');
+  assert.equal(doc.root.querySelectorAll('button').length, 0, 'old review controls are removed synchronously');
+});
+
+test('review checks selection again after a held prepare before enabling any decision', { timeout: 5000 }, async t => {
+  const doc = new LearningDocument(ORIGIN), calls: string[] = [];
+  let release!: (response: Response) => void, started!: () => void, invalidate: (() => void) | null = null, live = true;
+  const admitted = new Promise<void>(resolve => { started = resolve; });
+  const unbind = installAssetReviewSelection(doc.asDocument(), { ready: async () => () => live, subscribeInvalidate: listener => {
+    invalidate = listener; return () => { invalidate = null; };
+  } });
+  const card = new AssetReviewCard(doc.asDocument(), TOKEN, { tokenOrigin: ORIGIN, transport: async path => {
+    calls.push(String(path)); started(); return new Promise<Response>(resolve => { release = resolve; });
+  } });
+  t.after(() => { card.clear(); unbind(); });
+  const opening = card.show(doc.root as unknown as HTMLElement, viewed, new AbortController().signal, () => true);
+  await admitted; live = false; (invalidate as (() => void) | null)?.(); release(Response.json(status())); await opening;
+  assert.deepEqual(calls, ['/v1/assets/review/prepare']);
+  assert.equal(doc.root.querySelectorAll('button').length, 0);
+});
+
+test('a status refresh preserves only the same opening and approved models remain rejectable', async t => {
+  const doc = new LearningDocument(ORIGIN), calls: { path: string; body: any }[] = [];
+  let approved = false;
+  const card = new AssetReviewCard(doc.asDocument(), TOKEN, { tokenOrigin: ORIGIN, transport: async (path, init) => {
+    const body = JSON.parse(String(init!.body)); calls.push({ path: String(path), body });
+    const value = status();
+    if (approved) Object.assign(value.review, { status: 'approved', revision: 1, decidedAt: '2026-10-19T00:01:00Z' });
+    if (String(path).endsWith('/status')) return Response.json({ ...value, openWitness: null });
+    if (String(path).endsWith('/decide')) {
+      assert.deepEqual(Object.keys(body).sort(), ['decision', 'idempotencyKey', 'openWitness', 'reviewId']);
+      assert.equal(body.openWitness, WITNESS);
+      approved = body.decision === 'approved';
+      Object.assign(value.review, { status: body.decision, revision: approved ? 1 : 2, decidedAt: '2026-10-19T00:02:00Z' });
+      return Response.json({ state: 'recorded', review: value.review, command: { idempotencyKey: body.idempotencyKey, decision: body.decision, revision: value.review.revision }, retry: false });
+    }
+    return Response.json(value);
+  } });
+  t.after(() => card.clear());
+  await card.show(doc.root as unknown as HTMLElement, viewed, new AbortController().signal, () => true);
+  const button = (label: string) => doc.root.querySelectorAll('button').find(node => node.textContent === label)!;
+  button('Approve model').trustedClick();
+  for (let n = 0; n < 100 && !/Model approved\./.test(doc.root.textContent); n++) await learningTick();
+  assert.match(doc.root.textContent, /Model approved\./);
+  button('Refresh review').trustedClick();
+  for (let n = 0; n < 100 && !/Review status refreshed\./.test(doc.root.textContent); n++) await learningTick();
+  assert.equal(button('Reject model').disabled, false);
+  button('Reject model').trustedClick();
+  for (let n = 0; n < 100 && !/Model rejected\./.test(doc.root.textContent); n++) await learningTick();
+  assert.match(doc.root.textContent, /Model rejected\./);
+  assert.deepEqual(calls.filter(c => c.path.endsWith('/decide')).map(c => c.body.decision), ['approved', 'rejected']);
 });
 
 function providerStatus(provider:'codex'|'claude-code'|'arcane') {
@@ -140,7 +228,8 @@ for(const provider of ['codex','claude-code','arcane'] as const)test(provider+' 
       calls.push(String(path));if(String(path).endsWith('/prepare'))return Response.json(providerStatus(provider));
       assert.equal(String(path),'/v1/assets/review/decide');
       const command=JSON.parse(String(init!.body)),next=providerStatus(provider);
-      assert.deepEqual(Object.keys(command).sort(),['decision','idempotencyKey','reviewId']);
+      assert.deepEqual(Object.keys(command).sort(),['decision','idempotencyKey','openWitness','reviewId']);
+      assert.equal(command.openWitness,WITNESS);
       Object.assign(next.review,{status:command.decision,revision:1,decidedAt:'2026-10-19T00:01:00Z'});
       if(outcome==='provider-mismatch')next.review.subject.conversation.provider=provider==='arcane'?'claude-code':'arcane';
       if(outcome==='digest-mismatch')next.review.subjectDigest='0'.repeat(64);

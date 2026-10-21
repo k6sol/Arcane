@@ -40,6 +40,7 @@ export const REQUIRED_FRONTEND_FILES = [
   'dist/apps/desktop/src/workspace-shell.js.map', 'apps/desktop/src/asset-downloads.ts',
   'dist/apps/desktop/src/asset-downloads.js', 'dist/apps/desktop/src/asset-downloads.js.map',
   'apps/desktop/src/asset-review.ts', 'dist/apps/desktop/src/asset-review.js', 'dist/apps/desktop/src/asset-review.js.map',
+  'apps/desktop/src/asset-conversation-selection.ts', 'dist/apps/desktop/src/asset-conversation-selection.js', 'dist/apps/desktop/src/asset-conversation-selection.js.map',
   'apps/desktop/src/asset-viewer.ts', 'dist/apps/desktop/src/asset-viewer.js', 'dist/apps/desktop/src/asset-viewer.js.map',
   'apps/desktop/src/automatic-asset-previews.ts', 'dist/apps/desktop/src/automatic-asset-previews.js', 'dist/apps/desktop/src/automatic-asset-previews.js.map',
   'apps/desktop/src/playtest-panel.ts', 'dist/apps/desktop/src/playtest-panel.js', 'dist/apps/desktop/src/playtest-panel.js.map',

@@ -14,8 +14,8 @@ interface Review {
   reviewId: string; subject: Subject; subjectDigest: string; status: 'pending' | Decision;
   revision: number; preparedAt: string; decidedAt: string | null;
 }
-export interface ReviewStatus { subject: Subject; subjectDigest: string; review: Review | null; retry: false }
-interface Command { reviewId: string; decision: Decision; idempotencyKey: string }
+export interface ReviewStatus { subject: Subject; subjectDigest: string; review: Review | null; openWitness: string | null; retry: false }
+interface Command { reviewId: string; decision: Decision; idempotencyKey: string; openWitness: string }
 interface Pending extends Command { subjectDigest: string }
 type Receipt = { state: 'recorded'; review: Review } | { state: 'not-recorded'; review: Review } | { state: 'stale'; review: null };
 const invalid = (): never => { throw new Error('Model review response did not match the viewed model.'); };
@@ -63,10 +63,12 @@ function review(value: unknown, expected: Subject, expectedDigest: string): Revi
     preparedAt: timestamp(r.preparedAt), decidedAt: r.decidedAt === null ? null : timestamp(r.decidedAt) };
 }
 export async function readAssetReviewStatus(value: unknown, viewed: ViewedAsset, cryptography: Crypto = crypto): Promise<ReviewStatus> {
-  const r = record(value, ['subject', 'subjectDigest', 'review', 'retry']), measured = subject(r.subject, viewed);
+  const r = record(value, ['subject', 'subjectDigest', 'review', 'openWitness', 'retry']), measured = subject(r.subject, viewed);
   const hash = string(r.subjectDigest, HASH);
   if (r.retry !== false || hash !== await digest(measured, cryptography)) return invalid();
-  return { subject: measured, subjectDigest: hash, review: r.review === null ? null : review(r.review, measured, hash), retry: false };
+  const openWitness = r.openWitness === null ? null : string(r.openWitness, UUID);
+  if (r.review === null && openWitness !== null) return invalid();
+  return { subject: measured, subjectDigest: hash, review: r.review === null ? null : review(r.review, measured, hash), openWitness, retry: false };
 }
 function receipt(value: unknown, prepared: ReviewStatus, command: Pending): Receipt {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return invalid();
@@ -95,9 +97,9 @@ export class AssetReviewApi {
       if (!['prepare', 'status', 'decide', 'receipt'].includes(endpoint)) return invalid();
       if (endpoint === 'prepare' || endpoint === 'status') { const r = record(body, ['jobId']); payload = { jobId: string(r.jobId, UUID) }; }
       else {
-        const r = record(body, endpoint === 'decide' ? ['reviewId', 'decision', 'idempotencyKey'] : ['reviewId', 'idempotencyKey']);
+        const r = record(body, endpoint === 'decide' ? ['reviewId', 'decision', 'idempotencyKey', 'openWitness'] : ['reviewId', 'idempotencyKey']);
         payload = { reviewId: string(r.reviewId, UUID), idempotencyKey: string(r.idempotencyKey, UUID) };
-        if (endpoint === 'decide') { if (r.decision !== 'approved' && r.decision !== 'rejected') return invalid(); payload.decision = r.decision; }
+        if (endpoint === 'decide') { if (r.decision !== 'approved' && r.decision !== 'rejected') return invalid(); payload.decision = r.decision; payload.openWitness = string(r.openWitness, UUID); }
       }
     } catch { throw new AssetReviewRequestError(false); }
     let origin: URL; try { origin = new URL(this.tokenOrigin); } catch { throw new AssetReviewRequestError(false); }
@@ -138,6 +140,17 @@ export class AssetReviewApi {
   }
 }
 interface ReviewOptions { transport?: typeof fetch; tokenOrigin?: string; deadlineMs?: number; cryptography?: Crypto }
+export interface AssetReviewSelection {
+  ready(): Promise<() => boolean>;
+  subscribeInvalidate(listener: () => void): () => void;
+}
+const documentSelections = new WeakMap<Document, AssetReviewSelection>();
+/** Functional workspace binding; no provider identity is accepted from a model. */
+export function installAssetReviewSelection(doc: Document, selection: AssetReviewSelection): () => void {
+  if (documentSelections.has(doc)) throw new Error('Model review conversation is already bound.');
+  documentSelections.set(doc, selection);
+  return () => { if (documentSelections.get(doc) === selection) documentSelections.delete(doc); };
+}
 interface Session {
   epoch: number; controller: AbortController; active: () => boolean; viewed: ViewedAsset; root: HTMLElement; status: HTMLElement; notice: HTMLElement;
   approve: HTMLButtonElement; reject: HTMLButtonElement; refresh: HTMLButtonElement; prepared: ReviewStatus | null; busy: boolean; fenced: boolean; blocked: boolean;
@@ -171,11 +184,15 @@ export class AssetReviewCard {
     const approve = this.make('button', 'Approve model'), reject = this.make('button', 'Reject model'), refresh = this.make('button', 'Refresh review');
     for (const button of [approve, reject, refresh]) { button.type = 'button'; button.disabled = true; controls.append(button); }
     root.append(title, status, notice, controls); host.append(root);
-    const active = () => this.session?.epoch === epoch && this.epoch === epoch && !controller.signal.aborted && current();
+    let selected = () => true;
+    const active = () => this.session?.epoch === epoch && this.epoch === epoch && !controller.signal.aborted && current() && selected();
     const s: Session = { epoch, controller, active, viewed: { ...viewed }, root, status, notice, approve, reject, refresh, prepared: null, busy: true, fenced: false, blocked: true };
     this.session = s;
     const abort = () => { if (this.session === s) this.clear(); };
-    signal.addEventListener('abort', abort, { once: true }); this.unlink = () => signal.removeEventListener('abort', abort);
+    const selection = documentSelections.get(this.doc);
+    const unlinkSelection = selection?.subscribeInvalidate(abort);
+    signal.addEventListener('abort', abort, { once: true });
+    this.unlink = () => { signal.removeEventListener('abort', abort); unlinkSelection?.(); };
     const human = (event: Event): boolean => {
       const click = event as MouseEvent;
       return event.isTrusted && !event.defaultPrevented && click.button === 0 && !click.altKey && !click.ctrlKey && !click.metaKey && !click.shiftKey && active();
@@ -184,6 +201,10 @@ export class AssetReviewCard {
     reject.addEventListener('click', event => { if (human(event) && !reject.disabled) void this.decide(s, 'rejected'); });
     refresh.addEventListener('click', event => { if (human(event) && !refresh.disabled) void this.refresh(s); });
     try {
+      const desktop = (this.doc.defaultView as (Window & { arcaneDesktop?: { runtime?: unknown } }) | null)?.arcaneDesktop;
+      if (selection) selected = await selection.ready();
+      else if (desktop?.runtime === 'desktop') throw new Error('Model review conversation is unavailable.');
+      if (!active()) return;
       const data = await this.api.request('prepare', { jobId: viewed.jobId }, controller.signal);
       const prepared = await readAssetReviewStatus(data, viewed, this.cryptography);
       if (!active()) return;
@@ -196,7 +217,11 @@ export class AssetReviewCard {
   private apply(s: Session, prepared: ReviewStatus): void {
     if (s.prepared && (prepared.subjectDigest !== s.prepared.subjectDigest || prepared.review && s.prepared.review &&
         (prepared.review.reviewId !== s.prepared.review.reviewId || prepared.review.revision < s.prepared.review.revision))) invalid();
-    s.prepared = prepared; s.fenced = this.unknown.has(this.key(s)); s.blocked = false;
+    // Status observes an existing opening; it cannot create permission to decide.
+    const sameOpening = prepared.openWitness === null && s.prepared?.review?.reviewId === prepared.review?.reviewId &&
+      s.prepared?.subjectDigest === prepared.subjectDigest;
+    s.prepared = sameOpening ? { ...prepared, openWitness: s.prepared!.openWitness } : prepared;
+    s.fenced = this.unknown.has(this.key(s)); s.blocked = s.prepared.openWitness === null;
   }
   private render(s: Session): void {
     if (!s.active()) return;
@@ -211,14 +236,14 @@ export class AssetReviewCard {
     s.refresh.textContent = s.fenced ? 'Check review status' : 'Refresh review';
   }
   private async decide(s: Session, decision: Decision): Promise<void> {
-    if (!s.active() || s.busy || s.blocked || s.fenced || !s.prepared?.review || this.unknown.size >= 32) return;
+    if (!s.active() || s.busy || s.blocked || s.fenced || !s.prepared?.review || !s.prepared.openWitness || this.unknown.size >= 32) return;
     if (s.prepared.review.status === 'rejected' || s.prepared.review.status === decision) return;
     let key: string; try { key = this.cryptography.randomUUID(); } catch { return; }
     if (!UUID.test(key)) return;
-    const command: Pending = { reviewId: s.prepared.review.reviewId, decision, idempotencyKey: key, subjectDigest: s.prepared.subjectDigest };
+    const command: Pending = { reviewId: s.prepared.review.reviewId, decision, idempotencyKey: key, openWitness: s.prepared.openWitness, subjectDigest: s.prepared.subjectDigest };
     const subjectKey = this.key(s); this.unknown.set(subjectKey, command); s.busy = true; s.fenced = true; this.render(s);
     try {
-      const value = await this.api.request('decide', { reviewId: command.reviewId, decision, idempotencyKey: key }, s.controller.signal);
+      const value = await this.api.request('decide', { reviewId: command.reviewId, decision, idempotencyKey: key, openWitness: command.openWitness }, s.controller.signal);
       const result = receipt(value, s.prepared, command);
       if (!s.active()) return;
       if (result.state !== 'recorded') return invalid();

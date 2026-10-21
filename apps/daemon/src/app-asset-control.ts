@@ -4,6 +4,7 @@ import {workflowProjectIdentity} from '../../../packages/storage/src/workflow-st
 import type {AppAssetConversationBinding} from '../../../packages/protocol/src/asset-conversation.js';
 import type {NativeAssetIncarnation,NativeAssetRegistry} from './native-asset-authority.js';
 import {nativeAssetActorScope} from './native-asset-authority.js';
+import {snapshotAppAssetHumanSelection,type AppAssetHumanSelection,type AppAssetHumanSelectionHost} from './app-asset-human-selection.js';
 
 export const APP_ASSET_CONTROL_LIMITS=Object.freeze({messageBytes:8192,receiptsPerContext:64,contexts:128});
 const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}(?![\s\S])/;
@@ -13,6 +14,7 @@ type Provider=AppAssetConversationBinding['provider'];
 type IssueReference={issueSequence:number;issueRequestId:string};
 type Command=
  | {action:'open'}
+ | {action:'select-human';selection:AppAssetHumanSelection}
  | {action:'issue';provider:Provider;conversationId:string;connectionId:string}
  | (IssueReference&{action:'bind';binding:AppAssetConversationBinding})
  | (IssueReference&{action:'grant-next'|'retire'|'transport-closed'|'retire-issue'})
@@ -57,6 +59,10 @@ function command(value:unknown):Command{
  if(!value||typeof value!=='object'||types.isProxy(value))fail();const descriptor=Object.getOwnPropertyDescriptor(value,'action');
  if(!descriptor||!Object.hasOwn(descriptor,'value'))fail();const action:unknown=descriptor.value;
  if(action==='open'){fields(value,['action']);return{action};}
+ if(action==='select-human'){
+  const a=fields(value,['action','selection']);
+  try{return{action,selection:snapshotAppAssetHumanSelection(a.selection)};}catch{return fail();}
+ }
  if(action==='issue'){const a=fields(value,['action','provider','conversationId','connectionId']);return{action,provider:provider(a.provider),conversationId:uuid(a.conversationId),connectionId:uuid(a.connectionId)};}
  if(action==='bind'){const a=fields(value,['action','issueSequence','issueRequestId','binding']);return{action,...issueReference(a),binding:binding(a.binding)};}
  if(action==='grant-next'||action==='retire'||action==='transport-closed'||action==='retire-issue'){const a=fields(value,['action','issueSequence','issueRequestId']);return{action,...issueReference(a)};}
@@ -79,9 +85,10 @@ interface Entry {
 }
 export interface AppAssetControl {accept(value:unknown):AppAssetReply|null;close():void}
 /** Trusted parent-only port. No HTTP, renderer, agent, persistence or provider invocation. */
-export function createAppAssetControl(options:{projectPath:string;registry:NativeAssetRegistry}):AppAssetControl{
+export function createAppAssetControl(options:{projectPath:string;registry:NativeAssetRegistry;humanSelection?:Pick<AppAssetHumanSelectionHost,'select'>}):AppAssetControl{
  const project=workflowProjectIdentity(options.projectPath),registry=options.registry;
  if(!registry||typeof registry.issue!=='function')fail('SCOPE');
+ if(options.humanSelection!==undefined&&(!options.humanSelection||typeof options.humanSelection.select!=='function'))fail('SCOPE');
  const entries=new Map<number,Entry>();
  const history=new Map<number,{owner:Entry;digest:string;reply:AppAssetReply}>();let epoch:string|null=null,closed=false,highWater=0;
  const header=(r:Pick<AppAssetRequest,'sequence'|'requestId'|'projectId'|'epoch'>):Header=>({type:'arcane-app-asset-reply',protocolVersion:1,sequence:r.sequence,requestId:r.requestId,projectId:r.projectId,epoch:r.epoch});
@@ -98,6 +105,11 @@ export function createAppAssetControl(options:{projectPath:string;registry:Nativ
   const c=r.command;
   if(c.action==='open'){if(epoch!==null&&epoch!==r.epoch)fail('SCOPE');epoch=r.epoch;return{...header(r),outcome:'ok',result:{action:c.action}};}
   if(epoch===null||r.epoch!==epoch)fail('SCOPE');
+  if(c.action==='select-human'){
+   if(!options.humanSelection)fail('SCOPE');
+   options.humanSelection.select(c.selection);
+   return{...header(r),outcome:'ok',result:{action:c.action}};
+  }
   if(c.action==='issue'){
    if(entries.size>=APP_ASSET_CONTROL_LIMITS.contexts)fail('LIMIT');
    const handle=registry.issue();let credential:string;

@@ -236,7 +236,7 @@ test('main cold start passes an isolated unavailable compiler to the core daemon
   f.disk.nodes.delete(f.disk.key(f.compilerPath));
   const begin = mainSource.indexOf('async function startDaemon('), end = mainSource.indexOf('function makeWindow()', begin);
   assert.ok(begin >= 0 && end > begin);
-  const warnings = [], requested = [], owned = [], child = new EventEmitter();
+  const warnings = [], requested = [], owned = [], assetStarts = [], child = new EventEmitter();
   const warning = /const CODE_VERIFICATION_WARNING = ('[^']*');/.exec(mainSource)?.[1];
   assert.ok(warning);
   const context = { projectSession: null, child: null, origin: '', token: '', closing: false, switching: false,
@@ -249,11 +249,19 @@ test('main cold start passes an isolated unavailable compiler to the core daemon
     ownedDirectory: async value => { owned.push(value); return value; },
     smoke: false, window: null, nativeHandoff: null, providerSetup: { cancelPending() {} },
     recordStartupDiagnostic() {}, attachDiagnosticChild() {},
+    // Compiler isolation does not create app authority. Witness only the awaited
+    // startup boundary; the actual broker is exercised by main-app-assets.test.ts.
+    async startAppAssets(ownedChild, epoch) {
+      assert.equal(ownedChild, child); assert.equal(context.child, child); assert.equal(epoch, context.projectSession);
+      assert.equal(epoch.projectPath, context.projectPath); assert.equal(context.origin, origin); assert.equal(context.token, 'a'.repeat(64));
+      assetStarts.push('begin'); await Promise.resolve(); assetStarts.push('ready');
+    },
     // Compiler isolation is the boundary under test. The separate handoff suite
     // executes its actual broker; here the newly mounted host capability has no actions.
     require(name) {
       assert.equal(name, './native-handoff-host.cjs');
       return { createNativeHandoffHost(ports) {
+        assert.deepEqual(assetStarts, ['begin', 'ready'], 'asset startup is awaited before native handoff construction');
         assert.deepEqual(Object.keys(ports).sort(), ['confirm', 'getChoices', 'getSession', 'launchTerminal']);
         assert.equal(ports.getSession(), null, 'A compiler fixture has no desktop window.');
         return Object.freeze({ dispose: async () => ({ revoked: 0, unknown: 0, retained: 0 }), cancelPending() {} });
@@ -275,6 +283,7 @@ test('main cold start passes an isolated unavailable compiler to the core daemon
   assert.ok(bootstrap.includes(moduleLoad));
   vm.runInContext('const CODE_VERIFICATION_WARNING = ' + warning + ';\n' + bootstrap.replace(moduleLoad, 'managedBootstrap') + '\nglobalThis.coldStart = startDaemon;', context);
   await context.coldStart(f.projectPath);
+  assert.deepEqual(assetStarts, ['begin', 'ready'], 'one exact ready child/project reaches the startup witness');
   assert.equal(requested.length, 1, 'Only an in-memory core daemon spawn request is observed; no process executes.');
   // State ownership precedes the spawn; the handoff directory is owned only after readiness.
   assert.deepEqual(owned, [f.stateRoot, f.stateRoot + '\\native-handoffs']);

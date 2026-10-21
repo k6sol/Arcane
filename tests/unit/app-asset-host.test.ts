@@ -8,7 +8,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 interface Request {type:string;protocolVersion:1;sequence:number;requestId:string;projectId:string;epoch:string;command:{action:string;[key:string]:unknown}}
 interface Context {launchEnvironment():Record<string,string>;bind(value:unknown):Promise<void>;grantNextIntent():Promise<void>;dispatched(id:string):Promise<void>;ended(id:string):Promise<void>;cancelWork(scope:'active-operation'|'incarnation'):Promise<void>;retire():Promise<void>;transportClosed():Promise<void>}
-interface Host {ready():Promise<void>;issue(value:{provider:'claude-code'|'arcane';conversationId:string;connectionId:string}):Promise<Context>;fence():void;close():void}
+interface Host {ready():Promise<void>;isCurrent():boolean;selectHumanConversation(value:unknown):Promise<void>;issue(value:{provider:'claude-code'|'arcane';conversationId:string;connectionId:string}):Promise<Context>;fence():void;close():void}
 const require=createRequire(join(process.cwd(),'package.json'));
 const {createAppAssetHost}=require(join(process.cwd(),'apps/desktop/electron/app-asset-host.cjs')) as {createAppAssetHost(value:{child:EventEmitter;projectPath:string;timeoutMs?:number}):Host};
 function fixture(t:test.TestContext){
@@ -30,6 +30,30 @@ function fixture(t:test.TestContext){
  const waitFor=(action:string,count:number)=>new Promise<void>(resolve=>{const check=()=>{if(child.sent.filter(r=>r.command.action===action).length>=count){child.off('sent',check);resolve();}};child.on('sent',check);check();});
  return{directory,child,host,input,waitFor};
 }
+
+test('human selection sends only a validated fixed parent command without creating native authority',{timeout:5000},async t=>{
+ const f=fixture(t);await f.host.ready();assert.equal(f.host.isCurrent(),true);
+ for(const selection of [null,{provider:'codex'},{provider:'claude-code',conversationId:randomUUID()},{provider:'arcane',conversationId:randomUUID()}]){
+  await f.host.selectHumanConversation(selection);
+  assert.deepEqual(f.child.sent.at(-1)!.command,{action:'select-human',selection});
+ }
+ assert.equal(f.child.sent.some(r=>['issue','bind','grant-next','dispatched'].includes(r.command.action)),false);
+ const sent=f.child.sent.length;let getterReads=0,proxyReads=0;
+ const getter=Object.defineProperty({},'provider',{enumerable:true,get(){getterReads++;return 'codex';}});
+ const proxy=new Proxy({provider:'codex'},{getOwnPropertyDescriptor(){proxyReads++;throw Error('must not run');}});
+ for(const selection of [undefined,{},getter,proxy,{provider:'codex',conversationId:randomUUID()},{provider:'arcane',conversationId:null},{provider:'claude-code',conversationId:randomUUID()+'\n'}])await assert.rejects(f.host.selectHumanConversation(selection),{code:'INPUT'});
+ assert.equal(f.child.sent.length,sent);assert.equal(getterReads,0);assert.equal(proxyReads,0);
+});
+
+test('a held selection ACK cannot revive a fenced current-channel witness',{timeout:5000},async t=>{
+ const f=fixture(t);await f.host.ready();f.child.hold.add('select-human');
+ const pending=f.host.selectHumanConversation(null);await f.waitFor('select-human',1);
+ const request=f.child.sent.find(r=>r.command.action==='select-human')!;
+ f.host.fence();assert.equal(f.host.isCurrent(),false);
+ await assert.rejects(pending,{code:'UNKNOWN'});f.child.emit('message',f.child.reply(request));
+ assert.equal(f.host.isCurrent(),false);await assert.rejects(f.host.selectHumanConversation({provider:'codex'}),{code:'CLOSED'});
+ assert.equal(f.child.sent.some(r=>r.command.action==='transport-closed'),false,'channel fencing does not invent a provider transport close');
+});
 
 test('private launch overlay is nonenumerable and never falls back to a core handoff token',{timeout:5000},async t=>{
  const f=fixture(t),context=await f.host.issue(f.input()),env=context.launchEnvironment();

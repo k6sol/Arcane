@@ -22,6 +22,8 @@ import { startTaskUsageFooter } from './task-usage-ui.js';
 import { startDesktopVerification } from './desktop-verification.js';
 import { ArtifactDownloads } from './asset-downloads.js';
 import { AssetViewerPanel } from './asset-viewer.js';
+import { AssetConversationSelection } from './asset-conversation-selection.js';
+import { installAssetReviewSelection } from './asset-review.js';
 import { AutomaticAssetPreviews } from './automatic-asset-previews.js';
 import { startPlaytestPanel } from './playtest-panel.js';
 import { startToolboxPolicy } from './toolbox-policy.js';
@@ -2257,9 +2259,61 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   // Arcane Credits chat (desktop only): a third model column and chat surface once the user's Arcane account is connected
   // to a configured gateway. Loaded lazily; while not configured it stays hidden and requests nothing over the network.
   let arcaneChat: import('./arcane-chat.js').ArcaneChat | null = null;
+  // Bind review to the actual provider transcript, never the shared library row.
+  const reviewDesktop = (window as unknown as { arcaneDesktop?: { runtime?: string; selectAssetConversation?: (selection: import('./asset-conversation-selection.js').AssetConversationSelectionValue) => Promise<{state:'selected'|'unavailable'}> } }).arcaneDesktop;
+  const reviewSelection = reviewDesktop?.runtime === 'desktop' ? new AssetConversationSelection({
+    select: selection => reviewDesktop.selectAssetConversation ? reviewDesktop.selectAssetConversation(selection) : Promise.reject(new Error('Model review conversation is unavailable.')),
+  }) : null;
+  let reviewSelectionPaused = false;
+  let reviewProjectPath: () => string | null = () => null;
+  let reviewFocusSignature = '';
+  let selectedAssetScope: (AssetConversation & {projectPath:string}) | null = null;
+  const assetScopeListeners = new Set<() => void>();
+  const publishAssetScope = () => { for (const listener of [...assetScopeListeners]) { try { listener(); } catch { /* One view cannot block other invalidations. */ } } };
+  const syncReviewSelection = () => {
+    if (!reviewSelection) return;
+    const provider = providerSetup.chatSurface();
+    const peer = provider === 'claude' ? claudeChat : provider === 'arcane' ? arcaneChat : codexChat;
+    const transcript = peer?.recordedTranscript();
+    const draft = !peer || peer.isDraftConversation();
+    const id = transcript?.conversationId;
+    const project = reviewProjectPath();
+    const native = provider === 'codex' ? codexChat.workflowConversation() : null;
+    const key = JSON.stringify([project, provider, transcript?.projectPath ?? null, id ?? null, transcript?.sessionId ?? null, draft, reviewSelectionPaused, native]);
+    if (key === reviewFocusSignature) return;
+    reviewFocusSignature = key;
+    selectedAssetScope = null; publishAssetScope();
+    try {
+      const empty = reviewSelectionPaused || draft || !id || !project || transcript?.projectPath !== project ||
+        provider === 'codex' && (!native || native.projectPath !== project);
+      reviewSelection.update(empty ? null :
+        provider === 'codex' ? { provider: 'codex' } : { provider: provider === 'claude' ? 'claude-code' : 'arcane', conversationId: id }, key);
+      if (!empty && transcript?.projectPath && id) {
+        const scope = provider === 'codex' && native ? native : { provider: provider === 'claude' ? 'claude-code' as const : 'arcane' as const,
+          threadId: 'app:' + id, sessionId: null, projectPath: transcript.projectPath };
+        void reviewSelection.ready().then(current => {
+          if (!current() || key !== reviewFocusSignature || reviewSelectionPaused) return;
+          selectedAssetScope = scope; publishAssetScope();
+        }).catch(() => { /* Unknown selection never publishes another chat's assets. */ });
+      }
+    } catch { reviewSelection.update(null, null); }
+  };
+  if (reviewSelection) {
+    const unbind = installAssetReviewSelection(document, reviewSelection);
+    const unsubscribers = [codexChat.subscribeTranscriptChange(syncReviewSelection),
+      providerSetup.subscribeChatSurface(syncReviewSelection), ...(claudeChat ? [claudeChat.subscribeTranscriptChange(syncReviewSelection)] : [])];
+    syncReviewSelection();
+    window.addEventListener('pagehide', event => {
+      reviewSelectionPaused = true; syncReviewSelection();
+      if (!event.persisted) { for (const unsubscribe of unsubscribers) unsubscribe(); reviewSelection.dispose(); unbind(); }
+    });
+    window.addEventListener('pageshow', event => { if (event.persisted) { reviewSelectionPaused = false; syncReviewSelection(); } });
+  }
   if (chatLink && (window as unknown as { arcaneDesktop?: { arcaneChat?: unknown } }).arcaneDesktop?.arcaneChat) void import('./arcane-chat.js').then(module => {
     if (claudeChatStopped) return;
     const chat = arcaneChat = new module.ArcaneChat(document);
+    if (reviewSelection) chat.subscribeTranscriptChange(syncReviewSelection);
+    syncReviewSelection();
     // The sign-in card offers Arcane Credits when usable, or says plainly what is missing (an account, or the service).
     chat.subscribeModels(() => { providerSetup.setArcaneAvailable(chat.usable()); providerSetup.setArcaneSetup?.(chat.arcaneStatus()?.state === 'signed-out' ? 'signed-out' : 'none'); });
     chatLink.setArcane(chat); void chat.loadModels();
@@ -2287,9 +2341,15 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   const workbench = new StudioWorkbench(document, new StudioApi(token), window.location.origin, token, {
     isSignedIn: () => providerSetup.isSignedIn(),
     subscribeSignInChange: listener => providerSetup.subscribeSignInChange(listener),
-    assetMode: 'conversation', getNativeConversation: () => codexChat.workflowConversation(),
-    subscribeContextChange: listener => codexChat.subscribeWorkflowContextChange(listener),
+    assetMode: 'conversation', getNativeConversation: () => reviewSelection ? selectedAssetScope : codexChat.workflowConversation(),
+    subscribeContextChange: listener => {
+      if (!reviewSelection) return codexChat.subscribeWorkflowContextChange(listener);
+      assetScopeListeners.add(listener); return () => { assetScopeListeners.delete(listener); };
+    },
   });
+  reviewProjectPath = () => workbench.historyProjectPath() || null;
+  if (reviewSelection) workbench.subscribeProjectChange(syncReviewSelection);
+  syncReviewSelection();
   // Script-editor drafts: recovered source text only fills the editor on an explicit click and never submits a command.
   if (editorDrafts) {
     scriptDrafts = startScriptEditorDrafts(document, { drafts: editorDrafts, target: () => workbench.sourceDraftTarget(),

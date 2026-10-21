@@ -9,6 +9,7 @@ const enabled = !!process.env.ARCANE_UI_MODULE_ROOT;
 const JOB = '11111111-1111-4111-8111-111111111111', NEXT = '33333333-3333-4333-8333-333333333333';
 const THIRD = '44444444-4444-4444-8444-444444444444', WRONG = '55555555-5555-4555-8555-555555555555';
 const OLD = '66666666-6666-4666-8666-666666666666', LATEST = '77777777-7777-4777-8777-777777777777';
+const WITNESS = '88888888-8888-4888-8888-888888888888';
 const HUMAN = 'a'.repeat(64), AGENT = 'b'.repeat(64);
 const canonical = (v: any): string => Array.isArray(v) ? '[' + v.map(canonical).join(',') + ']' : v && typeof v === 'object' ?
   '{' + Object.keys(v).sort().map(k => JSON.stringify(k) + ':' + canonical(v[k])).join(',') + '}' : JSON.stringify(v);
@@ -55,7 +56,7 @@ test('owned Edge model review: exact bytes, trusted decisions, unknown receipts 
     const s = subject(jobId), d = hash(canonical(s)); let review = reviews.get(jobId);
     if (!review || review.subjectDigest !== d) { review = { reviewId: String(nextId++).padStart(8, '0') + '-2222-4222-8222-222222222222', subject: s, subjectDigest: d,
       status: 'pending', revision: 0, preparedAt: '2026-10-19T00:00:00Z', decidedAt: null }; reviews.set(jobId, review); }
-    return { subject: s, subjectDigest: d, review, retry: false };
+    return { subject: s, subjectDigest: d, review, openWitness: WITNESS, retry: false };
   };
   const server = createServer((request, response) => { void (async () => {
     const url = new URL(request.url ?? '/', origin || 'http://127.0.0.1'), route = url.pathname;
@@ -87,12 +88,14 @@ test('owned Edge model review: exact bytes, trusted decisions, unknown receipts 
       assert.deepEqual(Object.keys(body), ['jobId']);
       if (route.endsWith('/status') && state.statusFailure) { send(503, { error: 'UNAVAILABLE', retry: false }); return; }
       if (state.heldJob === body.jobId) { state.heldJob = ''; await new Promise<void>(done => { state.held = done; }); }
-      send(200, selected(body.jobId)); return;
+      const result=selected(body.jobId);
+      send(200, route.endsWith('/status') ? {...result,openWitness:null} : result); return;
     }
     const review = [...reviews.values()].find(value => value.reviewId === body.reviewId);
     if (!review) { send(404, { error: 'NOT_FOUND', retry: false }); return; }
     if (route.endsWith('/decide')) {
-      assert.deepEqual(Object.keys(body).sort(), ['decision', 'idempotencyKey', 'reviewId']);
+      assert.deepEqual(Object.keys(body).sort(), ['decision', 'idempotencyKey', 'openWitness', 'reviewId']);
+      assert.equal(body.openWitness,WITNESS);
       assert.match(body.idempotencyKey, /^[a-f0-9-]{36}$/); assert.ok(['approved', 'rejected'].includes(body.decision));
       if (state.mode !== 'lost-unrecorded') { review.status = body.decision; review.revision++; review.decidedAt = '2026-10-19T00:01:00Z'; commands.set(body.idempotencyKey, { idempotencyKey: body.idempotencyKey, decision: body.decision, revision: review.revision }); }
       if (state.mode.startsWith('lost-')) { response.destroy(); return; }

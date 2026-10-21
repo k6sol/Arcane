@@ -31,7 +31,7 @@ function snapshotReply(value){
  if(d.value==='issue'){
   const a=fields(r.result,['action','issueSequence','issueRequestId','credential']);
   if(a.issueSequence!==r.sequence||a.issueRequestId!==r.requestId||typeof a.credential!=='string'||!HASH.test(a.credential))throw error('INPUT');r.result=a;
- }else{const a=fields(r.result,['action']);if(!['open','bind','grant-next','dispatched',...CLEANUP].includes(a.action))throw error('INPUT');r.result=a;}
+ }else{const a=fields(r.result,['action']);if(!['open','select-human','bind','grant-next','dispatched',...CLEANUP].includes(a.action))throw error('INPUT');r.result=a;}
  if(Buffer.byteLength(JSON.stringify(r))>LIMITS.messageBytes)throw error('INPUT');return r;
 }
 function transport(provider,value){
@@ -41,6 +41,16 @@ function transport(provider,value){
   return{kind:a.kind,incarnationId:uuid(a.incarnationId),nativeSessionId:a.nativeSessionId};
  }
  const a=fields(value,['kind','incarnationId']);if(a.kind!=='arcane-gateway-loop')throw error('INPUT');return{kind:a.kind,incarnationId:uuid(a.incarnationId)};
+}
+function humanSelection(value){
+ if(value===null)return null;
+ if(!value||typeof value!=='object'||types.isProxy(value))throw error('INPUT');
+ const descriptor=Object.getOwnPropertyDescriptor(value,'provider');
+ if(!descriptor||!Object.hasOwn(descriptor,'value'))throw error('INPUT');
+ if(descriptor.value==='codex'){fields(value,['provider']);return{provider:'codex'};}
+ const a=fields(value,['provider','conversationId']);
+ if(a.provider!=='claude-code'&&a.provider!=='arcane')throw error('INPUT');
+ return{provider:a.provider,conversationId:uuid(a.conversationId)};
 }
 /** Main-process closure only. The caller supplies its exact owned daemon ChildProcess,
  * never a renderer-selected process, PID, token, project or arbitrary RPC name. */
@@ -147,6 +157,12 @@ function createAppAssetHost({child,projectPath,timeoutMs=1000}){
   });
   return context;
  }
- return Object.freeze({ready:()=>opened,issue,fence,close});
+ async function selectHumanConversation(value){
+  const selection=humanSelection(value);await opened;
+  if(fenced||closed||child.connected===false)throw error('CLOSED');
+  await request({action:'select-human',selection});
+  if(fenced||closed||child.connected===false)throw error('UNKNOWN');
+ }
+ return Object.freeze({ready:()=>opened,isCurrent:()=>!fenced&&!closed&&child.connected!==false,issue,selectHumanConversation,fence,close});
 }
 module.exports={createAppAssetHost,AppAssetHostError,APP_ASSET_HOST_LIMITS:LIMITS};

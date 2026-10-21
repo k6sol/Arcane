@@ -45,6 +45,8 @@ export interface ArcaneCredentialVault {
   clear(): Promise<void>;
 }
 
+/** Trusted local lifetime observation only; never a gateway/model payload or asset permission. */
+export type GatewayStreamClosure = Readonly<{state: 'closed' | 'unresolved'}>;
 /** The provider surface the desktop and daemon use. Every call refuses while the provider is disabled. */
 export interface ArcaneGatewayProvider {
   readonly id: typeof ARCANE_PROVIDER_ID;
@@ -52,7 +54,7 @@ export interface ArcaneGatewayProvider {
   balance(): Promise<GatewayBalance>;
   usage(): Promise<GatewayUsage>;
   models(): Promise<GatewayModel[]>;
-  streamChat(request: GatewayChatRequest, signal?: AbortSignal): AsyncGenerator<GatewayChunk>;
+  streamChat(request: GatewayChatRequest, signal?: AbortSignal, onClosed?: (value: GatewayStreamClosure) => void): AsyncGenerator<GatewayChunk>;
 }
 
 export class GatewayUnavailable extends Error {
@@ -162,15 +164,17 @@ export function createArcaneGateway(options: ArcaneGatewayOptions): ArcaneGatewa
     if (!token || !TOKEN.test(token)) throw new GatewayUnavailable('Sign in to your Arcane account to use credits.', 'signed-out');
     return { base, token };
   };
-  const call = async (path: string, init: RequestInit = {}, signal?: AbortSignal, timeoutMs = TIMEOUT_MS): Promise<Response> => {
+  const call = async (path: string, init: RequestInit = {}, signal?: AbortSignal, timeoutMs = TIMEOUT_MS, ownResponse?: (response: Response) => void): Promise<Response> => {
     const { base, token } = await ready();
     const url = new URL(base + path);
     if (url.origin !== new URL(base).origin) throw new GatewayUnavailable();
     const timeout = AbortSignal.timeout(timeoutMs);
     const response = await doFetch(url, { ...init, redirect: 'error', credentials: 'omit', signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
       headers: { Accept: 'application/json', Authorization: 'Bearer ' + token, ...(init.body ? { 'Content-Type': 'application/json' } : {}) } });
+    ownResponse?.(response);
     if (!response.ok) {
-      await response.body?.cancel().catch(() => {});
+      // A streamed caller retains the actual response and owns its awaited cleanup.
+      if (!ownResponse) await response.body?.cancel().catch(() => {});
       throw response.status === 401 ? new GatewayUnavailable('Your Arcane sign-in expired. Sign in again.', 'signed-out')
         : response.status === 402 ? new GatewayUnavailable('You are out of Arcane Credits.', 'insufficient-credits')
         : response.status === 429 ? new GatewayUnavailable('Too many Arcane requests right now. Try again in a minute.', 'rate-limited')
@@ -216,30 +220,58 @@ export function createArcaneGateway(options: ArcaneGatewayOptions): ArcaneGatewa
         return { id: row.id as string, label: row.label as string, ...(pricing ? { pricing } : {}), ...(typeof row.tools === 'boolean' ? { tools: row.tools } : {}) };
       });
     },
-    async *streamChat(request, signal) {
-      const body = chatBody(request);
-      const response = await call('/v1/chat/stream', { method: 'POST', body: JSON.stringify(body) }, signal, options.streamTimeoutMs ?? STREAM_TIMEOUT_MS);
-      if (!response.body) throw new GatewayUnavailable();
-      const reader = response.body.getReader(), decoder = new TextDecoder(); let buffer = '', bytes = 0;
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        bytes += value.byteLength; if (bytes > MAX_STREAM_BYTES) { await reader.cancel(); yield { type: 'error', message: 'The Arcane gateway stream was too large.' }; return; }
-        buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n');
-        let split: number;
-        while ((split = buffer.indexOf('\n\n')) >= 0) {
-          const event = buffer.slice(0, split); buffer = buffer.slice(split + 2);
-          const data = event.split('\n').filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n');
-          if (!data) continue;
-          let raw: Record<string, unknown>;
-          try { raw = JSON.parse(data) as Record<string, unknown>; } catch { continue; }
-          const chunk = raw && typeof raw === 'object' && !Array.isArray(raw) ? chatChunk(raw) : null;
-          if (!chunk) continue;
-          yield chunk;
-          if (chunk.type === 'done' || chunk.type === 'error') { await reader.cancel(); return; }
+    async *streamChat(request, signal, onClosed) {
+      let response: Response | null = null, reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+      let failed = false, observed = false;
+      try {
+        const body = chatBody(request);
+        response = await call('/v1/chat/stream', { method: 'POST', body: JSON.stringify(body) }, signal,
+          options.streamTimeoutMs ?? STREAM_TIMEOUT_MS, value => { response = value; });
+        if (!response.body) throw new GatewayUnavailable();
+        reader = response.body.getReader();
+        const decoder = new TextDecoder(); let buffer = '', bytes = 0;
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          bytes += value.byteLength;
+          if (bytes > MAX_STREAM_BYTES) { yield { type: 'error', message: 'The Arcane gateway stream was too large.' }; return; }
+          buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n');
+          let split: number;
+          while ((split = buffer.indexOf('\n\n')) >= 0) {
+            const event = buffer.slice(0, split); buffer = buffer.slice(split + 2);
+            const data = event.split('\n').filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n');
+            if (!data) continue;
+            let raw: Record<string, unknown>;
+            try { raw = JSON.parse(data) as Record<string, unknown>; } catch { continue; }
+            const chunk = raw && typeof raw === 'object' && !Array.isArray(raw) ? chatChunk(raw) : null;
+            if (!chunk) continue;
+            yield chunk;
+            if (chunk.type === 'done' || chunk.type === 'error') return;
+          }
         }
+        yield { type: 'error', message: 'The Arcane gateway stream ended early.' };
+      } catch (error) { failed = true; throw error; }
+      finally {
+        // Abort/timeout/consumer return is not closure. Wait for the actual owned
+        // read/fetch and cancellation; a rejected cancel remains unresolved.
+        let cleanupFailed = false, cleanupError: unknown;
+        try {
+          if (reader) await reader.cancel();
+          else if (response?.body) await response.body.cancel();
+        } catch (error) { cleanupFailed = true; cleanupError = error; }
+        try { reader?.releaseLock(); } catch (error) { if (!cleanupFailed) cleanupError = error; cleanupFailed = true; }
+        if (!observed) {
+          observed = true;
+          try {
+            const observation: unknown = onClosed?.(Object.freeze({state: cleanupFailed ? 'unresolved' : 'closed'}));
+            // The trusted observer is synchronous; still absorb a mistaken async fault.
+            void Promise.resolve(observation).catch(() => {});
+          }
+          catch { /* A diagnostic observer cannot replace the original outcome. */ }
+        }
+        // Preserve even primitive/frozen original errors, including throw undefined.
+        if (cleanupFailed && !failed) throw cleanupError;
       }
-      yield { type: 'error', message: 'The Arcane gateway stream ended early.' };
     },
   };
 }

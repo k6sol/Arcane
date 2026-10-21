@@ -115,33 +115,45 @@ test('human IPC mounts in normal mode, delegates to the CURRENT broker, and refu
 });
 
 test('main-frame navigation cancels broker and provider work; subframe navigation does not', () => {
-  const code = block("  window.webContents.on('did-start-navigation'", "  window.webContents.on('render-process-gone'");
+  const clearSelection = block('function clearHumanAssetSelection()', 'async function selectHumanAssetConversation(');
+  const code = clearSelection + block("  window.webContents.on('did-start-navigation'", "  window.webContents.on('render-process-gone'");
   const handlers = new Map(), counts = { handoff: 0, provider: 0, recovery: 0 }, inPage = [];
+  const selected = [];
   const owner = { webContents: { on(name, handler) { handlers.set(name, handler); } } };
-  const context = vm.createContext({ window: owner, owner,
+  const context = vm.createContext({ window: owner, owner, assetSelectionGeneration: 7, assetSelectionReady: true,
+    appAssets: { selectHumanConversation(value) { selected.push(value); return Promise.resolve(); } },
     runtimeRecovery: { invalidate(value) { assert.equal(value, owner); counts.recovery++; }, navigatedInPage(value, url) { inPage.push([value, url]); } },
     nativeHandoff: { cancelPending() { counts.handoff++; } }, providerSetup: { cancelPending() { counts.provider++; } } });
   vm.runInContext(code, context);
   const navigate = handlers.get('did-start-navigation');
   navigate({}, origin + '/x', false, false); assert.deepEqual(counts, { handoff: 0, provider: 0, recovery: 0 }, 'subframe');
+  assert.deepEqual(selected, []); assert.equal(context.assetSelectionReady, true); assert.equal(context.assetSelectionGeneration, 7);
   navigate({}, origin + '/studio', false, true); assert.deepEqual(counts, { handoff: 1, provider: 1, recovery: 1 }, 'main frame');
+  assert.deepEqual(selected, [null], 'the actual clear helper sends only a null human selection');
+  assert.equal(context.assetSelectionReady, false, 'navigation disarms selection synchronously without inventing an ACK');
+  assert.equal(context.assetSelectionGeneration, 8);
   context.nativeHandoff = null; navigate({}, origin + '/studio#settings', true, true); assert.deepEqual(counts, { handoff: 1, provider: 2, recovery: 1 }, 'same document retains presentation scope; provider work is still cancelled');
+  assert.deepEqual(selected, [null], 'same-document navigation does not clear human selection');
   const complete = handlers.get('did-navigate-in-page');
   complete({}, origin + '/studio#subframe', false); assert.deepEqual(inPage, [], 'subframe completion cannot update the retained main frame');
   complete({}, origin + '/studio#settings', true); assert.deepEqual(inPage, [[owner, origin + '/studio#settings']], 'only completed same-document navigation updates presentation scope');
   context.window = { webContents: {} };
   navigate({}, origin + '/studio', false, true); assert.deepEqual(counts, { handoff: 1, provider: 2, recovery: 2 }, 'an inactive window retires only its own recovery scope');
+  assert.deepEqual(selected, [null], 'a retired owner cannot clear the replacement window selection');
 });
 
 /** Production stopDaemon with a scripted owned child and broker. */
 function stopFixture(child, broker) {
   const code = block('async function stopDaemon()', 'async function startDaemon(');
-  const timers = [];
-  const context = vm.createContext({ child, token, origin, nativeHandoff: broker, providerSetup: { cancelled: 0, cancelPending() { this.cancelled++; } },
+  const timers = [], assetEvents = [];
+  const assets = { fence() { assetEvents.push('fence'); }, close() { assetEvents.push('close'); },
+    transportClosed() { assert.fail('Daemon shutdown is not a provider transport-close witness.'); } };
+  const context = vm.createContext({ child, token, origin, nativeHandoff: broker, appAssets: assets, assetSelectionGeneration: 7, assetSelectionReady: true,
+    providerSetup: { cancelled: 0, cancelPending() { assert.deepEqual(assetEvents, ['fence'], 'asset admission is fenced before provider cleanup'); this.cancelled++; } },
     retireDiagnosticChild() {},
     setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; }, clearTimeout() {} });
   vm.runInContext(code + '\nglobalThis.stopOwned = stopDaemon;', context);
-  return { context, timers };
+  return { context, timers, assetEvents };
 }
 function ownedChild() {
   const child = new EventEmitter(); child.exitCode = null; child.signalCode = null; child.connected = true; child.sent = []; child.killed = 0;
@@ -156,13 +168,17 @@ test('stopDaemon starts broker disposal and the daemon shutdown request together
   let returned = false; const stopping = f.context.stopOwned().then(value => { returned = true; return value; });
   // Synchronously, before any await completes: authority cleared, disposal started, shutdown requested.
   assert.deepEqual([f.context.nativeHandoff, f.context.token, f.context.origin, f.context.child], [null, '', '', null]);
+  assert.equal(f.context.appAssets, null); assert.equal(f.context.assetSelectionReady, false); assert.equal(f.context.assetSelectionGeneration, 8);
+  assert.deepEqual(f.assetEvents, ['fence'], 'private asset admission is fenced before the first await');
   assert.equal(disposeCalls, 1, 'broker disposal initiated');
   assert.deepEqual(JSON.parse(JSON.stringify(child.sent)), [{ type: 'arcane-shutdown', protocolVersion: 1 }], 'daemon shutdown requested in the same turn, not after cleanup');
   assert.equal(f.context.providerSetup.cancelled, 1);
   child.emit('exit', 0); await Promise.resolve(); await Promise.resolve();
   assert.equal(returned, false, 'the daemon exited but config cleanup is still pending: stopDaemon has not returned');
+  assert.deepEqual(f.assetEvents, ['fence'], 'the broker remains owned while handoff cleanup is held');
   cleanup.resolve({ revoked: 0, unknown: 1, retained: 0 });
   assert.equal(await stopping, true); assert.equal(returned, true);
+  assert.deepEqual(f.assetEvents, ['fence', 'close'], 'the exact broker closes once after owned cleanup');
   // A rejected disposal never blocks or fails a clean shutdown.
   const failingChild = ownedChild(), rejected = stopFixture(failingChild, { dispose: () => Promise.reject(new Error('cleanup')), cancelPending() {} });
   const rejectedStop = rejected.context.stopOwned(); assert.equal(rejected.context.nativeHandoff, null);

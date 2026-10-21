@@ -1,5 +1,6 @@
 import { createNativeAssetRegistry } from './native-asset-authority.js';
 import {createAppAssetControl} from './app-asset-control.js';
+import {createAppAssetHumanSelection} from './app-asset-human-selection.js';
 import { createNativeHandoffRoutes } from './native-handoff-routes.js';
 import { nativeAssetRoutes } from './native-asset-routes.js';
 import { workflowProjectIdentity } from '../../../packages/storage/src/workflow-store.js';
@@ -93,7 +94,7 @@ interface Options {
   port?: number;
   assetService?: AssetService;
   /** Trusted launcher factory, created after current conversation binding exists. */
-  assetReviewHostFactory?:(conversation:ReturnType<typeof createAssetConversationHost>)=>AssetReviewHost;
+  assetReviewHostFactory?:(conversation:ReturnType<typeof createAssetConversationHost>,selectionEpoch:()=>object)=>AssetReviewHost;
   studioImportStaging?: Pick<ReturnType<typeof createStudioImportStagingController>, 'stage'> & Partial<Pick<ReturnType<typeof createStudioImportStagingController>, 'status'|'reconstruct'|'reconstructionStatus'>>;
   /** Owned by the product launcher; absent in metadata-only labs. */
   learningService?: LearningService;
@@ -135,7 +136,12 @@ export async function createConnectionLab(options: Options) {
   const nativeAssetRegistry = options.assetService && options.workStore
     ? createNativeAssetRegistry({projectPath:workflowProjectIdentity(options.projectPath ?? options.cwd).projectPath}) : null;
   // Parent-only authority port. It is deliberately absent from HTTP/state.
-  const appAssets=nativeAssetRegistry?createAppAssetControl({projectPath:options.projectPath??options.cwd,registry:nativeAssetRegistry}):null;
+  const humanAssetSelection=createAppAssetHumanSelection({codexConversation:()=>{
+    const state=codex?.state(),thread=state?.snapshot?.thread;
+    const identity=thread?.configured?thread:state?.nativeHistory;
+    return identity?{provider:'codex',threadId:identity.threadId,sessionId:identity.sessionId}:null;
+  }});
+  const appAssets=nativeAssetRegistry?createAppAssetControl({projectPath:options.projectPath??options.cwd,registry:nativeAssetRegistry,humanSelection:humanAssetSelection}):null;
   const coreAgentToken = (request: IncomingMessage): string => {
     const handoff=handoffs?.agentToken(request,origin);if(handoff)return handoff;
     const value = request.headers.authorization;
@@ -280,21 +286,17 @@ export async function createConnectionLab(options: Options) {
     }
     conversationAssets = options.assetService && associations ? createAssetConversationHost({
       projectPath: associations.projectPath, workAssociations: associations,
-      conversation: () => {
-        const state = codex?.state(), thread = state?.snapshot?.thread;
-        const identity = thread?.configured ? thread : state?.nativeHistory;
-        return identity ? { provider: 'codex', threadId: identity.threadId, sessionId: identity.sessionId } : null;
-      },
+      conversation: humanAssetSelection.current,
       start: async request => (await options.assetService!.start(request)).jobId,
       startNative: async (request,admission) => (await options.assetService!.start(request,admission)).jobId,
       ...(typeof options.assetService.adoptProjectGlb === 'function' ? {adoptNative: async (request,actor,admission) => (await options.assetService!.adoptProjectGlb(request,actor,admission)).jobId} satisfies Pick<import('./asset-conversation-host.js').AssetConversationHostOptions,'adoptNative'> : {}),
     }) : null;
-    if(options.assetReviewHostFactory){if(!conversationAssets)throw new ArcaneError('ASSET_REVIEW_CONFIGURATION','Model review requires the current asset conversation.');modelReviews=options.assetReviewHostFactory(conversationAssets);}
+    if(options.assetReviewHostFactory){if(!conversationAssets)throw new ArcaneError('ASSET_REVIEW_CONFIGURATION','Model review requires the current asset conversation.');modelReviews=options.assetReviewHostFactory(conversationAssets,humanAssetSelection.epoch);}
   } catch (error) {
     // Initialization failure must close every owned resource, without closing
     // the launcher's borrowed WorkStore or masking the original failure.
     fenceTasks();
-    appAssets?.close(); handoffs?.close(); nativeAssetRegistry?.close(); scriptSync?.close();
+    humanAssetSelection.close(); appAssets?.close(); handoffs?.close(); nativeAssetRegistry?.close(); scriptSync?.close();
     ownedSourceVerifier?.dispose();
     try { await ownedTests?.lifecycle.close(); } catch { /* Preserve original failure/fence. */ }
     try { modelReviews?.close(); } catch { /* Preserve original failure. */ }
@@ -379,6 +381,7 @@ export async function createConnectionLab(options: Options) {
           ['/workspace-shell.js', [join(options.cwd, 'dist/apps/desktop/src/workspace-shell.js'), 'text/javascript']],
           ['/asset-downloads.js', [join(options.cwd, 'dist/apps/desktop/src/asset-downloads.js'), 'text/javascript']],
           ['/asset-review.js', [join(options.cwd, 'dist/apps/desktop/src/asset-review.js'), 'text/javascript']],
+          ['/asset-conversation-selection.js', [join(options.cwd, 'dist/apps/desktop/src/asset-conversation-selection.js'), 'text/javascript']],
           ['/asset-viewer.js', [join(options.cwd, 'dist/apps/desktop/src/asset-viewer.js'), 'text/javascript']],
           ['/automatic-asset-previews.js', [join(options.cwd, 'dist/apps/desktop/src/automatic-asset-previews.js'), 'text/javascript']],
           ['/playtest-panel.js', [join(options.cwd, 'dist/apps/desktop/src/playtest-panel.js'), 'text/javascript']],
@@ -475,7 +478,7 @@ export async function createConnectionLab(options: Options) {
   try { await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(options.port ?? 0, '127.0.0.1', resolve); }); }
   catch (error) {
     fenceTasks();
-    appAssets?.close(); handoffs?.close(); nativeAssetRegistry?.close(); scriptSync?.close();
+    humanAssetSelection.close(); appAssets?.close(); handoffs?.close(); nativeAssetRegistry?.close(); scriptSync?.close();
     ownedSourceVerifier?.dispose();
     try { await ownedTests?.lifecycle.close(); } catch { /* Preserve listener failure/fence. */ }
     try { modelReviews?.close(); } catch { /* Preserve listener failure. */ }
@@ -492,7 +495,7 @@ export async function createConnectionLab(options: Options) {
     server, origin, token, agentToken, url: origin + (bridge ? '/studio#' : '/#') + token, meshKeep, appAssets,
     close(): Promise<void> {
       if (cleanup) return cleanup;
-      shuttingDown = true; appAssets?.close(); const fenceErrors = fenceTasks(); handoffs?.close(); nativeAssetRegistry?.close(); ownedSourceVerifier?.dispose(); scriptSync?.close();
+      shuttingDown = true; humanAssetSelection.close(); appAssets?.close(); const fenceErrors = fenceTasks(); handoffs?.close(); nativeAssetRegistry?.close(); ownedSourceVerifier?.dispose(); scriptSync?.close();
       cleanup = (async () => {
         // Quiesce the listener first; all cleanup paths still run on failure.
         const listenerClosed = new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))

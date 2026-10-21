@@ -51,12 +51,21 @@ function fixture(t) {
   return { root, project, userRoot, productRoot, stateRoot, portFile, cleanup };
 }
 
-function host(f, { filesystem = fs, action, real = false } = {}) {
-  const calls = [], timers = new Map(); let timerId = 0;
+function host(f, { filesystem = fs, action, real = false, assetStartup } = {}) {
+  const calls = [], timers = new Map(), assetStartupEvents = []; let timerId = 0, handoffConstructions = 0;
   const context = {
     child: null, origin: '', token: '', projectSession: null, projectPath: '', closing: false, switching: false,
-    smoke: false, window: null, nativeHandoff: null,
+    smoke: false, window: null, nativeHandoff: null, appAssets: null, assetSelectionGeneration: 0, assetSelectionReady: false,
     recordStartupDiagnostic() {}, attachDiagnosticChild() {}, retireDiagnosticChild() {},
+    // The port/state suite witnesses this awaited boundary without issuing any
+    // asset credential, native grant or invented private broker response.
+    async startAppAssets(owned, epoch) {
+      assert.equal(owned, context.child); assert.equal(epoch, context.projectSession);
+      assert.equal(epoch.projectPath, context.projectPath); assert.ok(policy.validOrigin(context.origin)); assert.match(context.token, /^[a-f0-9]{64}$/);
+      assetStartupEvents.push('begin');
+      if (assetStartup) await assetStartup(owned, epoch); else await Promise.resolve();
+      assetStartupEvents.push('ready');
+    },
     ...f, nodeExecutable: process.execPath, process: { platform: process.platform, env: { ARCANE_PORT: '9', ARCANE_DAEMON_URL: 'https://invalid.example', NODE_OPTIONS: 'untrusted' } },
     fs: filesystem, Buffer, URL, join: path.join, resolve: path.resolve, createHash, policy,
     performance: { now: () => 0 }, started: 0, daemonReadyMs: 0, CODE_VERIFICATION_WARNING: 'Fixture warning.', console,
@@ -66,6 +75,8 @@ function host(f, { filesystem = fs, action, real = false } = {}) {
     require(name) {
       assert.equal(name, './native-handoff-host.cjs');
       return { createNativeHandoffHost(ports) {
+        assert.equal(assetStartupEvents.at(-1), 'ready', 'the exact ready child/project asset startup is awaited before handoff construction');
+        handoffConstructions++;
         assert.equal(ports.getSession(), null, 'A port fixture has no desktop window.');
         return Object.freeze({ dispose: async () => ({ revoked: 0, unknown: 0, retained: 0 }), cancelPending() {} });
       } };
@@ -90,8 +101,29 @@ function host(f, { filesystem = fs, action, real = false } = {}) {
     },
   };
   vm.createContext(context); vm.runInContext(fixtureStart + '\n' + stop + '\nglobalThis.start = startDaemon; globalThis.stop = stopDaemon;', context);
-  return { context, calls, timers, start: project => context.start(project ?? f.project), stop: () => context.stop() };
+  return { context, calls, timers, assetStartupEvents, get handoffConstructions() { return handoffConstructions; },
+    start: project => context.start(project ?? f.project), stop: () => context.stop() };
 }
+
+test('port startup awaits the exact owned app-asset boundary and never constructs a handoff after its rejection', async t => {
+  const f = fixture(t); let enter, release;
+  const entered = new Promise(resolve => { enter = resolve; }), gate = new Promise(resolve => { release = resolve; });
+  const held = host(f, { assetStartup: async () => { enter(); await gate; } });
+  let settled = false;
+  const pending = held.start().then(() => { settled = true; });
+  try {
+    await Promise.race([entered, pending.then(() => assert.fail('Startup must remain held at the app-asset boundary.'))]);
+    assert.deepEqual(held.assetStartupEvents, ['begin']); assert.equal(settled, false); assert.equal(held.handoffConstructions, 0);
+    assert.equal(held.context.projectSession.projectId, id(f.project));
+    assert.equal(held.context.origin, 'http://127.0.0.1:45071'); assert.equal(held.calls.length, 1);
+  } finally { release(); await pending; }
+  assert.deepEqual(held.assetStartupEvents, ['begin', 'ready']); assert.equal(held.handoffConstructions, 1);
+  const refusal = Object.freeze(new Error('Synthetic app-asset startup refusal.'));
+  const rejected = host(f, { assetStartup: async () => { throw refusal; } });
+  await assert.rejects(rejected.start(), error => error === refusal);
+  assert.deepEqual(rejected.assetStartupEvents, ['begin']); assert.equal(rejected.handoffConstructions, 0);
+  assert.equal(rejected.calls.length, 1, 'no retry or second daemon is requested');
+});
 
 test('first ACK persists the existing v1 tuple; restart reuses exact port, state and project hash', async t => {
   const f = fixture(t), first = host(f); await first.start();

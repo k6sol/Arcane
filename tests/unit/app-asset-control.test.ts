@@ -8,10 +8,11 @@ import {createAppAssetControl,type AppAssetRequest,type AppAssetReply} from '../
 import {createNativeAssetRegistry,nativeAssetActorScope,nativeAssetOperationSignal,acquireNativeAssetWork} from '../../apps/daemon/src/native-asset-authority.js';
 import {workflowProjectIdentity} from '../../packages/storage/src/workflow-store.js';
 import type {AppAssetConversationBinding} from '../../packages/protocol/src/asset-conversation.js';
+import {createAppAssetHumanSelection,type AppAssetHumanSelectionHost} from '../../apps/daemon/src/app-asset-human-selection.js';
 
-function fixture(t:test.TestContext){
+function fixture(t:test.TestContext,humanSelection?:AppAssetHumanSelectionHost){
  const directory=realpathSync(mkdtempSync(join(tmpdir(),'arcane-app-assets-'))),project=workflowProjectIdentity(directory),registry=createNativeAssetRegistry({projectPath:directory});
- const control=createAppAssetControl({projectPath:directory,registry}),epoch=randomUUID();let sequence=0;
+ const control=createAppAssetControl({projectPath:directory,registry,...(humanSelection?{humanSelection}:{})}),epoch=randomUUID();let sequence=0;
  t.after(()=>{control.close();registry.close();rmSync(directory,{recursive:true,force:true});});
  function envelope(command:AppAssetRequest['command'],overrides:Partial<AppAssetRequest>={}):AppAssetRequest{return{type:'arcane-app-asset-request',protocolVersion:1,sequence:++sequence,requestId:randomUUID(),projectId:project.projectId,epoch,command,...overrides};}
  function accept(request:AppAssetRequest):AppAssetReply{const reply=control.accept(request);assert.ok(reply);return reply;}
@@ -27,6 +28,33 @@ function fixture(t:test.TestContext){
  }
  return{directory,project,registry,control,epoch,envelope,accept,send,ok,issue};
 }
+
+test('parent human selection changes only the review scope and never binds or grants a native actor',t=>{
+ const selection=createAppAssetHumanSelection({codexConversation:()=>({provider:'codex',threadId:'owned-thread',sessionId:null})});
+ const f=fixture(t,selection),a=f.issue('claude-code'),conversationId=a.binding.conversationId;
+ assert.throws(()=>f.registry.capture(a.credential,'read'));
+ f.ok(f.send({action:'select-human',selection:{provider:'claude-code',conversationId}}));
+ assert.deepEqual(selection.current(),{provider:'claude-code',threadId:'app:'+conversationId,sessionId:null});
+ assert.throws(()=>f.registry.capture(a.credential,'read'),'human selection does not replace an owned transport binding');
+ f.ok(f.send({action:'bind',...a.ref,binding:a.binding}));
+ assert.throws(()=>f.registry.capture(a.credential,'mutate'),'human selection does not grant a native mutation');
+ const epoch=selection.epoch();f.ok(f.send({action:'select-human',selection:null}));assert.notEqual(selection.epoch(),epoch);assert.equal(selection.current(),null);
+ f.ok(f.send({action:'select-human',selection:{provider:'codex'}}));assert.equal(selection.current()?.threadId,'owned-thread');
+});
+
+test('human selection retains parent project/epoch/high-water validation and refuses unavailable ports',t=>{
+ const selection=createAppAssetHumanSelection({codexConversation:()=>null}),f=fixture(t,selection);
+ const request=f.envelope({action:'select-human',selection:{provider:'arcane',conversationId:randomUUID()}}),before=selection.epoch();
+ assert.equal(f.accept({...request,projectId:'f'.repeat(64)}).outcome,'rejected');
+ assert.equal(f.accept({...request,epoch:randomUUID()}).outcome,'rejected');
+ assert.equal(selection.epoch(),before);
+ f.ok(f.accept(request));const selected=selection.epoch();assert.notEqual(selected,before);
+ const duplicate=f.accept(request);assert.equal(duplicate.outcome,'rejected');assert.equal(selection.epoch(),selected,'spent selection is never replayed');
+ const unavailable=fixture(t);assert.equal(unavailable.send({action:'select-human',selection:null}).outcome,'rejected');
+ let reads=0;
+ const invalid={...f.envelope({action:'select-human',selection:null}),command:{action:'select-human',selection:Object.defineProperty({},'provider',{enumerable:true,get(){reads++;return 'codex';}})}};
+ assert.equal(f.control.accept(invalid),null);assert.equal(reads,0);assert.equal(selection.epoch(),selected);
+});
 
 for(const provider of ['claude-code','arcane'] as const)test(provider+' private app binding keeps actual scope and requires a separate human dispatch grant',t=>{
  const f=fixture(t),a=f.issue(provider);assert.throws(()=>f.registry.capture(a.credential,'read'));

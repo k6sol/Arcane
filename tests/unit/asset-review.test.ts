@@ -143,13 +143,13 @@ test('human host refuses provider, native and general agent bearers and caller-s
   assert.equal(f.reads,0);
   const prepared=await f.host.prepare({jobId:JOB},request(origin),auth);assert.equal(prepared.review!.status,'pending');
   assert.throws(()=>f.host.assertApproved(f.subject),refused('ASSET_REVIEW_REQUIRED'));
-  const result=await f.host.decide({reviewId:prepared.review!.reviewId,decision:'approved',idempotencyKey:randomUUID()},request(origin),auth);
+  const result=await f.host.decide({reviewId:prepared.review!.reviewId,decision:'approved',idempotencyKey:randomUUID(),openWitness:prepared.openWitness},request(origin),auth);
   assert.equal(result.review.status,'approved');assert.equal(f.host.assertApproved(f.subject).reviewId,result.review.reviewId);
 });
 
 test('human decision rechecks canonical bytes and current UI conversation around its awaited source read',async t=>{
   const f=await hostFixture(t),origin='http://127.0.0.1:12345',auth={controlToken:CONTROL,agentToken:AGENT,origin};
-  const prepared=await f.host.prepare({jobId:JOB},request(origin),auth),input={reviewId:prepared.review!.reviewId,decision:'approved',idempotencyKey:randomUUID()};
+  const prepared=await f.host.prepare({jobId:JOB},request(origin),auth),input={reviewId:prepared.review!.reviewId,decision:'approved',idempotencyKey:randomUUID(),openWitness:prepared.openWitness};
   f.source=snapshotAssetReviewSubject({...f.subject,manifestSha256:'e'.repeat(64)});
   await assert.rejects(f.host.decide(input,request(origin),auth),refused('ASSET_REVIEW_STALE'));
   f.source=f.subject;f.hold=async()=>{f.current=false;};
@@ -167,7 +167,7 @@ test('real human HTTP routes cannot be bypassed by direct native or generic agen
   assert.equal(f.reads,0);
   const preparedResponse=await post('prepare',{jobId:JOB});assert.equal(preparedResponse.status,200);
   const prepared=await preparedResponse.json() as any;assert.equal(prepared.review.status,'pending');
-  const key=randomUUID(),input={reviewId:prepared.review.reviewId,decision:'approved',idempotencyKey:key};
+  const key=randomUUID(),input={reviewId:prepared.review.reviewId,decision:'approved',idempotencyKey:key,openWitness:prepared.openWitness};
   assert.ok((await post('decide',input,AGENT)).status>=400);assert.throws(()=>f.host.assertApproved(f.subject),refused('ASSET_REVIEW_REQUIRED'));
   const approved=await post('decide',input);assert.equal(approved.status,200);
   const recorded=await(await post('receipt',{reviewId:input.reviewId,idempotencyKey:key})).json() as any;
@@ -209,7 +209,7 @@ for(const provider of ['claude-code','arcane'] as const)test(provider+' human re
   assert.equal(f.reads,0);
   const prepared=await f.host.prepare({jobId:JOB},request(origin),auth);
   assert.deepEqual(prepared.subject.conversation,{provider,threadId:'app:'+JOB,sessionId:null});
-  const input={reviewId:prepared.review!.reviewId,decision:'approved',idempotencyKey:randomUUID()};
+  const input={reviewId:prepared.review!.reviewId,decision:'approved',idempotencyKey:randomUUID(),openWitness:prepared.openWitness};
   await assert.rejects(f.host.decide(input,request(origin,AGENT),auth));
   assert.throws(()=>f.host.assertApproved(f.subject),refused('ASSET_REVIEW_REQUIRED'));
   f.source=snapshotAssetReviewSubject({...f.subject,sourceRequestSha256:'e'.repeat(64)});

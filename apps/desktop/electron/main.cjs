@@ -23,6 +23,7 @@ const locked = !profilePreparationFailed && app.requestSingleInstanceLock();
 let window, child, origin = '', token = '', closing = false, switching = false, userRoot, productRoot, nodeExecutable, projectPath;
 let codeVerification, projectSession, providerSetup;
 let nativeHandoff;
+let appAssets = null, assetSelectionGeneration = 0, assetSelectionReady = false;
 let studioKeyVault;
 let workspacePreferences;
 let conversationLibrary;
@@ -170,17 +171,82 @@ async function learnedContext() {
     return value && typeof value.text === 'string' ? value.text.slice(0, 600) : '';
   } catch { return ''; }
 }
+// App-asset authority belongs to one exact owned daemon/project. Startup may
+// occur while switching; provider admission never does.
+function ownedAppAssetRuntime(broker, epoch, owned) {
+  try {
+    return !!broker && appAssets === broker && projectSession === epoch && child === owned && !closing &&
+      !!origin && !!token && !!owned && owned.connected === true && owned.exitCode == null && owned.signalCode == null && broker.isCurrent() === true;
+  } catch { return false; }
+}
+async function startAppAssets(owned, epoch) {
+  if (smoke) return;
+  const broker = require('./app-asset-host.cjs').createAppAssetHost({ child: owned, projectPath: epoch.projectPath });
+  appAssets = broker; assetSelectionGeneration++; assetSelectionReady = false;
+  try {
+    await broker.ready();
+    if (!ownedAppAssetRuntime(broker, epoch, owned)) throw new Error('App asset runtime changed during startup.');
+  } catch {
+    // The surrounding startup owner still shuts down this child. Fencing is not
+    // an assertion that its transport or accepted daemon work has closed.
+    try { broker.fence(); } catch { /* Startup remains failed. */ }
+    throw new Error('App asset runtime is unavailable.');
+  }
+}
+function appAssetPort(provider, broker, epoch, owned) {
+  const isCurrent = () => !switching && ownedAppAssetRuntime(broker, epoch, owned);
+  return Object.freeze({ isCurrent, async issue(value) {
+    if (!isCurrent()) throw new Error('App asset runtime is unavailable.');
+    const context = await broker.issue({ provider, conversationId: value.conversationId, connectionId: value.connectionId });
+    if (!isCurrent()) {
+      // This context has never escaped to a provider host: no child could have
+      // received its credential. Both cleanup calls are ordered, one-shot and
+      // independent of an unknown/held prior receipt.
+      try { void Promise.resolve(context.retire()).catch(() => {}); } catch { /* Unknown; never replay. */ }
+      try { void Promise.resolve(context.transportClosed()).catch(() => {}); } catch { /* True no-child cleanup only. */ }
+      throw new Error('App asset runtime is unavailable.');
+    }
+    return context;
+  } });
+}
+function clearHumanAssetSelection() {
+  assetSelectionGeneration++; assetSelectionReady = false;
+  const broker = appAssets;
+  if (!broker) return;
+  // An unknown clear is not an acknowledgement. Only a later explicit, exact
+  // selection ACK can arm the new view; no native grant or cancellation follows.
+  try { void Promise.resolve(broker.selectHumanConversation(null)).catch(() => {}); } catch { /* Remains unready. */ }
+}
+async function selectHumanAssetConversation(event, ...args) {
+  const unavailable = () => Object.freeze({ state: 'unavailable' });
+  if (smoke || args.length !== 1 || !rendererEvent(event)) return unavailable();
+  const owner = window, frame = event.senderFrame, url = frame.url, broker = appAssets, epoch = projectSession, owned = child;
+  if (!owner || owner.isDestroyed() || !ownedAppAssetRuntime(broker, epoch, owned)) return unavailable();
+  const generation = ++assetSelectionGeneration; assetSelectionReady = false;
+  try {
+    // The broker snapshots and strictly validates the sole secret-free selection
+    // union. Renderer input cannot choose a token, process, project or RPC.
+    await broker.selectHumanConversation(args[0]);
+    if (generation !== assetSelectionGeneration || owner !== window || owner.isDestroyed() || frame !== owner.webContents.mainFrame || frame.url !== url ||
+        !rendererEvent(event) || !ownedAppAssetRuntime(broker, epoch, owned)) return unavailable();
+    assetSelectionReady = true;
+    return Object.freeze({ state: assetSelectionReady ? 'selected' : 'unavailable' });
+  } catch { return unavailable(); }
+}
 // In-app Claude chat: headless installed Claude Code per turn, Arcane-only MCP config and a scoped credential from this
 // project's handoff broker. Bound to this project epoch; the transcript lives in an owned per-project directory.
 // Started after startDaemon, so the port/state host fixtures exercise only the daemon boundary.
 async function startClaudeChat() {
-  if (smoke || !projectSession || !nativeHandoff) return;
-  const chatDirectory = await ownedDirectory(join(projectSession.stateRoot, 'claude-chat')), chatBroker = nativeHandoff, chatEpoch = projectSession;
+  if (smoke || !projectSession || !nativeHandoff || !appAssets) return;
+  const chatBroker = nativeHandoff, chatEpoch = projectSession, assetBroker = appAssets, chatChild = child;
+  const chatDirectory = await ownedDirectory(join(chatEpoch.stateRoot, 'claude-chat'));
+  if (nativeHandoff !== chatBroker || !ownedAppAssetRuntime(assetBroker, chatEpoch, chatChild)) return;
   void stopClaudeChat();
   // Persisted per-project consent (Settings > Permissions): on by default, so Claude chat starts without a question.
   const permissions = projectPermissions ? { claudeTools: async () => projectSession === chatEpoch && (await projectPermissions.read()).claudeTools === true,
     allowClaudeTools: async () => { if (projectSession === chatEpoch) await projectPermissions.save({ claudeTools: true }); } } : undefined;
   claudeChat = require('./claude-chat.cjs').createClaudeChat({ projectPath: chatEpoch.projectPath, stateDirectory: chatDirectory, dialog, permissions,
+    appAssets: appAssetPort('claude-code', assetBroker, chatEpoch, chatChild),
     getWindow: () => closing || switching || !window || window.isDestroyed() || projectSession !== chatEpoch ? null : window,
     handoff: { prepare: selection => nativeHandoff === chatBroker && projectSession === chatEpoch ? chatBroker.prepareChat(selection) : null,
       release: handoffId => chatBroker.releaseChat(handoffId) },
@@ -194,11 +260,14 @@ async function startClaudeChat() {
 // the chat unavailable and nothing is requested. The account token never leaves the main process.
 function stopArcaneChat() { const chat = arcaneChat; arcaneChat = null; return chat ? chat.dispose().catch(() => null) : Promise.resolve(null); }
 async function startArcaneChat(permissions) {
-  if (smoke || !projectSession || !nativeHandoff) return;
-  const chatDirectory = await ownedDirectory(join(projectSession.stateRoot, 'arcane-chat')), chatBroker = nativeHandoff, chatEpoch = projectSession;
+  if (smoke || !projectSession || !nativeHandoff || !appAssets) return;
+  const chatBroker = nativeHandoff, chatEpoch = projectSession, assetBroker = appAssets, chatChild = child;
+  const chatDirectory = await ownedDirectory(join(chatEpoch.stateRoot, 'arcane-chat'));
+  if (nativeHandoff !== chatBroker || !ownedAppAssetRuntime(assetBroker, chatEpoch, chatChild)) return;
   void stopArcaneChat();
   const credential = async () => (await billing?.accountCredential().catch(() => null)) ?? null;
   arcaneChat = require('./arcane-chat.cjs').createArcaneChat({ projectPath: chatEpoch.projectPath, stateDirectory: chatDirectory, dialog, permissions,
+    appAssets: appAssetPort('arcane', assetBroker, chatEpoch, chatChild),
     getWindow: () => closing || switching || !window || window.isDestroyed() || projectSession !== chatEpoch ? null : window,
     handoff: { prepare: selection => nativeHandoff === chatBroker && projectSession === chatEpoch ? chatBroker.prepareChat(selection) : null,
       release: handoffId => chatBroker.releaseChat(handoffId) },
@@ -211,23 +280,34 @@ async function startArcaneChat(permissions) {
     instructions: async () => (await import(require('node:url').pathToFileURL(join(productRoot, 'dist/packages/protocol/src/arcane-tools.js')).href)).ARCANE_TASK_INSTRUCTIONS });
 }
 async function stopDaemon() {
+  // Clear/fence the exact private broker synchronously before any shutdown await.
+  const assets = appAssets; appAssets = null; assetSelectionGeneration++; assetSelectionReady = false;
+  let assetClean = true;
+  try { assets?.fence(); } catch { assetClean = false; }
   providerSetup?.cancelPending();
   const handoff = nativeHandoff; nativeHandoff = null;
   // Retire authority while the owned daemon closes; cleanup never holds its shutdown request.
   const handoffCleanup = handoff?.dispose().catch(() => null) ?? Promise.resolve(null);
   const owned = child; child = null; token = ''; origin = '';
   retireDiagnosticChild(owned);
-  if (!owned) { await handoffCleanup; return true; }
-  if (owned.exitCode !== null || owned.signalCode != null) { await handoffCleanup; return owned.exitCode === 0; }
-  const clean = await new Promise(resolve => {
-    let finished = false;
-    const done = code => { if (finished) return; finished = true; clearTimeout(timer); resolve(code === 0); };
-    const timer = setTimeout(() => { if (owned.exitCode === null) owned.kill(); done(1); }, 15000);
-    owned.once('exit', done); owned.once('close', done);
-    if (owned.connected) owned.send({ type: 'arcane-shutdown', protocolVersion: 1 }, error => { if (error && owned.exitCode === null) owned.kill(); }); else owned.kill();
-  });
-  await handoffCleanup;
-  return clean;
+  let clean = false;
+  try {
+    if (!owned) clean = true;
+    else if (owned.exitCode !== null || owned.signalCode != null) clean = owned.exitCode === 0;
+    else clean = await new Promise(resolve => {
+      let finished = false;
+      const done = code => { if (finished) return; finished = true; clearTimeout(timer); resolve(code === 0); };
+      const timer = setTimeout(() => { if (owned.exitCode === null) owned.kill(); done(1); }, 15000);
+      owned.once('exit', done); owned.once('close', done);
+      if (owned.connected) owned.send({ type: 'arcane-shutdown', protocolVersion: 1 }, error => { if (error && owned.exitCode === null) owned.kill(); }); else owned.kill();
+    });
+  } finally {
+    await handoffCleanup;
+    // Closing the private IPC broker is not transportClosed on any provider
+    // context. A timed-out/failed daemon still returns an unclean outcome.
+    try { assets?.close(); } catch { assetClean = false; }
+  }
+  return clean && assetClean;
 }
 async function startDaemon(project) {
   const canonical = await policy.directPath(project);
@@ -355,6 +435,7 @@ async function startDaemon(project) {
   projectSession = Object.freeze({ projectId: key, projectPath: canonical, stateRoot, activeSettingsHash: verification.settingsHash,
     verificationUnavailable: verification.failure === 'compiler-unavailable',
     verificationEnvironmentAbsent: !['ARCANE_LUAU_COMPILER_PATH', 'ARCANE_LUAU_COMPILER_SHA256', 'ARCANE_LUAU_EVIDENCE_DIRECTORY'].some(name => Object.hasOwn(env, name)) });
+  await startAppAssets(owned, projectSession);
   const handoffDirectory = await ownedDirectory(join(stateRoot, 'native-handoffs'));
   const handoffEpoch = projectSession;
   nativeHandoff = require('./native-handoff-host.cjs').createNativeHandoffHost({
@@ -411,7 +492,7 @@ function makeWindow() {
   for (const type of ['will-navigate', 'will-redirect', 'will-frame-navigate']) window.webContents.on(type, event => { if (!event.isMainFrame || !policy.navigationAllowed(origin, event.url)) event.preventDefault(); });
   window.webContents.on('will-attach-webview', event => event.preventDefault());
   window.webContents.on('did-start-navigation', (_event, _url, inPlace, isMainFrame) => {
-    if (isMainFrame) { if (!inPlace) runtimeRecovery?.invalidate(owner); if (window === owner) { nativeHandoff?.cancelPending(); providerSetup?.cancelPending(); } }
+    if (isMainFrame) { if (!inPlace) { runtimeRecovery?.invalidate(owner); if (window === owner) clearHumanAssetSelection(); } if (window === owner) { nativeHandoff?.cancelPending(); providerSetup?.cancelPending(); } }
   });
   window.webContents.on('did-navigate-in-page', (_event, url, isMainFrame) => {
     if (isMainFrame) runtimeRecovery?.navigatedInPage(owner, url);
@@ -834,6 +915,7 @@ else {
             closing = true; setTimeout(() => app.exit(0), 100); return true;
           } catch { switching = false; return false; }
         } }).installIpc(ipcMain, { trusted: rendererEvent });
+      ipcMain.handle('arcane:asset-conversation-select', selectHumanAssetConversation);
       require('./claude-chat.cjs').installClaudeChatIpc(ipcMain, {
         getSession: () => smoke || closing || switching || !window || !projectSession || !origin || !token || !claudeChat ? null : { window, origin, epoch: projectSession },
         getHost: () => claudeChat ?? null,
