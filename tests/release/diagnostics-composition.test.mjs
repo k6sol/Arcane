@@ -147,7 +147,7 @@ test('the before-quit callback observes daemon failure and always delegates fina
  }
 });
 test('update handoff quiesces diagnostics before relaunch and preserves a refused-close fence',async()=>{
- const adapter=between(main,"      require('./desktop-updates.cjs').createDesktopUpdates(","      require('./claude-chat.cjs').installClaudeChatIpc");
+ const adapter=between(main,"      require('./desktop-updates.cjs').createDesktopUpdates(","      ipcMain.handle('arcane:asset-conversation-select'");
  for(const clean of [false,true]){
   const calls=[];let config;const context={require:name=>{assert.equal(name,'./desktop-updates.cjs');return{createDesktopUpdates:options=>{config=options;return{installIpc(){}};}};},
    smoke:false,process:{env:{LOCALAPPDATA:'C:\\Local'},resourcesPath:'C:\\Resources'},app:{isPackaged:true,getPath:()=> 'C:\\App\\Arcane.exe',relaunch:()=>calls.push('relaunch'),exit:()=>calls.push('exit')},

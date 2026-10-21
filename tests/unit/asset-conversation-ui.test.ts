@@ -369,10 +369,12 @@ test('late preview bytes cannot decode or restore previews/downloads after a cha
   }
 });
 
-test('production boot uses existing chat callbacks; static UI names global scope and adds no decorative badges', async () => {
+test('production boot follows the selected provider; static UI keeps global history explicit', async () => {
   const source = await readFile('apps/desktop/src/studio.ts', 'utf8'), html = await readFile('apps/desktop/public/studio.html', 'utf8');
-  assert.match(source, /assetMode: 'conversation', getNativeConversation: \(\) => codexChat.workflowConversation\(\)/);
-  assert.match(source, /subscribeContextChange: listener => codexChat.subscribeWorkflowContextChange\(listener\)/);
+  assert.match(source, /assetMode: 'conversation', getNativeConversation: \(\) => reviewSelection \? selectedAssetScope : codexChat.workflowConversation\(\)/);
+  assert.match(source, /if \(!reviewSelection\) return codexChat.subscribeWorkflowContextChange\(listener\)/);
+  assert.match(source, /assetScopeListeners.add\(listener\); return \(\) => \{ assetScopeListeners.delete\(listener\); \}/);
+  assert.match(source, /reviewProjectPath = \(\) => workbench.historyProjectPath\(\) \|\| null/);
   assert.match(source, /getProjectPath: options.getProjectPath \?\? \(\(\) => this.historyProjectPath\(\) \|\| null\)/);
   assert.match(html, /id="asset-history-scope"/); assert.match(html, /Global asset history · all chats and unscoped jobs/);
   assert.match(html, /id="asset-ambiguous-records"/); assert.match(html, /Start template job in this chat/);

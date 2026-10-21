@@ -303,7 +303,7 @@ for(const kind of ['asset','core'] as const)test('Claude '+kind+' bearer split a
   child.output(result()); // The result is strictly BETWEEN the secret fragments.
   assert.equal(child.ended,true);assert.equal(r.calls.includes('closed'),false);
   assert.equal(f.events.some(event=>event.type==='done'),false);
-  assert.equal(f.events.filter(event=>event.type==='delta').map(event=>event.text??'').join(''),'Public opening.');
+  assert.equal(f.events.filter(event=>event.type==='delta').map(event=>event.text??'').join(''),'Public opening. ');
   child.output(delta(secret.slice(split)+' Public ending.'));
   child.output(assistant('Queued follow-up finished exactly.'));
   child.output(result());child.close();await f.done(reply.turnId);
