@@ -48,10 +48,19 @@ function gate() {
   const pending = new Promise<void>(resolve => { release = resolve; });
   return { pending, release };
 }
-async function until(predicate: () => boolean, timeoutMs = 8_000): Promise<void> {
+async function until(predicate: () => boolean, timeoutMs = 8_000, failureSnapshot?: () => Record<string, unknown>): Promise<void> {
   const deadline = performance.now() + timeoutMs;
   while (!predicate()) {
-    assert.ok(performance.now() < deadline, 'service fixture did not reach the expected state');
+    try {
+      assert.ok(performance.now() < deadline, 'service fixture did not reach the expected state');
+    } catch (error) {
+      // Evidence is synchronous and best effort. Preserve this exact assertion
+      // and original error even if sampling/serialization itself fails.
+      if (failureSnapshot && error instanceof Error) {
+        try { error.message += '\nFixture timeout snapshot: ' + JSON.stringify(failureSnapshot()); } catch { /* Preserve the original assertion. */ }
+      }
+      throw error;
+    }
     await new Promise<void>(resolve => setTimeout(resolve, 10));
   }
 }
@@ -295,7 +304,32 @@ describe('createStudioTestService: SDK/store/ledger fixture integration', { conc
     await assert.rejects(f.prepare(OTHER), { code: 'BUSY' });
     await assert.rejects(f.service.humanControl.approve(approval(job), () => {}), { code: 'HUMAN_AUTH_REQUIRED' });
     // Only real timers drive completion. Status reads do not advance time.
-    await until(() => f.status(job).review.phase === 'done' && f.state.closes === 1);
+    await until(() => f.status(job).review.phase === 'done' && f.state.closes === 1, undefined, () => {
+      const review = f.status(job).review, proof = f.store.session(f.pair.sessionId).proof, now = Date.now();
+      const finite = (value: number): number | null => Number.isFinite(value) ? Math.trunc(value) : null;
+      // Fixed fixture state only: no identifiers, paths, tool arguments, log
+      // contents or freeform errors enter the timeout message.
+      return {
+        review: { phase: review.phase, outcome: review.outcome, code: review.code, cleanup: review.cleanup,
+          observations: review.observations, requiresHumanReview: review.requiresHumanReview,
+          canStartAnotherOperation: review.canStartAnotherOperation,
+          watchdog: { armed: review.watchdog.armed, fired: review.watchdog.fired, reason: review.watchdog.reason },
+          elapsedMs: review.startedAt === null ? null : finite(now - review.startedAt),
+          deadlineRemainingMs: review.deadline === null ? null : finite(review.deadline - now),
+          cleanupRemainingMs: review.cleanupDeadline === null ? null : finite(review.cleanupDeadline - now) },
+        fixture: { mode: f.state.mode, epoch: f.state.epoch, heartbeats: f.heartbeats(),
+          connects: f.state.connects, closes: f.state.closes, lists: f.state.lists,
+          calls: { total: f.calls.length, inventory: f.calls.filter(call => call.name === 'list_roblox_studios').length,
+            state: f.calls.filter(call => call.name === 'get_studio_state').length,
+            console: f.calls.filter(call => call.name === 'get_console_output').length,
+            starts: f.effects().filter(call => call.args.is_start === true).length,
+            stops: f.effects().filter(call => call.args.is_start === false).length } },
+        proof: { present: !!proof, connected: proof?.connected === true,
+          current: !!proof && Date.parse(proof.expiresAt) > now,
+          observedAgeMs: proof ? finite(now - Date.parse(proof.observedAt)) : null,
+          expiresInMs: proof ? finite(Date.parse(proof.expiresAt) - now) : null },
+      };
+    });
     const complete = f.status(job);
     assert.equal(complete.state, 'complete');
     assert.equal(complete.review.outcome, 'succeeded');

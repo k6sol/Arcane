@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
+import { stripTypeScriptTypes } from 'node:module';
 import { mkdtemp, mkdir, readFile, writeFile, lstat, realpath, rm, symlink, link } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
@@ -12,6 +13,13 @@ const productSource = await readFile(new URL('../../apps/daemon/src/product-main
 // Real startup validation/reporting modules execute beside the fixture entry; only services are replaced.
 const productStartupModules = await Promise.all(['state-directory-validation', 'startup-failure'].map(async name =>
   ({ name, source: await readFile(new URL('../../apps/daemon/src/' + name + '.ts', import.meta.url), 'utf8') })));
+// Exact runtime import closure of the real parent-only dispatcher. Type-only
+// dependencies erase; this fixture never constructs its controller/registry.
+const appAssetControlModules = await Promise.all([
+  'apps/daemon/src/app-asset-control.ts', 'apps/daemon/src/native-asset-authority.ts',
+  'packages/storage/src/workflow-store.ts', 'packages/storage/src/sqlite-path.ts', 'packages/protocol/src/providers.ts',
+].map(async path => ({ path: path.replace(/\.ts$/, '.js'), source: stripTypeScriptTypes(
+  await readFile(new URL('../../' + path, import.meta.url), 'utf8'), { mode: 'transform' }) })));
 const digest = path => createHash('sha256').update(process.platform === 'win32' ? path.toLowerCase() : path).digest('hex');
 function cleanEnv(extra = {}) {
   const env = { ...process.env };
@@ -76,6 +84,9 @@ async function fixture(t) {
     productFixture = productFixture.replace("from './" + name + ".js'", "from './" + name + ".ts'");
     await write(name + '.ts', source);
   }
+  assert.ok(productFixture.includes("from './app-asset-control.js'"));
+  productFixture = productFixture.replace("from './app-asset-control.js'", "from './apps/daemon/src/app-asset-control.js'");
+  for (const { path, source } of appAssetControlModules) await write(path, source);
   // This metadata-only product fixture has no parent diagnostics channel or outbox.
   await write('diagnostic-reporter.js', 'export function createDiagnosticReporter() { return Object.freeze({report:async()=>null,close(){}}); }');
   await write('product.fixture.ts', productFixture);
