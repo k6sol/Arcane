@@ -307,7 +307,7 @@ test('real service releases a synchronously refused pipeline start before any wo
 test('real service retains unresolved pipeline ownership even after its actual completion promise settles',async t=>{
   const f=await fixture(t),incarnation=f.registry.issue(),binding={connectionId:'unresolved-connection',threadId:'unresolved-thread'};
   incarnation.seal({...binding,provider:'codex',sessionId:null});incarnation.grant(binding);incarnation.dispatched({...binding,operationId:'unresolved-operation'});
-  t.mock.method(AssetPipeline.prototype as unknown as {generate:Generate},'generate',async(jobId,directory,request)=>{
+  t.mock.method(AssetPipeline.prototype as unknown as {generate:Generate},'generate',async(jobId:string,directory:string,request:AssetRequest)=>{
     await mkdir(directory);const result:AssetJobResult={jobId,directory,state:'interrupted',manifestPath:null,
       error:{code:'SUPERVISION_UNRESOLVED',message:'Synthetic unconfirmed worker closure; no native worker launched.'}};
     await writeFile(join(directory,'job.json'),JSON.stringify({schemaVersion:1,...result,request,startedAt:new Date().toISOString()}));return result;

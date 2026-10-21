@@ -5,6 +5,7 @@ import { mkdtemp, readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import type { Request as BrowserRequest } from 'playwright-core';
 import type { SettingsKeyRecord } from '../../apps/desktop/src/studio-key-settings.js';
 import { STUDIO_ROOTS } from '../../apps/desktop/src/studio.js';
 
@@ -108,7 +109,49 @@ async function fixture(t: TestContext, native: boolean, legacy = false, fail: Fa
     }) }) });
   }, { native, secret, keyId: KEY_ID, legacy, fail });
   const page = await context.newPage(); page.setDefaultTimeout(6000); page.setDefaultNavigationTimeout(20000); page.on('pageerror', error => errors.push(error.message));
-  await page.goto(origin + '/studio#' + TOKEN);
+  // Observe only this synthetic navigation. Never inspect headers, bodies,
+  // URL query/hash, bearer values or arbitrary evaluated page state.
+  type NavigationRequest = { method: string; path: string };
+  const pending = new Map<BrowserRequest, NavigationRequest>(), failed: (NavigationRequest & { code: string })[] = [];
+  let domContentLoaded = false, load = false, requestsStarted = 0, requestsFinished = 0, omittedPending = 0, omittedFailures = 0;
+  const describe = (request: BrowserRequest): NavigationRequest | null => {
+    try {
+      const url = new URL(request.url()); if (url.origin !== origin) return null;
+      const pathname = url.pathname, method = request.method();
+      return { method: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'].includes(method) ? method : 'OTHER',
+        path: pathname.length <= 96 && /^\/[a-zA-Z0-9/_.-]*$/.test(pathname) ? pathname : '/unclassified' };
+    } catch { return null; }
+  };
+  const onRequest = (request: BrowserRequest) => {
+    const value = describe(request); if (!value) return; requestsStarted++;
+    if (pending.size < 32) pending.set(request, value); else omittedPending++;
+  };
+  const onFinished = (request: BrowserRequest) => { if (describe(request)) requestsFinished++; pending.delete(request); };
+  const onFailed = (request: BrowserRequest) => {
+    const value = pending.get(request) ?? describe(request); pending.delete(request); if (!value) return;
+    const reason = request.failure()?.errorText;
+    const code = typeof reason === 'string' && /^net::ERR_[A-Z_]{1,48}$/.test(reason) ? reason : 'request-failed';
+    if (failed.length < 8) failed.push({ ...value, code }); else omittedFailures++;
+  };
+  const onDOMContentLoaded = () => { domContentLoaded = true; }, onLoad = () => { load = true; };
+  page.on('request', onRequest); page.on('requestfinished', onFinished); page.on('requestfailed', onFailed);
+  page.on('domcontentloaded', onDOMContentLoaded); page.on('load', onLoad);
+  try { await page.goto(origin + '/studio#' + TOKEN); }
+  catch (error) {
+    if (error instanceof Error && error.name === 'TimeoutError') {
+      const observation = Object.freeze({ schemaVersion: 1, stage: 'page.goto-load', deadlineMs: 20000,
+        domContentLoaded, load, requestsStarted, requestsFinished, omittedPending, omittedFailures,
+        pending: Object.freeze([...pending.values()].map(value => Object.freeze({ ...value }))),
+        failed: Object.freeze(failed.map(value => Object.freeze({ ...value }))) });
+      t.diagnostic('Synthetic navigation observation: ' + JSON.stringify(observation));
+      try { Object.defineProperty(error, 'navigationObservation', { value: observation, enumerable: true }); }
+      catch { /* Preserve the original TimeoutError even if it cannot carry metadata. */ }
+    }
+    throw error;
+  } finally {
+    page.off('request', onRequest); page.off('requestfinished', onFinished); page.off('requestfailed', onFailed);
+    page.off('domcontentloaded', onDOMContentLoaded); page.off('load', onLoad);
+  }
   await page.waitForFunction(() => document.getElementById('key-status')?.textContent === 'Key service responding');
   await page.locator('#codex-composer').fill(DRAFT);
   const counts = () => page.evaluate(() => (window as unknown as FixtureWindow).keyFixture.calls);
