@@ -138,6 +138,8 @@ if (process.send && !process.connected) void shutdown();
 // Keep this mesh: the desktop main process (the only holder of this channel) delivers the person's trusted-dialog
 // consent here; the renderer and agents cannot reach it, so they can never start an upload.
 if (process.send) app.meshKeep?.enableConsentChannel();
+// Imports: the same private channel carries the desktop host's single-use import consent (asset-import.cjs).
+if (process.send) app.imports?.enableConsentChannel();
 if (process.send) process.on('message', (message: unknown) => {
   if (message && typeof message === 'object' && 'type' in message && 'protocolVersion' in message &&
       message.type === 'arcane-shutdown' && message.protocolVersion === 1) void shutdown();
@@ -146,6 +148,7 @@ if (process.send) process.on('message', (message: unknown) => {
       if(!process.send||!process.connected){app.appAssets?.close();return;}
       process.send(reply,error=>{if(error)app.appAssets?.close();});
     }))return;
+    if (app.imports?.acceptConsent(message)) return;
     app.meshKeep?.acceptConsent(message);
   }
 });

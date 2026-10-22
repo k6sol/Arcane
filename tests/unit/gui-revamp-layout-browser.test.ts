@@ -120,7 +120,7 @@ test('Edge: production picker and settings handlers open reachable surfaces afte
       response.writeHead(200, { 'content-type': request.url === '/studio' ? 'text/html' : 'text/javascript', 'content-security-policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'" });
       response.end(request.url === '/studio' ? html : bootstrap); return;
     }
-    const file = files.get(request.url ?? '');
+    const file = files.get(request.url ?? '') ?? (/^\/fonts\/[a-z0-9-]+\.woff2$/.test(request.url ?? '') ? [resolve('apps/desktop/public', request.url!.slice(1)), 'font/woff2'] : undefined);
     if (file) { response.writeHead(200, { 'content-type': file[1]! }); response.end(await readFile(file[0]!)); return; }
     if (request.url !== '/favicon.ico' && request.url !== '/brand/arcane-ridges.png') unexpected.push(request.url ?? '');
     response.writeHead(404); response.end();

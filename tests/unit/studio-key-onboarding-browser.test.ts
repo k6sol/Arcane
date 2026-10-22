@@ -48,11 +48,13 @@ for (const storageAvailable of [true, false]) test('key onboarding: trusted rota
     for (const name of await readdir(resolve(build, 'apps/desktop/src'))) {
       if (name.endsWith('.js')) files.set('/' + name, resolve(build, 'apps/desktop/src', name));
     }
+    // The shipped faces (studio.css @font-face, same-origin /fonts) are part of the product page.
+    for (const name of await readdir(resolve('apps/desktop/public/fonts'))) if (name.endsWith('.woff2')) files.set('/fonts/' + name, resolve('apps/desktop/public/fonts', name));
     const server = createServer((request, response) => { void (async () => {
       const url = new URL(request.url ?? '/', origin), path = url.pathname;
       const send = (json: unknown, status = 200) => { response.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); response.end(JSON.stringify(json)); };
       const file = files.get(path);
-      if (request.method === 'GET' && file) { response.writeHead(200, { 'Content-Type': path.endsWith('.js') ? 'text/javascript' : path.endsWith('.css') ? 'text/css' : path.endsWith('.png') ? 'image/png' : 'text/html' }); response.end(await readFile(file)); return; }
+      if (request.method === 'GET' && file) { response.writeHead(200, { 'Content-Type': path.endsWith('.js') ? 'text/javascript' : path.endsWith('.css') ? 'text/css' : path.endsWith('.png') ? 'image/png' : path.endsWith('.woff2') ? 'font/woff2' : 'text/html' }); response.end(await readFile(file)); return; }
       if (path === '/favicon.ico') { response.writeHead(204); response.end(); return; }
       if (request.method === 'POST') {
         if (!['/v1/studio/keys/rotate', '/v1/plugin/connect', '/v1/plugin/poll'].includes(path)) { unexpected.push('POST ' + path); send({ error: 'FIXTURE_WRITE_DENIED' }, 403); return; }

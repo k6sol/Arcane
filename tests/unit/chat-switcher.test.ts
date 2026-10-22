@@ -61,12 +61,21 @@ test('the summary names the current chat first and keeps the Saved chats label; 
   doc.activeElement = null; assert.equal(chatSwitchFocus(doc as unknown as Document, menu as unknown as HTMLElement), null);
 });
 
-test('studio.css keeps the tab strip on wide layouts and swaps to the switcher on narrow ones', () => {
+test('studio.css draws the top bar chat chip as the switcher at every width', () => {
   const css = readFileSync('apps/desktop/public/studio.css', 'utf8').replace(/\s+/g, ' ');
+  const start = css.indexOf('/* C30 topbar */'), end = css.indexOf('/* end C30 topbar */');
+  assert.ok(start > 0 && end > start, 'the owned top bar block exists');
+  // Every chip rule sits before the block's first width query, so it applies at all widths.
+  const block = css.slice(start, end), narrowAt = block.indexOf('@media (max-width');
+  assert.ok(narrowAt > 0, 'the block has its narrow steps');
+  for (const [rule, why] of [
+    ['.arcane-app .workspace-topbar .workspace-chat-tabs{display:none}', 'tab strips are never drawn'],
+    ['.workspace-topbar .chat-tabs-history .chat-switch-current{display:block', 'the chip names the current chat'],
+    ['.workspace-topbar .chat-tabs-history .chat-switch-open{display:block}', 'its menu lists the open chats and New chat'],
+    ['.workspace-topbar .chat-tabs-history .chat-switch-label{position:absolute;width:1px', '"Saved chats" stays only as the accessible name and the menu heading'],
+    ['.workspace-topbar .chat-tabs-history .chat-switch-select[aria-current=true]{', 'the current chat is marked'],
+    ['.chat-tabs-history[open]::details-content{position:absolute;top:calc(100% + 8px);left:0;z-index:var(--z-menu,40)', 'the menu opens under the chip'],
+  ] as const) { const at = block.indexOf(rule); assert.ok(at >= 0 && at < narrowAt, why); }
+  // Narrow layouts keep their own rules too.
   assert.match(css, /\.arcane-app \.chat-tabs-history :is\(\.chat-switch-open,\.chat-switch-current\)\{display:none\}/);
-  const narrow = css.slice(css.indexOf('@media(max-width:1099px){'));
-  assert.ok(narrow.length > 0 && narrow.indexOf('.arcane-app .workspace-chat-tabs{display:none}') > 0);
-  assert.match(narrow, /\.chat-tabs-history \.chat-switch-open\{display:block\}/);
-  assert.match(narrow, /\.chat-switch-select\[aria-current=true\]/);
-  assert.match(narrow, /z-index:var\(--z-menu\)/);
 });

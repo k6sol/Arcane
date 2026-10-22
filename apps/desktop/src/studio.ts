@@ -8,7 +8,7 @@ import type { startWorkflowPanel, WorkflowPanelOptions } from './workflow-panel.
 import { CodexHistoryPanel } from './codex-history.js';
 import { LearningPanel } from './learning-panel.js';
 /// <reference lib="dom" />
-import { CodexChat, CodexChatApi, setProjectMemorySaver } from './codex-chat.js';
+import { CodexChat, CodexChatApi, providerLogo, setProjectMemorySaver } from './codex-chat.js';
 import { startWorkspaceShell, WORKSPACE_ASSET_ACTIVITY_EVENT, type WorkspaceAssetActivity } from './workspace-shell.js';
 import { startProviderSetup } from './provider-setup.js';
 import { startSetupChecklist, startStudioConnectionBanner } from './setup-checklist.js';
@@ -18,7 +18,8 @@ import { ClaudeChat, linkChatProviders, setChatFeedbackHooks } from './claude-ch
 import { SharedConversations } from './shared-conversations.js';
 import type { ChatQueueBridge } from '../../../packages/protocol/src/chat-queue.js';
 import { startNativeHandoff } from './native-handoff.js';
-import { startTaskUsageFooter } from './task-usage-ui.js';
+import { codexContextWindow, startComposerChrome, startTaskUsageFooter, type ComposerChromeController } from './task-usage-ui.js';
+import type { TaskUsageView } from './task-usage.js';
 import { startDesktopVerification } from './desktop-verification.js';
 import { ArtifactDownloads } from './asset-downloads.js';
 import { AssetViewerPanel } from './asset-viewer.js';
@@ -816,11 +817,16 @@ export class StudioWorkbench {
     const ids = (value as { outdatedSessionIds?: unknown } | null)?.outdatedSessionIds;
     this.outdatedPluginSessions = new Set(Array.isArray(ids) ? ids.filter((id): id is string => typeof id === 'string').slice(0, 1000) : []);
   }
+  // The live session's place name (the chosen session, else the only live one); null with none or several. Display only.
+  private studioPlace: string | null = null;
+  studioPlaceName(): string | null { return this.stopped ? null : this.studioPlace; }
   private observeStudioSessions(): void {
     const liveSessions = this.sessions.filter(session => !session.revokedAt && Date.now() - Date.parse(session.lastSeenAt) <= 30000);
     const live = liveSessions.length > 0, fresh = live ? !liveSessions.some(session => this.outdatedPluginSessions.has(session.id)) : null;
-    if (live === this.studioLive && fresh === this.studioPluginFresh) return;
-    this.studioLive = live; this.studioPluginFresh = fresh;
+    const placed = liveSessions.find(session => session.id === this.sessionId) ?? (liveSessions.length === 1 ? liveSessions[0] : undefined);
+    const place = typeof placed?.name === 'string' ? placed.name.replace(/[\u0000-\u001f\u007f-\u009f‪-‮⁦-⁩]/g, '').trim().slice(0, 100) || null : null;
+    if (live === this.studioLive && fresh === this.studioPluginFresh && place === this.studioPlace) return;
+    this.studioLive = live; this.studioPluginFresh = fresh; this.studioPlace = place;
     for (const listener of [...this.studioListeners]) { try { listener(); } catch { /* Observers cannot interrupt refresh. */ } }
   }
   private observeProjectPath(value: unknown, identity: unknown = null): void {
@@ -1725,6 +1731,20 @@ export class StudioWorkbench {
     return prepareAssetInput({ template: this.value('asset-template'), name: this.value('asset-name'), seed: number('asset-seed'), sizeMeters: this.value('asset-size').split(',').map(s => s.trim() ? Number(s) : NaN), color: this.value('asset-color').split(',').map(s => s.trim() ? Number(s) : NaN), triangleBudget: number('asset-budget'), renderResolution: number('asset-resolution'), renderSamples: number('asset-samples') });
   }
   private currentAssetJob() { return this.assetJobs.find(j => j.jobId === this.assetJobId); }
+  /** Imported assets (asset-imports.ts): the shared viewer, the generated models a chat card could show now, the same
+   * View action and a release so an import can take the viewer. Imports never enter this job history. */
+  assetLibrary(): import('./asset-imports.js').AssetLibrary {
+    const viewable = (jobId: string) => !this.stopped && this.assetAvailable && !this.assetUnknown && this.assetJobs.some(job => job.jobId === jobId && job.state === 'succeeded' && job.manifestAvailable);
+    return {
+      viewer: this.assetViewer,
+      generated: () => this.assetJobs.filter(job => viewable(job.jobId)).slice(0, 32).map(job => ({ jobId: job.jobId, name: job.request.name.replaceAll('-', ' ') })),
+      view: jobId => {
+        if (this.assetBusy || !viewable(jobId)) return false;
+        this.selectAssetJob(jobId, true); this.renderAssetPicker(); void this.loadAssetManifest(); return true;
+      },
+      release: () => { if (this.assetJobId) { this.selectAssetJob('', true); this.renderAssetPicker(); } else this.clearAssetPreview(); },
+    };
+  }
   private selectAssetJob(jobId: string, manual: boolean): void {
     if (manual) this.automaticAssets.muteObserved();
     this.assetJobId = this.assetJobs.some(job => job.jobId === jobId) ? jobId : '';
@@ -2217,6 +2237,230 @@ export function createWorkflowContextOptions(
   };
 }
 
+/** C31 motion, exits: menus, popovers, the settings drawer, in-app dialogs, the compact sheet and a collapsing folder leave
+ * with a short fade instead of vanishing. The real element still hides at once, so focus, hit testing, the accessibility
+ * tree and every script see it gone immediately; what fades is a still copy of its last shown frame, drawn in an inert,
+ * aria-hidden, closed shadow root (studio.css adopted, the copy's own motion and pointer events off) that is removed when
+ * the fade ends. Opacity and the transform family only (plus a clip for the folder), on the exit curve and shorter than the
+ * entrances; nothing runs with reduced motion, while the page is hidden, or on a surface that reopens. Presentation only. */
+export function startExitMotion(doc: Document): { stop(): void; resume(): void } {
+  const win = doc.defaultView;
+  type Snap = { chain: Element[]; leaf: HTMLElement; rect: DOMRect; backdrop?: { background: string; filter: string } | undefined; anchor?: { selector: string; top: number } };
+  type Surface = { el: HTMLElement; leaf: HTMLElement; late: boolean; rise: number; prepare: (copy: HTMLElement) => void; snap: Snap | null };
+  const token = (name: string, fallback: string) => (win ? win.getComputedStyle(doc.documentElement).getPropertyValue(name).trim() : '') || fallback;
+  const ms = (value: string) => { const n = parseFloat(value); return /ms$/.test(value) ? n : n * 1000; };
+  const still = () => !win || doc.visibilityState === 'hidden' || !!win.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+  let fast = 120, base = 180, slow = 240, exit = 'cubic-bezier(.4,0,1,1)', emph = 'cubic-bezier(.3,0,0,1)';
+  let sheets: CSSStyleSheet[] | null | undefined, building = false;
+  // studio.css, adopted by every copy and built once while the window is idle: the file's own text (a CSSOM round trip
+  // drops var() shorthands that a later longhand overrides), with :root qualifiers moved to the host (which carries the
+  // document element's attributes, as the shadow tree has no :root). A second sheet turns the copy's own entrances,
+  // transitions and pointer events off. Until it is ready, surfaces simply close as they did before.
+  const styles = (): CSSStyleSheet[] | null => sheets ?? null;
+  const build = async () => {
+    if (sheets !== undefined || building || !win) return;
+    building = true;
+    try {
+      const source = Array.from(doc.styleSheets).find(sheet => /\/studio\.css(?:[?#]|$)/.test(sheet.href ?? ''));
+      if (!source?.href || typeof CSSStyleSheet !== 'function') { sheets = null; return; }
+      let text = '';
+      try { const response = await win.fetch(source.href, { credentials: 'same-origin' }); if (response.ok) text = await response.text(); } catch { /* The parsed rules below stand in. */ }
+      if (!text) text = Array.from(source.cssRules, rule => rule.cssText).join('\n');
+      text = text.replace(/@font-face\s*\{[^}]*\}/g, '')
+        .replace(/:root((?:\[[^\]]*\]|:not\(\[[^\]]*\]\))*)/g, (_all, qualifiers: string) => qualifiers ? ':host(' + qualifiers + ')' : ':host');
+      const copy = new CSSStyleSheet(), off = new CSSStyleSheet();
+      copy.replaceSync(text);
+      off.replaceSync('*,*::before,*::after,*::backdrop,*::details-content{animation:none!important;transition:none!important;pointer-events:none!important;caret-color:transparent!important}[data-exit-chain]::before,[data-exit-chain]::after{content:none!important}');
+      sheets = [copy, off];
+    } catch { sheets = null; } finally { building = false; }
+  };
+  const snapshot = (el: HTMLElement, leaf: HTMLElement, deep: boolean, measured?: DOMRect): Snap | null => {
+    const rect = measured ?? leaf.getBoundingClientRect();
+    if (rect.width < 1 || rect.height < 1) return null;
+    const chain: Element[] = [];
+    for (let node = leaf.parentElement; node && node !== doc.documentElement; node = node.parentElement) chain.unshift(node.cloneNode(false) as Element);
+    const snap: Snap = { chain, leaf: (deep ? leaf.cloneNode(true) : leaf) as HTMLElement, rect };
+    if (el instanceof HTMLDialogElement && win) { const style = win.getComputedStyle(el, '::backdrop'); snap.backdrop = { background: style.background, filter: style.backdropFilter }; }
+    return snap;
+  };
+  const hosts = new Map<HTMLElement, HTMLElement>();
+  const clear = (el: HTMLElement) => { const host = hosts.get(el); if (host) { host.remove(); hosts.delete(el); } };
+  const set = (el: HTMLElement, values: Record<string, string>, important = '') => { for (const [key, value] of Object.entries(values)) el.style.setProperty(key, value, important); };
+  /** Draws the copy at its last shown place and fades it; returns false when it cannot (no stylesheet, nothing measured). */
+  const ghost = (key: HTMLElement, snap: Snap, frames: Keyframe[] | ((shift: number) => Keyframe[]), duration: number, easing: string, behind?: (root: ShadowRoot) => Animation | null): boolean => {
+    const adopted = styles();
+    if (!adopted) { void build(); return false; }
+    if (!win || typeof Element.prototype.attachShadow !== 'function') return false;
+    clear(key);
+    const host = doc.createElement('arcane-exit');
+    for (const attr of Array.from(doc.documentElement.attributes)) if (attr.name !== 'id' && attr.name !== 'style') host.setAttribute(attr.name, attr.value);
+    host.setAttribute('aria-hidden', 'true'); host.inert = true;
+    set(host, { position: 'fixed', top: '0', left: '0', width: '0', height: '0', margin: '0', padding: '0', border: '0', overflow: 'visible', 'z-index': '2147483646', 'pointer-events': 'none', display: 'block', contain: 'none' }, 'important');
+    const root = host.attachShadow({ mode: 'closed' });
+    root.adoptedStyleSheets = adopted;
+    const fade = behind?.(root) ?? null;
+    let parent: Node = root;
+    for (const node of snap.chain) {
+      node.setAttribute('data-exit-chain', ''); (node as HTMLElement).style?.setProperty('display', 'contents', 'important');
+      // A details ancestor keeps its content shown, and an empty hidden summary stands in for the browser's default one.
+      if (node instanceof HTMLDetailsElement) { node.open = true; const summary = doc.createElement('summary'); summary.style.setProperty('display', 'none', 'important'); node.prepend(summary); }
+      parent.appendChild(node); parent = node;
+    }
+    const leaf = snap.leaf, r = snap.rect;
+    leaf.hidden = false; leaf.removeAttribute('inert');
+    for (const field of Array.from(leaf.querySelectorAll<HTMLInputElement>('input[type=password]'))) field.value = '';
+    set(leaf, { position: 'fixed', inset: 'auto', left: r.left + 'px', top: r.top + 'px', width: r.width + 'px', height: r.height + 'px', margin: '0', 'box-sizing': 'border-box',
+      'max-width': 'none', 'max-height': 'none', 'min-width': '0', 'min-height': '0', visibility: 'visible' }, 'important');
+    set(leaf, { transform: 'none', translate: 'none', scale: 'none' });
+    parent.appendChild(leaf);
+    doc.documentElement.appendChild(host); hosts.set(key, host);
+    // Line the copy up with what was on screen where an anchor was measured (a hovered row can change the layout above it).
+    let shift = 0;
+    const anchor = snap.anchor ? leaf.querySelector(snap.anchor.selector) : null;
+    if (snap.anchor && anchor) { shift = snap.anchor.top - anchor.getBoundingClientRect().top; if (Math.abs(shift) >= .5) set(leaf, { top: r.top + shift + 'px' }, 'important'); else shift = 0; }
+    let animation: Animation | null = null;
+    try { animation = leaf.animate(typeof frames === 'function' ? frames(shift) : frames, { duration, easing, fill: 'forwards' }); } catch { /* Presentation only. */ }
+    const done = () => { if (hosts.get(key) === host) hosts.delete(key); host.remove(); };
+    if (!animation) { done(); return false; }
+    void Promise.all([animation.finished, fade?.finished]).then(done, done);
+    win.setTimeout(done, duration + 1000);
+    return true;
+  };
+  const popover = (rise: number, scale = .98): Keyframe[] => [{ opacity: 1, scale: '1', translate: '0 0' }, { opacity: 0, scale: String(scale), translate: '0 ' + rise + 'px' }];
+  const none = () => {};
+  // Surfaces that hide in place: [selector, the shown test, the element that is drawn, late copy (closing does not change what
+  // it showed, so it is copied at the close), travel in px (back towards its anchor), what puts the copy back in its open state].
+  const kinds: [string, (el: HTMLElement) => boolean, (el: HTMLElement) => HTMLElement | null, boolean, number, (copy: HTMLElement) => void][] = [
+    ['.composer-model-popover,.composer-command-menu', el => !el.hidden, el => el, false, 4, none],
+    ['.studio-diagnostics-panel,.workspace-search-results,.vw-menu,.queue-menu,.import-picker', el => !el.hidden, el => el, false, -4, none],
+    ['details.chat-head-more', el => (el as HTMLDetailsElement).open, el => el.querySelector<HTMLElement>(':scope>.chat-head-menu'), false, -4, none],
+    // The chat chip's list is the details content: the copy keeps the details (its summary hidden, the real chip stays).
+    ['.workspace-topbar details.chat-tabs-history', el => (el as HTMLDetailsElement).open && !el.hidden, el => el, false, -4,
+      copy => copy.querySelector<HTMLElement>(':scope>summary')?.style.setProperty('visibility', 'hidden', 'important')],
+    ['#sidebar-menu', el => el.getAttribute('data-open') === 'true', el => el, false, 4, none],
+    ['dialog.settings-drawer', el => (el as HTMLDialogElement).open, el => el, true, 8,
+      copy => { copy.setAttribute('open', ''); for (const page of Array.from(copy.querySelectorAll('[data-settings-section][hidden]'))) page.remove(); }],
+    ['#app-sidebar', el => el.getAttribute('data-sheet') === 'open', el => el, true, -8, copy => copy.setAttribute('data-sheet', 'open')],
+    ['#compact-scrim', el => el.getAttribute('data-open') === 'true', el => el, true, 0, copy => copy.setAttribute('data-open', 'true')],
+  ];
+  const tracked = new Map<HTMLElement, Surface>();
+  const kindOf = (el: Element) => kinds.find(([selector]) => el.matches(selector));
+  const capture = (surface: Surface) => { if (!surface.late || !surface.snap) surface.snap = snapshot(surface.el, surface.leaf, !surface.late); else surface.snap.rect = surface.leaf.getBoundingClientRect(); };
+  const refresh = () => { for (const surface of tracked.values()) { try { capture(surface); } catch { surface.snap = null; } } };
+  const shown = (el: HTMLElement, kind: NonNullable<ReturnType<typeof kindOf>>) => {
+    clear(el);
+    const leaf = kind[2](el); if (!leaf) return;
+    const surface: Surface = { el, leaf, late: kind[3], rise: kind[4], prepare: kind[5], snap: null };
+    tracked.set(el, surface);
+    // Measure once the entrance has laid out; every press and key (just before a close) measures again.
+    win?.requestAnimationFrame(() => win.requestAnimationFrame(() => { if (tracked.get(el) === surface) { try { capture(surface); } catch { /* Presentation only. */ } } }));
+  };
+  const hidden = (el: HTMLElement) => {
+    const surface = tracked.get(el); tracked.delete(el);
+    if (!surface?.snap || still()) return;
+    let snap = surface.snap;
+    // Late copies (the drawer, the sheet, the scrim) are taken now: closing does not change what they showed.
+    if (surface.late) { const fresh = snapshot(el, surface.leaf, true, snap.rect); if (!fresh) return; fresh.backdrop = snap.backdrop ?? fresh.backdrop; snap = fresh; }
+    surface.prepare(snap.leaf);
+    if (el.matches('#compact-scrim')) { ghost(el, snap, [{ opacity: 1 }, { opacity: 0 }], base, exit); return; }
+    if (el.matches('dialog.settings-drawer')) {
+      const backdrop = snap.backdrop;
+      ghost(el, snap, popover(surface.rise, 1), base, exit, backdrop ? root => {
+        const layer = doc.createElement('div');
+        set(layer, { position: 'fixed', inset: '0', background: backdrop.background, 'backdrop-filter': backdrop.filter, 'pointer-events': 'none' }, 'important');
+        root.appendChild(layer);
+        try { return layer.animate([{ opacity: 1 }, { opacity: 0 }], { duration: base, easing: exit, fill: 'forwards' }); } catch { return null; }
+      } : undefined);
+      return;
+    }
+    if (el.matches('#app-sidebar')) { ghost(el, snap, [{ opacity: 1, translate: '0 0' }, { opacity: 0, translate: '0 ' + surface.rise + 'px' }], base, exit); return; }
+    ghost(el, snap, popover(surface.rise), fast, exit);
+  };
+  const check = (el: HTMLElement) => {
+    const kind = kindOf(el); if (!kind) return;
+    const open = kind[1](el), known = tracked.has(el);
+    if (open && !known) shown(el, kind);
+    else if (open) clear(el);
+    else if (known) hidden(el);
+  };
+  // Removed surfaces: an in-app dialog layer leaves the body; the folder menu and a collapsing folder leave with a rebuild.
+  let layers: { el: HTMLElement; snap: Snap }[] = [];
+  let folderMenu: { snap: Snap; at: number } | null = null, folder: { key: string; snap: Snap; radius: string; at: number } | null = null;
+  const recent = (at: number) => performance.now() - at < 1500;
+  const press = (event: Event) => {
+    refresh();
+    for (const layer of Array.from(doc.querySelectorAll<HTMLElement>('body>.arcane-modal-layer'))) {
+      const box = layer.querySelector<HTMLElement>('.arcane-modal'), snap = snapshot(layer, layer, true);
+      layers = layers.filter(entry => entry.el !== layer); if (snap && box) layers.push({ el: layer, snap });
+    }
+    const menu = doc.getElementById('library-folder-menu');
+    const menuSnap = menu ? snapshot(menu, menu, true) : null;
+    folderMenu = menuSnap ? { snap: menuSnap, at: performance.now() } : null;
+    const toggle = (event.target as Element | null)?.closest?.('.library-folder-toggle[aria-expanded=true]');
+    const card = toggle?.closest<HTMLElement>('.library-folder'), key = (toggle as HTMLElement | null | undefined)?.dataset.libraryFocus;
+    const snap = card ? snapshot(card, card, true) : null;
+    const firstRow = card?.querySelector('.library-chat');
+    if (snap && firstRow) snap.anchor = { selector: '.library-chat', top: firstRow.getBoundingClientRect().top };
+    folder = snap && key && card && win ? { key, snap, radius: win.getComputedStyle(card).borderRadius, at: performance.now() } : null;
+  };
+  const libraryChanged = () => {
+    const library = doc.getElementById('conversation-library');
+    if (folderMenu && !doc.getElementById('library-folder-menu')) { if (!still() && recent(folderMenu.at)) ghost(library ?? doc.documentElement, folderMenu.snap, popover(-4), fast, exit); folderMenu = null; }
+    if (!folder || !library) return;
+    if (!recent(folder.at)) { folder = null; return; }
+    const toggle = library.querySelector<HTMLElement>('.library-folder-toggle[data-library-focus="' + CSS.escape(folder.key) + '"]');
+    if (toggle?.getAttribute('aria-expanded') !== 'false') return;
+    const card = toggle.closest<HTMLElement>('.library-folder'), after = card?.getBoundingClientRect(), { snap, radius } = folder; folder = null;
+    const kept = after?.height ?? 0, height = snap.rect.height;
+    if (!card || height - kept < 1 || still()) return;
+    // Only what the collapse removes (the chats under the folder row) is drawn; it closes up from below in step with the
+    // cards beneath, which slide up with the list FLIP (same duration and curve), and fades as it goes.
+    const corners = 'round 0 0 ' + radius + ' ' + radius;
+    ghost(card, snap, shift => { const top = Math.max(0, kept - shift);
+      return [{ opacity: 1, clipPath: 'inset(' + top + 'px 0 ' + Math.max(0, shift) + 'px 0 ' + corners + ')' }, { opacity: 0, clipPath: 'inset(' + top + 'px 0 ' + Math.max(0, height - top) + 'px 0 ' + corners + ')' }]; }, slow, emph);
+  };
+  let observer: MutationObserver | null = null, removals: MutationObserver | null = null, idle = 0;
+  const start = () => {
+    if (!win || typeof win.MutationObserver !== 'function' || typeof Element.prototype.animate !== 'function' || observer) return;
+    fast = ms(token('--m-fast', '120ms')); base = ms(token('--m-base', '180ms')); slow = ms(token('--m-slow', '240ms'));
+    exit = token('--m-exit', exit); emph = token('--m-emph', emph);
+    observer = new win.MutationObserver(records => {
+      const seen = new Set<HTMLElement>();
+      for (const record of records) if (record.type === 'attributes' && record.target instanceof HTMLElement && !seen.has(record.target)) { seen.add(record.target); check(record.target); }
+      if (records.some(record => record.type === 'childList' && (record.target as Element).closest?.('#conversation-library'))) libraryChanged();
+    });
+    observer.observe(doc.documentElement, { subtree: true, attributes: true, attributeFilter: ['hidden', 'open', 'data-open', 'data-sheet'] });
+    const library = doc.getElementById('conversation-library');
+    if (library) observer.observe(library, { subtree: true, childList: true });
+    removals = new win.MutationObserver(records => {
+      for (const record of records) for (const node of Array.from(record.removedNodes)) {
+        const entry = layers.find(layer => layer.el === node); if (!entry) continue;
+        layers = layers.filter(layer => layer !== entry);
+        if (!still()) ghost(entry.el, entry.snap, [{ opacity: 1 }, { opacity: 0 }], base, exit);
+      }
+      for (const record of records) for (const node of Array.from(record.addedNodes)) if (node instanceof HTMLElement && node.matches('.arcane-modal-layer'))
+        win.requestAnimationFrame(() => win.requestAnimationFrame(() => { if (!node.isConnected) return; const snap = snapshot(node, node, true); if (snap) { layers = layers.filter(layer => layer.el !== node); layers.push({ el: node, snap }); } }));
+    });
+    if (doc.body) removals.observe(doc.body, { childList: true });
+    for (const kind of kinds) for (const el of Array.from(doc.querySelectorAll<HTMLElement>(kind[0]))) if (kind[1](el)) shown(el, kind);
+    doc.addEventListener('pointerdown', press, true); doc.addEventListener('keydown', press, true); win.addEventListener('resize', refresh);
+    // Build the copy's stylesheet while the window is idle, so the first close does not pay for it.
+    const prepare = () => { if (!still()) void build(); };
+    idle = typeof win.requestIdleCallback === 'function' ? win.requestIdleCallback(prepare, { timeout: 1500 }) : win.setTimeout(prepare, 500);
+  };
+  start();
+  return {
+    stop() {
+      observer?.disconnect(); removals?.disconnect(); observer = null; removals = null;
+      doc.removeEventListener('pointerdown', press, true); doc.removeEventListener('keydown', press, true); win?.removeEventListener('resize', refresh);
+      if (idle && win) { if (typeof win.cancelIdleCallback === 'function') win.cancelIdleCallback(idle); else win.clearTimeout(idle); } idle = 0;
+      for (const el of Array.from(hosts.keys())) clear(el);
+      tracked.clear(); layers = []; folderMenu = null; folder = null;
+    },
+    resume() { start(); },
+  };
+}
+
 if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   let chatTabController: import('./chat-tabs.js').ChatTabsController | null = null;
   let storage: Pick<Storage, 'getItem' | 'setItem'>;
@@ -2237,7 +2481,22 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   codexChat.setFeedbackHooks(learned.hooks);
   window.addEventListener('pagehide',()=>{learned.stop();setChatFeedbackHooks(null);codexChat.setFeedbackHooks(null);});
   window.addEventListener('pageshow',event=>{if(event.persisted){learned.resume();setChatFeedbackHooks(learned.hooks);codexChat.setFeedbackHooks(learned.hooks);}});
-  const providerSetup = startProviderSetup(document, {chat:codexChat, autoSelectSignedIn:true});
+  // signInPage: the first launch shows the full sign-in page until a usable sign-in or Continue without signing in.
+  const providerSetup = startProviderSetup(document, {chat:codexChat, autoSelectSignedIn:true, signInPage:true});
+  // Window chrome (desktop only): the native window buttons' background follows the surface, the sign-in page or the workspace.
+  const windowChrome = (window as unknown as { arcaneDesktop?: { windowChrome?: { tone(value: 'workspace' | 'page'): void } } }).arcaneDesktop?.windowChrome;
+  if (windowChrome) {
+    let tone = '';
+    const syncTone = () => {
+      const next = document.documentElement.getAttribute('data-provider-view') === 'workspace' ? 'workspace' : 'page';
+      if (next !== tone) { tone = next; try { windowChrome.tone(next); } catch { /* Presentation only. */ } }
+    };
+    syncTone();
+    const toneWatch = new MutationObserver(syncTone);
+    toneWatch.observe(document.documentElement, { attributes: true, attributeFilter: ['data-provider-view'] });
+    window.addEventListener('pagehide', () => { toneWatch.disconnect(); tone = ''; });
+    window.addEventListener('pageshow', event => { if (event.persisted) { syncTone(); toneWatch.observe(document.documentElement, { attributes: true, attributeFilter: ['data-provider-view'] }); } });
+  }
   // Both providers share one chat surface (tabs, transcript, composer and model picker). While provider setup reports
   // the Claude surface, Codex pauses drawing there (its state is never destroyed) and the Claude chat renders instead.
   const claudeChat = document.getElementById('codex-compose') ? new ClaudeChat(document) : null;
@@ -2329,7 +2588,9 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     window.addEventListener('pageshow',event=>{if(event.persisted)recovery?.resume();});
   }
   const nativeHandoff = startNativeHandoff(document, {provider:providerSetup});
-  const taskUsageFooter = startTaskUsageFooter(document, codexChat);
+  // The latest Codex usage view feeds the composer's context ring (started below, once the workbench exists).
+  let codexUsageView: TaskUsageView | null = null, composerChrome: ComposerChromeController | null = null;
+  const taskUsageFooter = startTaskUsageFooter(document, codexChat, { onView: view => { codexUsageView = view; composerChrome?.refresh(); } });
   const playtestRoot=document.getElementById('playtest-panel');
   // Composer Playtest switch (remembered per project); when on, the panel approves the managed chat's requests itself.
   const toolboxPolicy=startToolboxPolicy(document,{token:()=>token});
@@ -2376,7 +2637,42 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   // Mid-build disconnects: a banner above the chat while the live Studio session is gone (reconnecting / Reconnect Studio).
   const studioBanner = startStudioConnectionBanner(document, { workbench });
   window.addEventListener('pagehide', () => studioBanner.stop());
+  // Composer chrome (presentation only): Pyx perch, agents count, context ring, closed model chip, queue card placement.
+  // Pyx's pop-out window is C23 (desktop host/IPC); until the preload exposes arcaneDesktop.pyx.open the click only dispatches 'arcane:pyxopen'.
+  const pyxHost = (window as unknown as { arcaneDesktop?: { pyx?: { open?: () => unknown } } }).arcaneDesktop?.pyx;
+  composerChrome = startComposerChrome(document, {
+    surface: () => providerSetup.chatSurface(), subscribeSurface: listener => providerSetup.subscribeChatSurface(listener),
+    studioConnected: () => workbench.studioConnected(), subscribeStudio: listener => workbench.subscribeStudioChange(listener),
+    subagents: () => claudeChat?.subagents() ?? [],
+    contextWindow: () => providerSetup.chatSurface() === 'codex' ? codexContextWindow(codexUsageView) : null,
+    turnFailed: () => codexUsageView?.status === 'failed',
+    providerLogo: provider => providerLogo(document, provider),
+    ...(typeof pyxHost?.open === 'function' ? { openPyx: () => { void pyxHost.open?.(); } } : {}),
+  });
+  window.addEventListener('pagehide', () => composerChrome?.stop());
+  // Pyx pop-out bar, workspace side: publish what the workspace shows and route the bar's instructions through the main
+  // composer's own controls (send, queue or steer exactly as Enter here). Dynamic import keeps the static module list unchanged.
+  if (pyxHost && typeof (pyxHost as { publish?: unknown }).publish === 'function') void import('./pyx-link.js').then(({ startPyxLink }) => {
+    const link = startPyxLink(document, { bridge: pyxHost as unknown as import('./pyx-link.js').PyxHostBridge,
+      surface: () => providerSetup.chatSurface(), subscribeSurface: listener => providerSetup.subscribeChatSurface(listener) });
+    window.addEventListener('pagehide', () => link.stop());
+  }).catch(() => { /* Pyx is optional; the workspace is unaffected. */ });
+  window.addEventListener('pageshow', event => { if (event.persisted) composerChrome?.resume(); });
+  // C31 motion: keyed FLIP for the chat library and the composer queues (presentation only; nothing with reduced motion).
+  const listMotion = startListMotion(document);
+  window.addEventListener('pagehide', () => listMotion.stop());
+  window.addEventListener('pageshow', event => { if (event.persisted) listMotion.resume(); });
+  // C31 motion, exits: a closing menu, popover, drawer, dialog, sheet or folder fades as a still copy (presentation only).
+  const exitMotion = startExitMotion(document);
+  window.addEventListener('pagehide', () => exitMotion.stop());
+  window.addEventListener('pageshow', event => { if (event.persisted) exitMotion.resume(); });
   window.addEventListener('pageshow', event => { if (event.persisted) studioBanner.resume(); });
+  // Top bar and chat header (presentation only): Studio pill from the current session, chat title, menus, resting notice line.
+  // Optional like the Studio output dock: without it the top bar keeps its static markup and every control still works.
+  let workspaceTopbar: { stop(): void; resume(): void } | null = null, workspaceTopbarStopped = false;
+  void import('./workspace-topbar.js').then(module => { workspaceTopbar = module.startWorkspaceTopbar(document, { workbench }); if (workspaceTopbarStopped) workspaceTopbar.stop(); }).catch(() => {});
+  window.addEventListener('pagehide', () => { workspaceTopbarStopped = true; workspaceTopbar?.stop(); });
+  window.addEventListener('pageshow', event => { if (event.persisted) { workspaceTopbarStopped = false; workspaceTopbar?.resume(); } });
   // Quick-start gallery on the empty chat: a click only fills the composer for review.
   startStarterGallery(document);
   // Optional welcome tour: once after sign-in on the desktop app's first launch, and from Settings › Guide › Replay tour.
@@ -2416,6 +2712,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   void import('./plans.js').then(module=>{const plans=module.startPlans(document,{token:()=>token,desktop:(window as unknown as {arcaneDesktop?:import('./plans.js').PlansOptions['desktop']}).arcaneDesktop??null,open:url=>{window.open(url,'_blank','noopener,noreferrer');}});window.addEventListener('pagehide',()=>plans.stop());window.addEventListener('pageshow',event=>{if(event.persisted)plans.resume();});}).catch(()=>{});
   // Project memory (Settings › Project memory): ARCANE.md that both providers read; chat "Save to project memory" buttons append through it.
   // Script sync (Settings › Project memory): opt-in mirror of granted Studio scripts into the project src folder.
+  // Imported models and effects: "Choose an asset", the asset picker, drops on the preview. Files are opened only by the desktop host.
+  void import('./asset-imports.js').then(module=>{const start=()=>module.startAssetImports(document,{token:()=>token,library:workbench.assetLibrary(),desktop:(window as unknown as {arcaneDesktop?:import('./asset-imports.js').AssetImportOptions['desktop']}).arcaneDesktop??null});let imports=start();window.addEventListener('pagehide',()=>imports.stop());window.addEventListener('pageshow',event=>{if(event.persisted)imports=start();});}).catch(()=>{});
   // Keep this mesh: assets panel + chat asset cards; the click goes to the desktop host's trusted confirmation.
   void import('./mesh-keep.js').then(module=>{const keep=module.startMeshKeep(document,{token:()=>token,desktop:(window as unknown as {arcaneDesktop?:import('./mesh-keep.js').MeshKeepOptions['desktop']}).arcaneDesktop??null});window.addEventListener('pagehide',()=>keep.stop());window.addEventListener('pageshow',event=>{if(event.persisted)keep.resume();});}).catch(()=>{});
   void import('./script-sync.js').then(module=>{const sync=module.startScriptSync(document,{token:()=>token});window.addEventListener('pagehide',()=>sync.stop());window.addEventListener('pageshow',event=>{if(event.persisted)sync.resume();});}).catch(()=>{});
@@ -2449,4 +2747,92 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   void workbench.start().catch(error => { const notice = document.getElementById('notice'); if (notice) { notice.textContent = error instanceof Error ? error.message : String(error); notice.className = 'notice error'; } });
 }
 
-
+/** C31 motion: keyed FLIP for the two lists that scripts rebuild wholesale, the chat library and the composer queues. A CSS
+ * entrance would replay on every rebuild, so this remembers where each keyed item sat and, after a rebuild, slides the
+ * survivors from their old place, rises genuinely new items in, reveals a folder that opened and turns its chevron. Only
+ * translate, rotate, opacity and clip-path move (Web Animations, 240 ms, emphasised curve); nothing runs with reduced
+ * motion, while the page is hidden or on the first fill. Presentation only: no DOM, focus or state is changed. */
+function startListMotion(doc: Document): { stop(): void; resume(): void } {
+  const win = doc.defaultView;
+  const EASE = 'cubic-bezier(.3,0,0,1)', SLOW = 240, FAST = 180;
+  type Box = { x: number; y: number; w: number; h: number };
+  type List = { root: Element; items: string; key: (el: HTMLElement) => string | null; mover: (el: HTMLElement) => HTMLElement; boxes: Map<string, Box> | null; expanded: Map<string, boolean> };
+  const lists = new Map<Element, List>();
+  let observer: MutationObserver | null = null, host: MutationObserver | null = null;
+  const still = () => !win || doc.visibilityState === 'hidden' || !!win.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+  const measure = (list: List) => {
+    const base = list.root.getBoundingClientRect(), boxes = new Map<string, Box>();
+    for (const el of Array.from(list.root.querySelectorAll<HTMLElement>(list.items))) {
+      const key = list.key(el); if (!key || boxes.has(key)) continue;
+      const r = list.mover(el).getBoundingClientRect();
+      if (r.width || r.height) boxes.set(key, { x: r.left - base.left, y: r.top - base.top, w: r.width, h: r.height });
+    }
+    return boxes;
+  };
+  const folders = (list: List) => new Map(Array.from(list.root.querySelectorAll<HTMLElement>('.library-folder-toggle[aria-controls]'))
+    .map(el => [el.dataset.libraryFocus ?? '', el.getAttribute('aria-expanded') === 'true'] as const).filter(([key]) => !!key));
+  const play = (el: Element, frames: Keyframe[], duration: number) => { try { el.animate(frames, { duration, easing: EASE }); } catch { /* Presentation only. */ } };
+  const settle = (list: List) => {
+    const before = list.boxes, opened = list.expanded;
+    // A transiently empty list (a busy notice, Loading…) keeps the last real layout to compare against; the first fill is still.
+    const after = measure(list); list.expanded = folders(list);
+    if (!after.size) return;
+    list.boxes = after;
+    if (!before?.size || still()) return;
+    const revealed: HTMLElement[] = [];
+    for (const [key, open] of list.expanded) {
+      const was = opened.get(key); if (was === undefined || was === open) continue;
+      const toggle = list.root.querySelector<HTMLElement>('.library-folder-toggle[data-library-focus="' + CSS.escape(key) + '"]');
+      const chevron = toggle?.querySelector('.library-chevron');
+      if (chevron) play(chevron, [{ rotate: open ? '-90deg' : '90deg' }, { rotate: '0deg' }], SLOW);
+      // An opened folder's card grows from its old height (a clip, no layout animation) while its chats fade in under the row.
+      const group = toggle?.closest<HTMLElement>('.library-folder'), groupKey = group ? list.key(group) : null;
+      const grew = groupKey ? (after.get(groupKey)?.h ?? 0) - (before.get(groupKey)?.h ?? 0) : 0;
+      if (open && group && grew > 0) play(group, [{ clipPath: 'inset(0 0 ' + grew + 'px 0)' }, { clipPath: 'inset(0 0 0 0)' }], SLOW);
+      const body = open && toggle ? doc.getElementById(toggle.getAttribute('aria-controls') ?? '') : null;
+      if (body) { revealed.push(body); play(body, [{ opacity: 0, translate: '0 -4px' }, { opacity: 1, translate: '0 0' }], SLOW); }
+    }
+    const fresh: HTMLElement[] = [], seen = new Set<string>();
+    for (const el of Array.from(list.root.querySelectorAll<HTMLElement>(list.items))) {
+      const key = list.key(el); if (!key || seen.has(key)) continue; seen.add(key);
+      const mover = list.mover(el), now = after.get(key), was = before.get(key);
+      if (!now) continue;
+      if (!was) { if (!revealed.some(body => body.contains(mover))) fresh.push(mover); continue; }
+      const dx = was.x - now.x, dy = was.y - now.y;
+      if (Math.abs(dx) >= 1 || Math.abs(dy) >= 1) play(mover, [{ translate: dx + 'px ' + dy + 'px' }, { translate: '0 0' }], SLOW);
+    }
+    // A bulk change (Show all, first load of a project) fades in together; a single new item rises 6 px.
+    for (const mover of fresh) play(mover, fresh.length > 6 ? [{ opacity: 0 }, { opacity: 1 }] : [{ opacity: 0, translate: '0 6px' }, { opacity: 1, translate: '0 0' }], fresh.length > 6 ? FAST : SLOW);
+  };
+  const track = (root: Element, items: string, key: List['key'], mover: List['mover']) => {
+    if (lists.has(root)) return;
+    const list: List = { root, items, key, mover, boxes: null, expanded: new Map() };
+    lists.set(root, list); list.boxes = measure(list); list.expanded = folders(list);
+    observer?.observe(root, { childList: true, subtree: true });
+  };
+  const queues = () => {
+    for (const strip of Array.from(doc.querySelectorAll('.queue-strip'))) track(strip, '.queue-row[data-queue-id]', el => el.dataset.queueId ?? null, el => el);
+  };
+  const start = () => {
+    if (!win || typeof win.MutationObserver !== 'function' || typeof Element.prototype.animate !== 'function' || observer) return;
+    observer = new win.MutationObserver(records => {
+      const touched = new Set<List>();
+      for (const record of records) for (const [root, list] of lists) if (root === record.target || root.contains(record.target)) touched.add(list);
+      for (const list of touched) settle(list);
+    });
+    const library = doc.getElementById('conversation-library');
+    // Folders move as whole cards (keyed by their actions button, which survives renaming); their rows ride along.
+    if (library) track(library, '.library-folder,.library-heading,.library-create,[data-library-focus]:not([data-library-focus^="more:"]):not(input)',
+      el => el.classList.contains('library-folder') ? 'group:' + (el.querySelector<HTMLElement>('.library-folder-more')?.dataset.libraryFocus ?? el.getAttribute('aria-label') ?? '')
+        : el.closest('.library-folder') ? null : el.classList.contains('library-create') ? 'create' : el.dataset.libraryFocus ?? (el.id ? '#' + el.id : null), el => el);
+    queues();
+    // Queue strips are created on first use and moved beside the composer: watch the composer's parent (children only).
+    const form = doc.getElementById('codex-compose')?.parentElement;
+    if (form) { host = new win.MutationObserver(queues); host.observe(form, { childList: true }); }
+  };
+  start();
+  return {
+    stop() { observer?.disconnect(); host?.disconnect(); observer = null; host = null; lists.clear(); },
+    resume() { start(); },
+  };
+}

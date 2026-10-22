@@ -150,6 +150,8 @@ test('conversation transport bounds bytes and UTF-8 and never retries uncertain 
 class ElementFixture extends EventTarget {
   textContent = ''; value = ''; hidden = false; disabled = false; className = ''; type = ''; checked = false; open = false;
   children: ElementFixture[] = []; attributes = new Map<string, string>();
+  // The model viewer presentation writes data-* state and inline meter widths through the standard DOM properties.
+  readonly dataset: Record<string, string> = {}; readonly style: Record<string, string> = {};
   constructor(readonly tagName = 'DIV') { super(); }
   // StudioKeySettings reads the current select options after replaceChildren/append.
   get options() { return this.children.filter(child => child.tagName === 'OPTION'); }

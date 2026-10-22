@@ -51,6 +51,23 @@ function matchScore(label: string, keywords: string, query: string): number | nu
   return score;
 }
 
+/** The docked panel: a window this narrow shows the compact header card, and Menu opens the sidebar as a sheet. */
+export const COMPACT_PANEL_QUERY = '(max-width:520px)';
+export type CompactStudioState = 'paired' | 'reconnect' | 'none' | 'unknown';
+export interface CompactStudioView { state: CompactStudioState; text: string; actionable: boolean; label: string }
+const COMPACT_STUDIO_TEXT: Record<CompactStudioState, string> = { paired: 'Studio paired', reconnect: 'Reconnect Studio', none: 'Studio offline', unknown: 'Checking Studio\u2026' };
+/** The header's Studio line, read from the sidebar card that the live-session painter fills (data-studio, its label, data-place).
+ *  Green, yellow and the place name come only from that card; anything else reads as neutral. */
+export function compactStudioView(kind: string | null | undefined, label: string | null | undefined, place?: string | null): CompactStudioView {
+  const state: CompactStudioState = kind === 'paired' || kind === 'reconnect' || kind === 'none' ? kind : 'unknown';
+  const base = (label ?? '').replace(/\s+/g, ' ').trim().slice(0, 80) || COMPACT_STUDIO_TEXT[state];
+  const where = state === 'paired' ? (place ?? '').replace(/\s+/g, ' ').trim().slice(0, 100) : '';
+  const text = where ? base + ' \u00b7 ' + where : base;
+  const name = state === 'reconnect' ? (base === COMPACT_STUDIO_TEXT.reconnect ? 'Reconnect Studio. The plugin went offline' : base + ' Reconnect Studio now')
+    : state === 'none' ? 'Studio offline. Open Studio settings' : text;
+  return { state, text, actionable: state === 'reconnect' || state === 'none', label: name };
+}
+
 /** Presentation-only navigation. Native actions remain in the existing panels. */
 export class WorkspaceShell {
   private readonly removers: (() => void)[] = [];
@@ -64,6 +81,8 @@ export class WorkspaceShell {
   private tool: WorkspaceTool = 'all';
   private settingsReturnFocus: HTMLElement | null = null;
   private settingsSections: HTMLElement[] = [];
+  private sidebarMenu: ((open: boolean, restoreFocus?: boolean) => boolean) | null = null;
+  private compactSheet: ((open: boolean, restoreFocus?: boolean) => boolean) | null = null;
 
   get activeTool(): WorkspaceTool { return this.tool; }
 
@@ -99,8 +118,11 @@ export class WorkspaceShell {
       this.button(toggle, () => { sidebar.classList.toggle('collapsed'); sync(); });
     }
     this.bindCompactSidebar();
+    this.bindSidebarMenu();
+    this.bindCompactPanel();
     const settings = doc.getElementById('preview-settings');
-    if (settings) this.button(settings, () => { this.navigate('asset-heading'); });
+    // asset-imports.ts takes "Choose an asset" over once it loads (picker, or the file picker when there is nothing yet).
+    if (settings) this.button(settings, () => { if (settings.getAttribute('data-asset-picker') !== 'on') this.navigate('asset-heading'); });
     const expand = doc.getElementById('preview-expand'), preview = doc.getElementById('artifact-panel');
     if (expand && preview) {
       const sync = () => {
@@ -422,6 +444,7 @@ export class WorkspaceShell {
       toggle.setAttribute('aria-expanded', String(!compact));
       const label = compact ? 'Expand sidebar' : 'Collapse sidebar to icons';
       toggle.setAttribute('aria-label', label); toggle.setAttribute('title', label + ' (Ctrl+B)');
+      const text = this.doc.getElementById('sidebar-compact-label'); if (text) text.textContent = label;
     }
     const check = this.doc.getElementById('settings-compact-sidebar') as HTMLInputElement | null;
     if (check) check.checked = compact;
@@ -440,6 +463,161 @@ export class WorkspaceShell {
     if (toggle) { toggle.setAttribute('aria-controls', sidebar.id); toggle.setAttribute('aria-keyshortcuts', 'Control+B'); this.button(toggle, () => this.setCompactSidebar(!this.compactSidebar)); }
     const check = this.doc.getElementById('settings-compact-sidebar') as HTMLInputElement | null;
     if (check) this.listen(check, 'change', () => this.setCompactSidebar(check.checked));
+  }
+
+  /** The footer card's menu (Project, History, icon sidebar): a disclosure that closes on Escape, outside press or a choice. */
+  private bindSidebarMenu(): void {
+    const toggle = this.doc.getElementById('sidebar-menu-toggle'), menu = this.doc.getElementById('sidebar-menu');
+    if (!toggle || !menu) return;
+    const items = () => Array.from(menu.querySelectorAll<HTMLElement>('button')).filter(item => !item.hasAttribute('disabled'));
+    const set = (open: boolean, restoreFocus = false): boolean => {
+      const wasOpen = toggle.getAttribute('aria-expanded') === 'true';
+      toggle.setAttribute('aria-expanded', String(open)); menu.setAttribute('data-open', String(open));
+      if (open && !wasOpen) items()[0]?.focus();
+      if (!open && wasOpen && restoreFocus) toggle.focus();
+      return wasOpen !== open;
+    };
+    this.sidebarMenu = set;
+    this.removers.push(() => { if (this.sidebarMenu === set) this.sidebarMenu = null; });
+    set(false);
+    this.button(toggle, () => { set(toggle.getAttribute('aria-expanded') !== 'true'); });
+    this.listen(menu, 'click', event => { if ((event.target as Element | null)?.closest?.('button')) set(false); });
+    this.listen(this.doc, 'pointerdown', event => {
+      const target = event.target as Node | null;
+      if (target && !menu.contains(target) && !toggle.contains(target)) set(false);
+    });
+    this.listen(menu, 'focusout', event => {
+      const next = (event as FocusEvent).relatedTarget as Node | null;
+      if (next && !menu.contains(next) && !toggle.contains(next)) set(false);
+    });
+    this.listen(menu, 'keydown', event => {
+      const keyboard = event as KeyboardEvent, list = items(), at = list.indexOf(this.doc.activeElement as HTMLElement);
+      if (keyboard.key === 'Escape') { event.preventDefault(); set(false, true); return; }
+      const next = keyboard.key === 'ArrowDown' ? (at + 1) % list.length : keyboard.key === 'ArrowUp' ? (at - 1 + list.length) % list.length : keyboard.key === 'Home' ? 0 : keyboard.key === 'End' ? list.length - 1 : -1;
+      if (next >= 0 && list.length) { event.preventDefault(); list[next]?.focus(); }
+    });
+  }
+
+  /** Docked panel (COMPACT_PANEL_QUERY): the header card mirrors the chat title and the sidebar's live Studio line; Menu opens
+   *  the sidebar itself as a sheet (its folders, chats, tools and footer). Escape, an outside press, focus leaving or a choice
+   *  closes it; Escape returns focus to Menu. Display only: no reads, sends or provider changes. */
+  private bindCompactPanel(): void {
+    const doc = this.doc, header = doc.getElementById('compact-header'), menu = doc.getElementById('compact-menu'), sidebar = doc.getElementById('app-sidebar');
+    if (!header || !menu || !sidebar) return;
+    const scrim = doc.getElementById('compact-scrim'), view = doc.defaultView;
+    let query: MediaQueryList | null = null;
+    try { query = view?.matchMedia?.(COMPACT_PANEL_QUERY) ?? null; } catch { query = null; }
+    const compact = () => query?.matches === true, isOpen = () => sidebar.getAttribute('data-sheet') === 'open';
+    const first = (): HTMLElement | null => {
+      for (const id of ['new-chat', 'sidebar-search']) {
+        const node = doc.getElementById(id) as HTMLButtonElement | null;
+        if (node && !node.disabled && this.shown(node)) return node;
+      }
+      return sidebar.querySelector<HTMLElement>('button:not([disabled]), a[href]');
+    };
+    // The sheet stops above the queued-message card when that card stands taller than the room the layout leaves for it,
+    // so a tall queue is never half covered. Presentation only; cleared whenever the sheet closes.
+    const fit = (open: boolean): void => {
+      const targets = [sidebar, scrim].filter((node): node is HTMLElement => !!node?.style?.removeProperty);
+      for (const node of targets) node.style.removeProperty('--cp-sheet-bottom');
+      if (!open || !view) return;
+      try {
+        const room = parseFloat(view.getComputedStyle(sidebar).getPropertyValue('--cp-sheet-bottom')), height = view.innerHeight;
+        let bottom = 0;
+        for (const id of ['claude-chat-queue', 'codex-chat-queue']) {
+          const node = doc.getElementById(id); if (!node || !this.shown(node)) continue;
+          const top = node.getBoundingClientRect().top; if (top > 0) bottom = Math.max(bottom, Math.ceil(height - top + 8));
+        }
+        if (Number.isFinite(room) && bottom > room && bottom < height - 240) for (const node of targets) node.style.setProperty('--cp-sheet-bottom', bottom + 'px');
+      } catch { /* Layout reads are presentation only. */ }
+    };
+    const set = (open: boolean, restoreFocus = false): boolean => {
+      const next = open && compact(), wasOpen = isOpen();
+      fit(next);
+      menu.setAttribute('aria-expanded', String(next));
+      if (next) sidebar.setAttribute('data-sheet', 'open'); else sidebar.removeAttribute('data-sheet');
+      scrim?.setAttribute('data-open', String(next));
+      if (next && !wasOpen) first()?.focus({ preventScroll: true });
+      if (!next && wasOpen && restoreFocus) menu.focus({ preventScroll: true });
+      return wasOpen !== next;
+    };
+    this.compactSheet = set;
+    this.removers.push(() => { if (this.compactSheet === set) this.compactSheet = null; set(false); });
+    set(false);
+    this.button(menu, () => { set(menu.getAttribute('aria-expanded') !== 'true'); });
+    this.listen(doc, 'pointerdown', event => {
+      const target = event.target as Node | null;
+      if (isOpen() && target && !sidebar.contains(target) && !menu.contains(target)) set(false);
+    }, true);
+    for (const area of [sidebar, header]) this.listen(area, 'focusout', event => {
+      const next = (event as FocusEvent).relatedTarget as Node | null;
+      if (isOpen() && next && !sidebar.contains(next) && !header.contains(next)) set(false);
+    });
+    // A choice (a chat, New chat, search, a tool, Settings or a footer menu item) closes the sheet before its own action runs;
+    // focus then returns to Menu unless that action moved it somewhere visible.
+    this.listen(sidebar, 'click', event => {
+      const control = (event.target as Element | null)?.closest?.('.library-chat, #new-chat, #sidebar-search, .sidebar-links .nav-link, .sidebar-gear, .sidebar-menu button');
+      if (!isOpen() || !control || !sidebar.contains(control)) return;
+      set(false);
+      view?.setTimeout(() => {
+        const active = doc.activeElement;
+        if (!this.disposed && compact() && (!active || active === doc.body || sidebar.contains(active))) menu.focus({ preventScroll: true });
+      }, 0);
+    }, true);
+    const heading = doc.getElementById('codex-heading'), title = doc.getElementById('compact-title');
+    const card = doc.getElementById('sidebar-status-card'), label = doc.getElementById('sidebar-studio-status');
+    const line = doc.getElementById('compact-studio-line'), lineText = doc.getElementById('compact-studio-text'), status = doc.getElementById('compact-studio-status');
+    const action = doc.getElementById('compact-studio-action') as HTMLButtonElement | null, actionText = doc.getElementById('compact-studio-action-label');
+    const paint = () => {
+      if (this.disposed) return;
+      if (title) {
+        const text = (heading?.textContent ?? '').replace(/\s+/g, ' ').trim() || 'Conversation';
+        if (title.textContent !== text) title.textContent = text;
+        if (title.getAttribute('title') !== text) title.setAttribute('title', text);
+      }
+      const studio = compactStudioView(card?.getAttribute('data-studio'), label?.textContent, card?.getAttribute('data-place'));
+      if (header.getAttribute('data-studio') !== studio.state) header.setAttribute('data-studio', studio.state);
+      if (line && line.hidden !== studio.actionable) line.hidden = studio.actionable;
+      if (lineText && lineText.textContent !== studio.text) lineText.textContent = studio.text;
+      if (action) {
+        if (action.hidden !== !studio.actionable) action.hidden = !studio.actionable;
+        if (action.getAttribute('aria-label') !== studio.label) action.setAttribute('aria-label', studio.label);
+      }
+      if (actionText && actionText.textContent !== studio.text) actionText.textContent = studio.text;
+      if (status && status.textContent !== studio.text) status.textContent = studio.text;
+    };
+    // Reconnect uses the Studio banner's own control (a session refresh); otherwise it opens the Studio settings.
+    if (action) this.button(action, () => {
+      const reconnect = doc.querySelector<HTMLButtonElement>('#studio-connection-banner .studio-connection-reconnect');
+      if (header.getAttribute('data-studio') === 'reconnect' && reconnect && !reconnect.disabled && !reconnect.hidden) { reconnect.click(); return; }
+      this.navigate('session-heading');
+    });
+    // Expand needs a desktop host that can restore the window; without one the button stays hidden.
+    const expand = doc.getElementById('compact-expand');
+    const host = (view as unknown as { arcaneDesktop?: { panel?: { expand?: unknown } } } | null)?.arcaneDesktop?.panel;
+    const grow = typeof host?.expand === 'function' ? host.expand as () => unknown : null;
+    if (expand) {
+      expand.hidden = !grow;
+      if (grow) this.button(expand, () => {
+        const failed = () => this.notice('The window could not be expanded.');
+        try { void Promise.resolve(grow.call(host)).catch(failed); } catch { failed(); }
+      });
+    }
+    const Observer = view?.MutationObserver;
+    if (Observer) {
+      let queued = false;
+      const observer = new Observer(() => { if (queued) return; queued = true; queueMicrotask(() => { queued = false; paint(); }); });
+      if (heading) observer.observe(heading, { childList: true, characterData: true, subtree: true });
+      if (card) observer.observe(card, { attributes: true, attributeFilter: ['data-studio', 'data-place'] });
+      if (label) observer.observe(label, { childList: true, characterData: true, subtree: true });
+      this.removers.push(() => observer.disconnect());
+    }
+    if (query) {
+      const change = () => { if (!compact()) set(false); };
+      query.addEventListener?.('change', change);
+      this.removers.push(() => query?.removeEventListener?.('change', change));
+    }
+    paint();
   }
 
   private bindShortcuts(): void {
@@ -487,6 +665,18 @@ export class WorkspaceShell {
           if (close && !close.disabled) { event.preventDefault(); close.click(); }
           return;
         }
+        // The top bar folds the strip into the chat chip at every width: use the chip menu's own × for the current chat.
+        for (const menu of Array.from(this.doc.querySelectorAll<HTMLDetailsElement>('.chat-tabs-history'))) {
+          const current = menu.querySelector<HTMLElement>('.chat-switch-select[aria-current="true"]');
+          if (!this.shown(menu) || !current) continue;
+          const close = current.parentElement?.querySelector<HTMLButtonElement>('.chat-switch-close');
+          if (close && !close.disabled) {
+            event.preventDefault(); close.click();
+            // A draft with text asks first ("Discard draft?"): open the menu so the question is visible.
+            if (menu.querySelector('.chat-tab-confirm')) menu.open = true;
+          }
+          return;
+        }
       }
     });
   }
@@ -505,6 +695,8 @@ export class WorkspaceShell {
   /** Escape outside a popover closes the open one, using the same control a click would. */
   private closePopover(): boolean {
     if (this.openDialog()) return false;
+    if (this.sidebarMenu?.(false, true)) return true;
+    if (this.compactSheet?.(false, true)) return true;
     const picker = this.doc.getElementById('codex-model-popover'), trigger = this.doc.getElementById('codex-model-trigger') as HTMLButtonElement | null;
     if (picker && !picker.hidden && trigger && !trigger.disabled) { trigger.click(); trigger.focus(); return true; }
     for (const menu of this.doc.querySelectorAll<HTMLDetailsElement>('details')) {
@@ -814,12 +1006,15 @@ export class WorkspaceShell {
         button.textContent = match.label;
         options.append(button);
       }
-      status.textContent = ranked.length ? `${ranked.length} ${ranked.length === 1 ? 'tool' : 'tools'} · Arrow keys to choose · Enter to open` : 'No matching workspace sections. Try a tool name or keyword.';
+      status.textContent = ranked.length ? `${ranked.length} ${ranked.length === 1 ? 'match' : 'matches'}` : 'No matching workspace sections. Try a tool name or keyword.';
       results.hidden = false;
       search.setAttribute('aria-expanded', 'true');
       select(0);
     };
     this.openSearch = render;
+    // The sidebar search button is the visible twin of Ctrl+K: it opens the same top-bar search.
+    const sidebarSearch = this.doc.getElementById('sidebar-search');
+    if (sidebarSearch) this.button(sidebarSearch, () => { this.focus(search); render(); });
     this.listen(search, 'focus', render);
     this.listen(search, 'input', render);
     // Keep DOM focus in the combobox while its active option is announced.

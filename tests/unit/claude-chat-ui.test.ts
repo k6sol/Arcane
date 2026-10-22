@@ -288,20 +288,27 @@ test('Enter sends; streamed deltas, messages, tools and usage render as Codex tr
   b.emit({ type: 'message', message: { id: 'a1', role: 'assistant', text: 'Sure, building it.', at: '' } });
   b.emit({ type: 'tool', message: { id: 't1', role: 'tool', text: 'Edit', at: '', tool: { name: 'Edit', status: 'started' } } });
   const tool = f.messages.querySelectorAll('.codex-message').at(-1)!;
-  assert.equal(tool.className, 'codex-message tool'); assert.equal(tool.querySelector('.message-text')!.textContent, 'Using Edit…'); assert.equal(tool.dataset.toolState, 'started');
+  assert.equal(tool.className, 'codex-message tool'); assert.equal(tool.querySelector('.message-text')!.textContent, 'Editing a file…'); assert.equal(tool.dataset.toolState, 'started');
   b.emit({ type: 'tool', message: { id: 't1', role: 'tool', text: 'Edit', at: '', tool: { name: 'Edit', status: 'finished' } } });
   const finished = f.messages.querySelectorAll('.codex-message').at(-1)!;
-  assert.equal(f.messages.querySelectorAll('.tool').length, 1); assert.equal(finished.querySelector('.message-text')!.textContent, 'Using Edit'); assert.equal(finished.dataset.toolState, 'finished');
+  assert.equal(f.messages.querySelectorAll('.tool').length, 1); assert.equal(finished.querySelector('.message-text')!.textContent, 'Editing a file'); assert.equal(finished.dataset.toolState, 'finished');
   f.messages.scrollTop = 0; f.messages.scrollHeight = 5000; // user scrolled up: no forced scroll
   b.emit({ type: 'delta', text: 'Done.' });
   assert.equal(f.messages.scrollTop, 0);
   b.emit({ type: 'done', ok: true, error: null, usage: { inputTokens: 12, outputTokens: 34, costUsd: 0.0123 } });
   await tick();
   assert.deepEqual(f.bubbles().map(row => row.role), ['user', 'assistant', 'tool', 'assistant']);
-  assert.equal(f.notice.textContent, 'Done · 46 tokens (~$0.01)');
+  assert.equal(f.notice.textContent, 'Done · 46 tokens · ~$0.01');
+  assert.equal(f.messages.querySelectorAll('.message-usage').filter(node => node.getAttribute('data-live') === 'true').length, 0, 'the live line ends with the turn');
   const line = f.messages.querySelector('.reply-usage')!;
-  assert.equal(line.textContent, '46 tokens (~$0.01)', 'the finished reply shows a subtle tokens and cost line');
-  assert.match(line.title, /46 tokens \(12 input including cache, 34 output\)\. ~\$0\.01 is Claude Code's own cost estimate/);
+  assert.equal(line.textContent, '46 tokens · ~$0.01', 'the finished reply shows a quiet tokens and cost line');
+  assert.equal(line.tagName, 'BUTTON', 'a focusable ghost line');
+  const breakdown = line.closest('.message-usage')!.querySelector('.message-usage__detail')!;
+  assert.equal(line.getAttribute('aria-describedby'), breakdown.id, 'hover or focus shows the breakdown');
+  assert.equal(breakdown.getAttribute('role'), 'tooltip');
+  assert.deepEqual(breakdown.querySelectorAll('dt').map(node => node.textContent), ['Input', 'Output', 'Model']);
+  assert.deepEqual(breakdown.querySelectorAll('dd').map(node => node.textContent), ['12', '34', 'Sonnet 5.5 · High']);
+  assert.match(breakdown.querySelector('.message-usage__note')!.textContent, /^~\$0\.01 is Claude Code's own cost estimate at API prices/);
   assert.equal(f.submit.getAttribute('aria-label'), 'Send message'); assert.equal(f.chat.running(), false);
   assert.equal(f.tabs()[0]!.textContent, 'Build a lobby', 'the new conversation names its tab');
   assert.deepEqual(f.saved().map(row => row.textContent), ['Build a lobby']); assert.equal(f.saved()[0]!.getAttribute('aria-current'), 'true');
@@ -412,7 +419,7 @@ test('model text is never parsed as HTML', async t => {
   for (const tag of ['IMG', 'SCRIPT', 'B']) assert.equal(tags.has(tag), false, tag + ' was not created');
   assert.equal(innerHtmlWrites, 0);
   assert.ok(f.bubbles()[0]!.text.includes('<img src=x onerror="alert(1)">'));
-  assert.ok(f.messages.textContent.includes('Using <b onmouseover=x>…'), 'a hostile tool name stays text in its activity line');
+  assert.ok(f.messages.textContent.includes('Running a step…') && !f.messages.textContent.includes('<b onmouseover=x>…'), 'a hostile or unknown tool name is never shown; the step reads in plain words');
   assert.equal(f.bubbles().at(-1)!.text, '<img src=y onerror=z>');
 });
 
@@ -919,8 +926,10 @@ test('Edge: Codex and Claude share one chat surface; only provider labels differ
   await page.screenshot({ path: join(shots, 'codex-mode.png') });
   await page.locator('#codex-model-trigger').click(); await page.locator('#codex-picker-summary').waitFor();
   await page.screenshot({ path: join(shots, 'codex-picker.png') }); await page.keyboard.press('Escape');
+  // The chat chip sizes to the current chat's title, so "+" keeps its row and size (not its x) across providers.
   const layout = () => page.evaluate(() => Object.fromEntries(['codex-compose', 'codex-composer', 'codex-submit', 'workspace-new-chat'].map(id => {
-    const box = document.getElementById(id)!.getBoundingClientRect(); return [id, [Math.round(box.x), Math.round(box.y), Math.round(box.width), Math.round(box.height)]];
+    const box = document.getElementById(id)!.getBoundingClientRect(); const rect = [Math.round(box.x), Math.round(box.y), Math.round(box.width), Math.round(box.height)];
+    return [id, id === 'workspace-new-chat' ? rect.slice(1) : rect];
   })));
   const codexLayout = await layout();
   // Choose Claude: the same surface now shows Claude tabs, transcript and picker.
@@ -1073,7 +1082,7 @@ test('Edge: one model list switches between ChatGPT and Claude in one click and 
   await page.screenshot({ path: join(shots, 'claude-mode-both-groups.png') });
   for (const scheme of ['dark', 'light'] as const) {
     await page.emulateMedia({ colorScheme: scheme });
-    const tabs = (await page.locator('#claude-chat-tabs').boundingBox())!;
+    const tabs = (await page.locator('#claude-saved-chats').boundingBox())!;
     await page.screenshot({ path: join(shots, 'tabs-claude-' + scheme + '.png'), clip: { x: Math.max(0, tabs.x - 8), y: Math.max(0, tabs.y - 8), width: Math.min(700, tabs.width + 16), height: tabs.height + 16 } });
     await page.screenshot({ path: join(shots, 'claude-columns-' + scheme + '.png') });
   }
@@ -1361,7 +1370,8 @@ test('tool names and inputs become plain-language activity lines with running, d
   assert.equal(line('scene_search', { root: 'Workspace', query: 'Door' }), 'Searching Workspace for "Door"…');
   assert.equal(line('receipt_restore', { commandId: 'c' }), 'Restoring an earlier change…');
   assert.equal(line('work_progress', {}), 'Updating the task plan…');
-  assert.equal(line('mystery_tool', {}), 'Using mystery_tool…');
+  assert.equal(line('mystery_tool', {}), 'Running a step…', 'an unknown tool never shows its raw id');
+  assert.equal(line('scene_remove', {}), 'Removing objects…'); assert.equal(line('Bash', { command: 'ls' }), 'Running a command…');
   // Only a succeeded receipt is a change; ambiguous or failed outcomes never are.
   const args = { parent: ws('Workspace'), className: 'Part', name: 'SpawnPlatform' };
   assert.deepEqual(describeToolActivity('scene_create', args, JSON.parse(receipt('cmd-1', 'scene.create', args)), 'finished').change,
@@ -1543,9 +1553,11 @@ test('Claude steer: saved steered messages render inline without Edit; a bridge 
   assert.deepEqual(rows.map(node => node.className), ['codex-message human', 'codex-message human steered', 'codex-message codex'], 'only a user message can be steered');
   assert.equal(rows[1]!.querySelector('.message-steer-label')!.textContent, 'Steered');
   f.type('Next'); key(f.input, 'Enter'); await tick();
-  assert.equal(f.chat.canSteer(), false); assert.match(f.notice.textContent, /Press Enter to queue your next message\./);
+  // The status names the state only; queued messages show as rows, so the line carries no keyboard hint.
+  assert.equal(f.chat.canSteer(), false); assert.match(f.notice.textContent, /is working…$/); assert.doesNotMatch(f.notice.textContent, /Enter|Steer/);
   f.type('Queued'); key(f.input, 'Enter'); await tick();
   assert.deepEqual(f.chat.queued().map(row => row.text), ['Queued']);
+  assert.match(f.notice.textContent, /is working… 1 message queued\.$/);
 });
 
 test('Claude usage meter: tokens from finished replies accumulate per conversation with a ring, count and tooltip', async t => {
@@ -1885,8 +1897,9 @@ test('Edge: Claude activity lines, change card, queue chips, usage meter and the
     assert.equal(await page.evaluate(() => (window as any).fx.calls[1].text), 'Now make the platform glow', 'the next queued message is sent after success');
     assert.deepEqual(await page.locator('#claude-chat-queue .queue-text').allInnerTexts(), ['Then add a checkpoint']);
     assert.equal(await page.locator('#codex-messages .chat-change-summary').innerText(), '1 created · 1 script edited');
-    assert.equal(await page.locator('#claude-usage-meter').isVisible(), true);
-    assert.equal(await page.locator('#claude-usage-meter .usage-meter-count').innerText(), '19.9k');
+    // The chat keeps its meter current; the C30 composer footer leaves tokens and cost to the conversation header.
+    assert.equal(await page.locator('#claude-usage-meter').evaluate(node => (node as HTMLElement).hidden), false);
+    assert.equal(await page.locator('#claude-usage-meter .usage-meter-count').textContent(), '19.9k');
     await page.locator('#codex-messages .chat-change-card').scrollIntoViewIfNeeded();
     await page.screenshot({ path: join(shots, 'activity-change-card-' + scheme + '.png') });
     await page.locator('#codex-messages .chat-change-restore').click();
@@ -1993,6 +2006,9 @@ test('Edge: Claude edit and rewind with the undo option, plan approval and optio
     await human.nth(1).waitFor();
     assert.equal(await human.locator('.chat-message-edit').count(), 2);
     await human.nth(1).hover();
+    // The message actions fade in (the 120 ms C31 motion colour/opacity fade); let it land, then require it fully shown.
+    await human.nth(1).locator('.chat-message-edit').evaluate(node => new Promise<void>(done => { const end = performance.now() + 1000;
+      const check = () => getComputedStyle(node).opacity === '1' || performance.now() > end ? done() : requestAnimationFrame(check); check(); }));
     assert.equal(await human.nth(1).locator('.chat-message-edit').evaluate(node => getComputedStyle(node).opacity), '1', 'Edit shows on hover');
     await page.screenshot({ path: join(shots, 'rewind-edit-hover-' + scheme + '.png') });
     await human.nth(1).locator('.chat-message-edit').click();
@@ -2428,9 +2444,14 @@ test('Edge: Enter queues and explicit Steer guides a running Claude reply while 
   await tool('t1', 'scene_create', 'started'); await tool('t1', 'scene_create', 'finished'); await tool('t2', 'scene_update', 'started');
   await page.locator('#codex-messages .build-progress').waitFor();
   assert.equal(await composer.getAttribute('placeholder'), CLAUDE_CHAT_STEER_HINT);
-  assert.match(await page.locator('#claude-chat-notice').innerText(), /Enter to queue/);
+  // The routine working status carries no keyboard hint and is marked for the top bar to keep out of view.
+  const notice = page.locator('#claude-chat-notice');
+  assert.doesNotMatch(await notice.textContent() ?? '', /Enter|Steer/); assert.equal(await notice.getAttribute('data-routine'), 'working');
   // Enter while a step runs only queues; the explicit Steer button guides that reply.
   await composer.fill('Make it blue instead'); await composer.press('Enter');
+  await page.locator('#claude-chat-queue .queue-row').waitFor();
+  assert.equal(await page.locator('#claude-chat-queue .queue-row').count(), 1);
+  assert.equal(await page.locator('#claude-chat-queue .queue-row .queue-steer').isEnabled(), true, 'the queued row offers Steer');
   assert.equal(await page.evaluate(() => (window as any).fx.steers.length),0);
   await page.locator('#claude-chat-queue .queue-steer').click();
   await page.waitForFunction(() => (window as any).fx.steers.length === 1);
@@ -2656,4 +2677,69 @@ test('durability: a saved-list read started before Send cannot remove the newly 
   rows=[{conversationId:'conv-new',title:'Accepted chat',model:'sonnet',effort:'high',updatedAt:'2026-10-20T18:00:00.000Z'}];
   b.emit({type:'done',ok:true,error:null,usage:null});await tick();resolveList({conversations:[]});await refreshing;
   assert.equal(f.chat.activeConversation(),'conv-new');assert.ok(f.bubbles().some(row=>row.text==='Keep this accepted prompt'));
+});
+
+test('Claude drafts close like Codex drafts: empty at once, text asks Discard draft?, neighbour handover, fresh last tab, no native action', async t => {
+  const b = fakeBridge(); const f = mount(b.bridge); t.after(() => f.chat.stop()); await f.chat.refresh();
+  const rerender = () => (f.chat as unknown as { render(): void }).render();
+  const strip = f.el('claude-chat-tabs'), keyOf = (tab: Element) => tab.dataset.chatKey!;
+  const chip = (k: string) => strip.children.find(wrap => wrap.children[0]!.dataset.chatKey === k)!;
+  const xOf = (k: string) => chip(k).children.find(node => node.dataset.closeChat === k);
+  const answer = (k: string, action: 'discard' | 'keep', root: Element = strip) => root.all().find(node => node.dataset.confirmChat === k && node.dataset.confirmAction === action);
+  const keydown = (target: Element, value: string) => { const event = new Event('keydown', { cancelable: true }); Object.defineProperties(event, { key: { value }, target: { value: target } }); strip.dispatchEvent(event); return event; };
+  const first = keyOf(f.tabs()[0]!); f.type('Keep this lobby idea');
+  f.chat.newChat(); const second = keyOf(f.tabs()[1]!); assert.equal(f.tabs().length, 2);
+  assert.equal(xOf(second)!.className, 'chat-tab-close', 'the x uses the shared hover/focus styling');
+  click(xOf(second)!); await tick();
+  assert.deepEqual(f.tabs().map(keyOf), [first], 'an empty draft closes at once'); assert.equal(f.input.value, 'Keep this lobby idea', 'the neighbour shows its own draft');
+  assert.equal(f.doc.activeElement?.dataset.chatKey, first, 'focus moves to the neighbouring tab');
+  click(xOf(first)!); await tick();
+  assert.equal(chip(first).dataset.confirming, 'true'); assert.match(chip(first).textContent, /Discard draft\?DiscardKeep/);
+  assert.equal(f.doc.activeElement?.dataset.confirmAction, 'keep', 'the safe answer takes focus');
+  rerender(); assert.equal(f.doc.activeElement?.dataset.confirmAction, 'keep', 'a re-render keeps focus on the question');
+  const escape = keydown(answer(first, 'keep')!, 'Escape'); await tick();
+  assert.equal(escape.defaultPrevented, true); assert.equal(chip(first).dataset.confirming, undefined); assert.equal(f.doc.activeElement?.dataset.closeChat, first);
+  assert.equal(f.input.value, 'Keep this lobby idea');
+  // Middle-click on an inactive draft with stored text asks too; Keep leaves both drafts.
+  f.chat.newChat(); const third = keyOf(f.tabs()[1]!);
+  const middle = new Event('auxclick', { cancelable: true }); Object.defineProperty(middle, 'button', { value: 1 }); chip(first).dispatchEvent(middle); await tick();
+  assert.equal(middle.defaultPrevented, true); assert.equal(chip(first).dataset.confirming, 'true');
+  click(answer(first, 'keep')!); await tick(); assert.deepEqual(f.tabs().map(keyOf), [first, third]);
+  // The chat switcher has an x per open chat; a question asked there is answered there.
+  const sheet = f.el('claude-saved-chats'); sheet.open = true; rerender();
+  click(sheet.all().find(node => node.dataset.closeChat === first)!); await tick();
+  assert.ok(sheet.contains(f.doc.activeElement), 'focus stays in the switcher'); assert.equal(f.doc.activeElement?.dataset.confirmAction, 'keep');
+  click(answer(first, 'discard', sheet)!); await tick();
+  assert.deepEqual(f.tabs().map(keyOf), [third], 'Discard deletes the draft'); sheet.open = false; rerender();
+  // Delete on the last (active, empty) tab leaves one fresh empty chat.
+  keydown(f.tabs()[0]!, 'Delete'); await tick();
+  assert.equal(f.tabs().length, 1); assert.notEqual(keyOf(f.tabs()[0]!), third); assert.equal(f.tabs()[0]!.getAttribute('aria-selected'), 'true'); assert.equal(f.input.value, '');
+  // Live composer text that the draft has not stored yet still asks first.
+  f.input.value = 'typed, not yet saved'; const fresh = keyOf(f.tabs()[0]!); click(xOf(fresh)!); await tick();
+  assert.equal(chip(fresh).dataset.confirming, 'true'); click(answer(fresh, 'discard')!); await tick();
+  assert.equal(f.tabs().length, 1); assert.equal(f.input.value, ''); assert.notEqual(keyOf(f.tabs()[0]!), fresh);
+  assert.deepEqual(b.calls.filter(call => ['send', 'stop', 'remove', 'history'].includes(call[0] as string)), [], 'closing drafts starts, reads and deletes nothing');
+});
+
+test('a saved Claude chat keeps its existing close: no question even with unsent text', async t => {
+  const b = fakeBridge(); b.setList([{ conversationId: 'saved', title: 'Saved plan', updatedAt: '2026-05-01T00:00:00Z', model: 'opus', effort: 'high' }]);
+  const f = mount(b.bridge); t.after(() => f.chat.stop()); await f.chat.refresh();
+  click(f.saved()[0]!); await tick(); assert.equal(f.chat.activeConversation(), 'saved');
+  f.type('reply I have not sent');
+  click(f.el('claude-chat-tabs').querySelectorAll('button').find(button => button.getAttribute('aria-label') === 'Close Saved plan')!); await tick();
+  assert.equal(f.tabs().some(tab => tab.textContent === 'Saved plan'), false); assert.equal(f.el('claude-chat-tabs').all().some(node => node.className === 'chat-tab-confirm'), false);
+  assert.equal(b.calls.some(call => call[0] === 'remove'), false, 'closing a tab never deletes the saved conversation');
+});
+
+test('C31: New chat is never refused while a message is handed off; it opens right after, and the message stays with its tab', async t => {
+  const b = fakeBridge(); let resolveSend!: (value: unknown) => void;
+  b.reply(() => new Promise(resolve => { resolveSend = resolve; }));
+  const f = mount(b.bridge); t.after(() => f.chat.stop()); await f.chat.refresh();
+  f.type('Build a lobby'); key(f.input, 'Enter'); await tick();
+  assert.equal(sends(b).length, 1); assert.equal(f.el('workspace-new-chat').disabled, false, 'New chat stays available while sending');
+  f.chat.newChat(); assert.equal(f.tabs().length, 1, 'it waits for the hand-off instead of moving the sending message');
+  resolveSend({ turnId: 'turn-1', conversationId: 'conv-new' }); await tick(); await tick();
+  assert.equal(f.tabs().length, 2, 'the new chat opened once the hand-off settled'); assert.equal(f.chat.activeConversation(), null);
+  assert.equal(sends(b).length, 1, 'nothing was sent again');
+  click(f.tabs()[0]!); await tick(); assert.equal(f.chat.activeConversation(), 'conv-new', 'the sent message kept its tab');
 });

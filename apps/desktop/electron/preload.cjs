@@ -206,7 +206,8 @@ const workspacePreferenceInvoke = async (action, args, record = 'workspace') => 
   } catch { workspacePreferenceError(); }
 };
 function librarySnapshot(value, scope) {
-  workspacePreferenceFields(value, ['version','projectPath','activeId','folders','conversations']);
+  const expanded=!!value&&typeof value==='object'&&Object.hasOwn(value,'expandedFolderIds');
+  workspacePreferenceFields(value, ['version','projectPath','activeId','folders','conversations',...(expanded?['expandedFolderIds']:[])]);
   const projectPath=workspacePreferenceText(value.projectPath,4096);
   const array=(v,max)=>{if(!Array.isArray(v)||Object.getPrototypeOf(v)!==Array.prototype||v.length>max||Reflect.ownKeys(v).length!==v.length+1)workspacePreferenceError();return Array.from({length:v.length},(_,i)=>{const d=Object.getOwnPropertyDescriptor(v,String(i));if(!d?.enumerable||!Object.hasOwn(d,'value'))workspacePreferenceError();return d.value;});};
   const singleLine=(v,max)=>{const s=workspacePreferenceText(v,max);if(/[\x00-\x1f\x7f]/.test(s))workspacePreferenceError();return s;};
@@ -223,6 +224,8 @@ function librarySnapshot(value, scope) {
     return{id,title,folderId,bindings,messages};
   });
   const activeId=workspacePreferenceId(value.activeId,256),result={version:1,projectPath,activeId,folders,conversations};
+  // Optional presentation field: the open sidebar folders (unique, existing, omitted when empty).
+  if(expanded){const open=array(value.expandedFolderIds,64).map(id=>workspacePreferenceText(id,256,true));if(!open.length||new Set(open).size!==open.length||open.some(id=>!folderIds.has(id)))workspacePreferenceError();result.expandedFolderIds=open;}
   if(activeId!==null&&!conversationIds.has(activeId)||count>1024||new TextEncoder().encode(JSON.stringify(result)).byteLength>480*1024)workspacePreferenceError();return result;
 }
 
@@ -832,6 +835,33 @@ const meshKeep = Object.freeze({ version: 1,
     } catch { throw new Error(MESH_KEEP_UNAVAILABLE); }
   },
 });
+// Importing models and effects. The renderer never handles a path: pick() opens the native picker in the main process;
+// importFiles(...files) turns files the person dropped into paths here with webUtils.getPathForFile, which only resolves
+// real files from a drop or file input. Replies carry opaque import ids, names and plain refusal messages only.
+const IMPORT_UNAVAILABLE = 'Importing is unavailable.';
+const importReply = out => {
+  const text = (value, max) => typeof value === 'string' ? value.replace(/[\u0000-\u001f\u007f‪-‮⁦-⁩]/g, ' ').slice(0, max) : '';
+  const rows = value => Array.isArray(value) ? value.slice(0, 16) : [];
+  return {
+    state: ['imported', 'cancelled', 'refused', 'busy', 'unavailable'].includes(out?.state) ? out.state : 'unavailable', message: text(out?.message, 300),
+    imported: rows(out?.imported).filter(row => typeof row?.id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(row.id) && (row.kind === 'model' || row.kind === 'effect'))
+      .map(row => ({ id: row.id, name: text(row.name, 80), kind: row.kind, duplicate: row.duplicate === true })),
+    refused: rows(out?.refused).map(row => ({ name: text(row?.name, 120), message: text(row?.message, 300) })),
+  };
+};
+const assetImport = Object.freeze({ version: 1,
+  pick: async (...args) => {
+    if (args.length) throw new Error(IMPORT_UNAVAILABLE);
+    try { return importReply(await ipcRenderer.invoke('arcane:asset-import-pick')); } catch { throw new Error(IMPORT_UNAVAILABLE); }
+  },
+  importFiles: async (...files) => {
+    if (!files.length || files.length > 8) throw new Error(IMPORT_UNAVAILABLE);
+    const { webUtils } = require('electron');
+    const paths = files.map(file => { try { const path = webUtils.getPathForFile(file); return typeof path === 'string' ? path : ''; } catch { return ''; } });
+    if (paths.some(path => !path || path.length > 4096)) throw new Error('Drop files from your computer to import them.');
+    try { return importReply(await ipcRenderer.invoke('arcane:asset-import-files', paths)); } catch { throw new Error(IMPORT_UNAVAILABLE); }
+  },
+});
 const updates = Object.freeze({ version: 1,
   status: async (...args) => {
     if (args.length) throw new Error('Updates are unavailable.');
@@ -903,4 +933,33 @@ const selectAssetConversation = async (...args) => {
     return { state: reply.state };
   } catch { throw new Error('Model review conversation is unavailable.'); }
 };
-contextBridge.exposeInMainWorld('arcaneDesktop', Object.freeze({ version: '0.1.0', platform: 'win32', runtime: 'desktop', selectAssetConversation, codeVerification, providerSetup, nativeHandoff, studioKeys, conversationLibrary, chatQueue, workspacePreferences, claudePreferences, toolDrafts, welcomeTour, setupChecklist, claudeChat, arcaneChat, studioPlugin, workspaceProject, dialogs, projectPermissions, billing, notifications, meshKeep, updates, runtimeRecovery }));
+// Pyx pop-out bar, workspace side (pyx-link.ts): the perch toggles the bar, publish a bounded snapshot, answer the bar's requests.
+const pyx = Object.freeze({ version: 1,
+  // The perch's click: opens the bar when it is closed and closes it (with its pop-out) when it is open.
+  open: (...args) => { if (args.length) throw new Error('Pyx is unavailable.'); return ipcRenderer.invoke('arcane:pyx-toggle').catch(() => ({ opened: false })); },
+  isOpen: () => ipcRenderer.invoke('arcane:pyx-is-open').then(open => open === true, () => false),
+  onVisibility: listener => {
+    if (typeof listener !== 'function') throw new Error('Pyx is unavailable.');
+    const handler = (_event, open) => { try { listener(open === true); } catch { /* ignored */ } };
+    ipcRenderer.on('arcane:pyx-visibility', handler); return () => { ipcRenderer.removeListener('arcane:pyx-visibility', handler); };
+  },
+  // Where the composer is (viewport CSS pixels), so the bar first opens clear of it.
+  layout: rect => { try { const n = v => typeof v === 'number' && Number.isFinite(v) ? Math.round(v) : null; const r = rect && { x: n(rect.x), y: n(rect.y), width: n(rect.width), height: n(rect.height) };
+    ipcRenderer.send('arcane:pyx-layout', r && Object.values(r).every(v => v !== null) ? r : null); } catch { /* the bar is optional */ } },
+  publish: snapshot => { try { ipcRenderer.send('arcane:pyx-publish', JSON.parse(JSON.stringify(snapshot ?? null))); } catch { /* the bar is optional */ } },
+  onRequest: listener => {
+    if (typeof listener !== 'function') throw new Error('Pyx is unavailable.');
+    const handler = (_event, request) => { try { listener(request); } catch { /* ignored */ } };
+    ipcRenderer.on('arcane:pyx-request', handler); return () => { ipcRenderer.removeListener('arcane:pyx-request', handler); };
+  },
+  answer: (id, result) => ipcRenderer.send('arcane:pyx-answer', { id: String(id).slice(0, 64), accepted: result?.accepted === true,
+    message: typeof result?.message === 'string' ? result.message.slice(0, 300) : null }),
+});
+// Window chrome: the native window buttons' background follows the surface shown ('workspace' or the sign-in 'page').
+const windowChrome = Object.freeze({ version: 1,
+  tone: (...args) => {
+    if (args.length !== 1 || (args[0] !== 'workspace' && args[0] !== 'page')) throw new Error('Window chrome is unavailable.');
+    ipcRenderer.send('arcane:titlebar-tone', args[0]);
+  },
+});
+contextBridge.exposeInMainWorld('arcaneDesktop', Object.freeze({ version: '0.1.0', platform: 'win32', runtime: 'desktop', selectAssetConversation, codeVerification, providerSetup, nativeHandoff, studioKeys, conversationLibrary, chatQueue, workspacePreferences, claudePreferences, toolDrafts, welcomeTour, setupChecklist, claudeChat, arcaneChat, studioPlugin, workspaceProject, dialogs, projectPermissions, billing, notifications, meshKeep, assetImport, updates, runtimeRecovery, pyx, windowChrome }));

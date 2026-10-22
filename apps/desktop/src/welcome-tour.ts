@@ -118,7 +118,8 @@ export function startWelcomeTour(doc: Document, options: WelcomeTourOptions = {}
     const box = node.getBoundingClientRect(); return box.width > 0 && box.height > 0;
   };
   const signInShowing = () => { const gate = doc.getElementById('provider-login-gate'); return !!gate && !gate.hidden && visible(gate); };
-  const blocked = () => signInShowing() || !!doc.querySelector('dialog[open]');
+  // Also wait while the saved sign-in is still being checked (the stage stays provider-required until the workspace shows).
+  const blocked = () => signInShowing() || !!doc.getElementById('workspace-stage')?.classList.contains('provider-required') || !!doc.querySelector('dialog[open]');
   const findTarget = (step: TourStep) => { for (const selector of step.targets) { const node = doc.querySelector(selector); if (visible(node)) return node; } return null; };
 
   function layout() {

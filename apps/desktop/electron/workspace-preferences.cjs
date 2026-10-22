@@ -36,7 +36,8 @@ function presentationModel(value) {
   return model;
 }
 function libraryPreferences(value, scope) {
-  fields(value, ['version','projectPath','activeId','folders','conversations']);
+  const expanded=!!value&&typeof value==='object'&&!types.isProxy(value)&&Object.hasOwn(value,'expandedFolderIds');
+  fields(value, ['version','projectPath','activeId','folders','conversations',...(expanded?['expandedFolderIds']:[])]);
   const projectPath=text(value.projectPath,4096);
   const array=(v,max)=>{if(types.isProxy(v)||!Array.isArray(v)||Object.getPrototypeOf(v)!==Array.prototype||v.length>max||Reflect.ownKeys(v).length!==v.length+1)fail();return Array.from({length:v.length},(_,i)=>{const d=Object.getOwnPropertyDescriptor(v,String(i));if(!d?.enumerable||!Object.hasOwn(d,'value'))fail();return d.value;});};
   const singleLine=(v,max)=>{const s=text(v,max);if(/[\x00-\x1f\x7f]/.test(s))fail();return s;};
@@ -53,6 +54,8 @@ function libraryPreferences(value, scope) {
     return{id,title,folderId,bindings,messages};
   });
   const activeId=nullableId(value.activeId,256),result={version:1,projectPath,activeId,folders,conversations};
+  // Optional presentation field: the open sidebar folders (unique, existing, omitted when empty).
+  if(expanded){const open=array(value.expandedFolderIds,64).map(id=>text(id,256,true));if(!open.length||new Set(open).size!==open.length||open.some(id=>!folderIds.has(id)))fail();result.expandedFolderIds=open;}
   if(activeId!==null&&!conversationIds.has(activeId)||count>1024||Buffer.byteLength(JSON.stringify(result))>480*1024)fail();return result;
 }
 // Queue records contain unsubmitted text and advisory identifiers, never native execution authority.

@@ -132,18 +132,20 @@ test('a fatal startup during private initialization retains its fixed event and 
 });
 test('startup quit and startup failure both await diagnostic shutdown before exiting',async()=>{
  for(const [name,end,expected,rejectDialog] of [['quitStartup','async function runtimeStopped',0,false],['failStartup','/** Start a project',1,false],['failStartup','/** Start a project',1,true]]){
-  const body=between(main,'async function '+name+'(',end),calls=[];
-  const context={closing:false,smoke:false,providerSetup:{dispose(){}},stopClaudeChat:()=>Promise.resolve(),appDialogs:null,trustedDialogs:null,
+  const body=between(main,'async function '+name+'(',end),calls=[];let pyxDisposed=0;
+  const context={closing:false,smoke:false,providerSetup:{dispose(){}},pyxBar:{dispose(){pyxDisposed++;}},stopClaudeChat:()=>Promise.resolve(),appDialogs:null,trustedDialogs:null,
    dialog:{showMessageBox:async()=>{calls.push('dialog');if(rejectDialog)throw Error('fixture native dialog refusal');}},stopDaemon:async()=>calls.push('daemon'),exitAfterDiagnostics:async code=>calls.push('diagnostics-exit:'+code)};
   vm.runInNewContext(body+'\nglobalThis.run='+name+';',context);await context.run('fixed public startup message');assert.equal(calls.at(-1),'diagnostics-exit:'+expected);assert.ok(calls.indexOf('daemon')<calls.length-1);
+  if(name==='failStartup')assert.equal(pyxDisposed,1,'a failed startup also retires the Pyx bar window');
  }
 });
 test('the before-quit callback observes daemon failure and always delegates final diagnostic closure',async()=>{
  const registration=main.split(/\r?\n/).find(line=>line.includes("app.on('before-quit'"));assert.ok(registration);
  for(const fail of [false,true]){
-  let callback;const calls=[],context={app:{on(type,fn){assert.equal(type,'before-quit');callback=fn;}},closing:false,providerSetup:{dispose(){}},
+  let callback,pyxDisposed=0;const calls=[],context={app:{on(type,fn){assert.equal(type,'before-quit');callback=fn;}},closing:false,providerSetup:{dispose(){}},pyxBar:{dispose(){pyxDisposed++;}},
    stopClaudeChat:async()=>{},stopDaemon:async()=>{if(fail)throw Error('fixture daemon refusal');return true;},exitAfterDiagnostics:async code=>calls.push('diagnostics-exit:'+code)};
   vm.runInNewContext(registration,context);callback({preventDefault:()=>calls.push('prevent')});await settle();assert.deepEqual(calls,['prevent','diagnostics-exit:'+(fail?1:0)]);
+  assert.equal(pyxDisposed,1,'quitting retires the Pyx bar window');
  }
 });
 test('update handoff quiesces diagnostics before relaunch and preserves a refused-close fence',async()=>{

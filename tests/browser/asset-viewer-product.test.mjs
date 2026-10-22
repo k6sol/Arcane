@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, mkdir, writeFile } from 'node:fs/promises';
+import { readFile, readdir, mkdir, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -93,7 +93,9 @@ async function sources(emit) {
   assert.match(policy, /connect-src 'self' blob:;/); assert.match(policy, /img-src 'self' blob:;/);
   assert.match(policy, /worker-src 'none';/); assert.match(policy, /object-src 'none';/);
   assert.doesNotMatch(policy, /unsafe-inline|unsafe-eval|\*|https?:/);
-  const paths = ['/studio.css', '/asset-viewer-runtime.mjs', ...vendorPaths];
+  // The shipped faces (studio.css @font-face, same-origin /fonts) are part of the product page.
+  const fonts = (await readdir(resolve(root, 'apps/desktop/public/fonts'))).filter(name => name.endsWith('.woff2')).map(name => '/fonts/' + name);
+  const paths = ['/studio.css', '/asset-viewer-runtime.mjs', ...vendorPaths, ...fonts];
   const result = new Map(await Promise.all(paths.map(async path => [path, await readFile(resolve(root, 'apps/desktop/public', '.' + path))])));
   const html = (await readFile(resolve(root, 'apps/desktop/public/studio.html'), 'utf8'))
     .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
@@ -125,9 +127,14 @@ async function fixture(browser, t, sources, emit, options = {}) {
       else { assert.equal(url.searchParams.get('path'), 'asset.glb'); await route.fulfill({ body: artifact, headers: artifactHeaders(artifact) }); }
       return;
     }
+    if (url.pathname === '/v1/assets/review/prepare') {
+      assert.equal(request.method(), 'POST'); assert.equal(request.headers().authorization, 'Bearer ' + TOKEN);
+      assert.equal(JSON.parse(request.postData() ?? '{}').jobId, selectedManifest.jobId, 'review prepares the exact shown job');
+      await route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"FIXTURE","message":"No review service in this fixture."}' }); return;
+    }
     if (url.pathname === '/asset-viewer-runtime.mjs' && !options.gpu) { await route.fulfill({ contentType: 'text/javascript', body: recorder }); return; }
     if (files.has(url.pathname)) {
-      await route.fulfill({ contentType: url.pathname === '/' ? 'text/html' : url.pathname.endsWith('.css') ? 'text/css' : 'text/javascript', body: files.get(url.pathname), headers: { 'Content-Security-Policy': policy } }); return;
+      await route.fulfill({ contentType: url.pathname === '/' ? 'text/html' : url.pathname.endsWith('.css') ? 'text/css' : url.pathname.endsWith('.woff2') ? 'font/woff2' : 'text/javascript', body: files.get(url.pathname), headers: { 'Content-Security-Policy': policy } }); return;
     }
     // Only emitted desktop JavaScript is readable; URL paths cannot select
     // another directory or any account, app state, manifest or credential file.
@@ -171,6 +178,16 @@ async function startProduct(page, jobId = JOB, request = { template: 'hero-prop'
   }, { JOB: jobId, NEXT_JOB, TOKEN, request });
 }
 
+// C30 viewer controls: the camera gizmo, the display segmented control, the lighting menu and the inspector tabs.
+const viewerControl = {
+  view: (page, value) => page.getByRole('button', { name: { perspective: 'Perspective', front: 'Front', side: 'Side', top: 'Top' }[value] + ' view', exact: true }).click(),
+  mode: (page, value) => page.getByRole('button', { name: { rendered: 'Textured', wireframe: 'Wireframe', clay: 'Shaded' }[value], exact: true }).click(),
+  async lighting(page, value) {
+    await page.getByRole('button', { name: /^Lighting, / }).click();
+    await page.getByRole('menuitemradio', { name: { studio: 'Studio', soft: 'Soft', dramatic: 'Dramatic' }[value], exact: true }).click();
+  },
+};
+
 test('production manifest-to-viewer wiring in isolated Edge DOM', { skip: !process.env.ARCANE_VIEWER_PRODUCT_EMIT, timeout: 60_000 }, async t => {
   const emit = resolve(process.env.ARCANE_VIEWER_PRODUCT_EMIT), assets = await sources(emit);
   const browser = await chromium.launch({ headless: true,
@@ -190,15 +207,16 @@ test('production manifest-to-viewer wiring in isolated Edge DOM', { skip: !proce
     await page.locator('#asset-load-manifest').click();
     await page.waitForFunction(() => viewerMeter.renderers.length === 1 && !workbench.assetBusy);
     assert.deepEqual(f.network.filter(path => path.startsWith('/v1/')), [
-      '/v1/assets/manifest?jobId=' + JOB, '/v1/assets/artifact?jobId=' + JOB + '&path=asset.glb',
+      '/v1/assets/manifest?jobId=' + JOB, '/v1/assets/artifact?jobId=' + JOB + '&path=asset.glb', '/v1/assets/review/prepare',
     ]);
     assert.equal(await page.locator('#asset-viewer canvas[role="img"]').count(), 1);
     assert.match(await page.locator('.viewer-metrics').textContent(), /4\.00 × 2\.00 × 1\.00 m/);
     assert.equal(await page.locator('#workspace-preview-toggle').getAttribute('aria-expanded'), 'true', 'verified 3D canvas opens workspace preview');
-    for (const view of ['perspective', 'front', 'side', 'top']) await page.getByRole('combobox', { name: 'View', exact: true }).selectOption(view);
-    for (const mode of ['rendered', 'wireframe', 'clay']) await page.getByRole('combobox', { name: 'Display', exact: true }).selectOption(mode);
-    for (const lighting of ['studio', 'soft', 'dramatic']) await page.getByRole('combobox', { name: 'Lighting', exact: true }).selectOption(lighting);
+    for (const view of ['perspective', 'front', 'side', 'top']) await viewerControl.view(page, view);
+    for (const mode of ['rendered', 'wireframe', 'clay']) await viewerControl.mode(page, mode);
+    for (const lighting of ['studio', 'soft', 'dramatic']) await viewerControl.lighting(page, lighting);
     await page.getByRole('button', { name: 'Reset view' }).click();
+    await page.getByRole('tab', { name: 'Animation', exact: true }).click();
     await page.getByRole('combobox', { name: 'Animation clip' }).selectOption('1');
     await page.getByRole('slider', { name: 'Animation time' }).fill('1.25');
     await page.getByRole('combobox', { name: 'Animation speed' }).selectOption('1.5');
@@ -221,11 +239,11 @@ test('production manifest-to-viewer wiring in isolated Edge DOM', { skip: !proce
     await page.locator('#asset-load-manifest').click();
     await page.waitForFunction(() => viewerMeter.renderers.length === 2 && !workbench.assetBusy);
     await page.evaluate(() => { for (const node of oldControls) for (const event of ['click', 'change', 'input']) node.dispatchEvent(new Event(event)); });
-    await page.getByRole('combobox', { name: 'View', exact: true }).selectOption('top');
+    await viewerControl.view(page, 'top');
     const recorded = await page.evaluate(() => viewerMeter.renderers);
     assert.deepEqual(recorded[0].calls, expected); assert.equal(recorded[0].disposed, 1);
     assert.deepEqual(recorded[1].calls, [{ method: 'setView', args: ['top'] }]);
-    assert.equal(f.network.filter(path => path.startsWith('/v1/')).length, 4, 'all controls stay local');
+    assert.equal(f.network.filter(path => path.startsWith('/v1/')).length, 6, 'all controls stay local (two loads: manifest, artifact and review prepare each)');
     await page.evaluate(() => { shell.cleanup(); workbench.stop(); });
     assert.equal(await page.locator('#asset-viewer canvas').count(), 0);
     assert.equal(await page.evaluate(() => viewerMeter.renderers[1].disposed), 1);
@@ -294,14 +312,14 @@ test('production manifest-to-viewer wiring in isolated Edge DOM', { skip: !proce
     const canvas = page.locator('#asset-viewer canvas[role="img"]'); await canvas.waitFor();
     await page.waitForFunction(() => !workbench.assetBusy && document.querySelector('#asset-viewer canvas').width > 0);
     assert.deepEqual(f.network.filter(path => path.startsWith('/v1/')), [
-      '/v1/assets/manifest?jobId=' + JOB, '/v1/assets/artifact?jobId=' + JOB + '&path=asset.glb',
+      '/v1/assets/manifest?jobId=' + JOB, '/v1/assets/artifact?jobId=' + JOB + '&path=asset.glb', '/v1/assets/review/prepare',
     ]);
     assert.match(await page.locator('.viewer-metrics').textContent(), /4\.00 × 2\.00 × 1\.00 m/);
     const rendered = await canvas.screenshot(), pixels = visiblePixels(rendered);
     assert.ok(pixels.modelPixels > 5000, 'visible model pixels: ' + JSON.stringify(pixels));
     assert.ok(pixels.distinctColors > 30, 'shaded texture, not an empty canvas');
-    await page.getByRole('combobox', { name: 'View', exact: true }).selectOption('front');
-    await page.getByRole('combobox', { name: 'Display', exact: true }).selectOption('wireframe');
+    await viewerControl.view(page, 'front');
+    await viewerControl.mode(page, 'wireframe');
     const wireframe = await canvas.screenshot(); assert.notDeepEqual(wireframe, rendered);
     const metrics = await page.locator('.viewer-metrics').textContent(); assert.match(metrics, /4\.00 × 2\.00 × 1\.00 m/);
     await page.evaluate(() => { window.contexts = [...document.querySelectorAll('#asset-viewer canvas')].map(canvas => canvas.getContext('webgl2')); shell.cleanup(); workbench.stop(); });
@@ -333,15 +351,15 @@ test('production manifest-to-viewer wiring in isolated Edge DOM', { skip: !proce
     const canvas = page.locator('#asset-viewer canvas[role="img"]'); await canvas.waitFor();
     await page.waitForFunction(() => !workbench.assetBusy && document.querySelector('#asset-viewer canvas').width > 0);
     assert.deepEqual(f.network.filter(path => path.startsWith('/v1/')), [
-      '/v1/assets/manifest?jobId=' + RETAINED_JOB, '/v1/assets/artifact?jobId=' + RETAINED_JOB + '&path=asset.glb',
+      '/v1/assets/manifest?jobId=' + RETAINED_JOB, '/v1/assets/artifact?jobId=' + RETAINED_JOB + '&path=asset.glb', '/v1/assets/review/prepare',
     ]);
     const rendered = await canvas.screenshot(), pixels = visiblePixels(rendered);
     assert.ok(pixels.modelPixels > 5000, 'retained model has visible geometry: ' + JSON.stringify(pixels));
     assert.ok(pixels.distinctColors > 30);
     const dimensions = await page.locator('.viewer-metrics').textContent(); assert.match(dimensions, / m · /);
-    await page.getByRole('combobox', { name: 'View', exact: true }).selectOption('front');
-    await page.getByRole('combobox', { name: 'Display', exact: true }).selectOption('wireframe');
-    await page.getByRole('combobox', { name: 'Lighting', exact: true }).selectOption('soft');
+    await viewerControl.view(page, 'front');
+    await viewerControl.mode(page, 'wireframe');
+    await viewerControl.lighting(page, 'soft');
     const wireframe = await canvas.screenshot(); assert.notDeepEqual(wireframe, rendered);
     assert.equal(await page.locator('.viewer-metrics').textContent(), dimensions);
     await page.evaluate(() => { window.contexts = [...document.querySelectorAll('#asset-viewer canvas')].map(canvas => canvas.getContext('webgl2')); shell.cleanup(); workbench.stop(); });

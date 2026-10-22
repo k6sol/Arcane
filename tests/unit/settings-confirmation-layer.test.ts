@@ -6,10 +6,14 @@ import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { readdirSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import type { Page } from 'playwright-core';
 import type { ChatAction, ChatActionRecord, ChatState, CodexChat } from '../../apps/desktop/src/codex-chat.js';
 import type { WorkspaceShell } from '../../apps/desktop/src/workspace-shell.js';
+// The shipped faces (studio.css @font-face, same-origin /fonts) are part of the product page, so fixtures serve them.
+const shippedFonts = () => readdirSync('apps/desktop/public/fonts').filter(name => name.endsWith('.woff2'))
+  .map(name => ['/fonts/' + name, [resolve('apps/desktop/public/fonts', name), 'font/woff2']] as [string, [string, string]]);
 
 const TOKEN = 'a'.repeat(64), THREAD = 'opaque/native thread:settings.1';
 const DRAFT = 'Unsent settings draft 🧩\nPreserve trailing spaces.  ';
@@ -42,7 +46,7 @@ async function fixture(t: TestContext) {
   assert.ok(build, 'Use an explicit private compiled output, never root dist.');
   const proof = await mkdtemp(join(process.env.ARCANE_UI_FIXTURE_DIR ?? tmpdir(), 'settings-confirmation-layer-'));
   const files = new Map([
-    ['/studio.css', [resolve('apps/desktop/public/studio.css'), 'text/css']],
+    ...shippedFonts(), ['/studio.css', [resolve('apps/desktop/public/studio.css'), 'text/css']],
     ['/codex-chat.js', [resolve(build, 'apps/desktop/src/codex-chat.js'), 'text/javascript']],
     ['/workspace-shell.js', [resolve(build, 'apps/desktop/src/workspace-shell.js'), 'text/javascript']],
     ['/brand/arcane-ridges.png', [resolve('apps/desktop/public/brand/arcane-ridges.png'), 'image/png']],

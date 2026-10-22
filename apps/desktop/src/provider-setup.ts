@@ -38,6 +38,12 @@ export interface ProviderSetupOptions {
     connectForSavedLogin?(): Promise<void>;
   };
   nativeBridge?: unknown;
+  /**
+   * First-launch sign-in page (presentation only, never authority). Until this profile has shown a usable sign-in, a
+   * saved native login alone does not open the workspace: the page stays (or 'checking' while metadata connects). The page
+   * offers Continue without signing in (remembered); signInSkipped()/showSignIn() let the checklist reopen it.
+   */
+  signInPage?: boolean;
 }
 /**
  * What the chat already knows about the chosen provider: `signedIn` when its own fresh status lists models for a signed-in
@@ -74,12 +80,27 @@ export interface ProviderSetupController {
   setArcaneSetup?(state: ArcaneCreditsSetup): void;
   /** The currently selected provider (not proof of sign-in). */
   selectedProvider(): SetupProvider;
+  /** Presentation only: the user chose Continue without signing in on the sign-in page (cleared by a usable sign-in). */
+  signInSkipped?(): boolean;
+  /** Reopens the sign-in page after Continue without signing in; true when the page is now showing. Grants nothing. */
+  showSignIn?(): boolean;
   stop(): void;
   resume(): void;
   cleanup(): void;
 }
 // Origin-local presentation only. Never persist native status, accounts or authority.
 export const PROVIDER_PRESENTATION_KEY = 'arcane.provider-presentation.v1';
+/** Presentation only: the first-launch sign-in page ended with a usable sign-in, or the user chose to explore without one. */
+export const SIGN_IN_PAGE_KEY = 'arcane.sign-in-page.v1';
+export type SignInPageMemory = 'none' | 'signed-in' | 'skipped';
+export function readSignInPage(value: unknown): SignInPageMemory {
+  if (typeof value !== 'string' || value.length > 80) return 'none';
+  try {
+    const state = data(JSON.parse(value), ['version', 'state']);
+    const memory = state?.version === 1 ? state.state : null;
+    return memory === 'signed-in' || memory === 'skipped' ? memory : 'none';
+  } catch { return 'none'; }
+}
 export const PROVIDER_PREFERENCE_EVENT = 'workspace:providerpreference';
 /** Presentation only: the user last chose the Arcane Credits chat (no account data, no authority). */
 export const ARCANE_SURFACE_KEY = 'arcane.chat-surface.v1';
@@ -240,6 +261,19 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
     arcaneChosen = chosen;
     try { if (chosen) storage?.setItem(ARCANE_SURFACE_KEY, '{"version":1,"chosen":true}'); else storage?.removeItem(ARCANE_SURFACE_KEY); } catch { /* Only presentation is lost. */ }
   };
+  // First-launch sign-in page (presentation only). Without the option the memory is 'signed-in', so every view rule below
+  // is exactly the previous one.
+  const pageEnabled = options.signInPage === true;
+  let pageMemory: SignInPageMemory = 'signed-in';
+  if (pageEnabled) { try { pageMemory = readSignInPage(storage?.getItem(SIGN_IN_PAGE_KEY)); } catch { pageMemory = 'none'; } }
+  // pageShown: the page was on screen once (later re-checks keep it rather than swapping to the splash).
+  // sawPending: the saved-login metadata connection started; once it settles unusable, the page shows.
+  let pageShown = false, sawPending = false;
+  const rememberPage = (next: SignInPageMemory) => {
+    if (!pageEnabled || pageMemory === next) return;
+    pageMemory = next;
+    try { if (next === 'none') storage?.removeItem(SIGN_IN_PAGE_KEY); else storage?.setItem(SIGN_IN_PAGE_KEY, JSON.stringify({ version: 1, state: next })); } catch { /* Only presentation is lost. */ }
+  };
   const el = (id: string) => doc.getElementById(id), button = (id: string) => el(id) as HTMLButtonElement | null;
   const set = (id: string, value: string) => { const node = el(id); if (node) node.textContent = value; };
   const status = () => {
@@ -308,14 +342,23 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
       else if(!connection?.connected&&(state?.auth==='signed-out'||state?.auth==='api-or-cloud'))codexChatEvidence=false;
     }
     rememberEvidence();
-    const workspace = (provider === 'codex' && codexChatEvidence && reconnectAllowed) || claudeChatActive() || arcaneChatActive();
-    const firstCheck = !!native && !stopped && !disposed && !actionError && (!states.has(provider) || fallbackCheck !== null);
-    const view = workspace ? 'workspace' : firstCheck ? 'checking' : 'setup';
+    const evidence = (provider === 'codex' && codexChatEvidence && reconnectAllowed) || claudeChatActive() || arcaneChatActive();
+    // A usable sign-in (Claude or Arcane chat, or a fresh ready Codex connection) ends the first-launch page for good.
+    if (evidence && (claudeChatActive() || arcaneChatActive() || connected())) rememberPage('signed-in');
+    const workspace = evidence && pageMemory === 'signed-in';
+    // First launch: a saved login whose metadata is still connecting shows 'checking', never the page or the workspace.
+    if (savedConnectionPending) sawPending = true;
+    const connecting = evidence && !workspace && !pageShown && !needsDisconnect() && (savedConnectionPending || !sawPending);
+    const firstCheck = !!native && !stopped && !disposed && !actionError && (!states.has(provider) || fallbackCheck !== null || connecting);
+    const view = workspace || pageMemory === 'skipped' ? 'workspace' : firstCheck ? 'checking' : 'setup';
+    if (view === 'setup') pageShown = true;
     gate.hidden = view !== 'setup';
     const stage = el('workspace-stage');
     stage?.classList.toggle('provider-required', view !== 'workspace');
     stage?.setAttribute('data-provider-view', view);
     doc.documentElement?.setAttribute('data-provider-view', view);
+    // The static document is the signed-out page; this marks that setup now decides the view (CSS keeps the page back until then).
+    doc.documentElement?.setAttribute('data-provider-ready', 'true');
     const checking = busy && activeAction === 'status' || pendingStatus;
     const text = connected() ? 'Codex connected.' : checking ? 'Checking ' + name + ' sign-in…' : connectingSavedLogin ? 'Connecting Codex…' : state?.auth === 'subscription' && !state.busy ? name + ' signed in.' :
       state?.auth === 'signed-out' || provider === 'codex' && connection?.fresh && connection.auth === 'signed-out' ? 'Sign in with ' + name + '.' :
@@ -351,6 +394,7 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
     const refresh = button('provider-login-refresh'); if (refresh) { refresh.hidden = true; refresh.disabled = stopped || disposed || busy || !native; }
     // Terminal handoff stays available as a secondary action beside the embedded Claude chat.
     const terminal = button('claude-chat-terminal'); if (terminal) { terminal.hidden = !claudeChatActive(); terminal.disabled = stopped || disposed || busy || !native; }
+    const skip = button('provider-login-skip'); if (skip) { skip.hidden = !pageEnabled; skip.disabled = stopped || disposed; }
     applySurface();
     clearSignInTimer();
     const entry = states.get(provider);
@@ -542,6 +586,13 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
     if (arcaneAvailable) { autoSelect = false; retireFallback(); chooseArcane(true); render(); }
     else requestSettings(ARCANE_CREDITS_TARGET);
   });
+  // Continue without signing in: presentation only. The workspace shows; every native action still needs its own fresh state.
+  const skip = button('provider-login-skip');
+  if (skip) listen(skip, 'click', event => {
+    if (!trusted(event) || skip.disabled || !pageEnabled || stopped || disposed) return;
+    rememberPage('skipped'); render();
+    try { const composer = el('codex-composer') as HTMLTextAreaElement | null; if (composer && !composer.disabled && !composer.hidden) composer.focus(); else el('codex-heading')?.focus(); } catch { /* Focus is optional. */ }
+  });
   // Exact presentation event only. A changed preference requests native status,
   // but its payload never supplies authentication or native session authority.
   // The chat preference owner restores this event and saves the whole native payload.
@@ -593,6 +644,12 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
       arcaneSetup = next; render();
     },
     selectedProvider: () => provider,
+    signInSkipped: () => pageMemory === 'skipped',
+    showSignIn() {
+      if (disposed || pageMemory !== 'skipped') return false;
+      rememberPage('none'); render();
+      return !gate.hidden;
+    },
     subscribeChatSurface(listener: () => void) {
       if (disposed) return () => {};
       surfaceListeners.add(listener);

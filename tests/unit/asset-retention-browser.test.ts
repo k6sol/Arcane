@@ -53,13 +53,14 @@ async function harness(t:test.TestContext){
     if(path==='/'){body=html;type='text/html';}
     else if(path==='/fixture.js')body=FIXTURE;
     else if(path==='/studio.css'){body=await readFile(resolve(root,'apps/desktop/public/studio.css'));type='text/css';}
+    else if(/^\/fonts\/[a-z0-9-]+\.woff2$/.test(path)){body=await readFile(resolve(root,'apps/desktop/public',path.slice(1)));type='font/woff2';}
     else if(path.startsWith('/dist/')&&path.endsWith('.js')){
       const file=resolve(modules,'.'+path.slice('/dist'.length)),child=relative(modules,file);if(isAbsolute(child)||child.startsWith('..'))throw Error('Outside owned module tree');
       body=await readFile(file);
       // Disable only the page bootstrap. All production class/event/transport code remains byte-identical.
       if(path==='/dist/apps/desktop/src/studio.js')body='const window=undefined,document=undefined;\n'+body.toString();
     }else{response.writeHead(404);response.end();return;}
-    response.writeHead(200,{'Content-Type':type,'Cache-Control':'no-store','Content-Security-Policy':"default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'"});response.end(body);
+    response.writeHead(200,{'Content-Type':type,'Cache-Control':'no-store','Content-Security-Policy':"default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'"});response.end(body);
   })().catch(error=>{errors.push(String(error));response.writeHead(500);response.end();});});
   await new Promise<void>(done=>server.listen(0,'127.0.0.1',done));
   t.after(async()=>{server.closeAllConnections();await new Promise<void>(done=>server.close(()=>done()));});

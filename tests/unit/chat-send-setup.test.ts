@@ -177,18 +177,40 @@ test('valid signed-in local draft enables Send; the form binds via real receipts
 });
 
 test('duplicate Send during pending setup cannot create a second POST or change its tab', async t => {
-  const f = await fixture(t); await f.mount(); const other = f.chat.chatTabsView()[0]!.key;
+  const f = await fixture(t); await f.mount();
   await f.chat.newChat(); f.pair(); f.text('One pending message'); f.controls.gate = deferred();
+  const source = f.chat.currentStateView().activeChat!.key;
   const first = f.submit(); await until(() => f.posts.some(post => post.action === 'thread-start'));
   assert.equal(f.doc.getElementById('codex-submit').disabled, true);
   const before = f.posts.length; await f.submit();
-  assert.equal(await f.chat.newChat(), false); assert.equal(await f.chat.selectChat(other), false);
-  assert.equal(await f.chat.closeChat(f.chat.currentStateView().activeChat!.key), false);
   assert.equal(f.posts.length, before); assert.ok(!f.posts.some(post => post.action === 'turn-start'));
+  assert.equal(f.chat.currentStateView().activeChat!.key, source, 'the pending message keeps its tab');
   assert.equal(f.service.state().actions.find(record => record.action === 'thread-start')!.state, 'pending');
   f.controls.gate.release(); await first;
   assert.equal(f.posts.filter(post => post.action === 'thread-start').length, 1);
   assert.equal(f.posts.filter(post => post.action === 'turn-start').length, 1);
+});
+
+test('New chat during pending setup opens a local draft; the open stops before binding it and the message waits unsent in its own tab', async t => {
+  const f = await fixture(t); await f.mount();
+  await f.chat.newChat(); f.pair(); f.text('One pending message'); f.controls.gate = deferred();
+  const source = f.chat.currentStateView().activeChat!.key;
+  const first = f.submit(); await until(() => f.posts.some(post => post.action === 'thread-start'));
+  const before = f.posts.length;
+  // New chat is local: it never waits for, retries or repeats the pending open, and sends nothing itself.
+  assert.equal(await f.chat.newChat(), true);
+  const fresh = f.chat.currentStateView().activeChat!.key;
+  assert.notEqual(fresh, source); assert.equal(f.doc.getElementById('codex-composer').value, '', 'the new draft starts empty');
+  assert.equal(f.posts.length, before, 'no native action for the new draft');
+  f.controls.gate.release(); await first;
+  assert.equal(f.posts.filter(post => post.action === 'thread-start').length, 1, 'the in-flight open is never repeated');
+  assert.equal(f.posts.filter(post => post.action === 'turn-start').length, 0, 'nothing is sent from a tab the user left');
+  assert.equal(f.chat.currentStateView().activeChat!.key, fresh, 'the open did not bind or pull back the new draft');
+  assert.equal(f.service.state().actions.find(record => record.action === 'thread-start')!.state, 'acknowledged', 'the open keeps its own receipt');
+  // The message is still the unsent text of the tab it was typed in.
+  assert.equal(await f.chat.selectChat(source), true);
+  assert.equal(f.doc.getElementById('codex-composer').value, 'One pending message');
+  assert.equal(f.posts.filter(post => post.action === 'turn-start').length, 0);
 });
 
 test('textarea Enter uses setup-before-send; Shift+Enter and IME Enter never send', async t => {

@@ -7,12 +7,13 @@ import {
   closeChoiceBlocks, composerMenuOpen, composerPickerCheck, crossProviderColumns, describeToolActivity, fillModelColumns, firstModelRow, installComposerCommands, loopPickerFocus, modelListEntry,
   modelListMove, parseToolDetail, patchMessageText, positionComposerPopover, prefillComposer, prependProviderLogo, renderChangeCard, renderEarlierButton, renderMessageText, renderToolActivity,
   restoreRequestText, revealEarlier, toolDetailText, toolResultImage, transcriptWindowStart, formatUsageReset, usageLimitActive, usageLimitPickerNote,boundRecordedChatTranscript,publicChatText,renderChatQueueStrip,ChatQueueJournal,chatQueueScope,
+  markEntered, renderLiveUsage, renderReplyUsage, LIVE_USAGE_WORKING_TEXT,
 } from './codex-chat.js';
 import type { BeforeMessageSubmit,RecordedChatTranscript, ChoiceBlockOptions, ComposerModelGroup, ComposerProvider, CrossProviderModels, ProviderUsageLimit, ToolChange,ChatQueueRow,ChatQueueAction } from './codex-chat.js';
 import type {ChatQueueBridge,StoredChatQueueRow} from '../../../packages/protocol/src/chat-queue.js';
 import type { ChatAttachmentsController, ChatAttachmentsOwner } from './chat-attachments.js';
 import { ClaudePreferenceStore, claudePreferenceBridge, type ClaudePreferenceBridge, type ClaudePreferenceSnapshot } from './claude-preferences.js';
-import { chatSwitchFocus, chatSwitchOpenSection, chatSwitchSummary, restoreChatSwitchFocus } from './chat-tabs.js';
+import { chatSwitchFocus, chatSwitchOpenSection, chatSwitchSummary, draftCloseConfirm, draftCloseStep, restoreChatSwitchFocus } from './chat-tabs.js';
 import { USAGE_PRICES_AS_OF, compactTokenCount, costConversionNote, estimateUsageUsd, formatUsageCost, type TaskUsageCostDisplay } from './task-usage.js';
 import { costDisplay, onCostPreferences, replyUsageText } from './task-usage-ui.js';
 
@@ -24,6 +25,15 @@ export interface ClaudeChatTool { name: string; status: ClaudeToolStatus; input?
 /** `steered`: a user message sent into a running reply (it joined that reply instead of starting a new one). */
 export interface ClaudeMessageDelivery { model:string; effort:string; turnId:string|null; startedAt:string; finishedAt:string|null; state:'sending'|'accepted'|'completed'|'failed'|'stopped'; error:string|null;contextIncluded:boolean;transmittedBytes:number }
 export interface ClaudeChatMessage { id: string; role: ClaudeChatRole; text: string; at: string; tool?: ClaudeChatTool; steered?: true; delivery?:ClaudeMessageDelivery }
+/** One Claude Code sub-agent call as the composer lists it: its agent type, its short task description and its tool status. */
+export interface ClaudeSubagentView { name: string; task: string; state: ClaudeToolStatus }
+const CLAUDE_SUBAGENT_TOOLS: ReadonlySet<string> = new Set(['Task', 'Agent']);
+export function claudeSubagentView(tool: ClaudeChatTool): ClaudeSubagentView {
+  const input = parseToolDetail(tool.input), fields = input && typeof input === 'object' && !Array.isArray(input) ? input as Record<string, unknown> : {};
+  const text = (value: unknown) => typeof value === 'string' && !/^\[\d+ characters\]$/.test(value) ? value.replace(/\s+/g, ' ').trim().slice(0, 80) : '';
+  const kind = text(fields.subagent_type);
+  return { name: kind && kind !== 'general-purpose' ? kind : 'Agent', task: text(fields.description), state: tool.status };
+}
 /** Exact saved IDs reconcile a late history read with messages received while that read was pending. */
 export function mergeClaudeChatMessages(saved:readonly ClaudeChatMessage[],live:readonly ClaudeChatMessage[]):ClaudeChatMessage[] {
   const merged=saved.map(message=>({...message})), byId=new Map(merged.flatMap((message,index)=>message.id?[[message.id,index] as const]:[]));
@@ -276,6 +286,12 @@ export function usageMeterText(usage: ClaudeConversationUsage, display: TaskUsag
       '; your subscription is not charged per token.' + conversion(display) : '') +
     ' The red arc is the output share.';
 }
+/** The chat header's summary of the same totals: '8.3M tokens · ~£4.33', or tokens only when the cost is unknown or hidden. */
+export function headerUsageText(usage: ClaudeConversationUsage, display: TaskUsageCostDisplay = DEFAULT_DISPLAY): string {
+  const total = usage.inputTokens + usage.outputTokens;
+  const cost = usage.costUsd !== null && display.preferences.show ? formatUsageCost(usage.costUsd, display.preferences, display.locale) : null;
+  return compactTokenCount(total) + (Math.round(total) === 1 ? ' token' : ' tokens') + (cost ? ' \u00b7 ' + cost : '');
+}
 /** Per-conversation usage totals kept on this device (bounded). */
 export const CLAUDE_CHAT_USAGE_KEY = 'arcane.claude-chat.usage.v1';
 const USAGE_ROWS = 200;
@@ -343,7 +359,7 @@ const editable = (message: ClaudeChatMessage) => message.role === 'user' && !!me
 interface Tab { key: string; conversationId: string | null; model: string; effort: string; draft: string; title?:string }
 type El = HTMLElement;
 /** Claude-only composer nodes created on first activation (studio.html stays provider-neutral). */
-const QUEUE_ID = 'claude-chat-queue', METER_ID = 'claude-usage-meter';
+const QUEUE_ID = 'claude-chat-queue', METER_ID = 'claude-usage-meter', HEADER_USAGE_ID = 'chat-usage-summary';
 const SVG_NS = 'http://www.w3.org/2000/svg', RING = 2 * Math.PI * 7;
 
 export class ClaudeChat {
@@ -400,6 +416,8 @@ export class ClaudeChat {
   private queueChoice:string|null=null;
   private usage = new Map<string, ClaudeConversationUsage>();
   private confirmingDelete = false;
+  /** The unsent draft whose inline "Discard draft?" question is showing. */
+  private confirmingClose: string | null = null;
   private deleting = new Set<string>();
   private pickerModels = false;
   private reasoningOpen = false;
@@ -418,6 +436,8 @@ export class ClaudeChat {
   private readonly messageElements=new WeakMap<HTMLElement,ClaudeChatMessage>();
   private beforeMessageSubmit:BeforeMessageSubmit|null=null;
   private preparingSend=false;
+  /** New chat pressed while a message is still being handed to the bridge: it opens as soon as that hand-off settles. */
+  private newChatAfterSend=false;
   private readonly transcriptListeners=new Set<()=>void>();
   private transcriptSignature='';
   private conversationRevision=0;
@@ -513,6 +533,13 @@ export class ClaudeChat {
   }
   showConversationNotice(message:string):void{this.notice=message;this.render();}
   running(): boolean { return !!this.turn; }
+  /** Sub-agents (Claude Code Task/Agent calls) in the shown chat's latest turn, for the composer's agents count. Presentation only. */
+  subagents(): ClaudeSubagentView[] {
+    if (!this.active) return [];
+    let start = 0;
+    for (let i = this.shown.length - 1; i >= 0; i--) if (this.shown[i]!.role === 'user' && !this.shown[i]!.steered) { start = i + 1; break; }
+    return this.shown.slice(start).flatMap(message => message.tool && CLAUDE_SUBAGENT_TOOLS.has(message.tool.name) ? [claudeSubagentView(message.tool)] : []);
+  }
   openTabs(): readonly { key: string; conversationId: string | null; model: string; effort: string }[] {
     return this.tabs.map(tab => ({ key: tab.key, conversationId: tab.conversationId, model: tab.model, effort: tab.effort }));
   }
@@ -578,9 +605,11 @@ export class ClaudeChat {
     const strip = this.el('claude-chat-tabs');
     listen(strip, 'keydown', event => {
       const key = event as KeyboardEvent, target = (key.target as HTMLElement | null)?.dataset?.chatKey;
+      const confirming = (key.target as HTMLElement | null)?.dataset?.confirmChat;
+      if (confirming && key.key === 'Escape' && !key.altKey && !key.ctrlKey && !key.metaKey && !key.shiftKey) { event.preventDefault(); this.keepDraftTab(confirming, 'strip'); return; }
       if (!target || key.altKey || key.ctrlKey || key.metaKey || key.shiftKey) return;
       const index = this.tabs.findIndex(tab => tab.key === target); if (index < 0) return;
-      if (key.key === 'Delete') { event.preventDefault(); this.closeTab(target); return; }
+      if (key.key === 'Delete') { event.preventDefault(); if (this.active) this.requestCloseTab(target); return; }
       const next = key.key === 'Home' ? 0 : key.key === 'End' ? this.tabs.length - 1 : key.key === 'ArrowRight' ? (index + 1) % this.tabs.length : key.key === 'ArrowLeft' ? (index + this.tabs.length - 1) % this.tabs.length : -1;
       if (next < 0) return;
       event.preventDefault(); const nextKey = this.tabs[next]!.key; this.selectTab(nextKey);
@@ -629,7 +658,7 @@ export class ClaudeChat {
     this.restoreAttach = null;
     this.el('codex-messages')?.removeAttribute('aria-busy');
     this.steerHint(false);
-    for (const id of [QUEUE_ID, METER_ID]) { const node = this.el(id); if (node) node.hidden = true; }
+    for (const id of [QUEUE_ID, METER_ID, HEADER_USAGE_ID]) { const node = this.el(id); if (node) node.hidden = true; }
     this.rememberMessages();
     this.active = false; this.tools.clear(); this.messageCount = 0; this.turnChanges = []; this.shown = [];this.shownKey=null;
     this.cancelStream();
@@ -770,10 +799,14 @@ export class ClaudeChat {
     this.applyDefaultsTo(tab); this.saveChoice(tab);
   }
 
-  /** New chat: reuses an empty draft tab, otherwise opens a new one. */
+  /**
+   * New chat: reuses an empty draft tab, otherwise opens a new one. It is never refused: while a message is still being
+   * handed to the bridge (no turn ID yet) it waits for that hand-off, so the message stays with the tab it was sent from.
+   */
   newChat(): void {
     if(this.nativeHydrating){void this.nativeReading?.then(()=>{if(!this.nativeDisposed)this.newChat();});return;}
-    if (this.turn && this.turn.turnId === null) return;
+    if (this.turn && this.turn.turnId === null) { this.newChatAfterSend = true; return; }
+    this.newChatAfterSend = false;
     this.saveDraft();
     const empty = this.tabs.find(tab => tab.conversationId === null && !tab.draft.trim());
     if (!empty && this.tabs.length >= CLAUDE_CHAT_TAB_LIMIT) { this.notice = 'Close a tab before opening another chat.'; this.render(); return; }
@@ -834,6 +867,49 @@ export class ClaudeChat {
     if (!this.tabs.length) this.createTab(null);
     if (this.activeKey === key) void this.showTab(this.tabs[Math.max(0, index - 1)]!.key);
     else { this.persistTabs(); this.render(); }
+  }
+  /**
+   * Every close gesture lands here (×, middle-click, Delete, Ctrl+W through the selected tab's ×, a switcher row's ×). A saved chat
+   * closes as before. An unsent draft closes at once when empty; with text or attachments it first asks "Discard draft?" inline.
+   */
+  requestCloseTab(key: string, from: 'strip' | 'switcher' = 'strip'): void {
+    const tab = this.tabs.find(row => row.key === key); if (!tab || !this.active) return;
+    const live = key === this.activeKey ? this.input()?.value ?? tab.draft : tab.draft;
+    const step = draftCloseStep({ kind: tab.conversationId ? 'native' : 'draft', draft: live }, key === this.activeKey && this.attachedDraft());
+    if (step === 'native') { this.closeTab(key); return; }
+    if (step === 'close') { this.closeDraftTab(key, from); return; }
+    this.confirmingClose = key; this.render();
+    this.focusTabControl(node => node.dataset.confirmChat === key && node.dataset.confirmAction === 'keep', from);
+  }
+  /** Keep answers the question: the draft and its text stay, and focus returns to its close button. */
+  keepDraftTab(key: string, from: 'strip' | 'switcher' = 'strip'): void {
+    if (this.confirmingClose !== key) return;
+    this.confirmingClose = null; this.render();
+    if (!this.focusTabControl(node => node.dataset.closeChat === key, from)) this.focusTabControl(node => node.dataset.chatKey === key || node.dataset.openChat === key, from);
+  }
+  /** Discard (or closing an empty draft): the draft and its stored text go; the neighbour shows with no new turn; focus follows it. */
+  private closeDraftTab(key: string, from: 'strip' | 'switcher'): void {
+    const keys = this.tabs.map(tab => tab.key), index = keys.indexOf(key), neighbour = keys[index - 1] ?? keys[index + 1] ?? null;
+    if (this.confirmingClose === key) this.confirmingClose = null;
+    this.closeTab(key);
+    if (this.tabs.some(tab => tab.key === key)) { this.render(); this.focusTabControl(node => node.dataset.closeChat === key, from); return; }
+    const next = neighbour && this.tabs.some(tab => tab.key === neighbour) ? neighbour : this.activeKey;
+    if (next) this.focusTabControl(node => node.dataset.chatKey === next || node.dataset.openChat === next, from);
+  }
+  /** Attachments waiting in the composer this surface owns are unsent content too. */
+  private attachedDraft(): boolean {
+    const controller = this.claimed ? this.attachments.controller() : null; if (!controller) return false;
+    try { return controller.prepareReferences().length > 0 || !!controller.prepareText(''); } catch { return true; }
+  }
+  /** Focus a control where the gesture came from (tab strip or open chat switcher), else in the other one when it is laid out. */
+  private focusTabControl(match: (node: HTMLElement) => boolean, from: 'strip' | 'switcher'): boolean {
+    const strip = this.el('claude-chat-tabs'), sheet = this.el<HTMLDetailsElement>('claude-saved-chats'), menu = sheet?.open ? sheet : null;
+    for (const root of from === 'switcher' ? [menu, strip] : [strip, menu]) {
+      let nodes: HTMLElement[] = []; try { nodes = Array.from(root?.querySelectorAll<HTMLElement>('button') ?? []); } catch { /* Focus is presentation only. */ }
+      const target = nodes.find(node => match(node) && !(node as HTMLButtonElement).disabled && !(typeof node.getClientRects === 'function' && node.getClientRects().length === 0));
+      if (target) { try { target.focus({ preventScroll: true }); return true; } catch { /* Focus is presentation only. */ } }
+    }
+    return false;
   }
 
   /** Enter queues during a reply. Steering always requires the explicit row action. */
@@ -1050,6 +1126,8 @@ export class ClaudeChat {
     try { reply = record(await bridge.send({ conversationId, text: sent, model, effort, ...(sent!==visibleSent?{displayText:visibleSent}:{}),...(images.length ? { images } : {}), ...playtest })); }
     catch (error) { reply = null; failure = bridgeError(error, failure, this.profile.knownErrors); }
     const turnId = text(reply?.turnId, 256), nextConversation = text(reply?.conversationId, 256);
+    // A New chat pressed during the hand-off opens once this send has settled (after the code below has run).
+    if (this.newChatAfterSend) queueMicrotask(() => { if (!this.newChatAfterSend) return; this.newChatAfterSend = false; if (!this.nativeDisposed && this.active) this.newChat(); });
     if (!turnId || !nextConversation) {
       delivery.state='failed';delivery.finishedAt=new Date().toISOString();delivery.error=failure;this.refreshMessageDetails();
       this.turn = null; this.buffered = [];
@@ -1217,7 +1295,7 @@ export class ClaudeChat {
         turn.text = (turn.text + text(event.text)).slice(-MAX_TEXT);
         if (!visible) return;
         // Only the reply being written is a live region; aria-busy holds its announcement until it settles.
-        if (!turn.bubble) { turn.bubble = this.appendMessage({ id: '', role: 'assistant', text: '', at: '',delivery:turn.delivery }, false); turn.bubble.setAttribute('aria-busy', 'true'); turn.bubble.setAttribute('aria-live', 'polite'); }
+        if (!turn.bubble) { turn.bubble = this.appendMessage({ id: '', role: 'assistant', text: '', at: '',delivery:turn.delivery }, false); turn.bubble.setAttribute('aria-busy', 'true'); turn.bubble.setAttribute('aria-live', 'polite'); this.paintLiveUsage(); }
         this.paintStream();
         return;
       }
@@ -1233,11 +1311,12 @@ export class ClaudeChat {
           const row=this.messageElements.get(turn.bubble);if(row)Object.assign(row,message,{text:message.text||turn.text});
           this.setText(turn.bubble, message.text || turn.text, true);
           turn.bubble.setAttribute('aria-busy', 'false'); turn.bubble.removeAttribute('aria-live');
-          turn.bubble = null; turn.text = '';this.reconcileShownIds();this.refreshMessageDetails(); return;
+          turn.bubble = null; turn.text = '';this.reconcileShownIds();this.refreshMessageDetails(); this.paintLiveUsage(); return;
         }
         if (message.role === 'assistant') { turn.bubble = null; turn.text = ''; }
         const near = this.nearBottom();
         this.appendMessage(message, false);
+        this.paintLiveUsage();
         if (near) this.scrollToBottom();
         return;
       }
@@ -1264,7 +1343,7 @@ export class ClaudeChat {
         }
         const model = this.turnModel(turn.tabKey), display = this.costDisplay(), reply = claudeReplyCost(event.usage, model);
         this.notice = turn.stopping && !ok ? 'Stopped.' : this.replyNotice(event.usage, model, display) ?? (ok ? 'Done.' : '');
-        if (visible && reply) this.appendReplyUsage(reply, display);
+        if (visible && reply) this.appendReplyUsage(reply, display, this.turnModelLabel(turn.tabKey));
         if (visible && ok) try { feedbackSink?.turnFinished({ key: this.profile.provider + ':' + turn.tabKey, ok, tools: this.turnTools(), box: this.el('codex-messages') }); } catch { /* Learning is optional. */ }
         this.addUsage(turn.conversationId, reply);
         if (limited) this.setUsageLimit(limited); else if (ok) this.setUsageLimit(null);
@@ -1284,16 +1363,31 @@ export class ClaudeChat {
     return alias ? this.state?.resolved[alias] ?? alias : null;
   }
   private costDisplay(): TaskUsageCostDisplay { return costDisplay(this.doc, this.storage); }
-  /** A subtle '12k tokens (~$0.31)' line under the finished reply. Its numbers stay on the node so a preference change re-renders it. */
-  private appendReplyUsage(reply: ClaudeReplyCost, display: TaskUsageCostDisplay): void {
+  /**
+   * A quiet '12k tokens · ~$0.31' line under the finished reply; hovering or focusing it shows the input, output and model
+   * breakdown and where the cost came from. Its numbers stay on the node so a preference change re-renders it.
+   */
+  private appendReplyUsage(reply: ClaudeReplyCost, display: TaskUsageCostDisplay, model: string | null = null): void {
     const box = this.el('codex-messages'); if (!box || !this.active) return;
-    const line = this.make('p', replyUsageText(reply.tokens, reply.usd, display), 'reply-usage');
-    line.dataset.tokens = String(reply.tokens); line.dataset.inputTokens = String(reply.inputTokens); line.dataset.outputTokens = String(reply.outputTokens);
-    if (reply.usd !== null) line.dataset.usd = String(reply.usd);
-    if (reply.source) line.dataset.costSource = reply.source;
-    line.title = claudeReplyUsageTitle(reply, display);
+    this.removeLiveUsage();
+    const line = this.replyUsageNode(reply, display, model);
     const last = Array.from(box.querySelectorAll<HTMLElement>('.codex-message')).at(-1);
     if (last && last.getAttribute('data-role') === 'assistant') last.append(line); else box.append(line);
+  }
+  private replyUsageNode(reply: ClaudeReplyCost, display: TaskUsageCostDisplay, model: string | null): HTMLElement {
+    const format = (n: number) => Math.round(n).toLocaleString('en-US');
+    // The tooltip text's first sentence repeats the counts shown in the rows; the rest says where the cost came from.
+    const note = claudeReplyUsageTitle(reply, display).replace(/^[^.]*\.\s*/, '') || null;
+    const line = renderReplyUsage(this.doc, { text: replyUsageText(reply.tokens, reply.usd, display),
+      rows: [['Input', format(reply.inputTokens)], ['Output', format(reply.outputTokens)], ...(model ? [['Model', model] as const] : [])], note });
+    const button = line.querySelector<HTMLElement>('.reply-usage');
+    if (button) {
+      button.dataset.tokens = String(reply.tokens); button.dataset.inputTokens = String(reply.inputTokens); button.dataset.outputTokens = String(reply.outputTokens);
+      if (reply.usd !== null) button.dataset.usd = String(reply.usd);
+      if (reply.source) button.dataset.costSource = reply.source;
+      if (model) button.dataset.model = model;
+    }
+    return line;
   }
   /** Re-renders every visible reply usage line after a cost preference change. */
   private refreshReplyUsage(): void {
@@ -1301,11 +1395,36 @@ export class ClaudeChat {
     const display = this.costDisplay();
     for (const line of Array.from(box.querySelectorAll<HTMLElement>('.reply-usage'))) {
       const number = (key: string) => { const value = Number(line.dataset[key]); return Number.isFinite(value) && value >= 0 ? value : null; };
-      const tokens = number('tokens'); if (tokens === null) continue;
+      const tokens = number('tokens'), wrap = line.closest?.('.message-usage'); if (tokens === null || !wrap) continue;
       const source = line.dataset.costSource === 'reported' || line.dataset.costSource === 'table' ? line.dataset.costSource : null;
       const reply: ClaudeReplyCost = { tokens, inputTokens: number('inputTokens') ?? 0, outputTokens: number('outputTokens') ?? 0, usd: number('usd'), source };
-      line.textContent = replyUsageText(reply.tokens, reply.usd, display); line.title = claudeReplyUsageTitle(reply, display);
+      wrap.replaceWith(this.replyUsageNode(reply, display, line.dataset.model ?? null));
     }
+  }
+  /** The model and reasoning a tab's turn ran on, as the usage breakdown names it ('Opus 5.5 · High'). */
+  private turnModelLabel(tabKey: string): string | null {
+    const tab = this.tabs.find(row => row.key === tabKey); if (!tab?.model) return null;
+    return this.modelLabel(tab.model).short + (tab.effort ? ' · ' + claudeEffortLabel(tab.effort) : '');
+  }
+  private liveUsageLines(): HTMLElement[] {
+    return Array.from(this.el('codex-messages')?.querySelectorAll?.<HTMLElement>('.message-usage') ?? []).filter(line => line.getAttribute('data-live') === 'true');
+  }
+  private removeLiveUsage(): void { for (const line of this.liveUsageLines()) line.remove?.(); }
+  /**
+   * The quiet live line under the running reply. Claude Code reports tokens only when a reply ends, so it reads 'Working…'
+   * until the finished line replaces it. It sits under the turn's latest reply, or at the end before any reply text.
+   */
+  private paintLiveUsage(): void {
+    const box = this.el('codex-messages'); if (!box) return;
+    const turn = this.turn, lines = this.liveUsageLines();
+    if (!this.active || !turn || turn.turnId === null || !this.turnOwnsActiveTab()) { for (const line of lines) line.remove?.(); return; }
+    const children = Array.from(box.children ?? []) as HTMLElement[], has = (node: HTMLElement, name: string) => String(node.className ?? '').split(/\s+/).includes(name);
+    let start = -1; children.forEach((node, index) => { if (has(node, 'human') && !has(node, 'steered')) start = index; });
+    const reply = children.slice(start + 1).filter(node => has(node, 'codex') && node.getAttribute('data-role') === 'assistant').at(-1) ?? null;
+    for (const extra of lines.slice(1)) extra.remove?.();
+    const line = lines[0] ?? renderLiveUsage(this.doc, LIVE_USAGE_WORKING_TEXT), host = reply ?? box;
+    const hostChildren = Array.from(host.children ?? []);
+    if (hostChildren.at(-1) !== line) { line.remove?.(); host.append(line); }
   }
   /** Accumulates a finished reply's tokens and cost for its conversation's meter, and keeps the totals on this device. */
   private addUsage(conversationId: string | null, reply: ClaudeReplyCost | null): void {
@@ -1357,6 +1476,7 @@ export class ClaudeChat {
     const box = this.el('codex-messages'); if (!box?.dataset || !this.active) return;
     const live = String(!!this.turn && this.turn.tabKey === this.activeKey);
     if (box.dataset.turnLive !== live) box.dataset.turnLive = live;
+    this.paintLiveUsage();
   }
   private flushChanges(): void {
     const changes = this.turnChanges; this.turnChanges = [];
@@ -1616,6 +1736,8 @@ export class ClaudeChat {
     const near = !restored && (scroll || this.nearBottom());
     if (this.messageCount === 0) box.replaceChildren();
     box.append(element); this.messageCount++;
+    // A message that just arrived (not saved history) gets one short entrance.
+    if (!restored) markEntered(element);
     this.publishTranscript();
     if (near) this.scrollToBottom();
     return element;
@@ -1955,7 +2077,9 @@ export class ClaudeChat {
   private renderTabs(): void {
     const strip = this.el('claude-chat-tabs'); if (!strip) return;
     const sending = !!this.turn && this.turn.turnId === null;
-    const focusKey = (this.doc.activeElement as HTMLElement | null)?.dataset?.chatKey;
+    const focused = this.doc.activeElement as HTMLElement | null, focusData = focused?.dataset ?? ({} as DOMStringMap), focusKey = focusData.chatKey;
+    const focusInStrip = !!focused && typeof strip.contains === 'function' && strip.contains(focused);
+    if (this.confirmingClose && !this.tabs.some(tab => tab.key === this.confirmingClose && !tab.conversationId)) this.confirmingClose = null;
     strip.replaceChildren();
     for (const tab of this.tabs) {
       const wrap = this.make('span', undefined, 'chat-tab'); wrap.setAttribute('role', 'presentation');
@@ -1966,12 +2090,23 @@ export class ClaudeChat {
       button.tabIndex = tab.key === this.activeKey ? 0 : -1; button.disabled = sending && tab.key !== this.activeKey;
       if (this.turn?.tabKey === tab.key) button.setAttribute('aria-busy', 'true');
       button.addEventListener('click', () => { if (this.active) this.selectTab(tab.key); });
-      const close = this.make('button', '×'); close.type = 'button'; close.setAttribute('aria-label', 'Close ' + button.textContent);
-      close.disabled = sending && this.turn?.tabKey === tab.key;
-      close.addEventListener('click', () => { if (this.active) this.closeTab(tab.key); });
-      wrap.append(button, close); strip.append(wrap);
+      const closeDisabled = sending && this.turn?.tabKey === tab.key;
+      if (tab.key === this.confirmingClose) {
+        wrap.dataset.confirming = 'true';
+        wrap.append(button, draftCloseConfirm(this.doc, tab.key, button.textContent ?? '', { discard: () => { if (this.active) this.closeDraftTab(tab.key, 'strip'); }, keep: () => this.keepDraftTab(tab.key, 'strip') }));
+      } else {
+        const close = this.make('button', '×', 'chat-tab-close'); close.type = 'button'; close.setAttribute('aria-label', 'Close ' + button.textContent); close.dataset.closeChat = tab.key;
+        close.title = 'Close ' + button.textContent; close.disabled = closeDisabled;
+        close.addEventListener('click', () => { if (this.active) this.requestCloseTab(tab.key, 'strip'); });
+        wrap.append(button, close);
+      }
+      // Middle-click closes a tab, as in browsers; the press itself must not start autoscroll.
+      wrap.addEventListener('mousedown', event => { if ((event as MouseEvent).button === 1) event.preventDefault(); });
+      wrap.addEventListener('auxclick', event => { if ((event as MouseEvent).button !== 1) return; event.preventDefault(); if (this.active && !closeDisabled && tab.key !== this.confirmingClose) this.requestCloseTab(tab.key, 'strip'); });
+      strip.append(wrap);
     }
     if (focusKey) Array.from(strip.querySelectorAll<HTMLElement>('[role=tab]')).find(node => node.dataset.chatKey === focusKey)?.focus({ preventScroll: true });
+    else if (focusInStrip && (focusData.closeChat || focusData.confirmChat)) this.focusTabControl(node => focusData.closeChat ? node.dataset.closeChat === focusData.closeChat : node.dataset.confirmChat === focusData.confirmChat && node.dataset.confirmAction === focusData.confirmAction, 'strip');
   }
   private renderSaved(): void {
     const menu = this.el<HTMLDetailsElement>('claude-saved-chats'); if (!menu) return;
@@ -1980,9 +2115,10 @@ export class ClaudeChat {
     // Same switcher as the ChatGPT tabs: on narrow layouts the strip is hidden and this sheet lists open chats and New chat.
     const rows: HTMLElement[] = [chatSwitchSummary(this.doc, active ? this.tabTitle(active) : 'Saved chats', this.profile.provider),
       chatSwitchOpenSection(this.doc, menu, this.tabs.map(tab => ({ key: tab.key, label: this.tabTitle(tab), current: tab.key === this.activeKey,
-        selectDisabled: sending && tab.key !== this.activeKey, closeDisabled: sending && this.turn?.tabKey === tab.key })), {
-        select: key => { if (this.active) this.selectTab(key); }, close: key => { if (this.active) this.closeTab(key); },
-        newChat: () => { if (this.active) this.el<HTMLButtonElement>('workspace-new-chat')?.click(); }, newDisabled: sending })];
+        selectDisabled: sending && tab.key !== this.activeKey, closeDisabled: sending && this.turn?.tabKey === tab.key, confirm: tab.key === this.confirmingClose && !tab.conversationId })), {
+        select: key => { if (this.active) this.selectTab(key); }, close: key => { if (this.active) this.requestCloseTab(key, 'switcher'); },
+        discard: key => { if (this.active) this.closeDraftTab(key, 'switcher'); }, keep: key => this.keepDraftTab(key, 'switcher'),
+        newChat: () => { if (this.active) this.el<HTMLButtonElement>('workspace-new-chat')?.click(); }, newDisabled: false })];
     for (const row of sortConversations(this.conversations)) {
       const button = this.make('button', row.title || 'Untitled chat'); button.type = 'button';
       button.dataset.conversationId = row.conversationId; button.setAttribute('aria-current', String(row.conversationId === current));
@@ -2008,22 +2144,27 @@ export class ClaudeChat {
     restoreChatSwitchFocus(menu, focus);
   }
 
-  private statusText(): string {
+  private statusText(): string { return this.status().text; }
+  /** The status line, and whether it is only the routine "working" state: queued messages already show as rows with Steer,
+   * delete and more, so that line carries no keyboard hints and the top bar keeps it out of view (still announced). */
+  private status(): { text: string; routine: boolean } {
+    const text = (value: string) => ({ text: value, routine: false });
     const { name, engine } = this.profile;
-    if (!this.bridge) return this.profile.noBridgeText;
-    if (this.statusError) return this.statusError;
-    if (!this.state) return this.refreshing ? 'Checking ' + engine + '…' : engine + ' status has not been read.';
-    if (!this.state.installed) return this.state.message ?? 'Install ' + engine + ' to chat with ' + name + '.';
-    if (!this.state.signedIn) return this.state.message ?? 'Sign in to ' + engine + ' to chat with ' + name + '.';
-    if (!this.models().length || !this.efforts().length) return this.state.message ?? engine + ' reported no model or reasoning choices. Update ' + engine + ', then reopen the chat.';
-    if (this.turn && this.notice && this.turn.turnId !== null && !this.turn.stopping) return this.notice;
+    if (!this.bridge) return text(this.profile.noBridgeText);
+    if (this.statusError) return text(this.statusError);
+    if (!this.state) return text(this.refreshing ? 'Checking ' + engine + '…' : engine + ' status has not been read.');
+    if (!this.state.installed) return text(this.state.message ?? 'Install ' + engine + ' to chat with ' + name + '.');
+    if (!this.state.signedIn) return text(this.state.message ?? 'Sign in to ' + engine + ' to chat with ' + name + '.');
+    if (!this.models().length || !this.efforts().length) return text(this.state.message ?? engine + ' reported no model or reasoning choices. Update ' + engine + ', then reopen the chat.');
+    if (this.turn && this.notice && this.turn.turnId !== null && !this.turn.stopping) return text(this.notice);
     if (this.turn) {
       const waiting = this.queue.filter(item => item.tabKey === this.activeKey).length;
-      const queued = (waiting ? ' ' + waiting + (waiting === 1 ? ' message' : ' messages') + ' queued.' : '') +
-        (this.canSteer() ? ' ' + CLAUDE_CHAT_STEER_HINT + '.' : waiting ? '' : ' Press Enter to queue your next message.');
-      return this.turn.turnId === null ? 'Sending…' : this.turn.stopping ? 'Stopping…' : (this.turnOwnsActiveTab() ? name + ' is working…' : name + ' is replying in another chat.') + queued;
+      const queued = waiting ? ' ' + waiting + (waiting === 1 ? ' message' : ' messages') + ' queued.' : '';
+      if (this.turn.turnId === null) return text('Sending…');
+      if (this.turn.stopping) return text('Stopping…');
+      return this.turnOwnsActiveTab() ? { text: name + ' is working…' + queued, routine: true } : text(name + ' is replying in another chat.' + queued);
     }
-    return this.notice || 'Continue in this conversation.';
+    return text(this.notice || 'Continue in this conversation.');
   }
 
   private renderControls(): void {
@@ -2041,7 +2182,8 @@ export class ClaudeChat {
       const controls = submit.closest?.<HTMLElement>('.composer-controls'); if (controls) controls.dataset.taskActive = String(stopMode);
       submit.disabled = this.nativeHydrating||this.preparingSend|| (stopMode ? !turn?.turnId || turn.stopping : !!this.queueEnqueue || !this.canSend() || !!turn || this.rewinding || !(input?.value.trim()));
     }
-    const create = this.el<HTMLButtonElement>('workspace-new-chat'); if (create) create.disabled = !!turn && turn.turnId === null;
+    // New chat stays available while sending: newChat() waits for the hand-off instead of refusing.
+    const create = this.el<HTMLButtonElement>('workspace-new-chat'); if (create && create.disabled) create.disabled = false;
   }
 
   private render(): void {
@@ -2049,7 +2191,8 @@ export class ClaudeChat {
     if (!this.active) return;
     this.queueNativePreferences();
     if (this.claimed) this.claimAttachments();
-    const notice = this.el('claude-chat-notice'); if (notice) notice.textContent = this.statusText();
+    const notice = this.el('claude-chat-notice');
+    if (notice) { const status = this.status(); notice.textContent = status.text; if (status.routine) notice.setAttribute('data-routine', 'working'); else notice.removeAttribute?.('data-routine'); }
     const status = this.el('claude-chat-status');
     if (status) status.textContent = !this.bridge ? 'Unavailable' : this.turn ? 'Working' : this.ready() ? this.readyLabel() : this.state ? 'Not signed in' : 'Checking';
     const box = this.el('codex-messages');
@@ -2082,8 +2225,19 @@ export class ClaudeChat {
     const saveNotice=this.profile.provider==='claude'?this.queueJournal.notice():null;if(saveNotice&&items.length){const note=this.make('p',saveNotice,'queue-persistence-notice');note.setAttribute('role','status');host.append(note);}
   }
 
+  /** The chat header's 'tokens · ~cost' summary for this conversation, from the same recorded totals; hidden without them. */
+  private renderHeaderUsage(): void {
+    const node = this.el(HEADER_USAGE_ID); if (!node) return;
+    const usage = this.active ? this.conversationUsage() : null;
+    node.hidden = !usage;
+    if (!usage) { node.textContent = ''; node.removeAttribute('title'); return; }
+    const display = this.costDisplay(), text = headerUsageText(usage, display);
+    if (node.textContent !== text) node.textContent = text;
+    node.title = usageMeterText(usage, display);
+  }
   /** Small ring + count of tokens this conversation used (from finished replies' usage), with a tooltip. */
   private renderMeter(): void {
+    this.renderHeaderUsage();
     let meter = this.el(METER_ID);
     const controls = this.el('codex-compose')?.querySelector?.<HTMLElement>('.composer-controls') ?? null;
     if (!meter && controls) {

@@ -373,7 +373,7 @@ test('preload exposes immutable identity and only the bounded Luau verification 
       return { contextBridge: { exposeInMainWorld(name, value) { assert.equal(name, 'arcaneDesktop'); exposed = value; } } };
     },
   });
-  assert.deepEqual(Object.keys(exposed).sort(), ['arcaneChat', 'billing', 'chatQueue', 'claudeChat', 'claudePreferences', 'codeVerification', 'conversationLibrary', 'dialogs', 'meshKeep', 'nativeHandoff', 'notifications', 'platform', 'projectPermissions', 'providerSetup', 'runtime', 'runtimeRecovery', 'selectAssetConversation', 'setupChecklist', 'studioKeys', 'studioPlugin', 'toolDrafts', 'updates', 'version', 'welcomeTour', 'workspacePreferences', 'workspaceProject']);
+  assert.deepEqual(Object.keys(exposed).sort(), ['arcaneChat', 'assetImport', 'billing', 'chatQueue', 'claudeChat', 'claudePreferences', 'codeVerification', 'conversationLibrary', 'dialogs', 'meshKeep', 'nativeHandoff', 'notifications', 'platform', 'projectPermissions', 'providerSetup', 'pyx', 'runtime', 'runtimeRecovery', 'selectAssetConversation', 'setupChecklist', 'studioKeys', 'studioPlugin', 'toolDrafts', 'updates', 'version', 'welcomeTour', 'windowChrome', 'workspacePreferences', 'workspaceProject']);
   assert.equal(typeof exposed.selectAssetConversation, 'function');
   assert.equal(Object.isFrozen(exposed.conversationLibrary), true);
   assert.deepEqual(Object.keys(exposed.conversationLibrary).sort(), ['read', 'save', 'version']);

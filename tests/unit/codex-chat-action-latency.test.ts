@@ -133,11 +133,16 @@ test('an unresolved chat request shows its exact blocker and an explicit reviewe
   (f.chat as unknown as {uncertain:Map<string,unknown>}).uncertain.set(requestId,{input,read:false});
   const at=new Date().toISOString();f.state.actions.push({requestId,connectionId:snapshot.connectionId,action:'turn-start',state:'unknown',errorCode:'TIMEOUT',threadId:'latency-thread',turnId:null,model:'latency-fixture',effort:'low',createdAt:at,finishedAt:at});
   f.doc.getElementById('codex-composer').value='Retained next draft';await f.chat.refresh();
-  const readiness=f.doc.getElementById('codex-readiness');assert.match(readiness.textContent,/previous request needs review/);assert.match(readiness.textContent,/TIMEOUT/);
+  // One recovery card carries the request (details collapsed); the composer only says why Send waits, with no second set of controls.
+  const readiness=f.doc.getElementById('codex-readiness'),card=f.doc.getElementById('codex-unknown'),review=f.doc.getElementById('codex-acknowledge');
+  assert.equal(readiness.hidden,false);assert.equal(readiness.dataset.reason,'recovery');assert.equal(readiness.children.length,1,'the composer has no recovery buttons');
+  assert.doesNotMatch(readiness.textContent,/TIMEOUT|[0-9a-f]{8}-[0-9a-f]{4}-/);
+  assert.equal(card.hidden,false);assert.equal(card.dataset.state,'unconfirmed','read, still unknown on the live connection');assert.match(f.doc.getElementById('codex-unknown-requests').textContent,new RegExp(requestId+' · turn-start · unknown · TIMEOUT'));
+  assert.doesNotMatch(f.doc.getElementById('codex-unknown-title').textContent+f.doc.getElementById('codex-unknown-body').textContent,/TIMEOUT|[0-9a-f]{8}-[0-9a-f]{4}-/);
   assert.equal(f.doc.getElementById('codex-model').disabled,true);assert.equal(f.doc.getElementById('codex-submit').disabled,true);
-  let review=readiness.children.find(child=>child.textContent==='Acknowledge reviewed state')!;assert.equal(review.disabled,true);
+  assert.equal(review.disabled,true);
   f.state.actions[0]!.state='rejected';f.state.actions[0]!.errorCode='REMOTE_REJECTED';await f.chat.refresh();
-  review=readiness.children.find(child=>child.textContent==='Acknowledge reviewed state')!;assert.equal(review.disabled,false);review.dispatchEvent(new Event('click'));
+  assert.equal(card.dataset.state,'checked');assert.equal(review.disabled,false);review.dispatchEvent(new Event('click'));assert.equal(card.hidden,true);assert.equal(readiness.hidden,true);
   assert.equal(f.doc.getElementById('codex-model').disabled,false);assert.equal(f.doc.getElementById('codex-submit').disabled,false);
   assert.equal(f.doc.getElementById('codex-composer').value,'Retained next draft');assert.equal(f.posts.length,0);
 });

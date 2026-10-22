@@ -10,7 +10,7 @@ import { ARCANE_PLANS, CHECKOUT_NOT_CONNECTED, resolveCheckout, serviceBase, val
 import { ActionsLedger, LEDGER_FILE } from '../../apps/daemon/src/actions-ledger.js';
 import { createArcaneGateway, createEncryptedTokenVault, gatewayBase, gatewayStatus, GatewayUnavailable, type ArcaneCredentialVault } from '../../apps/daemon/src/arcane-gateway.js';
 import { plansRoutes } from '../../apps/daemon/src/plans-routes.js';
-import { checkoutUrlAllowed, chipLabel, formatPrice, readDesktopAccount, readDesktopAccountReply, readPlansState } from '../../apps/desktop/src/plans.js';
+import { actionsAllowance, allowanceDetail, allowanceSentence, checkoutUrlAllowed, chipLabel, formatPrice, FREE_PLAN_ACTIONS_PER_MONTH, readDesktopAccount, readDesktopAccountReply, readPlansState, usedOfLimit } from '../../apps/desktop/src/plans.js';
 
 const temp = () => mkdtemp(join(tmpdir(), 'arcane-plans-test-'));
 const configured = (patch: Partial<PlansConfig> = {}): PlansConfig => ({ ...structuredClone(ARCANE_PLANS),
@@ -217,6 +217,28 @@ test('renderer helpers format placeholder prices and refuse unsafe checkout URLs
   for (const url of ['http://billing.arcane.test/checkout', 'https://evil.test/checkout', 'javascript:alert(1)', 'https://u:p@billing.arcane.test/', 42])
     assert.equal(checkoutUrlAllowed(url, ['https://billing.arcane.test']), false, String(url));
   assert.equal(readPlansState({ catalog: {} }), null);
+});
+
+test('actions read as used / plan limit: the free plan 500 unless the feed names a limit, with near and over states and the reset day', () => {
+  const reply = (month: Record<string, unknown>) => readPlansState({
+    catalog: { placeholderPrices: true, currency: 'USD', action: { singular: 'action', plural: 'actions', definition: 'One build turn.' }, plans: [], packs: [], credits: { blurb: 'Credits.', offers: [] } },
+    billing: { state: 'not-configured', origins: [] }, gateway: { state: 'disabled', message: 'Off.', showInModelPicker: false },
+    usage: { month, today: { key: '2026-10-21', used: 0 }, days: [], conversations: [], byKind: { 'build-turn': 0, 'studio-change': 0 }, integrity: 'empty' } })!;
+  assert.equal(FREE_PLAN_ACTIONS_PER_MONTH, 500);
+  const normal = actionsAllowance(reply({ key: '2026-10', used: 312 }));
+  assert.deepEqual([normal.limit, normal.left, normal.over, normal.level, normal.source, normal.resetsAt], [500, 188, 0, 'ok', 'free-plan', '2026-11-01T00:00:00.000Z']);
+  assert.equal(usedOfLimit(normal), '312 / 500'); assert.equal(allowanceDetail(normal), '188 left · resets 1 Nov');
+  const over = actionsAllowance(reply({ key: '2026-10', used: 750 }));
+  assert.deepEqual([usedOfLimit(over), over.level, allowanceDetail(over)], ['750 / 500', 'over', '250 over · resets 1 Nov']);
+  assert.equal(actionsAllowance(reply({ key: '2026-10', used: 468 })).level, 'near');
+  assert.equal(actionsAllowance(reply({ key: '2026-12', used: 0 })).resetsAt, '2027-01-01T00:00:00.000Z', 'December resets on 1 January');
+  const fed = actionsAllowance(reply({ key: '2026-10', used: 900, limit: 1200, resetsAt: '2026-11-15T00:00:00.000Z' }));
+  assert.deepEqual([usedOfLimit(fed), fed.source, allowanceDetail(fed)], ['900 / 1,200', 'feed', '300 left · resets 15 Nov']);
+  for (const limit of [0, -5, 1.5, '500']) assert.equal(actionsAllowance(reply({ key: '2026-10', used: 1, limit })).limit, 500, 'A malformed feed limit is ignored, never guessed: ' + String(limit));
+  const chip = chipLabel(reply({ key: '2026-10', used: 750 }));
+  assert.deepEqual([chip.value, chip.unit, chip.level], ['750', '/ 500', 'over']);
+  assert.match(chip.aria, /^750 of 500 Arcane actions used this month, 250 over the limit, resets 1 Nov\. Open Plans and credits\.$/);
+  assert.match(allowanceSentence(normal), /^312 of 500 Arcane actions used this month, 188 left, resets 1 Nov$/);
 });
 
 test('real Edge: Plans & credits page and balance chip render, and buying says checkout is not connected', { skip: !process.env.ARCANE_UI_BROWSER_MODULE, timeout: 60000 }, async t => {

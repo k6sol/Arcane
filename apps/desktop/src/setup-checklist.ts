@@ -168,6 +168,8 @@ export interface SetupChecklistOptions {
   provider: {
     isSignedIn(): boolean; chatSurface(): 'codex' | 'claude' | 'arcane'; selectedProvider(): 'codex' | 'claude';
     subscribeSignInChange(listener: () => void): () => void; subscribeChatSurface(listener: () => void): () => void;
+    /** Reopens the sign-in page after Continue without signing in; true when it is showing. */
+    showSignIn?(): boolean;
   };
   workbench: {
     studioConnected(): boolean | null; subscribeStudioChange(listener: () => void): () => void;
@@ -406,6 +408,9 @@ export function startSetupChecklist(doc: Document, options: SetupChecklistOption
       // The sign-in card is right above: point at it rather than opening Settings behind it.
       const gate = el('provider-login-gate'), start = el('provider-login-start') as HTMLButtonElement | null;
       if (gate && !gate.hidden && start && !start.hidden) { try { gate.scrollIntoView({ block: 'nearest' }); } catch { /* Optional. */ } start.focus(); return; }
+      // After Continue without signing in, the step reopens the full sign-in page.
+      let reopened = false; try { reopened = options.provider.showSignIn?.() === true; } catch { reopened = false; }
+      if (reopened) { const next = el('provider-login-start') as HTMLButtonElement | null; if (next && !next.hidden && !next.disabled) next.focus(); else el('provider-login-codex')?.focus(); return; }
       let provider: 'codex' | 'claude' = 'codex'; try { provider = options.provider.selectedProvider(); } catch { /* Default provider. */ }
       dispatch('workspace:providersetup', { provider });
     } else if (kind === 'install-plugin') void installPlugin();
@@ -484,8 +489,11 @@ export const STUDIO_BANNER_TEXT = Object.freeze({
   reconnected: 'Studio reconnected.',
 });
 export type StudioBannerState = 'hidden' | 'reconnecting' | 'offline' | 'reconnected';
+/** The sidebar footer's Studio line. Green and yellow come only from the live session; with no session yet it stays neutral. */
+export const SIDEBAR_STUDIO_TEXT = Object.freeze({ paired: 'Studio paired', reconnecting: 'Reconnecting\u2026', reconnect: 'Reconnect Studio', none: 'Studio offline', unknown: 'Checking Studio\u2026' });
+export type SidebarStudioState = 'paired' | 'reconnect' | 'none' | 'unknown';
 export interface StudioBannerOptions {
-  workbench: { studioConnected(): boolean | null; subscribeStudioChange(listener: () => void): () => void; refresh(): Promise<void> };
+  workbench: { studioConnected(): boolean | null; subscribeStudioChange(listener: () => void): () => void; refresh(): Promise<void>; studioPlaceName?(): string | null };
   /** How long the plugin's own recovery runs before the banner asks for a manual reconnect. */
   graceMs?: number;
   timers?: { set(fn: () => void, ms: number): unknown; clear(handle: unknown): void };
@@ -508,7 +516,22 @@ export function startStudioConnectionBanner(doc: Document, options: StudioBanner
     root.append(message, button); parent.insertBefore(root, messages);
     return true;
   }
+  function paintSidebar(): void {
+    const card = doc.getElementById('sidebar-status-card'), label = doc.getElementById('sidebar-studio-status');
+    if (stopped || !card || !label) return;
+    const live = connected(), down = state === 'reconnecting' || state === 'offline';
+    const kind: SidebarStudioState = live === true ? 'paired' : down ? 'reconnect' : live === false ? 'none' : 'unknown';
+    const text = kind === 'reconnect' ? (state === 'reconnecting' ? SIDEBAR_STUDIO_TEXT.reconnecting : SIDEBAR_STUDIO_TEXT.reconnect) : SIDEBAR_STUDIO_TEXT[kind];
+    card.setAttribute('data-studio', kind);
+    card.classList.toggle('studio-status--paired', kind === 'paired'); card.classList.toggle('studio-status--reconnect', kind === 'reconnect');
+    if (label.textContent !== text) { label.textContent = text; label.title = text; }
+    // The paired place's name (display only) for the compact header's Studio line; absent unless the live session names one.
+    let place: string | null = null;
+    if (kind === 'paired') { try { place = options.workbench.studioPlaceName?.() ?? null; } catch { place = null; } }
+    if (place) { if (card.getAttribute('data-place') !== place) card.setAttribute('data-place', place); } else card.removeAttribute('data-place');
+  }
   function paint(): void {
+    paintSidebar();
     if (!mount() || !root || !message || !button) return;
     root.hidden = stopped || state === 'hidden';
     root.className = 'notice ' + (state === 'reconnected' ? 'good' : 'warning') + ' studio-connection-banner';

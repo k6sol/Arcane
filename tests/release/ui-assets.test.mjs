@@ -27,7 +27,7 @@ async function fixture({ omit, bitmap = png, daemon = '// Offline fixture only.\
   await write('tsconfig.json', '{}');
   for (const path of ['README.md', 'LICENSE']) await write(path, 'Offline fixture.\n');
   for (const path of REQUIRED_FRONTEND_FILES) {
-    const bytes = path === BRAND_BITMAP_PATH ? bitmap : path.endsWith('.json') ? JSON.stringify({fixture:true}) : path.endsWith('.ts') || path.endsWith('workspace-shell.js') || path.endsWith('asset-downloads.js') || path.endsWith('learning-panel.js') ? shellSource : path.endsWith('.map') ? JSON.stringify({ version: 3, sources: [relative(dirname(path), path.slice('dist/'.length, -'.js.map'.length) + '.ts').split(sep).join('/')], sourcesContent: [shellSource] }) : path.endsWith('.html') ? '<!doctype html><title>Arcane fixture</title>' : '// Offline fixture only.\n';
+    const bytes = path === BRAND_BITMAP_PATH ? bitmap : path.endsWith('.woff2') ? Buffer.from('wOF2 offline fixture') : path.endsWith('.json') ? JSON.stringify({fixture:true}) : path.endsWith('.ts') || path.endsWith('workspace-shell.js') || path.endsWith('asset-downloads.js') || path.endsWith('learning-panel.js') ? shellSource : path.endsWith('.map') ? JSON.stringify({ version: 3, sources: [relative(dirname(path), path.slice('dist/'.length, -'.js.map'.length) + '.ts').split(sep).join('/')], sourcesContent: [shellSource] }) : path.endsWith('.html') ? '<!doctype html><title>Arcane fixture</title>' : '// Offline fixture only.\n';
     await put(path, bytes);
   }
   for (const path of firstRunFiles) await put(path, 'Offline first-run fixture; never executed.\n');
@@ -156,6 +156,12 @@ async function syntheticDaemon({ failWithCredentials = false, unsafePngHeaders =
     ['/claude-preferences.js',['dist/apps/desktop/src/claude-preferences.js','text/javascript; charset=utf-8']],
     ['/arcane-chat.js',['dist/apps/desktop/src/arcane-chat.js','text/javascript; charset=utf-8']],
     ['/setup-checklist.js',['dist/apps/desktop/src/setup-checklist.js','text/javascript; charset=utf-8']],
+    ['/workspace-topbar.js',['dist/apps/desktop/src/workspace-topbar.js','text/javascript; charset=utf-8']],
+    ['/pyx-bar',['apps/desktop/public/pyx-bar.html','text/html; charset=utf-8']],
+    ['/pyx-bar.css',['apps/desktop/public/pyx-bar.css','text/css; charset=utf-8']],
+    ['/pyx-bar.js',['dist/apps/desktop/src/pyx-bar.js','text/javascript; charset=utf-8']],
+    ['/pyx-sprite.js',['dist/apps/desktop/src/pyx-sprite.js','text/javascript; charset=utf-8']],
+    ['/pyx-link.js',['dist/apps/desktop/src/pyx-link.js','text/javascript; charset=utf-8']],
     ['/arcane-dialog.js',['dist/apps/desktop/src/arcane-dialog.js','text/javascript; charset=utf-8']],
     ['/toolbox-policy.js',['dist/apps/desktop/src/toolbox-policy.js','text/javascript; charset=utf-8']],
     ['/playtest-toggle.js',['dist/apps/desktop/src/playtest-toggle.js','text/javascript; charset=utf-8']],
@@ -171,6 +177,7 @@ async function syntheticDaemon({ failWithCredentials = false, unsafePngHeaders =
     ['/plans.js',['dist/apps/desktop/src/plans.js','text/javascript; charset=utf-8']],
     ['/notifications.js',['dist/apps/desktop/src/notifications.js','text/javascript; charset=utf-8']],
     ['/mesh-keep.js',['dist/apps/desktop/src/mesh-keep.js','text/javascript; charset=utf-8']],
+    ['/asset-imports.js',['dist/apps/desktop/src/asset-imports.js','text/javascript; charset=utf-8']],
     ['/brand/arcane-ridges.png', ['apps/desktop/public/brand/arcane-ridges.png', 'image/png']],
   ]);
   const server = createServer(async (request, response) => {

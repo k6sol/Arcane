@@ -66,6 +66,8 @@ test('owned Edge chat navigation: real controllers preserve drafts, close settin
       if(url.pathname==='/studio'){await route.fulfill({contentType:'text/html',body:html});return;}
       if(url.pathname==='/studio.css'){await route.fulfill({contentType:'text/css',body:await source('apps/desktop/public/studio.css')});return;}
       if(url.pathname==='/brand/arcane-ridges.png'){await route.fulfill({contentType:'image/png',body:await readFile(resolve('apps/desktop/public/brand/arcane-ridges.png'))});return;}
+      // The shipped faces (studio.css @font-face, same-origin /fonts) are part of the product page.
+      if(/^\/fonts\/[a-z0-9-]+\.woff2$/.test(url.pathname)){await route.fulfill({contentType:'font/woff2',body:await readFile(resolve('apps/desktop/public',url.pathname.slice(1)))});return;}
       const name=/^\/([a-z-]+)\.js$/.exec(url.pathname)?.[1];
       if(name&&modules.has(name)){await route.fulfill({contentType:'text/javascript',body:await readFile(join(build,'apps/desktop/src',name+'.js'))});return;}
       if(url.pathname==='/chat-flow-fixture.js'){
@@ -107,7 +109,8 @@ test('owned Edge chat navigation: real controllers preserve drafts, close settin
     assert.equal((await fixture()).views.find(row=>row.key===first)!.draft,draft);
     await page.keyboard.press('Control+n');assert.equal((await fixture()).views.length,3);
     assert.equal(await page.locator('#codex-composer').evaluate(node=>node===document.activeElement),true);
-    await page.locator('#workspace-chat-tabs [role="tab"]').first().click();
+    await page.locator('#workspace-saved-chats > summary').click();
+    await page.locator('#workspace-saved-chats .chat-switch-select').first().click();
     assert.equal(await page.locator('#codex-composer').inputValue(),draft);
     await page.locator('#app-sidebar [data-workspace-target="workspace-settings"]').click();
     await page.locator('[data-settings-section-target="settings-advanced"]').click();
@@ -184,7 +187,8 @@ test('Edge simplicity: optional key details, exact navigation, one draft, empty 
             rebind: () => { shell.cleanup(); shell = startWorkspaceShell(document, () => keys.hide()); } };
         ` }); return;
       }
-      const file = files.get(url.pathname);
+      // The shipped faces (studio.css @font-face, same-origin /fonts) are part of the product page.
+      const file = files.get(url.pathname) ?? (/^\/fonts\/[a-z0-9-]+\.woff2$/.test(url.pathname) ? ['apps/desktop/public' + url.pathname, 'font/woff2'] : undefined);
       if (!file) { unexpected.push(request.url()); await route.abort(); return; }
       await route.fulfill({ contentType: file[1]!, body: await readFile(resolve(file[0]!)) });
     });

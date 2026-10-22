@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, mkdir } from 'node:fs/promises';
+import { readFile, mkdir, readdir } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -9,6 +9,9 @@ import { studioPluginOutdated, studioPluginReport } from '../../apps/daemon/src/
 import { READ_METHODS, WRITE_METHODS, ASSET_STAGE_METHODS, STUDIO_FEATURE_CAPABILITIES, type StudioSession } from '../../packages/protocol/src/studio.js';
 import { STUDIO_PLUGIN_VERSION } from '../../packages/protocol/src/studio-plugin-artifact.js';
 
+// The shipped faces (studio.css @font-face, same-origin /fonts) are part of the product page, so the fixtures serve them.
+const shippedFonts = async () => new Map(await Promise.all((await readdir('apps/desktop/public/fonts')).filter(name => name.endsWith('.woff2'))
+  .map(async name => ['/fonts/' + name, await readFile(join('apps/desktop/public/fonts', name))] as const)));
 const ready: ChecklistSignals = { signedIn: true, providerName: 'Claude', plugin: { state: 'installed', pluginVersion: '0.1.9', message: 'ok' }, desktop: true, studioConnected: true, projectPath: 'C:\\Games\\Obby' };
 const states = (s: ChecklistSignals) => Object.fromEntries(checklistRows(s).map(row => [row.step, [row.state, row.action?.kind ?? null]]));
 
@@ -89,9 +92,10 @@ test('real Edge checklist: status reads only, one-click actions, persistence and
   const build = process.env.ARCANE_UI_BUILD_DIR ?? resolve('dist');
   const html = (await readFile('apps/desktop/public/studio.html', 'utf8')).replace(/<script\b[^>]*>[\s\S]*?<\/script>/g, '');
   const js = await readFile(join(build, 'apps/desktop/src/setup-checklist.js'), 'utf8'), css = await readFile('apps/desktop/public/studio.css', 'utf8');
-  const requests: string[] = [];
+  const requests: string[] = [], fonts = await shippedFonts();
   const server = createServer((req, res) => {
     const p = req.url?.split('?')[0] ?? ''; requests.push(p);
+    const font = fonts.get(p); if (font) { res.writeHead(200, { 'Content-Type': 'font/woff2' }); res.end(font); return; }
     const value = p === '/fixture' ? html : p === '/setup-checklist.js' ? js : p === '/studio.css' ? css : '';
     res.writeHead(value ? 200 : 404, { 'Content-Type': p === '/fixture' ? 'text/html' : p === '/studio.css' ? 'text/css' : 'text/javascript' }); res.end(value);
   });
@@ -220,7 +224,7 @@ test('real Edge checklist: status reads only, one-click actions, persistence and
   assert.equal(await page.locator('#setup-checklist').isVisible(),true,'completed setup remains available on demand');
 
   // Status checks never spend model calls: only the fixture page, stylesheet and module were requested.
-  assert.deepEqual([...new Set(requests)].sort(), ['/fixture', '/setup-checklist.js', '/studio.css'].concat(requests.includes('/favicon.ico') ? ['/favicon.ico'] : []).sort());
+  assert.deepEqual([...new Set(requests)].filter(p => !fonts.has(p)).sort(), ['/fixture', '/setup-checklist.js', '/studio.css'].concat(requests.includes('/favicon.ico') ? ['/favicon.ico'] : []).sort());
   assert.deepEqual(errors, []);
 });
 
@@ -262,8 +266,10 @@ test('real Edge plugin update banner: one click, restart guidance, pairing confi
   const build = process.env.ARCANE_UI_BUILD_DIR ?? resolve('dist');
   const html = (await readFile('apps/desktop/public/studio.html', 'utf8')).replace(/<script\b[^>]*>[\s\S]*?<\/script>/g, '');
   const js = await readFile(join(build, 'apps/desktop/src/setup-checklist.js'), 'utf8'), css = await readFile('apps/desktop/public/studio.css', 'utf8');
+  const fonts = await shippedFonts();
   const server = createServer((req, res) => {
     const p = req.url?.split('?')[0] ?? '';
+    const font = fonts.get(p); if (font) { res.writeHead(200, { 'Content-Type': 'font/woff2' }); res.end(font); return; }
     const value = p === '/fixture' ? html : p === '/setup-checklist.js' ? js : p === '/studio.css' ? css : '';
     res.writeHead(value ? 200 : 404, { 'Content-Type': p === '/fixture' ? 'text/html' : p === '/studio.css' ? 'text/css' : 'text/javascript' }); res.end(value);
   });

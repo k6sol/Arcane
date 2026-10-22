@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, mkdir, writeFile } from 'node:fs/promises';
+import { readFile, readdir, mkdir, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -66,7 +66,9 @@ async function sources(emit) {
   }
   const server = await readFile(resolve(root, 'apps/daemon/src/lab-server.ts'), 'utf8');
   const policy = /setHeader\('Content-Security-Policy', "([^"]+)"\)/.exec(server)?.[1]; assert.ok(policy, 'actual production CSP');
-  const paths = ['/studio.css', '/asset-viewer-runtime.mjs', ...vendorPaths];
+  // The shipped faces (studio.css @font-face, same-origin /fonts) are part of the product page.
+  const fonts = (await readdir(resolve(root, 'apps/desktop/public/fonts'))).filter(name => name.endsWith('.woff2')).map(name => '/fonts/' + name);
+  const paths = ['/studio.css', '/asset-viewer-runtime.mjs', ...vendorPaths, ...fonts];
   const files = new Map(await Promise.all(paths.map(async path => [path, await readFile(resolve(root, 'apps/desktop/public', '.' + path))])));
   const html = (await readFile(resolve(root, 'apps/desktop/public/studio.html'), 'utf8')).replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '');
   assert.match(html, /id="chat-assets"/); files.set('/', html);
@@ -77,13 +79,19 @@ async function sources(emit) {
 }
 async function fixture(browser, t, assets, emit, signedIn = true) {
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, serviceWorkers: 'block' }); t.after(() => context.close());
-  const page = await context.newPage(), calls = [], forbidden = [], errors = [], jobs = new Map();
+  const page = await context.newPage(), calls = [], reviews = [], forbidden = [], errors = [], jobs = new Map();
   page.setDefaultTimeout(10_000);
   let reply = pageReply(), bytes = glb(), delivered = bytes, manifestStatus = 200, manifestGate = null, artifactGate = null;
   page.on('pageerror', error => errors.push(error.message));
   await page.route('**/*', async route => {
     const request = route.request(), url = new URL(request.url()), path = url.pathname + url.search;
     if (url.origin !== origin) { forbidden.push(path); await route.abort(); return; }
+    // The viewer's review card asks the review service to prepare the exact verified job (human bearer); it is recorded
+    // apart from the asset reads, and this fixture has no review service.
+    if (url.pathname === '/v1/assets/review/prepare') {
+      reviews.push({ method: request.method(), authorization: request.headers().authorization, jobId: JSON.parse(request.postData() ?? '{}').jobId });
+      await route.fulfill({ status: 503, json: { error: 'FIXTURE', message: 'No review service in this fixture.' } }); return;
+    }
     if (url.pathname.startsWith('/v1/')) {
       calls.push({ path, method: request.method(), authorization: request.headers().authorization });
       assert.equal(request.method(), 'GET', 'automatic flow never mutates'); assert.equal(request.headers().authorization, 'Bearer ' + TOKEN);
@@ -100,7 +108,7 @@ async function fixture(browser, t, assets, emit, signedIn = true) {
       }
       forbidden.push(path); await route.abort(); return;
     }
-    if (assets.files.has(url.pathname)) { await route.fulfill({ contentType: url.pathname === '/' ? 'text/html' : url.pathname.endsWith('.css') ? 'text/css' : 'text/javascript', body: assets.files.get(url.pathname), headers: { 'Content-Security-Policy': assets.policy } }); return; }
+    if (assets.files.has(url.pathname)) { await route.fulfill({ contentType: url.pathname === '/' ? 'text/html' : url.pathname.endsWith('.css') ? 'text/css' : url.pathname.endsWith('.woff2') ? 'font/woff2' : 'text/javascript', body: assets.files.get(url.pathname), headers: { 'Content-Security-Policy': assets.policy } }); return; }
     if (/^\/[a-z][a-z0-9-]*\.js$/.test(url.pathname)) { await route.fulfill({ contentType: 'text/javascript', body: await readFile(resolve(emit, 'apps/desktop/src', url.pathname.slice(1))) }); return; }
     forbidden.push(path); await route.abort();
   });
@@ -159,7 +167,8 @@ async function fixture(browser, t, assets, emit, signedIn = true) {
     holdManifest(gate) { manifestGate = gate; }, failManifest() { manifestStatus = 503; },
     holdArtifact(gate) { artifactGate = gate; },
     corruptArtifact() { delivered = Buffer.from(bytes); delivered[delivered.indexOf('Arcane')] = 66; },
-    async clean() { assert.deepEqual(forbidden, []); assert.deepEqual(errors, []); assert.deepEqual(await page.evaluate(() => fixtureCspViolations), []); assert.ok(calls.every(call => call.method === 'GET')); },
+    async clean() { for (const review of reviews) { assert.equal(review.method, 'POST'); assert.equal(review.authorization, 'Bearer ' + TOKEN); assert.ok(jobs.has(review.jobId), 'review prepares only a returned job'); }
+      assert.deepEqual(forbidden, []); assert.deepEqual(errors, []); assert.deepEqual(await page.evaluate(() => fixtureCspViolations), []); assert.ok(calls.every(call => call.method === 'GET')); },
   };
 }
 const card = (page, id) => page.locator('#chat-assets .chat-asset-card[data-job-id="' + id + '"]');

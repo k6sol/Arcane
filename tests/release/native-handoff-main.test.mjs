@@ -117,28 +117,29 @@ test('human IPC mounts in normal mode, delegates to the CURRENT broker, and refu
 test('main-frame navigation cancels broker and provider work; subframe navigation does not', () => {
   const clearSelection = block('function clearHumanAssetSelection()', 'async function selectHumanAssetConversation(');
   const code = clearSelection + block("  window.webContents.on('did-start-navigation'", "  window.webContents.on('render-process-gone'");
-  const handlers = new Map(), counts = { handoff: 0, provider: 0, recovery: 0 }, inPage = [];
+  const handlers = new Map(), counts = { handoff: 0, provider: 0, recovery: 0, pyx: 0 }, inPage = [];
   const selected = [];
   const owner = { webContents: { on(name, handler) { handlers.set(name, handler); } } };
   const context = vm.createContext({ window: owner, owner, assetSelectionGeneration: 7, assetSelectionReady: true,
     appAssets: { selectHumanConversation(value) { selected.push(value); return Promise.resolve(); } },
     runtimeRecovery: { invalidate(value) { assert.equal(value, owner); counts.recovery++; }, navigatedInPage(value, url) { inPage.push([value, url]); } },
-    nativeHandoff: { cancelPending() { counts.handoff++; } }, providerSetup: { cancelPending() { counts.provider++; } } });
+    nativeHandoff: { cancelPending() { counts.handoff++; } }, providerSetup: { cancelPending() { counts.provider++; } },
+    pyxBar: { reset() { counts.pyx++; } } });
   vm.runInContext(code, context);
   const navigate = handlers.get('did-start-navigation');
-  navigate({}, origin + '/x', false, false); assert.deepEqual(counts, { handoff: 0, provider: 0, recovery: 0 }, 'subframe');
+  navigate({}, origin + '/x', false, false); assert.deepEqual(counts, { handoff: 0, provider: 0, recovery: 0, pyx: 0 }, 'subframe');
   assert.deepEqual(selected, []); assert.equal(context.assetSelectionReady, true); assert.equal(context.assetSelectionGeneration, 7);
-  navigate({}, origin + '/studio', false, true); assert.deepEqual(counts, { handoff: 1, provider: 1, recovery: 1 }, 'main frame');
+  navigate({}, origin + '/studio', false, true); assert.deepEqual(counts, { handoff: 1, provider: 1, recovery: 1, pyx: 1 }, 'main frame (the Pyx bar resets with the replaced view)');
   assert.deepEqual(selected, [null], 'the actual clear helper sends only a null human selection');
   assert.equal(context.assetSelectionReady, false, 'navigation disarms selection synchronously without inventing an ACK');
   assert.equal(context.assetSelectionGeneration, 8);
-  context.nativeHandoff = null; navigate({}, origin + '/studio#settings', true, true); assert.deepEqual(counts, { handoff: 1, provider: 2, recovery: 1 }, 'same document retains presentation scope; provider work is still cancelled');
+  context.nativeHandoff = null; navigate({}, origin + '/studio#settings', true, true); assert.deepEqual(counts, { handoff: 1, provider: 2, recovery: 1, pyx: 1 }, 'same document retains presentation scope; provider work is still cancelled');
   assert.deepEqual(selected, [null], 'same-document navigation does not clear human selection');
   const complete = handlers.get('did-navigate-in-page');
   complete({}, origin + '/studio#subframe', false); assert.deepEqual(inPage, [], 'subframe completion cannot update the retained main frame');
   complete({}, origin + '/studio#settings', true); assert.deepEqual(inPage, [[owner, origin + '/studio#settings']], 'only completed same-document navigation updates presentation scope');
   context.window = { webContents: {} };
-  navigate({}, origin + '/studio', false, true); assert.deepEqual(counts, { handoff: 1, provider: 2, recovery: 2 }, 'an inactive window retires only its own recovery scope');
+  navigate({}, origin + '/studio', false, true); assert.deepEqual(counts, { handoff: 1, provider: 2, recovery: 2, pyx: 1 }, 'an inactive window retires only its own recovery scope');
   assert.deepEqual(selected, [null], 'a retired owner cannot clear the replacement window selection');
 });
 

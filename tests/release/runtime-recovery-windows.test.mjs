@@ -19,7 +19,7 @@ function fixture(mode='ok'){
    this.emit('ready-to-show');if(mode==='crash-after-load')this.webContents.emit('render-process-gone');
   }
  }
- context=vm.createContext({window:null,recoveryWindow:null,recoveryWindowFailure:null,deferWindowShow:false,child:{exitCode:null,signalCode:null},switching:true,closing:false,smoke:false,
+ context=vm.createContext({window:null,pyxBar:{reset:()=>calls.push(['pyx-reset']),hide:()=>calls.push(['pyx-hide'])},recoveryWindow:null,recoveryWindowFailure:null,deferWindowShow:false,child:{exitCode:null,signalCode:null},switching:true,closing:false,smoke:false,
   assetSelectionGeneration:7,assetSelectionReady:true,appAssets:{selectHumanConversation(value){calls.push(['asset-selection',value]);return Promise.resolve();}},
   origin:'http://127.0.0.1:45871',token:'replacement-token',projectPath:'C:\\Project',projectSession:Object.freeze({id:'fixture'}),firstReadyMs:0,started:0,
   BrowserWindow:Window,join,basename,__dirname:'C:/Fixture/app',performance:{now:()=>0},Promise,
@@ -34,7 +34,8 @@ function fixture(mode='ok'){
 test('the actual window handoff shows a loaded replacement before retiring the old owner without quitting',async()=>{
  const f=fixture();await f.reload();const replacement=f.windows[1];assert.equal(f.context.window,replacement);assert.equal(f.previous.isDestroyed(),true);assert.equal(replacement.isDestroyed(),false);assert.equal(f.calls.filter(row=>row[0]==='quit').length,0);assert.equal(f.calls.filter(row=>row[0]==='show').length,1);assert.equal(f.calls.find(row=>row[0]==='show')[1],replacement);assert.equal(f.context.recoveryWindow,null);assert.equal(f.timers.size,0);
  assert.equal(f.calls.find(row=>row[0]==='invalidate')[1],replacement,'Navigation is bound to the new window, not the retained draft owner.');assert.equal(replacement.webContents.session.clipboard().window,replacement);
- assert.deepEqual(f.calls.filter(row=>row[0]==='asset-selection'),[['asset-selection',null]],'Only the active replacement navigation clears the previous human selection.');assert.equal(f.context.assetSelectionReady,false);assert.equal(f.context.assetSelectionGeneration,8);
+ assert.deepEqual(f.calls.filter(row=>row[0]==='asset-selection'),[['asset-selection',null]],'Only the active replacement navigation clears the previous human selection.');
+ assert.deepEqual(f.calls.filter(row=>row[0].startsWith('pyx-')),[['pyx-reset']],'The replacement navigation also drops the Pyx bar snapshot (honestly offline until the new document republishes).');assert.equal(f.context.assetSelectionReady,false);assert.equal(f.context.assetSelectionGeneration,8);
 });
 test('failed loading, a staging renderer crash or runtime exit restores the original document and clipboard owner',async()=>{
  for(const mode of['failure','crash','crash-after-load','exit']){const f=fixture(mode);await assert.rejects(f.reload());const replacement=f.windows[1];assert.equal(f.context.window,f.previous);assert.equal(f.previous.isDestroyed(),false);assert.equal(replacement.isDestroyed(),true);assert.equal(f.previous.webContents.mainFrame.url,'http://127.0.0.1:45871/studio#previous-token');assert.equal(f.previous.webContents.session.clipboard().window,f.previous);assert.equal(f.calls.filter(row=>row[0]==='failStartup').length,0);assert.equal(f.calls.filter(row=>row[0]==='quit').length,0);assert.equal(f.timers.size,0);}

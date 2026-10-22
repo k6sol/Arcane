@@ -79,11 +79,14 @@ test('static delivery excludes the pending motion block and preserves the viewer
   assert.match(css, /\.asset-viewer\{[^}]*flex:none/);
 });
 
-test('the sidebar status card ships hidden with blank data (no fake values)', () => {
+// C30: the footer card is always present (it holds the menu and the Settings gear); its data still ships blank.
+test('the sidebar status card ships with blank data (no fake values)', () => {
   const card = html.match(/<section id="sidebar-status-card"[\s\S]*?<\/section>/)?.[0] ?? '';
-  assert.match(card, /\shidden>/);
   assert.match(card, /<span id="sidebar-studio-status"[^>]*><\/span>/);
-  assert.match(card, /<meter id="sidebar-actions-meter"[^>]*value="0"/);
+  assert.match(card, /<div id="sidebar-actions"[^>]*\shidden>/);
+  assert.match(card, /<span id="sidebar-actions-value"[^>]*><\/span>/);
+  assert.match(card, /<span id="sidebar-actions-meter"[^>]*role="meter"[^>]*aria-valuenow="0"[^>]*hidden>/);
+  assert.match(card, /<span id="sidebar-actions-limit"[^>]*><\/span>/);
 });
 
 test('the open model and effort popovers retain their existing geometry, font, focus and scroller design', () => {

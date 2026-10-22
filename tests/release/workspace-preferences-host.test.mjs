@@ -32,6 +32,12 @@ test('shared library rejects foreign projects, duplicate native ownership and gr
   for(const invalid of [{...value,projectPath:'C:\\Other'},{...value,grants:['writes']},{...value,conversations:[...value.conversations,{...value.conversations[0],id:'shared-2'}]}])await assert.rejects(f.library('save',invalid),ERROR);
   assert.deepEqual(json((await f.library('read')).preferences),value);
 });
+test('shared library keeps the open sidebar folders and rejects unknown, duplicate or empty folder lists',async()=>{
+  const f=fixture({includeLibrary:true}),value={...librarySnapshot(),expandedFolderIds:['folder-1']};await f.library('save',value);
+  assert.deepEqual(json((await f.library('read')).preferences),value);
+  for(const invalid of [{...value,expandedFolderIds:['missing']},{...value,expandedFolderIds:['folder-1','folder-1']},{...value,expandedFolderIds:[]},{...value,expandedFolderIds:'folder-1'}])await assert.rejects(f.library('save',invalid),ERROR);
+  await f.library('save',librarySnapshot());assert.deepEqual(json((await f.library('read')).preferences),librarySnapshot(),'records without open folders stay valid');
+});
 test('shared history stays unavailable without encryption and failed saves retain the prior sealed record',async()=>{
   const disabled=fixture({includeLibrary:true,smoke:true});assert.deepEqual(json(await disabled.library('read')),{available:false,projectPath:null,preferences:null});await assert.rejects(disabled.library('save',librarySnapshot()),ERROR);assert.equal(disabled.disk.writes.length,0);
   const f=fixture({includeLibrary:true});await f.library('save',librarySnapshot());f.safeStorage.setAvailable(false);await assert.rejects(f.library('save',{...librarySnapshot(),folders:[]}),ERROR);f.safeStorage.setAvailable(true);assert.deepEqual(json((await f.library('read')).preferences),librarySnapshot());

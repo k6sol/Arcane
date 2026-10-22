@@ -78,7 +78,7 @@ test('sidebar and Ctrl/Cmd+N create actual local chats through one navigation ho
   f.chat.stop();assert.equal(newChatShortcut(f.doc).defaultPrevented,false);assert.equal(navigations,3);
 });
 
-test('busy and uncertain native work disables both New chat buttons and the shortcut without navigation',async t=>{
+test('busy and uncertain native work never hold New chat: both buttons and the shortcut open a local draft with no native action',async t=>{
   for(const mode of ['busy','unknown']as const){
     const initial=state();initial.snapshot=snapshot();
     if(mode==='busy')initial.busy=true;
@@ -86,9 +86,11 @@ test('busy and uncertain native work disables both New chat buttons and the shor
     const f=controller(initial);let navigations=0;t.after(()=>f.chat.stop());
     await f.chat.enableChatTabs({storage:f.storage,captureLegacyNewChat:true,beforeNewChat:()=>{navigations++;}});
     const count=f.chat.chatTabsView().length;
-    for(const id of ['new-chat','workspace-new-chat']){assert.equal(f.doc.getElementById(id).disabled,true);f.doc.getElementById(id).dispatchEvent(new Event('click',{cancelable:true}));}
+    for(const id of ['new-chat','workspace-new-chat']){assert.equal(f.doc.getElementById(id).disabled,false,mode+' '+id);f.doc.getElementById(id).dispatchEvent(new Event('click',{cancelable:true}));await tick();}
     assert.equal(newChatShortcut(f.doc).defaultPrevented,true);await tick();
-    assert.equal(f.chat.chatTabsView().length,count);assert.equal(navigations,0);assert.ok(f.calls.every(call=>call.endsWith(':GET')));
+    assert.equal(f.chat.chatTabsView().length,count+3);assert.equal(navigations,3);assert.equal(f.chat.currentStateView().activeChat!.kind,'draft');
+    assert.ok(f.calls.every(call=>call.endsWith(':GET')),'a new draft performs no native action');
+    if(mode==='unknown')assert.equal(f.doc.getElementById('codex-unknown').hidden,false,'the unconfirmed receipt stays reviewable');
   }
 });
 
@@ -159,7 +161,15 @@ test('freshness, active turns, unknown operations, pending receipts, approvals a
     value=>{value.displayLimited=true;},
     value=>{value.snapshot!.approvals=[{handle:'approval',connectionId:value.snapshot!.connectionId,threadId:'owned',turnId:'turn',itemId:'command',serverRequestId:1,method:'item/commandExecution/requestApproval',reason:null,command:'fixture',cwd:PROJECT,changes:null,canAccept:false,expiresAt:Date.now()+10000}];},
   ];
-  for(const patch of patches){const next=structuredClone(base);patch(next);f.set(next);await f.chat.refresh();assert.equal(await f.chat.selectChat(draft.key),false);assert.equal(await f.chat.newChat(),false);assert.equal(f.chat.currentStateView().activeChat!.key,native.key);}
+  // Work that keeps the live chat in front (a running or unknown turn, grants, approvals) holds every chat change.
+  for(const patch of patches.filter((_,index)=>[0,4,5,7].includes(index))){const next=structuredClone(base);patch(next);f.set(next);await f.chat.refresh();assert.equal(await f.chat.selectChat(draft.key),false);assert.equal(await f.chat.newChat(),false);assert.equal(f.chat.currentStateView().activeChat!.key,native.key);}
+  // Unresolved operations, busy or limited state hold saved chats (a resume is native) but never a local draft.
+  for(const patch of patches.filter((_,index)=>[1,2,3,6].includes(index))){
+    const next=structuredClone(base);patch(next);f.set(next);await f.chat.refresh();
+    assert.equal(await f.chat.selectChat(draft.key),true);assert.equal(await f.chat.selectChat(native.key),false);assert.equal(f.chat.currentStateView().activeChat!.key,draft.key);
+    f.set(base);await f.chat.refresh();assert.equal(await f.chat.selectChat(native.key),true);
+  }
+  assert.ok(f.calls.every(call=>call.endsWith(':GET')));
   f.set(base);await f.chat.refresh();assert.equal(await f.chat.selectChat(draft.key),true);
   f.fail();await f.chat.refresh();assert.equal(await f.chat.selectChat(native.key),false);assert.equal(f.chat.currentStateView().fresh,false);
 });
@@ -230,11 +240,17 @@ test('Claude presentation disables actual Codex form/keyboard Send, preserves ow
   f.doc.dispatchEvent(new CustomEvent('workspace:providerpreference',{detail:{provider:'codex'}}));assert.equal(f.doc.getElementById('codex-submit').disabled,false);assert.equal(f.chat.workflowConversation()!.threadId,'send-thread');assert.equal(f.chat.currentStateView().preferredProvider,'codex');
 });
 
-test('pending or unknown journal receipts cannot be bypassed by new draft, close, local preference reload or raw IDs',async t=>{
+test('pending or unknown journal receipts never hold New chat or draft close, stay reviewable and are never retried or resumed',async t=>{
   for(const receiptState of ['pending','unknown'] as const) {
     const initial=state();initial.snapshot=snapshot();initial.actions=[{requestId:randomUUID(),action:'thread-start',connectionId:initial.snapshot.connectionId,state:receiptState,errorCode:receiptState==='unknown'?'FIXTURE_UNKNOWN':null,threadId:null,turnId:null,model:null,effort:null,createdAt:new Date().toISOString(),finishedAt:null}];
     const f=controller(initial);t.after(()=>f.chat.stop());await f.chat.enableChatTabs({storage:f.storage});const key=f.chat.chatTabsView()[0]!.key;
-    assert.equal(await f.chat.newChat(),false);assert.equal(await f.chat.closeChat(key),false);assert.equal(await f.chat.openSavedChat('unknown'),false);assert.equal(f.doc.getElementById('codex-unknown').hidden,false);assert.ok(f.calls.every(call=>call.endsWith(':GET')));
+    assert.equal(await f.chat.newChat(),true);const fresh=f.chat.chatTabsView()[1]!.key;assert.equal(f.chat.currentStateView().activeChat!.key,fresh);
+    assert.equal(await f.chat.closeChat(key),true,'the draft that owns the receipt closes');assert.equal(await f.chat.closeChat(fresh),true,'closing the last draft leaves one empty draft');
+    assert.equal(f.chat.chatTabsView().length,1);assert.equal(f.chat.chatTabsView()[0]!.kind,'draft');
+    assert.equal(await f.chat.openSavedChat('unknown'),false,'raw IDs still never resume');
+    await f.chat.refresh();assert.equal(f.doc.getElementById('codex-unknown').hidden,false,'the receipt stays in the recovery card after its draft closes');
+    assert.equal(f.doc.getElementById('codex-submit').disabled,true,'Send still waits for the review');
+    assert.ok(f.calls.every(call=>call.endsWith(':GET')),'nothing was retried, resumed or sent');
   }
 });
 
@@ -482,7 +498,11 @@ test('target history failure keeps its own truthful notice after outgoing FRAME_
   f.setHistoryHook(async id=>{throw new CodexClientError(id===f.a?'FRAME_LIMIT':'TIMEOUT','Synthetic isolated history failure.',true);});
   assert.equal(await f.chat.openSavedChat(f.b),true);assert.equal(f.chat.currentStateView().conversation!.threadId,f.b);
   const notice=f.doc.getElementById('codex-notice').textContent;
-  assert.match(notice,/history-load.*rejected/);assert.notEqual(notice,HISTORY_LIMIT_NOTICE);assert.equal(f.recording(),f.originalRecording);
+  // Plain words in the line; the request ID, action and state only in its Details (for support).
+  assert.match(notice,/^Couldn\u2019t load this chat\u2019s saved history\./);assert.doesNotMatch(notice,/history-load|rejected|acknowledgement|[0-9a-f]{8}-[0-9a-f]{4}-/);
+  assert.equal(f.doc.getElementById('codex-notice-actions').hidden,false);
+  assert.match(f.doc.getElementById('codex-notice-detail').textContent,/^Request [0-9a-f-]{36} \u00b7 history-load \u00b7 rejected/);
+  assert.notEqual(notice,HISTORY_LIMIT_NOTICE);assert.equal(f.recording(),f.originalRecording);
 });
 
 test('FRAME_LIMIT on disconnect remains a rejected lifecycle action and prevents reconnect',async t=>{

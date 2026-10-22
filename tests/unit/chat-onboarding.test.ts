@@ -223,7 +223,20 @@ test('Edge uncertain start acknowledgements block Send; known rejection permits 
       next.actions = [record]; f.set(next); return { record, state: next };
     });
     await page.locator('#codex-conversation-start').click();
-    await page.waitForFunction(() => document.getElementById('codex-notice')?.textContent?.includes('Request ID retained:') || document.getElementById('codex-notice')?.textContent?.includes('native acknowledgement'));
+    if (outcome === 'rejected') {
+      // A rejected start reads in plain words with Review and Details; the request ID lives only in Details.
+      await page.waitForFunction(() => document.getElementById('codex-notice-actions')?.hidden === false);
+      assert.doesNotMatch(await page.locator('#codex-notice').textContent() ?? '', /[0-9a-f]{8}-[0-9a-f]{4}-|acknowledgement|Request ID/);
+      assert.match(await page.locator('#codex-notice-detail').textContent() ?? '', /^Request [0-9a-f-]{36} \u00b7 /);
+    } else {
+      // An unconfirmed start is told once, by the recovery card: plain words, the request ID only in its collapsed Details.
+      await page.locator('#codex-unknown').waitFor();
+      assert.equal(await page.locator('#codex-notice-actions').isHidden(), true, 'no second copy in the notice line');
+      const words = (await page.locator('#codex-unknown-title').textContent() ?? '') + (await page.locator('#codex-unknown-body').textContent() ?? '') + (await page.locator('#codex-notice').textContent() ?? '');
+      assert.doesNotMatch(words, /[0-9a-f]{8}-[0-9a-f]{4}-|acknowledgement|Request ID/);
+      assert.equal(await page.locator('#codex-unknown-details').evaluate((node: HTMLDetailsElement) => node.open), false);
+      assert.match(await page.locator('#codex-unknown-requests').textContent() ?? '', /^[0-9a-f-]{36} \u00b7 /);
+    }
     await settled(page); assert.equal(f.posts.length, 1); assert.equal(await page.locator('#codex-submit').isDisabled(), outcome!=='rejected');
     assert.equal(await page.locator('#codex-unknown').isVisible(), outcome !== 'rejected');
     assert.equal(await page.locator('#codex-conversation-start').isDisabled(), outcome !== 'rejected');

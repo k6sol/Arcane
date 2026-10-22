@@ -409,25 +409,26 @@ test('Edge actual chat tabs clear attached copies on native/draft switches and n
   await choose(f, [{ name: 'draft.txt', content: 'draft tab source' }]);
   const draftTab = await page.locator('#workspace-chat-tabs [role="tab"][aria-selected="true"]').getAttribute('data-chat-key');
   assert.ok(draftTab); assert.notEqual(draftTab, original);
-  // Every ChatGPT tab leads with the decorative ChatGPT mark; the tab's accessible name stays its title.
-  const marks = await page.locator('#workspace-chat-tabs [role="tab"]').evaluateAll(tabs => tabs.map(tab => {
-    const logo = tab.querySelector('svg.provider-logo'); return { provider: logo?.getAttribute('data-provider'), hidden: logo?.getAttribute('aria-hidden'), width: Math.round(logo?.getBoundingClientRect().width ?? 0) };
+  // The chat chip leads with the decorative ChatGPT mark; its accessible name stays the chat's title.
+  const marks = await page.locator('#workspace-saved-chats > summary').evaluateAll(chips => chips.map(chip => {
+    const logo = chip.querySelector('svg.provider-logo'); return { provider: logo?.getAttribute('data-provider'), hidden: logo?.getAttribute('aria-hidden'), width: Math.round(logo?.getBoundingClientRect().width ?? 0) };
   }));
-  assert.ok(marks.length >= 2 && marks.every(mark => mark.provider === 'codex' && mark.hidden === 'true' && mark.width >= 12), JSON.stringify(marks));
+  assert.ok(marks.length === 1 && marks.every(mark => mark.provider === 'codex' && mark.hidden === 'true' && mark.width >= 12), JSON.stringify(marks));
+  assert.equal(await page.locator('#workspace-chat-tabs [role="tab"]').count() >= 2, true, 'the open chats stay listed');
   if (process.env.ARCANE_UI_SCREENSHOT) for (const scheme of ['dark', 'light'] as const) {
     await page.emulateMedia({ colorScheme: scheme });
-    const box = (await page.locator('#workspace-chat-tabs').boundingBox())!;
+    const box = (await page.locator('#workspace-saved-chats').boundingBox())!;
     await page.screenshot({ path: join(process.env.ARCANE_UI_SCREENSHOT, 'tabs-chatgpt-real-' + scheme + '.png'), clip: { x: Math.max(0, box.x - 8), y: Math.max(0, box.y - 8), width: Math.min(700, box.width + 16), height: box.height + 16 } });
   }
   await page.emulateMedia({ colorScheme: null });
-  const originalTab = page.locator('#workspace-chat-tabs [role="tab"]');
-  // Locate by an observed key rather than guessing an index or native identity.
-  await originalTab.evaluateAll((tabs, key) => (tabs.find(tab => (tab as HTMLElement).dataset.chatKey === key) as HTMLButtonElement).focus(), original);
-  await page.keyboard.press('Enter'); await chips(page, 0);
+  // Locate by an observed key rather than guessing an index or native identity; switch from the chat chip's menu.
+  const openChat = async (key: string) => {
+    await page.locator('#workspace-saved-chats > summary').click();
+    await page.locator('#workspace-saved-chats .chat-switch-select').evaluateAll((rows, wanted) => (rows.find(row => (row as HTMLElement).dataset.openChat === wanted) as HTMLButtonElement).click(), key);
+  };
+  await openChat(original); await chips(page, 0);
   assert.equal(await page.locator('#codex-composer').inputValue(), 'Original unsent draft.');
-  await page.locator('#workspace-chat-tabs [role="tab"]').evaluateAll((tabs, key) =>
-    (tabs.find(tab => (tab as HTMLElement).dataset.chatKey === key) as HTMLButtonElement).focus(), draftTab);
-  await page.keyboard.press('Enter'); await chips(page, 0);
+  await openChat(draftTab); await chips(page, 0);
   assert.equal(await page.locator('#codex-attachment-input').inputValue(), ''); assert.equal(f.posts.length, 0);
 });
 

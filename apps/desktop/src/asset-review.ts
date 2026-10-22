@@ -90,7 +90,7 @@ export class AssetReviewRequestError extends Error {
 }
 export class AssetReviewApi {
   constructor(private readonly token: string, private readonly tokenOrigin: string, private readonly currentOrigin: () => string,
-    private readonly transport: typeof fetch = fetch, private readonly timeoutMs = 10000) {}
+    private readonly transport: typeof fetch = (input, init) => fetch(input, init), private readonly timeoutMs = 10000) {}
   async request(endpoint: 'prepare' | 'status' | 'decide' | 'receipt', body: { jobId: string } | Command | { reviewId: string; idempotencyKey: string }, signal: AbortSignal): Promise<unknown> {
     let payload: Record<string, unknown>;
     try {

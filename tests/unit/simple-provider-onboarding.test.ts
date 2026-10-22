@@ -85,6 +85,10 @@ async function fixture(t: TestContext, native = false, denyStorage = false) {
   const server = createServer((req, res) => {
     const path = req.url?.split('?')[0];
     if (req.method === 'GET' && path === '/favicon.ico') { res.writeHead(204); res.end(); return; }
+    if (req.method === 'GET' && /^\/fonts\/[a-z0-9-]+\.woff2$/.test(path ?? '')) {
+      void readFile(join('apps/desktop/public', path!.slice(1))).then(bytes => { res.writeHead(200, { 'Content-Type': 'font/woff2', 'Cache-Control': 'no-store' }); res.end(bytes); },
+        () => { unexpected.push(req.method + ' ' + req.url); res.writeHead(404); res.end(); }); return;
+    }
     const body = path === '/studio' ? html : path === '/studio.css' ? css : path === '/studio.js' ? bootstrap : modules.get(path ?? '');
     if (req.method !== 'GET' || !body) { unexpected.push(req.method + ' ' + req.url); res.writeHead(404); res.end(); return; }
     res.writeHead(200, { 'Content-Type': path === '/studio' ? 'text/html' : path === '/studio.css' ? 'text/css' : path?.endsWith('.png') ? 'image/png' : 'text/javascript', 'Cache-Control': 'no-store' }); res.end(body);
@@ -231,9 +235,10 @@ test('Edge native-contract fixture: metadata status reads, explicit login/connec
     assert.equal(await page.locator('#codex-notice').isVisible(), false, 'Codex notices are hidden, not destroyed');
     assert.equal(await page.locator('#workspace-chat-tabs').isVisible(), false);
     assert.equal(await page.locator('#workspace-new-chat').isVisible(), true);
-    await page.locator('#claude-chat-terminal').click(); await page.waitForFunction(n => (window as any).providerUI.calls.length === n + 1, beforeLaunch);
+    const more = page.locator('#chat-head-more'), openMore = async () => { if (!await more.evaluate(node => (node as HTMLDetailsElement).open)) await more.locator(':scope > summary').click(); };
+    await openMore(); await page.locator('#claude-chat-terminal').click(); await page.waitForFunction(n => (window as any).providerUI.calls.length === n + 1, beforeLaunch);
     assert.deepEqual((await f.calls()).at(-1), { action: 'launch', provider: 'claude' });
-    assert.equal(await page.locator('#claude-chat-terminal').isVisible(), true, 'Terminal handoff stays a secondary action beside the chat');
+    await openMore(); assert.equal(await page.locator('#claude-chat-terminal').isVisible(), true, 'Terminal handoff stays a secondary action in the chat header menu');
     assert.equal(await page.locator('#codex-submit').isDisabled(), true);
     assert.equal(await page.locator('#codex-composer').inputValue(), 'Keep my unsent draft.');
     assert.equal((await f.calls()).some((call: any) => call.action === 'install'), false);

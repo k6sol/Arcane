@@ -1,7 +1,7 @@
 /// <reference lib="dom" />
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -35,6 +35,8 @@ async function fixture(t: TestContext, native: boolean, legacy = false, fail: Fa
     ['/studio', [resolve('apps/desktop/public/studio.html'), 'text/html']],
     ['/studio.css', [resolve('apps/desktop/public/studio.css'), 'text/css']],
     ['/brand/arcane-ridges.png', [resolve('apps/desktop/public/brand/arcane-ridges.png'), 'image/png']],
+    // The shipped faces (studio.css @font-face, same-origin /fonts) are part of the product page.
+    ...(await readdir(resolve('apps/desktop/public/fonts'))).filter(name => name.endsWith('.woff2')).map(name => ['/fonts/' + name, [resolve('apps/desktop/public/fonts', name), 'font/woff2']] as [string, [string, string]]),
   ]);
   // The actual compiled desktop module graph, by exact top-level name only (no fixed list to go stale).
   const moduleFile = async (path: string) => {

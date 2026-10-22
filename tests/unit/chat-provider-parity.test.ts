@@ -82,15 +82,16 @@ const REPLY = 'Built the forest and the spawner.', TOKENS = { input: 12000, cach
 /** Comparable transcript structure: one row per top-level child, with grouped cards, change cards and usage lines. */
 function structure(container: Element): unknown[] {
   const tool = (article: Element) => (article.dataset.toolState ?? '') + ' ' + article.querySelector('.tool-activity-text')!.textContent;
-  const usage = (node: Element) => node.querySelector('.reply-usage')?.textContent.replace(/\s*\(.*\)$/, '') ?? null;
+  // A usage line reads 'N tokens · ~$x'; the comparison keeps the token count and whether a cost is shown.
+  const tokens = (text: string) => text.replace(/\s*·\s*~?[^·]*$/, ''), usage = (node: Element) => { const text = node.querySelector('.reply-usage')?.textContent; return text === undefined ? null : tokens(text); };
   return container.children.map(node => {
     if (node.classList.contains('tool-group')) return { group: node.querySelector('.tool-group-text')!.textContent, count: node.querySelector('.tool-group-count')!.textContent,
       state: node.dataset.toolState, items: node.querySelector('.tool-group-items')!.children.map(tool) };
     if (node.classList.contains('chat-change-card')) return { change: node.querySelector('.chat-change-summary')!.textContent, rows: node.querySelectorAll('.chat-change-text').map(row => row.textContent) };
-    if (node.classList.contains('reply-usage')) return { usage: node.textContent.replace(/\s*\(.*\)$/, '') };
+    if (node.classList.contains('message-usage')) return { usage: tokens(node.querySelector('.reply-usage')?.textContent ?? '') };
     if (node.classList.contains('tool')) return { tool: tool(node) };
     if (node.classList.contains('human')) return { human: node.querySelector('.message-text')?.textContent ?? '' };
-    if (node.classList.contains('codex')) return { reply: node.querySelector('.message-text')?.textContent ?? '', usage: usage(node), costed: /\(~?.+\)$/.test(node.querySelector('.reply-usage')?.textContent ?? '') };
+    if (node.classList.contains('codex')) return { reply: node.querySelector('.message-text')?.textContent ?? '', usage: usage(node), costed: /·\s*~?\S+$/.test(node.querySelector('.reply-usage')?.textContent ?? '') };
     return { other: node.className };
   });
 }

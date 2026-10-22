@@ -4,15 +4,19 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { join, resolve } from 'node:path';
+import { readdirSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import type { Page } from 'playwright-core';
+// The shipped faces (studio.css @font-face, same-origin /fonts) are part of the product page, so fixtures serve them.
+const shippedFonts = () => readdirSync('apps/desktop/public/fonts').filter(name => name.endsWith('.woff2'))
+  .map(name => ['/fonts/' + name, [resolve('apps/desktop/public/fonts', name), 'font/woff2']] as [string, [string, string]]);
 
 const enabled = !!process.env.ARCANE_UI_BROWSER_MODULE;
 async function fixture(t: TestContext) {
   const build = process.env.ARCANE_UI_BUILD_DIR; assert.ok(build, 'Explicit private output required');
   const html = (await readFile(resolve('apps/desktop/public/studio.html'),'utf8')).replace(/<script\b[^>]*>[\s\S]*?<\/script>/g,'');
   const files = new Map([
-    ['/studio.css', [resolve('apps/desktop/public/studio.css'), 'text/css']],
+    ...shippedFonts(), ['/studio.css', [resolve('apps/desktop/public/studio.css'), 'text/css']],
     ['/provider-setup.js', [join(build,'apps/desktop/src/provider-setup.js'), 'text/javascript']],
   ]);
   const unexpected: string[] = [], errors: string[] = [];

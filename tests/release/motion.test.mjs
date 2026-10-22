@@ -57,8 +57,10 @@ function rulesOf(css, context = []) {
     }
     assert.equal(depth, 0, 'CSS blocks must balance: ' + selector);
     const body = clean.slice(open + 1, end - 1);
-    if (selector.startsWith('@')) {
-      assert.match(selector, /^@(?:media|supports|keyframes)\b/, 'Recognize every grouping rule');
+    // @font-face is a descriptor block (no nested rules); it is scanned like a style rule so it can never hide motion.
+    if (selector.startsWith('@') && selector !== '@font-face') {
+      // @container (C31 window chrome) groups style rules like @media; they are scanned, so it cannot hide motion.
+      assert.match(selector, /^@(?:media|supports|keyframes|container)\b/, 'Recognize every grouping rule');
       rules.push(...rulesOf(body, [...context, selector]));
     } else {
       const declarations = splitTopLevel(body, ';').map(value => {
@@ -95,10 +97,35 @@ function resolve(value, rules) {
 test('contract scanner respects functional commas and nested preference/pointer blocks', () => {
   const sample = rulesOf('@media (prefers-reduced-motion: no-preference) { @media (hover: hover) { :where(a, button) { transition: transform 120ms cubic-bezier(.2,.7,.2,1), opacity 180ms ease; } } }');
   assert.equal(sample.length, 1);
+  const face = rulesOf('@font-face{font-family:"IBM Plex Sans";src:url(/fonts/a.woff2) format("woff2");unicode-range:U+0000-00FF,U+0131}');
+  assert.deepEqual(face.map(rule => [rule.selector, rule.declarations.map(declaration => declaration.property)]), [['@font-face', ['font-family', 'src', 'unicode-range']]]);
+  assert.throws(() => rulesOf('@layer base { a { color: red; } }'), /grouping rule/);
   assert.equal(sample[0].context.length, 2);
   assert.deepEqual(splitTopLevel(sample[0].declarations[0].value, ','), ['transform 120ms cubic-bezier(.2,.7,.2,1)', 'opacity 180ms ease']);
   assert.throws(() => rulesOf('.broken { opacity: 1;'), /balance/);
 });
+
+
+// ---- C31 motion contract. The main window's motion lives in ONE owned block,
+// "/* C31 motion */ ... /* end C31 motion */", after the C22/C30 blocks and before the final reduced-motion reset. Every
+// other studio.css block stays static. Inside the block: motion tokens only, compositor properties only (opacity and the
+// transform family; colour fades on hover), entrances that play once and land within 320 ms, and loops only on genuine
+// progress indicators. lab.css keeps its previous, narrower contract unchanged.
+const studioCss = sheets.find(sheet => sheet.name === 'studio').css;
+const C31_OPEN = '/* C31 motion */', C31_CLOSE = '/* end C31 motion */';
+const c31Start = studioCss.indexOf(C31_OPEN), c31End = studioCss.indexOf(C31_CLOSE);
+const c31Css = studioCss.slice(c31Start + C31_OPEN.length, c31End);
+const outsideCss = studioCss.slice(0, c31Start) + studioCss.slice(c31End + C31_CLOSE.length);
+const COMPOSITOR = new Set(['opacity', 'transform', 'translate', 'scale', 'rotate']);
+const TRANSITIONED = /^(?:transform|translate|scale|rotate|opacity|background-color|border-color|color)\s/;
+// Loops are allowed only on genuine progress: the running step ring, the streaming marker and caret, the loading skeleton.
+const LOOPS = new Map([
+  ['c31-spin', /\[data-tool-state=started\]/],
+  ['c31-live', /\[aria-busy=true\]|\[data-live\]/],
+  ['c31-blink', /\[aria-busy=true\]/],
+  ['c31-shimmer', /\[aria-busy=true\]/],
+]);
+const pseudoOf = selector => (selector.match(/::([\w-]+)(?:\([^)]*\))?\s*$/) ?? [])[1] ?? '';
 
 for (const { name, css } of sheets) {
   const rules = rulesOf(css);
@@ -116,63 +143,166 @@ for (const { name, css } of sheets) {
     }
   });
 
-  test(name + ': transitions are explicit, short and exclude layout, filters and continuous effects', () => {
-    const relevant = new Set([
-      ':where(button:enabled, a, summary)', ':where(input, select, textarea)',
-      '.workspace-search', '.workspace-stage .composer', '.app-sidebar', '.group-chevron',
-      '.artifact-stage .asset-previews figure[role="button"]',
-      ':where(button:enabled, .sidebar nav a, .install-help > summary)',
-      'select', '.provider-card', '.selection-panel',
-    ].map(normalize));
-    const reveals = new Set([
-      '.workspace-welcome', '.workspace-search-results', '.setup-panel',
-      '.artifact-stage .asset-previews figure[role="button"]',
-    ].map(normalize));
-    let transitions = 0;
+  test(name + ': motion is explicit shorthand on compositor properties, with no promotion or scroll-driven timelines', () => {
     for (const rule of rules) for (const declaration of rule.declarations) {
       assert.notEqual(declaration.property, 'will-change', 'Do not permanently promote canvas/surface layers');
       assert.notEqual(declaration.property, 'transition-property', 'Use reviewable explicit shorthands');
-      if (!enabledMotion(declaration)) continue;
-      assert.ok(['transition', 'animation'].includes(declaration.property), 'No detached timing/delay overrides');
-      const value = resolve(declaration.value, rules);
-      assert.doesNotMatch(value, /\binfinite\b/);
-      for (const item of splitTopLevel(value, ',')) {
-        const times = [...item.matchAll(/(?<![\w.])(\d*\.?\d+)(ms|s)\b/g)]
-          .map(match => Number(match[1]) * (match[2] === 's' ? 1000 : 1));
-        assert.equal(times.length, 1, 'One duration and no hidden delay: ' + item);
-        assert.ok(times[0] > 0 && times[0] <= 200, 'Motion must finish within 200 ms: ' + item);
-        if (declaration.property === 'transition') {
-          transitions++;
-          for (const selector of splitTopLevel(rule.selector, ',')) assert.ok(relevant.has(normalize(selector)), 'Transition must belong to an approved real control/surface: ' + selector);
-          assert.match(item, /^(?:transform|opacity|background-color|border-color|color)\s/, 'No all, geometry, shadow, background-image or filter transitions');
-        } else {
-          for (const selector of splitTopLevel(rule.selector, ',')) assert.ok(reveals.has(normalize(selector)), 'Only stable, approved surfaces reveal: ' + selector);
-          assert.match(item, /^arcane-reveal\s/);
-          assert.match(item, /\s1$/, 'Reveal must have one iteration and no backwards fill');
-          assert.doesNotMatch(rule.selector, /notice|error|approval|dialog|codex-message|status|unknown|canvas/, 'Critical/streaming content stays immediate');
-        }
-      }
+      if (enabledMotion(declaration)) assert.ok(['transition', 'animation'].includes(declaration.property), 'No detached timing/delay overrides: ' + declaration.property);
     }
-    assert.ok(transitions > 0, 'A motion contract must cover actual interactions');
     for (const rule of rules.filter(frames)) {
       assert.ok(optedIn(rule), 'Keyframes must also be gated');
-      for (const { property, value } of rule.declarations) {
-        assert.ok(['transform', 'opacity'].includes(property), 'Reveal animates only compositor properties');
-        if (property === 'opacity') assert.ok(Number(value) >= .9 && Number(value) <= 1, 'Reveals never conceal content');
-      }
+      for (const { property } of rule.declarations) assert.ok(COMPOSITOR.has(property), 'Keyframes animate only opacity and the transform family: ' + property);
     }
     assert.doesNotMatch(css, /@(?:import|scroll-timeline)|animation-timeline|view-timeline/);
   });
 
-  test(name + ': moving hover effects require a precise hover-capable pointer', () => {
+  test(name + ': moving hover effects require a precise hover-capable pointer and yield to the press state', () => {
     for (const rule of rules.filter(rule => rule.selector.includes(':hover'))) {
-      if (!rule.declarations.some(declaration => declaration.property === 'transform')) continue;
+      if (!rule.declarations.some(declaration => ['transform', 'translate', 'scale', 'rotate'].includes(declaration.property))) continue;
       assert.ok(optedIn(rule));
-      if (!rule.selector.includes('.asset-previews')) assert.ok(rule.selector.includes(':not(:active)'), 'Hover lift yields to the press state');
+      for (const selector of splitTopLevel(rule.selector, ',')) if (selector.includes(':hover')) assert.match(selector, /:hover:not\(:active\b/, 'Hover lift yields to the press state: ' + selector);
       assert.ok(rule.context.some(value => normalize(value).includes('(hover:hover)') && normalize(value).includes('(pointer:fine)')), rule.selector);
     }
   });
 }
+
+test('lab: the previous contract stands (approved controls, short colour fades, one reveal, nothing loops)', () => {
+  const rules = rulesOf(sheets.find(sheet => sheet.name === 'lab').css);
+  const relevant = new Set([':where(button:enabled, .sidebar nav a, .install-help > summary)', 'select', '.provider-card', '.selection-panel'].map(normalize));
+  let transitions = 0;
+  for (const rule of rules) for (const declaration of rule.declarations) {
+    if (!enabledMotion(declaration)) continue;
+    const value = resolve(declaration.value, rules);
+    assert.doesNotMatch(value, /\binfinite\b/);
+    for (const item of splitTopLevel(value, ',')) {
+      const times = [...item.matchAll(/(?<![\w.])(\d*\.?\d+)(ms|s)\b/g)].map(match => Number(match[1]) * (match[2] === 's' ? 1000 : 1));
+      assert.equal(times.length, 1, 'One duration and no hidden delay: ' + item);
+      assert.ok(times[0] > 0 && times[0] <= 200, 'Motion must finish within 200 ms: ' + item);
+      if (declaration.property === 'transition') {
+        transitions++;
+        for (const selector of splitTopLevel(rule.selector, ',')) assert.ok(relevant.has(normalize(selector)), 'Transition must belong to an approved control: ' + selector);
+        assert.match(item, /^(?:transform|opacity|background-color|border-color|color)\s/);
+      } else {
+        assert.equal(normalize(rule.selector), '.setup-panel', 'Only the setup panel reveals');
+        assert.match(item, /^arcane-reveal\s/);
+        assert.match(item, /\s1$/, 'Reveal must have one iteration and no backwards fill');
+      }
+    }
+  }
+  assert.ok(transitions > 0, 'A motion contract must cover actual interactions');
+  for (const rule of rules.filter(frames)) for (const { property, value } of rule.declarations) {
+    if (property === 'opacity') assert.ok(Number(value) >= .9 && Number(value) <= 1, 'Lab reveals never conceal content');
+  }
+});
+
+test('studio: all motion lives in the one owned C31 block, after the C22/C30 blocks and before the reset', () => {
+  const revampEnd = studioCss.indexOf('/* ---- End C22 revamp ---- */'), reset = studioCss.lastIndexOf('@media(prefers-reduced-motion:reduce)');
+  assert.ok(c31Start > 0 && c31End > c31Start, 'owned block markers');
+  assert.ok(c31Start > revampEnd && revampEnd > 0, 'after the C22 revamp (and every C30 block inside it)');
+  assert.ok(c31End < reset, 'before the final reduced-motion reset');
+  assert.equal(studioCss.split(C31_OPEN).length, 2, 'one block');
+  const outside = rulesOf(outsideCss);
+  for (const rule of outside) for (const declaration of rule.declarations) {
+    assert.ok(!enabledMotion(declaration), 'Motion outside the C31 block: ' + rule.selector + ' { ' + declaration.property + ' }');
+  }
+  assert.equal(outside.filter(frames).length, 0, 'Keyframes live in the C31 block');
+  // The C22 block (and the C30 blocks inside it) stays static.
+  const revamp = studioCss.slice(studioCss.indexOf('/* ---- C22 revamp'), revampEnd).replace(/\/\*[\s\S]*?\*\//g, '');
+  assert.doesNotMatch(revamp, /transition|animation|@keyframes|will-change/);
+});
+
+test('studio: C31 motion uses its tokens, lands within 320 ms, never delays or holds, and loops only on progress', () => {
+  const rules = rulesOf(c31Css), all = rulesOf(studioCss);
+  const root = new Map(rules.filter(rule => rule.selector === ':root' && !rule.context.length).flatMap(rule => rule.declarations.map(d => [d.property, d.value])));
+  for (const [token, value] of [['--m-fast', '120ms'], ['--m-base', '180ms'], ['--m-slow', '240ms'], ['--m-slower', '320ms'], ['--m-ease', 'cubic-bezier(.2,0,0,1)'],
+    ['--m-emph', 'cubic-bezier(.3,0,0,1)'], ['--m-exit', 'cubic-bezier(.4,0,1,1)'], ['--m-spring', 'cubic-bezier(.34,1.56,.64,1)'], ['--m-press', '.98']]) {
+    assert.equal(root.get(token), value, token);
+  }
+  const keyframes = new Set(c31Css.match(/@keyframes\s+([\w-]+)/g)?.map(value => value.split(/\s+/)[1]) ?? []);
+  let transitions = 0, animations = 0;
+  for (const rule of rules) for (const declaration of rule.declarations) {
+    if (!enabledMotion(declaration)) continue;
+    for (const raw of splitTopLevel(declaration.value, ',')) {
+      const item = resolve(raw, all);
+      const times = [...item.matchAll(/(?<![\w.-])(\d*\.?\d+)(ms|s)\b/g)].map(match => Number(match[1]) * (match[2] === 's' ? 1000 : 1));
+      assert.equal(times.length, 1, 'One duration, no delay: ' + raw);
+      assert.doesNotMatch(item, /\b(?:forwards|backwards|both|alternate|reverse|paused)\b/, 'Entrances neither hold nor reverse: ' + raw);
+      if (declaration.property === 'transition') {
+        transitions++;
+        assert.match(item, TRANSITIONED, 'Transitions move only colour, opacity and the transform family (no layout): ' + raw);
+        assert.match(raw, /\svar\(--m-(?:fast|base|slow|slower)\)\s+var\(--m-(?:ease|emph|exit|spring)\)$/, 'Transitions use the motion tokens: ' + raw);
+        continue;
+      }
+      animations++;
+      const [name] = raw.split(/\s+/);
+      assert.ok(keyframes.has(name) && name.startsWith('c31-'), 'Animations use the block\'s own keyframes: ' + raw);
+      if (/\binfinite\b/.test(raw)) {
+        assert.ok(LOOPS.has(name), 'Only progress indicators loop: ' + raw);
+        for (const selector of splitTopLevel(rule.selector, ',')) assert.match(selector, LOOPS.get(name), 'Loop bound to a live state: ' + selector);
+        assert.ok(times[0] >= 900 && times[0] <= 1400, 'Calm loop period: ' + raw);
+      } else {
+        assert.match(raw, /\s1$/, 'Entrances play once: ' + raw);
+        assert.match(raw, /^[\w-]+\s+var\(--m-(?:fast|base|slow|slower)\)\s+(?:var\(--m-(?:ease|emph|exit|spring)\)|steps\(\d,end\))\s+1$/, 'Entrances use the motion tokens: ' + raw);
+        assert.ok(times[0] <= 320, 'Every move lands within 320 ms: ' + raw);
+      }
+    }
+  }
+  assert.ok(transitions > 0 && animations > 0, 'The contract covers real interactions');
+  // Loop keyframes never hide content except the caret's blink.
+  for (const rule of rules.filter(frames)) for (const { property, value } of rule.declarations) {
+    const frame = rule.context.find(value => value.startsWith('@keyframes')).split(/\s+/)[1];
+    if (property === 'opacity' && LOOPS.has(frame) && frame !== 'c31-blink') assert.ok(Number(value) >= .35, frame + ' keeps content legible');
+  }
+  // Scale never shrinks below the press depth except the small confirmation pops (check marks, counts).
+  for (const rule of rules.filter(frames)) for (const { property, value } of rule.declarations) {
+    const frame = rule.context.find(value => value.startsWith('@keyframes')).split(/\s+/)[1];
+    if (property === 'scale' && !['c31-confirm', 'c31-nudge'].includes(frame)) assert.ok(Number(value) >= .98, frame + ' scale ' + value);
+  }
+});
+
+test('studio: the reduced-motion resets cover every animated selector, including dialog backdrops and details content', () => {
+  const rules = rulesOf(c31Css);
+  // The final universal reset covers elements, ::before and ::after; the block's own reduce rules name the other pseudo-elements.
+  const extra = rules.filter(rule => reduced(rule) && rule.declarations.some(d => d.property === 'animation' && normalize(d.value) === 'none!important')
+    && rule.declarations.some(d => d.property === 'transition' && normalize(d.value) === 'none!important'));
+  const covered = new Set(['', 'before', 'after', ...extra.flatMap(rule => splitTopLevel(rule.selector, ',').filter(s => /^\*::/.test(s.trim())).map(pseudoOf))]);
+  for (const rule of rules) {
+    if (!rule.declarations.some(enabledMotion)) continue;
+    assert.ok(optedIn(rule), 'Gated: ' + rule.selector);
+    for (const selector of splitTopLevel(rule.selector, ',')) assert.ok(covered.has(pseudoOf(selector)), 'A reduced-motion reset must cover ::' + pseudoOf(selector) + ' (' + selector + ')');
+  }
+});
+
+test('studio: exits are drawn by studio.ts as an inert copy on the exit tokens, never by CSS and never with reduced motion', () => {
+  const source = readFileSync(new URL('../../apps/desktop/src/studio.ts', import.meta.url), 'utf8');
+  const start = source.indexOf('export function startExitMotion('), end = source.indexOf("\nif (typeof window !== 'undefined'", start);
+  assert.ok(start > 0 && end > start, 'the exit helper sits before the page bootstrap');
+  const body = source.slice(start, end);
+  for (const token of ['--m-fast', '--m-base', '--m-slow', '--m-exit', '--m-emph']) assert.ok(body.includes("token('" + token + "'"), 'Exits read the motion token ' + token);
+  assert.match(body, /prefers-reduced-motion: reduce/, 'Nothing is copied with reduced motion');
+  assert.match(body, /attachShadow\(\{ mode: 'closed' \}\)/, 'The copy is out of reach of page scripts');
+  assert.match(body, /setAttribute\('aria-hidden', 'true'\); host\.inert = true;/, 'The copy is hidden from assistive technology and input');
+  assert.match(body, /pointer-events:none!important/, 'The copy never takes a press');
+  assert.match(body, /animation:none!important;transition:none!important/, 'The copy does not replay its entrance');
+  // Keyframes move only opacity and the transform family (a clip closes the folder card); no layout property animates.
+  const frames = [...body.matchAll(/\[\{ ([^\]]*?) \}\]/g)].map(match => match[1]);
+  assert.ok(frames.length >= 5, 'exit keyframes are present');
+  for (const frame of frames) for (const [, key] of frame.matchAll(/(?:^|[{,]\s*)([a-zA-Z]+):/g)) assert.ok(['opacity', 'scale', 'translate', 'clipPath'].includes(key), 'Exit keyframes animate ' + key);
+  assert.doesNotMatch(body, /\b(?:delay|iterations|direction|endDelay):/, 'Exits play once, without a delay');
+  // Menus and popovers leave on the fast step; the drawer, dialogs and the sheet on the base step; the folder on the slow step.
+  assert.match(body, /ghost\(el, snap, popover\(surface\.rise\), fast, exit\)/);
+  assert.match(body, /, slow, emph\);/, 'The folder closes on the slow step, with the list it moves with');
+  assert.doesNotMatch(body, /slower/, 'No exit takes the longest step');
+});
+
+test('studio: critical, live and canvas surfaces are never delayed, hidden by a loop or moved', () => {
+  const rules = rulesOf(c31Css);
+  for (const rule of rules) for (const declaration of rule.declarations.filter(enabledMotion)) {
+    if (/notice|error|approval|dialog|modal|recovery|unknown|alert|status/.test(rule.selector)) assert.doesNotMatch(declaration.value, /\binfinite\b/, 'Critical content does not loop: ' + rule.selector);
+    assert.doesNotMatch(rule.selector, /canvas|vw-stage|viewer-canvas/, 'The viewer canvas never moves: ' + rule.selector);
+    if (/\.codex-message(?![\w-])/.test(rule.selector) && declaration.property === 'animation' && !/\binfinite\b/.test(declaration.value)) assert.fail('Messages enter only through [data-enter]: ' + rule.selector);
+  }
+});
 
 test('studio: dynamic verified preview figures have keyboard, hover, press and selected states without canvas animation', () => {
   const css = sheets.find(sheet => sheet.name === 'studio').css;

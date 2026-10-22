@@ -43,6 +43,7 @@ import { createPreferenceStore } from '../../../packages/core/src/preference-sto
 import { scriptSyncRoutes } from './script-sync-routes.js';
 import { ActionsLedger } from './actions-ledger.js';
 import { createMeshKeep } from './mesh-keep-routes.js';
+import { createImportedAssets } from './imported-assets.js';
 
 const unavailableTestMessages = {
   UNAVAILABLE: 'Playtests are unavailable because the trusted plugin source could not be verified. Repair the local plugin build artifacts and restart Arcane before requesting a test.',
@@ -192,6 +193,8 @@ export async function createConnectionLab(options: Options) {
   const scriptSync = options.studioStore ? scriptSyncRoutes({ projectPath: options.projectPath ?? options.cwd, stateDirectory: options.stateDirectory, studio: options.studioStore }) : null;
   // Keep this mesh: human desktop only; uploads need a trusted-dialog consent delivered over the parent IPC (product-main).
   const meshKeep = options.studioStore ? createMeshKeep({ store: options.studioStore, stateDirectory: options.stateDirectory }) : null;
+  // Imported models and effects ("Imported by you"): a separate store; uploads need the desktop host's IPC consent.
+  const imports = options.studioStore ? createImportedAssets({ stateDirectory: options.stateDirectory }) : null;
   const plans = options.studioStore ? plansRoutes({ ledger: new ActionsLedger(join(options.stateDirectory, 'arcane-actions')),
     codexState: () => codex?.state(), studioEvents: () => options.studioStore?.events(100) ?? [] }) : null;
   // Quiesce every retained task before other services publish terminal evidence.
@@ -366,6 +369,11 @@ export async function createConnectionLab(options: Options) {
           ['/studio', [join(options.cwd, 'apps/desktop/public/studio.html'), 'text/html']],
           ['/studio.css', [join(options.cwd, 'apps/desktop/public/studio.css'), 'text/css']],
           ['/studio.js', [join(options.cwd, 'dist/apps/desktop/src/studio.js'), 'text/javascript']],
+          ['/pyx-bar', [join(options.cwd, 'apps/desktop/public/pyx-bar.html'), 'text/html']],
+          ['/pyx-bar.css', [join(options.cwd, 'apps/desktop/public/pyx-bar.css'), 'text/css']],
+          ['/pyx-bar.js', [join(options.cwd, 'dist/apps/desktop/src/pyx-bar.js'), 'text/javascript']],
+          ['/pyx-sprite.js', [join(options.cwd, 'dist/apps/desktop/src/pyx-sprite.js'), 'text/javascript']],
+          ['/pyx-link.js', [join(options.cwd, 'dist/apps/desktop/src/pyx-link.js'), 'text/javascript']],
           ['/codex-chat.js', [join(options.cwd, 'dist/apps/desktop/src/codex-chat.js'), 'text/javascript']],
           ['/codex-task-plan.js', [join(options.cwd, 'dist/apps/desktop/src/codex-task-plan.js'), 'text/javascript']],
           ['/task-plan-boot.js', [join(options.cwd, 'dist/apps/desktop/src/task-plan-boot.js'), 'text/javascript']],
@@ -392,6 +400,7 @@ export async function createConnectionLab(options: Options) {
           ['/welcome-tour.js', [join(options.cwd, 'dist/apps/desktop/src/welcome-tour.js'), 'text/javascript']],
           ['/glb-preflight.js', [join(options.cwd, 'dist/apps/desktop/src/glb-preflight.js'), 'text/javascript']],
           ['/asset-viewer-runtime.mjs', [join(options.cwd, 'apps/desktop/public/asset-viewer-runtime.mjs'), 'text/javascript']],
+          ['/effect-viewer-runtime.mjs', [join(options.cwd, 'apps/desktop/public/effect-viewer-runtime.mjs'), 'text/javascript']],
           ...[
             'build/three.module.js', 'build/three.core.js', 'examples/jsm/loaders/GLTFLoader.js',
             'examples/jsm/controls/OrbitControls.js', 'examples/jsm/utils/BufferGeometryUtils.js', 'examples/jsm/utils/SkeletonUtils.js'
@@ -403,11 +412,13 @@ export async function createConnectionLab(options: Options) {
           ['/claude-preferences.js',[join(options.cwd,'dist/apps/desktop/src/claude-preferences.js'),'text/javascript']],
           ['/arcane-chat.js',[join(options.cwd,'dist/apps/desktop/src/arcane-chat.js'),'text/javascript']],
           ['/setup-checklist.js',[join(options.cwd,'dist/apps/desktop/src/setup-checklist.js'),'text/javascript']],
+          ['/workspace-topbar.js',[join(options.cwd,'dist/apps/desktop/src/workspace-topbar.js'),'text/javascript']],
           ['/plans.js',[join(options.cwd,'dist/apps/desktop/src/plans.js'),'text/javascript']],
           ['/notifications.js',[join(options.cwd,'dist/apps/desktop/src/notifications.js'),'text/javascript']],
           ['/runtime-recovery.js',[join(options.cwd,'dist/apps/desktop/src/runtime-recovery.js'),'text/javascript']],
     ['/desktop-update.js',[join(options.cwd,'dist/apps/desktop/src/desktop-update.js'),'text/javascript']],
           ['/mesh-keep.js',[join(options.cwd,'dist/apps/desktop/src/mesh-keep.js'),'text/javascript']],
+          ['/asset-imports.js',[join(options.cwd,'dist/apps/desktop/src/asset-imports.js'),'text/javascript']],
           ['/editor-drafts.js',[join(options.cwd,'dist/apps/desktop/src/editor-drafts.js'),'text/javascript']],
           ['/project-memory.js',[join(options.cwd,'dist/apps/desktop/src/project-memory.js'),'text/javascript']],
           ['/learned-preferences.js',[join(options.cwd,'dist/apps/desktop/src/learned-preferences.js'),'text/javascript']],
@@ -418,13 +429,19 @@ export async function createConnectionLab(options: Options) {
           ['/studio-key-settings.js',[join(options.cwd,'dist/apps/desktop/src/studio-key-settings.js'),'text/javascript']],
           ['/workflow-panel.js',[join(options.cwd,'dist/apps/desktop/src/workflow-panel.js'),'text/javascript']],
           ['/codex-history.js', [join(options.cwd, 'dist/apps/desktop/src/codex-history.js'), 'text/javascript']],
-          ['/brand/arcane-ridges.png', [join(options.cwd, 'apps/desktop/public/brand/arcane-ridges.png'), 'image/png']]
+          ['/brand/arcane-ridges.png', [join(options.cwd, 'apps/desktop/public/brand/arcane-ridges.png'), 'image/png']],
+          ...[
+            'ibm-plex-sans-latin-wght-normal.woff2', 'ibm-plex-sans-latin-ext-wght-normal.woff2',
+            'archivo-latin-wght-normal.woff2', 'archivo-latin-ext-wght-normal.woff2',
+            'ibm-plex-mono-latin-400-normal.woff2', 'ibm-plex-mono-latin-ext-400-normal.woff2',
+            'ibm-plex-mono-latin-500-normal.woff2', 'ibm-plex-mono-latin-ext-500-normal.woff2'
+          ].map(name => ['/fonts/' + name, [join(options.cwd, 'apps/desktop/public/fonts', name), 'font/woff2']] as [string, [string, string]])
         ] as [string, [string, string]][] : [])
       ]);
       const asset = publicRoutes.get(url.pathname);
       if (asset && request.method === 'GET') {
         const data = await readFile(asset[0]);
-        response.writeHead(200, { 'Content-Type': asset[1] + (asset[1].startsWith('image/') ? '' : '; charset=utf-8'), 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+        response.writeHead(200, { 'Content-Type': asset[1] + (/^(?:image|font)\//.test(asset[1]) ? '' : '; charset=utf-8'), 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
         response.end(data); return;
       }
       if(plans&&await plans.handle(request,response,url,token,origin))return;
@@ -432,6 +449,7 @@ export async function createConnectionLab(options: Options) {
       if(learnedPreferences&&await learnedPreferences.handle(request,response,url,token,origin))return;
       if(scriptSync&&await scriptSync.handle(request,response,url,token,origin))return;
       if(meshKeep&&await meshKeep.handle(request,response,url,token,origin))return;
+      if(imports&&await imports.handle(request,response,url,token,origin))return;
       if(url.pathname==='/v1/playtests/repair'&&await repairPlaytestRecords(request,response))return;
       if(testApi&&await testApi(request,response,url,origin))return;
       if(handoffs&&await handoffs.handle(request,response,url,token,origin))return;
@@ -492,7 +510,7 @@ export async function createConnectionLab(options: Options) {
   origin = 'http://127.0.0.1:' + address.port;
   let cleanup: Promise<void> | null = null;
   return {
-    server, origin, token, agentToken, url: origin + (bridge ? '/studio#' : '/#') + token, meshKeep, appAssets,
+    server, origin, token, agentToken, url: origin + (bridge ? '/studio#' : '/#') + token, meshKeep, imports, appAssets,
     close(): Promise<void> {
       if (cleanup) return cleanup;
       shuttingDown = true; humanAssetSelection.close(); appAssets?.close(); const fenceErrors = fenceTasks(); handoffs?.close(); nativeAssetRegistry?.close(); ownedSourceVerifier?.dispose(); scriptSync?.close();

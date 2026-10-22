@@ -1,5 +1,5 @@
 'use strict';
-const { app, BrowserWindow, Menu, dialog: nativeDialog, nativeTheme, ipcMain, safeStorage, clipboard, shell, Notification } = require('electron');
+const { app, BrowserWindow, Menu, dialog: nativeDialog, nativeTheme, ipcMain, safeStorage, clipboard, shell, Notification, screen } = require('electron');
 const { spawn } = require('node:child_process');
 const { join, resolve, basename } = require('node:path');
 const { mkdir, readFile, writeFile, readdir } = require('node:fs/promises');
@@ -142,7 +142,7 @@ let projectPermissions;
 // (trusted-dialog.cjs) that the workspace renderer cannot answer. Purely informational one-button notices (About,
 // warnings) render in-page once the trusted workspace renderer attaches (in-app-dialog.cjs). Without an owner window,
 // e.g. for startup failures, the native message box remains. Folder/file pickers stay native.
-let appDialogs = null, trustedDialogs = null;
+let appDialogs = null, trustedDialogs = null, pyxBar = null;
 const dialog = Object.freeze({
   showMessageBox: (...args) => appDialogs ? appDialogs.showMessageBox(...args) : nativeDialog.showMessageBox(...args),
   showOpenDialog: (...args) => nativeDialog.showOpenDialog(...args),
@@ -481,7 +481,9 @@ async function reloadRecoveredWorkspace() {
   } finally { if (timer) clearTimeout(timer); previous.removeListener('closed', previousClosed); }
 }
 function makeWindow() {
-  window = new BrowserWindow({ width: 1512, height: 960, minWidth: 1000, minHeight: 680, show: false, title: 'Arcane', backgroundColor: '#0b0b0d', autoHideMenuBar: true, icon: join(__dirname, 'icon.png'),
+  window = new BrowserWindow({ width: 1512, height: 960, minWidth: 380, minHeight: 520, show: false, title: 'Arcane', backgroundColor: '#0b0b0d', autoHideMenuBar: true, icon: join(__dirname, 'icon.png'),
+    // Arcane's top bar is the title bar: no classic caption; the native window buttons (snap layouts included) draw over its right end.
+    titleBarStyle: 'hidden', titleBarOverlay: { color: '#200b0f', symbolColor: '#ffffff', height: 48 },
     webPreferences: { preload: join(__dirname, 'preload.cjs'), sandbox: true, contextIsolation: true, nodeIntegration: false, nodeIntegrationInWorker: false, nodeIntegrationInSubFrames: false, webSecurity: true, allowRunningInsecureContent: false, webviewTag: false, navigateOnDragDrop: false, spellcheck: false, devTools: !app.isPackaged, partition: 'arcane-workspace' } });
   const owner = window; if (deferWindowShow) { recoveryWindow = owner; recoveryWindowFailure = null; }
   const session = owner.webContents.session;
@@ -492,7 +494,7 @@ function makeWindow() {
   for (const type of ['will-navigate', 'will-redirect', 'will-frame-navigate']) window.webContents.on(type, event => { if (!event.isMainFrame || !policy.navigationAllowed(origin, event.url)) event.preventDefault(); });
   window.webContents.on('will-attach-webview', event => event.preventDefault());
   window.webContents.on('did-start-navigation', (_event, _url, inPlace, isMainFrame) => {
-    if (isMainFrame) { if (!inPlace) { runtimeRecovery?.invalidate(owner); if (window === owner) clearHumanAssetSelection(); } if (window === owner) { nativeHandoff?.cancelPending(); providerSetup?.cancelPending(); } }
+    if (isMainFrame) { if (!inPlace) { runtimeRecovery?.invalidate(owner); if (window === owner) { clearHumanAssetSelection(); pyxBar?.reset(); } } if (window === owner) { nativeHandoff?.cancelPending(); providerSetup?.cancelPending(); } }
   });
   window.webContents.on('did-navigate-in-page', (_event, url, isMainFrame) => {
     if (isMainFrame) runtimeRecovery?.navigatedInPage(owner, url);
@@ -507,7 +509,7 @@ function makeWindow() {
   for (const type of ['render-process-gone', 'destroyed']) dialogContents.on(type, () => appDialogs?.detach(dialogContents));
   window.once('ready-to-show', () => { firstReadyMs = performance.now() - started; if (!smoke && window === owner && recoveryWindow !== owner) owner.show(); });
   window.on('page-title-updated', event => event.preventDefault());
-  window.on('closed', () => { runtimeRecovery?.invalidate(owner); if (window === owner) { window = null; if (!switching && !closing) app.quit(); } });
+  window.on('closed', () => { runtimeRecovery?.invalidate(owner); if (window === owner) { window = null; pyxBar?.reset(); pyxBar?.hide(); if (!switching && !closing) app.quit(); } });
 }
 async function showCodeVerificationWarning() {
   if (smoke || closing || !window || window.isDestroyed() || !projectSession?.verificationUnavailable) return;
@@ -530,6 +532,7 @@ async function chooseProject() {
   const confirm = await dialog.showMessageBox(window, { type: 'question', title: 'Switch project', message: 'Stop this workspace and open the selected project?', detail: 'Active jobs and native connections will stop. Saved records are retained. No inference, Studio connection, write grant or upload starts automatically.', buttons: ['Cancel', 'Open project'], defaultId: 0, cancelId: 0 });
   if (confirm.response !== 1 || closing || switching || runtimeRecovery && runtimeRecovery.status().state !== 'ready') return;
   switching = true;
+  pyxBar?.reset(); pyxBar?.hide();
   try {
     // Discard the previous renderer and credential before selecting a new project.
     const old = window; window = null; if (old && !old.isDestroyed()) old.destroy();
@@ -554,7 +557,7 @@ function installMenu() {
   ]));
 }
 async function failStartup(message) {
-  providerSetup?.dispose(); void stopClaudeChat();
+  providerSetup?.dispose(); pyxBar?.dispose(); void stopClaudeChat();
   if (closing) return; closing = true; appDialogs?.dispose(); trustedDialogs?.dispose();
   if (!smoke) { try { await dialog.showMessageBox({ type: 'error', title: 'Arcane could not continue', message }); } catch { /* Shutdown still releases the owned diagnostic store. */ } }
   else if (smokeRoot) { try { await writeFile(join(smokeRoot, 'error.json'), JSON.stringify({ version: 1, error: message }) + '\n', { flag: 'wx' }); } catch {} }
@@ -783,7 +786,7 @@ if (profilePreparationFailed) app.whenReady().then(() => failStartup('Arcane app
 else if (!locked) app.quit();
 else {
   app.on('second-instance', () => { if (window) { if (window.isMinimized()) window.restore(); window.show(); window.focus(); } });
-  app.on('before-quit', event => { if (!closing) { event.preventDefault(); closing = true; providerSetup?.dispose(); void Promise.all([stopClaudeChat(), stopDaemon()]).then(([, clean]) => exitAfterDiagnostics(clean ? 0 : 1)).catch(() => exitAfterDiagnostics(1)); } });
+  app.on('before-quit', event => { if (!closing) { event.preventDefault(); closing = true; providerSetup?.dispose(); pyxBar?.dispose(); void Promise.all([stopClaudeChat(), stopDaemon()]).then(([, clean]) => exitAfterDiagnostics(clean ? 0 : 1)).catch(() => exitAfterDiagnostics(1)); } });
   app.on('window-all-closed', () => { if (!switching && !closing) app.quit(); });
   app.whenReady().then(async () => {
     try {
@@ -886,6 +889,19 @@ else {
       // Build-done notifications: fixed titles and a bounded body, only while the window is not focused; click focuses it.
       require('./build-notifications.cjs').createBuildNotifications({ enabled: !smoke, Notification,
         getWindow: () => closing || switching ? null : window }).installIpc(ipcMain, { trusted: rendererEvent });
+      // Pyx pop-out bar: a small always-on-top window whose preload exposes arcaneDesktop.pyx only. Its intents are relayed to
+      // the workspace renderer, which uses the main composer's own controls (pyx-link.ts); the bar holds no token.
+      pyxBar = require('./pyx-bar-host.cjs').createPyxBar({ BrowserWindow, screen, preload: join(__dirname, 'pyx-preload.cjs'), devTools: !app.isPackaged,
+        getMain: () => closing || switching ? null : window, getOrigin: () => origin,
+        available: () => !smoke && !closing && !switching && !!window && !window.isDestroyed() && policy.validOrigin(origin),
+        store: require('./pyx-bar-host.cjs').createPositionStore(() => smoke ? null : userRoot) }); // where the user dragged it, per display (pyx-bar.v1.json)
+      pyxBar.installIpc(ipcMain, { trusted: rendererEvent });
+      // The native window buttons draw over the top bar; their background follows the surface shown (the workspace bar or
+      // the near-black sign-in page) so they never sit on a mismatched block. Two fixed colours; the renderer only picks one.
+      ipcMain.on('arcane:titlebar-tone', (event, tone) => {
+        if (!rendererEvent(event) || (tone !== 'workspace' && tone !== 'page') || !window || window.isDestroyed() || typeof window.setTitleBarOverlay !== 'function') return;
+        try { window.setTitleBarOverlay({ color: tone === 'page' ? '#0b0a0b' : '#200b0f', symbolColor: '#ffffff', height: 48 }); } catch { /* The buttons keep their colour. */ }
+      });
       // Keep this mesh: the host asks in the trusted decision window (account, asset name, upload quota) and only then hands
       // the daemon a single-use consent over the private child IPC channel. Never automatic, never from a model.
       require('./mesh-keep.cjs').createMeshKeepHost({ enabled: !smoke,
@@ -897,6 +913,12 @@ else {
             buttons: ['Cancel', request.confirmLabel], defaultId: 0, cancelId: 0, noLink: true });
           return choice.response === 1 && !closing && !switching && window === owner;
         } }).installIpc(ipcMain, { trusted: rendererEvent });
+      // Importing models and effects: the native file picker, or files dropped on the preview. This host checks and reads
+      // each file, then hands the bytes to the daemon with a single-use consent over the private child IPC channel.
+      require('./asset-import.cjs').createAssetImportHost({ enabled: !smoke, dialog,
+        getSession: () => closing || switching || !window || !origin || !token || !child || !child.connected ? null :
+          { window, origin, token, send: message => { if (!child || !child.connected) throw new Error('Runtime unavailable.'); child.send(message); } },
+      }).installIpc(ipcMain, { trusted: rendererEvent });
       require('./desktop-updates.cjs').createDesktopUpdates({ enabled: !smoke && !!process.env.LOCALAPPDATA,
         development: !app.isPackaged,
         installRoot: join(process.env.LOCALAPPDATA ?? app.getPath('userData'), 'Arcane', 'Desktop'),

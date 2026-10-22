@@ -13,7 +13,8 @@ export interface PlanOffer extends Offer { actionsPerMonth: number; features: st
 export interface PackOffer extends Offer { actions: number }
 export interface CreditOffer extends Offer { credits: number }
 export interface UsageSummary {
-  month: { key: string; used: number }; today: { key: string; used: number };
+  /** limit/resetsAt: the plan allowance and its reset instant, when the plan feed supplies them (both optional). */
+  month: { key: string; used: number; limit?: number; resetsAt?: string }; today: { key: string; used: number };
   days: { key: string; used: number }[]; conversations: { conversation: string; used: number }[];
   byKind: { 'build-turn': number; 'studio-change': number };
   integrity: 'verified' | 'mismatch' | 'empty';
@@ -77,12 +78,15 @@ export function readPlansState(value: unknown): PlansState | null {
   const conversations: { conversation: string; used: number }[] = [];
   for (const raw of usage.conversations) { const c = obj(raw); if (!c || !str(c.conversation, 160) || !int(c.used)) return null; conversations.push({ conversation: c.conversation, used: c.used }); }
   if (!['verified', 'mismatch', 'empty'].includes(String(usage.integrity))) return null;
+  // Optional allowance fields: a positive whole limit and an ISO reset instant. Anything else is ignored, never guessed.
+  const limit = Number.isSafeInteger(month.limit) && (month.limit as number) > 0 ? month.limit as number : null;
+  const resetsAt = str(month.resetsAt, 40) && Number.isFinite(Date.parse(month.resetsAt as string)) ? month.resetsAt as string : null;
   return {
     catalog: { placeholderPrices: catalog.placeholderPrices, currency: catalog.currency, action: { singular: action.singular, plural: action.plural, definition: action.definition },
       plans, packs, credits: { blurb: credits.blurb, offers: creditOffers } },
     billing: { state: billing.state as PlansState['billing']['state'], origins: [...billing.origins as string[]] },
     gateway: { state: gateway.state as PlansState['gateway']['state'], message: gateway.message, showInModelPicker: gateway.showInModelPicker },
-    usage: { month: { key: month.key, used: month.used }, today: { key: today.key, used: today.used }, days, conversations,
+    usage: { month: { key: month.key, used: month.used, ...(limit === null ? {} : { limit }), ...(resetsAt === null ? {} : { resetsAt }) }, today: { key: today.key, used: today.used }, days, conversations,
       byKind: { 'build-turn': kinds['build-turn'], 'studio-change': kinds['studio-change'] }, integrity: usage.integrity as UsageSummary['integrity'] },
   };
 }
@@ -93,9 +97,53 @@ export function formatPrice(cents: number, currency: string): string {
 }
 export const formatCount = (value: number) => new Intl.NumberFormat('en-US').format(value);
 export function actionsLabel(count: number, singular = 'action', plural = 'actions'): string { return formatCount(count) + ' ' + (count === 1 ? singular : plural); }
-export function chipLabel(state: PlansState): { value: string; unit: string; aria: string } {
-  const used = state.usage.month.used, unit = used === 1 ? state.catalog.action.singular : state.catalog.action.plural;
-  return { value: formatCount(used), unit, aria: actionsLabel(used, state.catalog.action.singular, state.catalog.action.plural) + ' used this month. Open Plans and credits.' };
+/** The free plan's monthly allowance (product rule: 500 Arcane actions a month). Used whenever the plan feed names no limit. */
+export const FREE_PLAN_ACTIONS_PER_MONTH = 500;
+/** At or above this share of the allowance the meter turns to its near-limit state. */
+export const ACTIONS_NEAR_LIMIT = 0.9;
+export type ActionsLevel = 'ok' | 'near' | 'over';
+export interface ActionsAllowance {
+  used: number; limit: number; left: number; over: number; ratio: number; level: ActionsLevel;
+  /** ISO instant the monthly count restarts; null when unknown. */
+  resetsAt: string | null; source: 'feed' | 'free-plan';
+}
+/**
+ * Used against the plan limit. The limit is the feed's `usage.month.limit` or, without one, the free plan's 500. The reset is
+ * the feed's `resetsAt` or the start of the next month of `usage.month.key` (the local ledger counts by UTC calendar month).
+ */
+export function actionsAllowance(state: PlansState): ActionsAllowance {
+  const { used, key, limit: fed, resetsAt: fedReset } = state.usage.month;
+  const limit = fed ?? FREE_PLAN_ACTIONS_PER_MONTH;
+  const match = /^(\d{4})-(\d{2})$/.exec(key);
+  const derived = match ? new Date(Date.UTC(Number(match[1]), Number(match[2]), 1)).toISOString() : null;
+  const ratio = limit > 0 ? used / limit : 0;
+  return { used, limit, left: Math.max(0, limit - used), over: Math.max(0, used - limit), ratio,
+    level: used >= limit ? 'over' : ratio >= ACTIONS_NEAR_LIMIT ? 'near' : 'ok', resetsAt: fedReset ?? derived, source: fed ? 'feed' : 'free-plan' };
+}
+/** "1 Nov": the reset day in UTC (the ledger's month boundary), or null. */
+export function resetDayLabel(iso: string | null): string | null {
+  if (!iso) return null; const at = Date.parse(iso); if (!Number.isFinite(at)) return null;
+  try { return new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' }).format(new Date(at)); } catch { return null; }
+}
+/** "312 / 500": used, then the plan limit. */
+export const usedOfLimit = (allowance: ActionsAllowance) => formatCount(allowance.used) + ' / ' + formatCount(allowance.limit);
+/** "188 left · resets 1 Nov" or "250 over · resets 1 Nov". */
+export function allowanceDetail(allowance: ActionsAllowance): string {
+  const reset = resetDayLabel(allowance.resetsAt);
+  return (allowance.over > 0 ? formatCount(allowance.over) + ' over' : formatCount(allowance.left) + ' left') + (reset ? ' · resets ' + reset : '');
+}
+/** Screen-reader sentence for the meter and the top-bar pill. */
+export function allowanceSentence(allowance: ActionsAllowance, singular = 'action', plural = 'actions'): string {
+  const reset = resetDayLabel(allowance.resetsAt);
+  return formatCount(allowance.used) + ' of ' + formatCount(allowance.limit) + ' Arcane ' + (allowance.limit === 1 ? singular : plural) + ' used this month'
+    + (allowance.over > 0 ? ', ' + formatCount(allowance.over) + ' over the limit' : ', ' + formatCount(allowance.left) + ' left') + (reset ? ', resets ' + reset : '');
+}
+/** Top-bar pill: value "312", unit "/ 500" (used / plan limit), level for colour. */
+export function chipLabel(state: PlansState): { value: string; unit: string; aria: string; level: ActionsLevel; title: string } {
+  const allowance = actionsAllowance(state);
+  return { value: formatCount(allowance.used), unit: '/ ' + formatCount(allowance.limit), level: allowance.level,
+    aria: allowanceSentence(allowance, state.catalog.action.singular, state.catalog.action.plural) + '. Open Plans and credits.',
+    title: 'Arcane actions this month: ' + usedOfLimit(allowance) + ' · ' + allowanceDetail(allowance) };
 }
 
 /** Only an https URL on an origin the daemon verified may leave the app. */
@@ -217,7 +265,24 @@ export function startPlans(doc: Document, options: PlansOptions) {
       const label = chipLabel(state);
       const value = el('arcane-balance-chip-value'), unit = el('arcane-balance-chip-unit');
       if (value) value.textContent = label.value; if (unit) unit.textContent = label.unit;
-      chip.setAttribute('aria-label', label.aria); chip.title = 'Arcane actions used this month'; chip.hidden = false;
+      chip.setAttribute('aria-label', label.aria); chip.title = label.title; chip.dataset.level = label.level; chip.hidden = false;
+    }
+    // Sidebar footer: used / plan limit, the bar and (in the footer menu) what is left and when it resets.
+    const sidebar = el('sidebar-actions');
+    if (sidebar) {
+      const allowance = actionsAllowance(state), sentence = allowanceSentence(allowance, state.catalog.action.singular, state.catalog.action.plural);
+      const value = el('sidebar-actions-value'), limit = el('sidebar-actions-limit'), meter = el('sidebar-actions-meter'), fill = el('sidebar-actions-fill');
+      if (value) value.textContent = formatCount(allowance.used);
+      if (limit) limit.textContent = '/ ' + formatCount(allowance.limit);
+      if (meter) {
+        meter.setAttribute('aria-valuemax', String(allowance.limit)); meter.setAttribute('aria-valuenow', String(Math.min(allowance.used, allowance.limit)));
+        meter.setAttribute('aria-valuetext', sentence); meter.hidden = false;
+      }
+      fill?.style.setProperty('--actions-used', String(Math.min(1, Math.max(0, allowance.ratio))));
+      sidebar.dataset.level = allowance.level; sidebar.dataset.limitSource = allowance.source; sidebar.title = usedOfLimit(allowance) + ' · ' + allowanceDetail(allowance);
+      const detail = el('sidebar-menu-usage'), detailText = el('sidebar-menu-usage-text');
+      if (detail && detailText) { detailText.textContent = allowanceDetail(allowance); detail.dataset.level = allowance.level; detail.hidden = false; }
+      sidebar.hidden = false;
     }
     renderUsage(state);
     const placeholder = el('plans-placeholder'); if (placeholder) placeholder.hidden = !state.catalog.placeholderPrices;

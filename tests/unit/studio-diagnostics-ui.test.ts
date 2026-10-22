@@ -113,6 +113,10 @@ test('Studio output dock shows a counted badge and an expandable list in the rea
   assert.equal(await toggle.getAttribute('aria-expanded'), 'false');
   assert.equal(await page.locator('#studio-diagnostics-panel').isVisible(), false);
   assert.equal(await dock.getAttribute('data-severity'), 'error');
+  // A current read with errors: the errors tone (C22.1 severity classes), the terminal glyph and no visible label.
+  assert.match(await dock.getAttribute('class') ?? '', /(^| )studio-diagnostics--errors( |$)/);
+  assert.equal(await page.locator('#studio-diagnostics-toggle rect').count(), 1, 'terminal glyph');
+  assert.equal(await page.locator('.studio-diagnostics-label').isVisible(), false);
   await toggle.click();
   assert.equal(await toggle.getAttribute('aria-expanded'), 'true');
   const rows = page.locator('.studio-diagnostic');
@@ -179,10 +183,41 @@ test('Fix prefills the active composer with a precise request and never sends it
   await page.waitForFunction(() => document.querySelectorAll('.studio-diagnostic').length === 0);
   const clear = requests.find(r => r.path === '/v1/studio/diagnostics/clear');
   assert.ok(clear); assert.equal(clear.method, 'POST'); assert.equal(clear.authorization, 'Bearer ' + HUMAN); assert.equal(clear.body, '{}');
-  assert.equal(await page.locator('.studio-diagnostics-status').textContent(), 'No Studio errors or warnings.');
+  assert.equal(await page.locator('.studio-diagnostics-status').textContent(), 'Cleared.');
   assert.equal(await page.locator('.studio-diagnostics-clear').isDisabled(), true);
-  // Once closed with nothing to show, the badge leaves the topbar.
+  // Clearing is not a read: the pill stays neutral (never green, never "0") until the next read proves the output clean.
+  const pill = page.locator('#studio-diagnostics');
+  assert.match(await pill.getAttribute('class') ?? '', /(^| )studio-diagnostics--neutral( |$)/);
+  assert.equal(await pill.getAttribute('data-severity'), 'unknown');
+  assert.equal(await page.locator('.studio-diagnostics-count').textContent(), '\u2013');
+  await page.evaluate(() => window.dockFixture.dock.refresh());
+  assert.match(await pill.getAttribute('class') ?? '', /(^| )studio-diagnostics--clear( |$)/);
+  assert.equal(await pill.getAttribute('data-severity'), 'none');
+  assert.equal(await page.locator('.studio-diagnostics-count').textContent(), '', 'a clean read shows a dot, not a number');
+  assert.equal(await page.locator('#studio-diagnostics-toggle').getAttribute('aria-label'), 'Studio output: no errors or warnings');
+  assert.equal(await page.locator('.studio-diagnostics-status').textContent(), 'No Studio errors or warnings.');
+  // While a Studio session exists the pill stays in the top bar after the list closes.
   await page.locator('#studio-diagnostics-toggle').click();
-  assert.equal(await page.locator('#studio-diagnostics').isVisible(), false);
+  assert.equal(await pill.isVisible(), true);
+  await page.evaluate(() => window.dockFixture.dock.stop());
+});
+
+test('A failed read never looks current: the pill turns neutral and keeps the earlier list as earlier', browserOptions, async t => {
+  const { page, setReport } = await fixture(t);
+  const pill = page.locator('#studio-diagnostics');
+  assert.match(await pill.getAttribute('class') ?? '', /(^| )studio-diagnostics--errors( |$)/);
+  setReport({} as unknown as ReturnType<typeof report>);
+  await page.evaluate(() => window.dockFixture.dock.refresh());
+  assert.match(await pill.getAttribute('class') ?? '', /(^| )studio-diagnostics--neutral( |$)/);
+  assert.doesNotMatch(await pill.getAttribute('class') ?? '', /studio-diagnostics--(clear|warnings|errors)/);
+  assert.equal(await pill.getAttribute('data-severity'), 'unknown');
+  assert.equal(await page.locator('.studio-diagnostics-count').textContent(), '3');
+  assert.equal(await page.locator('#studio-diagnostics-toggle').getAttribute('aria-label'), 'Studio output: 2 errors, 1 warning (from an earlier read)');
+  await page.locator('#studio-diagnostics-toggle').click();
+  assert.equal(await page.locator('.studio-diagnostics-status').textContent(), 'Showing an earlier read of Studio output.');
+  setReport(report());
+  await page.evaluate(() => window.dockFixture.dock.refresh());
+  assert.match(await pill.getAttribute('class') ?? '', /(^| )studio-diagnostics--errors( |$)/);
+  assert.equal(await page.locator('.studio-diagnostics-status').textContent(), '');
   await page.evaluate(() => window.dockFixture.dock.stop());
 });

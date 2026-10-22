@@ -10,6 +10,9 @@ const SOURCE_ROOTS = ['apps', 'packages', 'workers', 'plugin', 'scripts', 'skill
 const EXCLUDED_DIRECTORIES = new Set(['node_modules', 'runtime', '.runtime', '.tmp', '.git', '.codex', '.agents', 'generated', '__pycache__', '.worker', 'cache']);
 const EXTENSIONS = /\.(?:ts|js|mjs|cjs|cs|json|map|html|css|md|csv|py|luau|lua|rbxm|rbxmx|yml|yaml|txt)$/;
 export const BRAND_BITMAP_PATH = 'apps/desktop/public/brand/arcane-ridges.png';
+export const FONT_FILES = ['ibm-plex-sans-latin-wght-normal.woff2', 'ibm-plex-sans-latin-ext-wght-normal.woff2', 'archivo-latin-wght-normal.woff2',
+  'archivo-latin-ext-wght-normal.woff2', 'ibm-plex-mono-latin-400-normal.woff2', 'ibm-plex-mono-latin-ext-400-normal.woff2',
+  'ibm-plex-mono-latin-500-normal.woff2', 'ibm-plex-mono-latin-ext-500-normal.woff2'].map(name => 'apps/desktop/public/fonts/' + name);
 export const REQUIRED_FRONTEND_FILES = [
   'apps/desktop/public/studio.html', 'apps/desktop/public/studio.css',
   'dist/apps/desktop/src/studio.js', 'dist/apps/desktop/src/codex-chat.js',
@@ -30,12 +33,14 @@ export const REQUIRED_FRONTEND_FILES = [
   'apps/desktop/src/claude-preferences.ts', 'dist/apps/desktop/src/claude-preferences.js', 'dist/apps/desktop/src/claude-preferences.js.map',
   'apps/desktop/src/arcane-chat.ts', 'dist/apps/desktop/src/arcane-chat.js', 'dist/apps/desktop/src/arcane-chat.js.map',
   'apps/desktop/src/setup-checklist.ts', 'dist/apps/desktop/src/setup-checklist.js', 'dist/apps/desktop/src/setup-checklist.js.map',
+  'apps/desktop/src/workspace-topbar.ts', 'dist/apps/desktop/src/workspace-topbar.js', 'dist/apps/desktop/src/workspace-topbar.js.map',
   'apps/desktop/src/arcane-dialog.ts', 'dist/apps/desktop/src/arcane-dialog.js', 'dist/apps/desktop/src/arcane-dialog.js.map',
   'apps/desktop/src/plans.ts', 'dist/apps/desktop/src/plans.js', 'dist/apps/desktop/src/plans.js.map',
   'apps/desktop/src/notifications.ts', 'dist/apps/desktop/src/notifications.js', 'dist/apps/desktop/src/notifications.js.map',
   'apps/desktop/src/runtime-recovery.ts', 'dist/apps/desktop/src/runtime-recovery.js', 'dist/apps/desktop/src/runtime-recovery.js.map',
   'apps/desktop/src/desktop-update.ts', 'dist/apps/desktop/src/desktop-update.js', 'dist/apps/desktop/src/desktop-update.js.map',
   'apps/desktop/src/mesh-keep.ts', 'dist/apps/desktop/src/mesh-keep.js', 'dist/apps/desktop/src/mesh-keep.js.map',
+  'apps/desktop/src/asset-imports.ts', 'dist/apps/desktop/src/asset-imports.js', 'dist/apps/desktop/src/asset-imports.js.map',
   'apps/desktop/src/workspace-shell.ts', 'dist/apps/desktop/src/workspace-shell.js',
   'dist/apps/desktop/src/workspace-shell.js.map', 'apps/desktop/src/asset-downloads.ts',
   'dist/apps/desktop/src/asset-downloads.js', 'dist/apps/desktop/src/asset-downloads.js.map',
@@ -56,11 +61,17 @@ export const REQUIRED_FRONTEND_FILES = [
   'apps/desktop/src/script-sync.ts', 'dist/apps/desktop/src/script-sync.js', 'dist/apps/desktop/src/script-sync.js.map',
   'apps/desktop/src/script-diff.ts', 'dist/apps/desktop/src/script-diff.js', 'dist/apps/desktop/src/script-diff.js.map',
   'apps/desktop/src/glb-preflight.ts', 'dist/apps/desktop/src/glb-preflight.js', 'dist/apps/desktop/src/glb-preflight.js.map',
-  'apps/desktop/public/asset-viewer-runtime.mjs', 'apps/desktop/public/vendor/three/manifest.json', 'apps/desktop/public/vendor/three/LICENSE',
+  'apps/desktop/public/pyx-bar.html', 'apps/desktop/public/pyx-bar.css',
+  'apps/desktop/src/pyx-bar.ts', 'dist/apps/desktop/src/pyx-bar.js', 'dist/apps/desktop/src/pyx-bar.js.map',
+  'apps/desktop/src/pyx-sprite.ts', 'dist/apps/desktop/src/pyx-sprite.js', 'dist/apps/desktop/src/pyx-sprite.js.map',
+  'apps/desktop/src/pyx-link.ts', 'dist/apps/desktop/src/pyx-link.js', 'dist/apps/desktop/src/pyx-link.js.map',
+  'apps/desktop/public/asset-viewer-runtime.mjs', 'apps/desktop/public/effect-viewer-runtime.mjs', 'apps/desktop/public/vendor/three/manifest.json', 'apps/desktop/public/vendor/three/LICENSE',
   ...['build/three.module.js', 'build/three.core.js', 'examples/jsm/loaders/GLTFLoader.js', 'examples/jsm/controls/OrbitControls.js', 'examples/jsm/utils/BufferGeometryUtils.js', 'examples/jsm/utils/SkeletonUtils.js'].map(path => 'apps/desktop/public/vendor/three/' + path),
   'apps/desktop/src/learning-panel.ts', 'dist/apps/desktop/src/learning-panel.js', 'dist/apps/desktop/src/learning-panel.js.map', 'apps/desktop/src/codex-history.ts','apps/desktop/src/workflow-panel.ts', 'dist/apps/desktop/src/codex-history.js','dist/apps/desktop/src/workflow-panel.js', 'dist/apps/desktop/src/codex-history.js.map','dist/apps/desktop/src/workflow-panel.js.map', BRAND_BITMAP_PATH,
+  ...FONT_FILES, 'apps/desktop/public/fonts/manifest.json',
+  'apps/desktop/public/fonts/OFL-IBM-Plex-Sans.txt', 'apps/desktop/public/fonts/OFL-Archivo.txt', 'apps/desktop/public/fonts/OFL-IBM-Plex-Mono.txt',
 ];
-const CONTROLLED_FILES = new Set([BRAND_BITMAP_PATH, 'apps/desktop/electron/icon.png', 'apps/desktop/electron/icon.ico', 'scripts/setup-arcane.ps1', 'scripts/launch-arcane.cmd', 'installer/setup.manifest', 'installer/launcher.manifest', 'installer/uninstaller.manifest', 'apps/desktop/public/vendor/three/LICENSE', ...MANAGED_LUAU_FILES]);
+const CONTROLLED_FILES = new Set([BRAND_BITMAP_PATH, 'apps/desktop/electron/icon.png', 'apps/desktop/electron/icon.ico', 'scripts/setup-arcane.ps1', 'scripts/launch-arcane.cmd', 'installer/setup.manifest', 'installer/launcher.manifest', 'installer/uninstaller.manifest', 'apps/desktop/public/vendor/three/LICENSE', ...FONT_FILES, ...MANAGED_LUAU_FILES]);
 const FIRST_RUN_FILES = ['scripts/setup-arcane.ps1', 'scripts/launch-arcane.cmd', 'docs/build/FIRST_RUN.md'];
 const allowedFile = path => EXTENSIONS.test(path) || CONTROLLED_FILES.has(path);
 export function validateBrandBitmap(bytes) {
@@ -105,6 +116,7 @@ async function regularBytes(path) {
 }
 function secretCheck(bytes, name) {
   if (name === BRAND_BITMAP_PATH) validateBrandBitmap(bytes);
+  if (FONT_FILES.includes(name) && !bytes.subarray(0, 4).equals(Buffer.from('wOF2'))) throw new Error('Invalid woff2 signature in ' + name + '.');
   // This is defense-in-depth, not a claim that a regex can identify every secret.
   // Session/provider storage is excluded structurally, irrespective of contents.
   const text = bytes.toString('utf8');

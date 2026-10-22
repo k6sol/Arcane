@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Pyx</title>
+  <link rel="stylesheet" href="/pyx-bar.css">
+  <script type="module" src="/pyx-bar.js"></script>
+</head>
+<body class="pyx-window">
+ <main id="pyx" class="pyx" data-autostart="true" data-open="false" data-mood="idle" data-phase="idle" aria-label="Pyx">
+  <div class="pyx-bubble-slot">
+   <div id="pyx-bubble" class="pyx-bubble pyx-hit" data-tone="reply" hidden><span id="pyx-bubble-text" class="pyx-bubble-text"></span><button id="pyx-bubble-open" class="pyx-bubble-open" type="button" hidden>Open Arcane</button></div>
+  </div>
+  <form id="pyx-form" class="pyx-bar pyx-hit" autocomplete="off">
+   <button id="pyx-pet" class="pyx-pet" type="button" aria-label="Open Arcane" aria-describedby="pyx-mood" data-mood="idle"><span class="pyx-pet-hop"><svg id="pyx-sprite" class="pyx-sprite" viewBox="0 0 24 24" width="48" height="48" shape-rendering="crispEdges" aria-hidden="true" focusable="false"></svg></span><svg id="pyx-badge" class="pyx-badge" viewBox="0 0 5 9" width="10" height="18" shape-rendering="crispEdges" aria-hidden="true" focusable="false" hidden><rect x="0" y="0" width="5" height="9" fill="#14040A"/><rect x="1" y="1" width="3" height="7" fill="#E5323F"/><rect x="2" y="2" width="1" height="3" fill="#FFFFFF"/><rect x="2" y="6" width="1" height="1" fill="#FFFFFF"/></svg></button>
+   <span id="pyx-mood" class="pyx-sr">Pyx is resting</span>
+   <label for="pyx-input" class="pyx-sr">Tell Pyx what to build</label>
+   <input id="pyx-input" class="pyx-input" type="text" maxlength="131072" spellcheck="false" autocomplete="off" enterkeyhint="send" placeholder="Tell Pyx what to build">
+   <button id="pyx-status" class="pyx-status" type="button" hidden>
+    <span class="pyx-status-head"><span id="pyx-status-title" class="pyx-status-title"></span><span class="pyx-status-meta"><span id="pyx-live-dot" class="pyx-live-dot" aria-hidden="true"></span><span id="pyx-status-count"></span></span></span>
+    <span id="pyx-progress" class="pyx-progress" role="progressbar" aria-label="Build progress" aria-valuemin="0" aria-valuemax="1" aria-valuenow="0" hidden><span id="pyx-progress-fill" class="pyx-progress-fill"></span></span>
+   </button>
+   <button id="pyx-model" class="pyx-model pyx-hover" type="button" aria-label="Choose a model"><svg id="pyx-model-logo" class="pyx-model-logo" viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true" focusable="false" hidden></svg><span id="pyx-model-name" class="pyx-model-name">Choose model</span><span id="pyx-model-divider" class="pyx-model-divider" aria-hidden="true" hidden></span><span id="pyx-model-pips" class="pyx-model-pips" data-level="0" aria-hidden="true" hidden><span class="pyx-pip"></span><span class="pyx-pip"></span><span class="pyx-pip"></span></span><svg class="pyx-model-chevron" viewBox="0 0 24 24" width="10" height="10" aria-hidden="true" focusable="false"><path d="M6 9l6 6 6-6"/></svg></button>
+   <button id="pyx-stop" class="pyx-stop pyx-hover" type="button" aria-label="Stop the run" hidden><svg viewBox="0 0 24 24" width="10" height="10" aria-hidden="true" focusable="false"><rect x="4" y="4" width="16" height="16" rx="3"/></svg>Stop</button>
+   <button id="pyx-send" class="pyx-send" type="submit" aria-label="Send to Pyx"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg></button>
+   <button id="pyx-close" class="pyx-close" type="button" aria-label="Close Pyx"><svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false"><path d="M6 6l12 12"/><path d="M18 6L6 18"/></svg></button>
+  </form>
+  <div id="pyx-suggestions" class="pyx-suggestions" role="group" aria-label="Suggestions. Clicking one fills the box; nothing sends until you press Send." hidden></div>
+  <p id="pyx-announce" class="pyx-sr" role="status" aria-live="polite"></p>
+ </main>
+</body>
+</html>

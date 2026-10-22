@@ -9,7 +9,9 @@ const MAX_DRAWS = 256;
 const MAX_COORDINATE = 1e12;
 const MAX_PIXELS = 4_000_000;
 const VIEWS = ['perspective', 'front', 'side', 'top'];
-const MODES = ['rendered', 'wireframe', 'clay'];
+// 'normals' and 'uv' are inspection modes. 'uv' is offered only when a mesh carries a UV0 map.
+const MODES = ['rendered', 'wireframe', 'clay', 'normals', 'uv'];
+const TURNTABLE_SPEED = 1.6; // OrbitControls autoRotateSpeed: one turn in about 37 s.
 const LIGHTING = {
   studio: { hemisphere: 2.2, lights: [3.8, 2.4, 1.3], environment: 1, exposure: 1 },
   soft: { hemisphere: 3, lights: [1.8, 1.4, 1.1], environment: 1.2, exposure: 1 },
@@ -99,6 +101,43 @@ function studioEnvironment(renderer, owned) {
   finally { generator.dispose(); }
 }
 
+// A two-tone checker (8 x 8 cells, repeated twice per UV unit) that shows stretch, seams and
+// texel density. Generated locally; no image, network or model data is involved.
+function uvChecker(renderer, owned) {
+  const size = 256, cell = size / 8, data = new Uint8Array(size * size * 4);
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+    const i = (y * size + x) * 4, odd = (Math.floor(x / cell) + Math.floor(y / cell)) % 2 === 1;
+    const edge = x % cell === 0 || y % cell === 0;
+    const [r, g, b] = edge ? [40, 18, 22] : odd ? [229, 50, 63] : [244, 239, 239];
+    data[i] = r; data[i + 1] = g; data[i + 2] = b; data[i + 3] = 255;
+  }
+  const texture = owned.capture(new THREE.DataTexture(data, size, size));
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
+  texture.repeat.set(2, 2);
+  texture.generateMipmaps = true;
+  texture.minFilter = THREE.LinearMipmapLinearFilter;
+  texture.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
+  texture.needsUpdate = true;
+  return texture;
+}
+
+// Inspection materials replace the source material, so an alpha-tested (cutout) source would
+// otherwise render as solid cards. Keep its cutout by discarding below the source alpha cutoff.
+function keepCutout(made, source) {
+  const map = source.map, cutoff = source.alphaTest;
+  if (!map?.isTexture || !(cutoff > 0)) return made;
+  made.defines = { ...(made.defines ?? {}), USE_UV: '' };
+  made.onBeforeCompile = shader => {
+    shader.uniforms.arcaneCutoutMap = { value: map };
+    shader.uniforms.arcaneCutoff = { value: cutoff };
+    shader.fragmentShader = 'uniform sampler2D arcaneCutoutMap;\nuniform float arcaneCutoff;\n' +
+      shader.fragmentShader.replace('void main() {', 'void main() {\n\tif ( texture2D( arcaneCutoutMap, vUv ).a < arcaneCutoff ) discard;');
+  };
+  made.customProgramCacheKey = () => 'arcane-cutout';
+  return made;
+}
+
 function validateScene(root, scanGeometry = false) {
   root.updateMatrixWorld(true);
   const materials = new Set(), geometries = new Set();
@@ -182,6 +221,9 @@ function validateScene(root, scanGeometry = false) {
  * normalization, including node transforms, in glTF meters (units: 'meters').
  * Getters return detached snapshots; playing records intent during visibility
  * and reduced-motion suspension, and becomes false at a nonlooping clip's end.
+ * modes() lists the display modes this asset supports ('uv' needs a UV0 map);
+ * setMode rejects any other. setTurntable records intent; like playback it only
+ * moves while visible and without reduced motion. Turntable starts off.
  */
 export async function createAssetViewer({ host, bytes, label, signal, onStatus }) {
   if (!(host instanceof HTMLElement) || !(bytes instanceof ArrayBuffer) || !(signal instanceof AbortSignal)) throw new TypeError('Asset viewer requires a host, ArrayBuffer and AbortSignal.');
@@ -195,7 +237,7 @@ export async function createAssetViewer({ host, bytes, label, signal, onStatus }
   let disposed = false, epoch = 0, raf = null, lastTime = null, playing = false, dirty = true;
   let renderer, controls, controlsCleanup, mixer, action, gltf, resizeObserver, intersectionObserver, mutationObserver, canvas;
   let view = 'perspective', mode = 'rendered', selectedIndex = -1, speed = 1, loop = true, stoppedTime = 0;
-  let clips = [], materialSlots = [], clayMaterials = new Map(), hemisphere, lights = [];
+  let clips = [], materialSlots = [], derivedMaterials = new Map(), hemisphere, lights = [], availableModes = MODES.slice(0, 4), checker = null, turntable = false;
   let rejectPending, loadFailure, resolutionMedia, intersectionKnown = false, intersecting = false, lastVisible = false, width = 0, height = 0, fitNeeded = true, maxDimension = 8192;
   // True once the user (or the orbit/pan/zoom API) moves the camera away from the
   // automatic framing; a resize then keeps that camera instead of refitting.
@@ -233,8 +275,8 @@ export async function createAssetViewer({ host, bytes, label, signal, onStatus }
     renderer?.forceContextLoss();
     canvas?.remove();
     scene?.clear();
-    action = controlsCleanup = hemisphere = null;
-    lights = []; materialSlots = []; clayMaterials.clear();
+    action = controlsCleanup = hemisphere = checker = null;
+    lights = []; materialSlots = []; derivedMaterials.clear(); turntable = false;
     gltf = renderer = controls = mixer = scene = camera = model = normalizedBox = null;
     if (owners.get(host)?.dispose === dispose) owners.delete(host);
   }
@@ -311,7 +353,10 @@ export async function createAssetViewer({ host, bytes, label, signal, onStatus }
     }
     return true;
   }
-  const animate = () => playing && !!action && clips[selectedIndex].duration > 0 && !motion.matches;
+  const playingClip = () => playing && !!action && clips[selectedIndex].duration > 0 && !motion.matches;
+  // The turntable is continuous motion: it records intent but stays still under reduced motion.
+  const spinning = () => turntable && !motion.matches && !!controls;
+  const animate = () => playingClip() || spinning();
   function requestRender() {
     dirty = true;
     schedule();
@@ -328,10 +373,14 @@ export async function createAssetViewer({ host, bytes, label, signal, onStatus }
       if (frameEpoch !== epoch || !hostVisible()) { lastTime = null; return; }
       try {
         if (animate()) {
-          mixer.update(lastTime === null ? 0 : Math.min((time - lastTime) / 1000, .1));
+          const delta = lastTime === null ? 0 : Math.min((time - lastTime) / 1000, .1);
           lastTime = time;
-          validateScene(gltf.scene);
-          if (!loop && action.paused) playing = false;
+          if (playingClip()) {
+            mixer.update(delta);
+            validateScene(gltf.scene);
+            if (!loop && action.paused) playing = false;
+          }
+          if (spinning()) { controls.autoRotate = true; controls.update(delta); }
         } else lastTime = null;
         draw();
         schedule();
@@ -449,7 +498,8 @@ export async function createAssetViewer({ host, bytes, label, signal, onStatus }
     };
     controls.enableDamping = false;
     controls.enablePan = true;
-    controls.autoRotate = false;
+    controls.autoRotate = false; // The turntable turns it on per frame while it may move.
+    controls.autoRotateSpeed = TURNTABLE_SPEED;
     controls.cursorStyle = 'grab';
     controls.addEventListener('change', controlsChanged);
   }
@@ -462,19 +512,29 @@ export async function createAssetViewer({ host, bytes, label, signal, onStatus }
     configureControls();
     reset();
   }
+  // One cached replacement per (inspection mode, source material); owned and disposed with the viewer.
+  function inspectionMaterial(value, material, hasUv) {
+    const kind = value === 'uv' && !hasUv ? 'clay' : value;
+    let cache = derivedMaterials.get(kind);
+    if (!cache) derivedMaterials.set(kind, cache = new Map());
+    if (!cache.has(material)) {
+      const shared = { side: material.side, flatShading: !!material.flatShading };
+      const made = kind === 'normals' ? new THREE.MeshNormalMaterial(shared)
+        : kind === 'uv' ? new THREE.MeshStandardMaterial({ ...shared, color: 0xffffff, map: checker ??= uvChecker(renderer, owned), roughness: .8, metalness: 0 })
+        : new THREE.MeshStandardMaterial({ ...shared, color: 0x9e9698, roughness: .85, metalness: 0 });
+      cache.set(material, owned.capture(keepCutout(made, material)));
+    }
+    return cache.get(material);
+  }
   function setMode(value) {
     if (disposed) return;
-    choice(value, MODES);
+    choice(value, availableModes);
     if (mode === value) return;
     for (const slot of materialSlots) {
+      const hasUv = !!slot.object.geometry?.getAttribute?.('uv');
       const convert = material => {
         if (!material) return material;
-        if (value === 'clay') {
-          if (!clayMaterials.has(material)) {
-            clayMaterials.set(material, owned.capture(new THREE.MeshStandardMaterial({ color: 0xbfc3ca, roughness: .85, metalness: 0, side: material.side, flatShading: !!material.flatShading })));
-          }
-          return clayMaterials.get(material);
-        }
+        if (value === 'clay' || value === 'normals' || value === 'uv') return inspectionMaterial(value, material, hasUv);
         if ('wireframe' in material) {
           const enabled = value === 'wireframe' || slot.wireframes.get(material);
           if (material.wireframe !== enabled) { material.wireframe = enabled; material.needsUpdate = true; }
@@ -495,6 +555,14 @@ export async function createAssetViewer({ host, bytes, label, signal, onStatus }
     scene.environmentIntensity = preset.environment;
     renderer.toneMappingExposure = preset.exposure;
     requestRender();
+  }
+  function setTurntable(enabled) {
+    if (disposed) return;
+    boolean(enabled);
+    turntable = enabled;
+    controls.autoRotateSpeed = TURNTABLE_SPEED;
+    controls.autoRotate = spinning();
+    stopFrame(); requestRender();
   }
   function orbit(horizontal, vertical) {
     if (disposed) return;
@@ -593,8 +661,10 @@ export async function createAssetViewer({ host, bytes, label, signal, onStatus }
       const material = object.material, materials = Array.isArray(material) ? material : [material];
       materialSlots.push({ object, material, wireframes: new Map(materials.map(value => [value, !!value?.wireframe])) });
     });
+    // Inspection modes need a source UV0 map to be honest; without one the UV checker is not offered.
+    if (materialSlots.some(slot => slot.object.geometry?.getAttribute?.('uv'))) availableModes = MODES.slice();
     scene = new THREE.Scene();
-    scene.background = new THREE.Color('#181b20');
+    scene.background = new THREE.Color('#141012'); // Warm near-black studio ground.
     model = new THREE.Group();
     model.scale.setScalar(1 / extent);
     model.position.copy(validated.box.getCenter(new THREE.Vector3())).multiplyScalar(-1 / extent);
@@ -674,7 +744,7 @@ export async function createAssetViewer({ host, bytes, label, signal, onStatus }
     // attribute change. Re-check when one ends, or the canvas stays undrawn.
     const settled = event => { if (event.target instanceof Node && event.target.contains(host)) measure(); };
     for (const type of ['animationend', 'animationcancel', 'transitionend', 'transitioncancel']) listen(document, type, settled, { capture: true, passive: true });
-    listen(motion, 'change', () => { stopFrame(); requestRender(); });
+    listen(motion, 'change', () => { if (controls) controls.autoRotate = spinning(); stopFrame(); requestRender(); });
     listen(window, 'resize', measure);
     listen(window, 'scroll', measure, { passive: true, capture: true });
     const watchResolution = () => {
@@ -690,7 +760,9 @@ export async function createAssetViewer({ host, bytes, label, signal, onStatus }
     checkActive();
     rejectPending = null;
     return {
-      reset, setView, setMode, setLighting, orbit, pan, zoom,
+      reset, setView, setMode, setLighting, setTurntable, orbit, pan, zoom,
+      modes: () => availableModes.slice(),
+      turntable: () => !disposed && turntable,
       setWireframe(enabled) { if (!disposed) { boolean(enabled); setMode(enabled ? 'wireframe' : 'rendered'); } },
       setAnimationPlaying, selectAnimation, seekAnimation, setAnimationSpeed, setAnimationLoop,
       animations: () => clips.map(clip => ({ ...clip })),

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { AssetViewerPanel } from '../../apps/desktop/src/asset-viewer.js';
+import { AssetViewerPanel, viewerFacts } from '../../apps/desktop/src/asset-viewer.js';
 import { ARTIFACT_LIMIT } from '../../apps/desktop/src/asset-downloads.js';
 import { validateGlb } from '../../apps/desktop/src/glb-preflight.js';
 
@@ -370,9 +370,11 @@ test('view/display/lighting and animation controls dispatch exact values only to
   };
   const first = f.renderers[0]!;
   assert.match(f.doc.host.textContent, /2\.00 × 1\.00 × 0\.00 m/);
-  for (const view of ['perspective', 'front', 'side', 'top']) change('View', view);
-  for (const mode of ['rendered', 'wireframe', 'clay']) change('Display', mode);
-  for (const lighting of ['studio', 'soft', 'dramatic']) change('Lighting', lighting);
+  // C30 viewer: the camera gizmo, the display segmented control and the lighting menu items.
+  for (const view of ['Perspective view', 'Front view', 'Side view', 'Top view']) control(view).click();
+  for (const mode of ['Textured', 'Wireframe', 'Shaded']) control(mode).click();
+  const lightItem = (label: string) => controls.find(element => element.getAttribute('role') === 'menuitemradio' && element.getAttribute('aria-label') === label)!;
+  for (const lighting of ['Studio', 'Soft', 'Dramatic']) lightItem(lighting).click();
   control('Reset view').click(); change('Animation clip', '1'); change('Animation time', '1.25', 'input');
   change('Animation speed', '1.5'); control('Loop animation').checked = false; control('Loop animation').dispatchEvent(new Event('change'));
   const play = control('Play animation'); play.click(); play.click();
@@ -392,8 +394,8 @@ test('view/display/lighting and animation controls dispatch exact values only to
   assert.equal(first.disposed(), 1);
   for (const node of controls) for (const event of ['click', 'change', 'input']) node.dispatchEvent(new Event(event));
   assert.deepEqual(first.calls, expected, 'detached controls have their listeners removed');
-  const second = f.renderers[1]!, view = f.doc.host.all().find(node => node.getAttribute('aria-label') === 'View')!;
-  view.value = 'top'; view.dispatchEvent(new Event('change'));
+  const second = f.renderers[1]!, view = f.doc.host.all().find(node => node.getAttribute('aria-label') === 'Top view')!;
+  view.click();
   assert.deepEqual(second.calls, [{ method: 'setView', args: ['top'] }]);
   assert.equal(f.downloads.length, 2, 'all controls are local, with no extra transport calls');
   assert.ok(f.downloads.every(call => /^\/v1\/assets\/artifact\?jobId=[a-f0-9-]+&path=asset\.glb$/.test(call.path)));
@@ -446,4 +448,92 @@ test('production source uses one fixed same-origin runtime and exact manifest-lo
   const load = workbench.slice(loadStart, workbench.indexOf('\n  private ', loadStart + 1) < 0 ? undefined : workbench.indexOf('\n  private ', loadStart + 1));
   assert.match(load, /assetManifest\(job\.jobId\)/); assert.match(load, /assetViewer\.show\(manifest, job\.jobId,/);
   assert.match(workbench, /assetViewer\.clear\(\)/);
+});
+
+
+// ---- C30 viewer presentation: manifest facts, empty-data hiding, supported display modes and the turntable. ----
+// The audit shape follows a real natural-finish procedural oak manifest (two textured materials, one collision hull).
+function auditedManifest(overrides: { triangles?: number } = {}) {
+  const mesh = (name: string, role: string, extra: Record<string, unknown>) => ({ name, role, vertices: 10, edges: 20, faces: 10, triangles: 10,
+    nonManifoldEdges: 0, looseVertices: 0, looseEdges: 0, duplicateVertices: 0, duplicateFaces: 0, degenerateFaces: 0, inconsistentNormals: 0,
+    invertedComponents: 0, finitePositions: true, uvLayers: 1, uvLoops: 30, invalidUVs: 0, degenerateUVFaces: 0, dimensions: [1, 2, 3], scale: [1, 1, 1],
+    rotation: [0, 0, 0], materials: [], errors: [], ...extra });
+  const image = (name: string, size: number) => ({ name, role: 'baseColor', width: size, height: size, colorSpace: 'sRGB', sha256: 'f'.repeat(64) });
+  return { ...manifest(), request: { name: 'oak-2', template: 'procedural', triangleBudget: 20000,
+    procedural: { kind: 'tree', species: 'oak', variant: [2, 6] } },
+  validation: { schemaVersion: 1, savedSceneReopened: true, errors: [],
+    warnings: ['UV overlap/texel density, inter-object intersections and visual quality require human review.'],
+    totals: { renderTriangles: overrides.triangles ?? 19170, lod1Triangles: 0, collisionTriangles: 12, materials: 2 },
+    meshes: [
+      mesh('SM_oak-2_bark', 'render', { materials: ['MAT_Bark'], materialProperties: [{ name: 'MAT_Bark', color: [1, 1, 1], surface: { images: [image('T_Bark', 512)] } }] }),
+      mesh('SM_oak-2_leaves', 'render', { materials: ['MAT_Leaves'], materialProperties: [{ name: 'MAT_Leaves', color: [1, 1, 1], surface: { alphaMode: 'MASK', images: [image('T_Leaves', 1024)] } }] }),
+      mesh('COL_oak-2', 'collision', { uvLayers: 0 }),
+    ] } };
+}
+const labelled = (f: ReturnType<typeof fixture>, label: string) => f.doc.host.all().find(node => node.getAttribute('aria-label') === label);
+const sectionsOf = (f: ReturnType<typeof fixture>) => f.doc.host.querySelectorAll('.vw-sec').map(node => node.dataset.section);
+const NONE = { kind: null, variant: null, triangles: null, budget: null, materials: null, texture: null, uv: null, materialRows: [], issues: [], passed: [] };
+
+test('C30 facts come only from the manifest request and validation; missing evidence stays absent', () => {
+  const facts = viewerFacts(auditedManifest());
+  assert.equal(facts.name, 'oak-2'); assert.equal(facts.kind, 'Oak tree'); assert.equal(facts.variant, '2 / 6');
+  assert.equal(facts.triangles, 19170); assert.equal(facts.budget, 20000); assert.equal(facts.materials, 2); assert.equal(facts.texture, 1024);
+  assert.equal(facts.uv, null, 'no measured UV quality, so no UV verdict');
+  assert.deepEqual(facts.materialRows.map(row => [row.name, row.detail, row.texture, row.mapped]), [['MAT_Bark', 'Bark', 512, true], ['MAT_Leaves', 'Leaves, alpha cutout', 1024, true]]);
+  assert.deepEqual(facts.issues, [{ tone: 'warn', title: 'UV overlap/texel density, inter-object intersections and visual quality require human review.' }]);
+  assert.deepEqual(facts.passed, ['Within triangle budget', 'Closed mesh, no broken faces', 'Consistent normals', 'UV map on every part, none invalid', 'Finite vertex positions', 'Saved scene reopens', 'Collision mesh included']);
+  const over = viewerFacts(auditedManifest({ triangles: 20500 }));
+  assert.deepEqual(over.issues[0], { tone: 'bad', title: 'Over the triangle budget by ' + (500).toLocaleString() });
+  assert.ok(!over.passed.includes('Within triangle budget'));
+  for (const empty of [null, undefined, 'manifest', [], {}, { request: { name: 42, triangleBudget: -1, procedural: { variant: [7, 6] } }, validation: { totals: { renderTriangles: 1.5 }, meshes: 'x' } }]) {
+    assert.deepEqual(viewerFacts(empty), { name: null, ...NONE }, JSON.stringify(empty));
+  }
+  assert.deepEqual(viewerFacts(manifest()), { name: 'fixture-asset', ...NONE }, 'a manifest without validation yields only its name');
+  const hostile = viewerFacts({ request: { name: 'oak‮\u0007-2' }, validation: { warnings: ['a⁦b'], meshes: [{ role: 'render', uvQuality: { errors: ['x', 'y'], warnings: [] } }] } });
+  assert.equal(hostile.name, 'oak-2'); assert.deepEqual(hostile.issues, [{ tone: 'warn', title: 'ab' }]); assert.deepEqual(hostile.uv, { value: '2 issues', tone: 'bad' });
+});
+
+test('C30 inspector hides every row without data and shows the audited facts when present', async t => {
+  const bare = fixture(); t.after(() => bare.panel.clear());
+  await bare.panel.show(manifest(), JOB, () => true);
+  const text = bare.doc.host.textContent;
+  assert.match(text, /Triangles/); assert.match(text, /2\.00 × 1\.00 × 0\.00/); assert.match(text, /Materials/);
+  assert.doesNotMatch(text, /Textures|UV quality|studs|undefined|NaN|null|\/ \d/, 'no texture, UV, studs, budget or placeholder values without data');
+  assert.equal(bare.doc.host.querySelectorAll('.vw-meter').length, 0, 'no budget meter without a recorded budget');
+  assert.deepEqual(sectionsOf(bare), ['stats', 'animation'], 'no materials or checks sections without evidence');
+  assert.equal(bare.doc.host.querySelectorAll('.vw-asset-variant').length, 0);
+  const rich = fixture(); t.after(() => rich.panel.clear());
+  await rich.panel.show(auditedManifest(), JOB, () => true);
+  const full = rich.doc.host.textContent;
+  for (const fact of ['oak-2', 'Oak tree', '2 / 6', (19170).toLocaleString(), '/ ' + (20000).toLocaleString(), '1024 px', 'MAT_Leaves', 'Leaves, alpha cutout', '7 checks passed', 'require human review']) {
+    assert.ok(full.includes(fact), fact);
+  }
+  assert.equal(rich.doc.host.querySelectorAll('.vw-meter').length, 1);
+  assert.deepEqual(sectionsOf(rich), ['stats', 'animation', 'materials', 'checks']);
+  assert.doesNotMatch(full, /UV quality|studs|undefined|NaN/);
+});
+
+test('C30 display modes follow the runtime capabilities; switching sets the mode and the pressed state', async t => {
+  const calls: { method: string; args: unknown[] }[] = [];
+  const capable = (modes: string[] | null, turntable: boolean): NonNullable<Options['loadRuntime']> => async () => ({ createAssetViewer: async input => {
+    const r = recordingRenderer(new DocumentFixture(), input.host), renderer = r.renderer as unknown as Record<string, unknown>;
+    renderer.setMode = (value: string) => { calls.push({ method: 'setMode', args: [value] }); };
+    if (modes) renderer.modes = () => modes;
+    if (turntable) { renderer.setTurntable = (value: boolean) => { calls.push({ method: 'setTurntable', args: [value] }); }; renderer.turntable = () => false; }
+    return r.renderer;
+  } });
+  const f = fixture({ loadRuntime: capable(['rendered', 'wireframe', 'clay', 'normals'], true) }); t.after(() => f.panel.clear());
+  await f.panel.show(manifest(), JOB, () => true);
+  const modes = (fx: ReturnType<typeof fixture>) => fx.doc.host.querySelectorAll('.vw-modes')[0]!.children.map(node => node.getAttribute('aria-label'));
+  assert.deepEqual(modes(f), ['Shaded', 'Textured', 'Wireframe', 'Normals'], 'no UV checker without a UV map');
+  assert.equal(labelled(f, 'Textured')!.getAttribute('aria-pressed'), 'true'); assert.equal(labelled(f, 'Normals')!.getAttribute('aria-pressed'), 'false');
+  labelled(f, 'Normals')!.click();
+  assert.equal(labelled(f, 'Normals')!.getAttribute('aria-pressed'), 'true'); assert.equal(labelled(f, 'Textured')!.getAttribute('aria-pressed'), 'false');
+  const spin = labelled(f, 'Turntable')!;
+  assert.equal(spin.getAttribute('aria-pressed'), 'false'); spin.click(); assert.equal(spin.getAttribute('aria-pressed'), 'true'); spin.click();
+  assert.deepEqual(calls, [{ method: 'setMode', args: ['normals'] }, { method: 'setTurntable', args: [true] }, { method: 'setTurntable', args: [false] }]);
+  const legacy = fixture({ loadRuntime: capable(null, false) }); t.after(() => legacy.panel.clear());
+  await legacy.panel.show(manifest(), JOB, () => true);
+  assert.deepEqual(modes(legacy), ['Shaded', 'Textured', 'Wireframe']);
+  assert.equal(labelled(legacy, 'Turntable'), undefined, 'no turntable control without runtime support');
 });

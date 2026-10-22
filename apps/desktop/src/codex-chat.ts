@@ -299,6 +299,25 @@ const CODEX_FAILURE_HINTS:Readonly<Record<string,string>>=Object.freeze({
 });
 /** A friendly first sentence for a recorded native error code; null when none applies. */
 export function codexFailureHint(code:string|null|undefined):string|null{return code&&Object.hasOwn(CODEX_FAILURE_HINTS,code)?CODEX_FAILURE_HINTS[code]!:null;}
+/** What a rejected request means, in plain words. */
+const CODEX_REQUEST_FAILED:Readonly<Record<string,string>>=Object.freeze({
+  connect:'Couldn\u2019t connect to ChatGPT.',disconnect:'Couldn\u2019t disconnect from ChatGPT.',select:'Couldn\u2019t change the model.',
+  'thread-start':'Couldn\u2019t start a new chat.','thread-resume':'Couldn\u2019t open this chat.','history-load':'Couldn\u2019t load this chat\u2019s saved history.',
+  'turn-start':'Your message wasn\u2019t sent.','turn-steer':'Your steering message wasn\u2019t accepted.','turn-interrupt':'Couldn\u2019t stop the reply.',
+  'task-stop':'Couldn\u2019t stop the task.','task-focus':'Couldn\u2019t switch to that task.','grant-writes':'Couldn\u2019t turn on workspace editing.',
+  'revoke-writes':'Couldn\u2019t turn off workspace editing.','grant-assets':'Couldn\u2019t allow asset jobs.','revoke-assets':'Couldn\u2019t turn off asset jobs.',
+  approval:'Your review wasn\u2019t recorded.',
+});
+/** A native request that was rejected or never confirmed: `text` is the plain-words line (with the reason when one is known)
+ * and `detail` carries the request ID, action and state for support. The visible line never contains IDs. */
+export interface CodexRequestNotice { text:string; detail:string }
+export function codexRequestNotice(action:string,state:string,requestId:string,errorCode:string|null=null,message:string|null=null):CodexRequestNotice {
+  const hint=codexFailureHint(errorCode);
+  const text=state==='rejected'?(Object.hasOwn(CODEX_REQUEST_FAILED,action)?CODEX_REQUEST_FAILED[action]!:'That request didn\u2019t go through.')+(hint?' '+hint:'')
+    :'Arcane couldn\u2019t confirm that this went through, so nothing was sent again.'+(hint?' '+hint:'')+' Review what was recorded before continuing.';
+  const detail=['Request '+requestId,action,state,...(errorCode?[errorCode]:[]),...(message?[message]:[])].join(' \u00b7 ');
+  return {text,detail};
+}
 /** Exact public quota shape; raw provider account/configuration objects never enter the view. */
 function readRateLimits(value:unknown):void {
   const reasons=['rate_limit_reached','workspace_owner_credits_depleted','workspace_member_credits_depleted','workspace_owner_usage_limit_reached','workspace_member_usage_limit_reached'];
@@ -592,7 +611,39 @@ type TurnCounts={inputTokens:number;cachedInputTokens:number;outputTokens:number
 export interface TurnUsageRow { baseline:TurnCounts; latest:TurnCounts }
 /** Input for a finished reply's usage line (the same '12k tokens (~$0.31)' line the Claude chat shows). */
 export interface ReplyUsageInput extends TurnCounts { model:string|null; tokens:number }
-export type ReplyUsageFormat=(usage:ReplyUsageInput)=>{text:string;title:string}|null;
+export type ReplyUsageFormat=(usage:ReplyUsageInput)=>{text:string;title:string;rows?:readonly (readonly [string,string])[];note?:string|null}|null;
+/** One finished reply's usage, ready to draw: the quiet line ('18.4k tokens · ~£0.21') and its breakdown rows and note. */
+export interface ReplyUsageView { text:string; rows:readonly (readonly [string,string])[]; note:string|null }
+let usageDetailSeq=0;
+/**
+ * The per-reply usage footer: a quiet ghost button with the totals. Hovering or focusing it shows the breakdown (input,
+ * output, cached, model) in a small popover; Escape hides it. Text only, no request of any kind.
+ */
+export function renderReplyUsage(doc:Document,view:ReplyUsageView):HTMLElement {
+  const wrap=doc.createElement('div');wrap.className='message-usage';
+  const button=doc.createElement('button');button.type='button';button.className='reply-usage';button.textContent=view.text;
+  wrap.append(button);
+  if(!view.rows.length&&!view.note)return wrap;
+  const detail=doc.createElement('div');detail.className='message-usage__detail';detail.id='usage-detail-'+(++usageDetailSeq);detail.setAttribute('role','tooltip');
+  const list=doc.createElement('dl');
+  for(const [term,value] of view.rows){const dt=doc.createElement('dt');dt.textContent=term;const dd=doc.createElement('dd');dd.textContent=value;list.append(dt,dd);}
+  detail.append(list);
+  if(view.note){const note=doc.createElement('p');note.className='message-usage__note';note.textContent=view.note;detail.append(note);}
+  button.setAttribute('aria-describedby',detail.id);
+  wrap.append(detail);
+  button.addEventListener('keydown',event=>{if((event as KeyboardEvent).key==='Escape'&&wrap.getAttribute('data-dismissed')!=='true'){wrap.setAttribute('data-dismissed','true');event.stopPropagation();}});
+  const reset=()=>wrap.removeAttribute('data-dismissed');
+  button.addEventListener('blur',reset);wrap.addEventListener('mouseleave',reset);
+  return wrap;
+}
+/** The live line under a running reply: a red dot and 'N tokens…' when the provider reports usage live, otherwise 'Working…'. */
+export function renderLiveUsage(doc:Document,text:string):HTMLElement {
+  const line=doc.createElement('p');line.className='message-usage message-usage--live';line.setAttribute('data-live','true');
+  const dot=doc.createElement('span');dot.className='message-usage__dot';dot.setAttribute('aria-hidden','true');
+  const label=doc.createElement('span');label.className='message-usage__text';label.textContent=text;
+  line.append(dot,label);return line;
+}
+export const LIVE_USAGE_WORKING_TEXT='Working…';
 /** The turn's own tokens (latest total minus its baseline); null when the reports went backwards or are empty. */
 export function turnReplyUsage(row:TurnUsageRow|undefined,model:string|null):ReplyUsageInput|null {
   if(!row)return null;
@@ -1322,7 +1373,7 @@ function toolPhrase(tool:string,args:Record<string,unknown>|null):string {
     case 'scene_update':return 'Updating '+(ref??'an instance')+propertyList(args);
     case 'scene_build':{
       const kinds=new Set((Array.isArray(args?.kits)?args.kits.slice(0,16):[]).map(kit=>activityRecord(kit)?.kind));
-      if(kinds.has('forest'))return 'Placing forest'+(kinds.has('plinth')?' and spawn plinth':'');
+      if(kinds.has('forest'))return kinds.has('plinth')?'Placing forest and spawn plinth':'Placing forest on terrain';
       if(kinds.has('plinth'))return 'Building the spawn plinth';
       const parent=studioRefPath(args?.parent);return 'Building a scene'+(parent?' in '+parent:'');
     }
@@ -1353,10 +1404,45 @@ function toolPhrase(tool:string,args:Record<string,unknown>|null):string {
     case 'skills_recommend':return 'Choosing the right skills';
     case 'skills_list':return 'Listing skills';
     case 'skills_get':return 'Reading skill guidance';
+    case 'scene_delete':{
+      if(args?.clearWorkspace===true)return 'Clearing the Workspace';
+      const targets=Array.isArray(args?.targets)?args.targets.slice(0,64):[],one=targets.length===1?studioRefPath(targets[0]):null;
+      return one?'Removing '+one:targets.length>1?'Removing '+targets.length+' objects':'Removing objects';
+    }
+    case 'assets_probe':return 'Checking Blender';
+    case 'assets_adopt_glb':return 'Adding a model for preview';
+    case 'assets_prepare_studio_import':return 'Preparing the approved models';
+    case 'assets_stage_studio_import':return 'Importing approved models';
+    case 'assets_studio_staging_status':case 'assets_studio_reconstruction_status':return 'Checking the model import';
+    case 'assets_reconstruct_studio_import':return 'Rebuilding imported meshes';
+    case 'work_runs':case 'work_ready':return 'Reading the task plan';
   }
   if(tool.startsWith('work_'))return 'Updating the task plan';
-  if(tool.startsWith('assets_'))return 'Working with assets';
-  return 'Using '+tool;
+  return AGENT_TOOL_PHRASES[tool]??fallbackToolPhrase(tool);
+}
+/** Claude Code's own tools in plain words. */
+const AGENT_TOOL_PHRASES:Readonly<Record<string,string>>=Object.freeze({Read:'Reading a file',Write:'Writing a file',Edit:'Editing a file',MultiEdit:'Editing a file',
+  NotebookEdit:'Editing a notebook',Bash:'Running a command',BashOutput:'Reading command output',KillShell:'Stopping a command',KillBash:'Stopping a command',
+  Grep:'Searching files',Glob:'Finding files',LS:'Listing files',WebFetch:'Reading a web page',WebSearch:'Searching the web',Task:'Running a helper agent',
+  Agent:'Running a helper agent',TodoWrite:'Updating the plan',ToolSearch:'Loading tools',Skill:'Loading a skill',ExitPlanMode:'Finishing the plan',
+  ListMcpResourcesTool:'Listing resources',ReadMcpResourceTool:'Reading a resource'});
+/** A tool with no label of its own reads by the verb in its name; the raw tool id is never shown. */
+function fallbackToolPhrase(tool:string):string {
+  const words=new Set(tool.replace(/([a-z0-9])([A-Z])/g,'$1 $2').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean));
+  const has=(...verbs:string[])=>verbs.some(verb=>words.has(verb));
+  if(has('import'))return 'Importing models';
+  // Blender job tools are named by their verb (start, cancel), never by a literal id.
+  if(words.has('assets')&&has('start','generate'))return 'Modelling in Blender';
+  if(words.has('assets')&&has('cancel'))return 'Stopping a Blender job';
+  if(has('remove','delete','clear','destroy'))return 'Removing objects';
+  if(has('capture','screenshot'))return 'Capturing viewport';
+  if(has('playtest'))return 'Running a playtest';
+  if(has('search','find','query'))return 'Searching';
+  if(has('create','insert','place','build','spawn','add'))return 'Building';
+  if(has('update','set','edit','apply','write','move'))return 'Making changes';
+  if(has('read','get','list','inspect','status','check','fetch'))return 'Checking';
+  if(words.has('assets')||words.has('asset'))return 'Working with models';
+  return 'Running a step';
 }
 /**
  * Describes one tool call from its real name, input and result. A change is reported only for a Studio mutation whose
@@ -1378,7 +1464,9 @@ export function compactCount(value:number):string {
   if(n<1e6)return Math.round(n/1000)+'k';
   return (n/1e6).toFixed(1).replace(/\.0$/,'')+'M';
 }
-const countFact=(value:unknown,one:string,many:string):string|null=>{const n=activityNumber(value);return n!==null&&n>0?compactCount(n)+' '+(n===1?one:many):null;};
+/** Exact grouped counts read best in a fact chip ('2,312 placed'); very large counts stay compact. */
+const factCount=(n:number)=>n<100000?Math.round(n).toLocaleString('en-US'):compactCount(n);
+const countFact=(value:unknown,one:string,many:string):string|null=>{const n=activityNumber(value);return n!==null&&n>0?factCount(n)+' '+(n===1?one:many):null;};
 /** The plugin's own result inside a daemon outcome ({command:{result}}), or a bare result. */
 function pluginResult(outcome:Record<string,unknown>|null):Record<string,unknown>|null {
   return activityRecord(activityRecord(outcome?.command)?.result)??activityRecord(outcome?.result);
@@ -1397,7 +1485,10 @@ export function toolResultFacts(tool:string,args:Record<string,unknown>|null,res
     case 'scene_build':{
       const kits=list(outcome.kits,16).map(activityRecord).filter((kit):kit is Record<string,unknown>=>!!kit);
       for(const kit of kits){
-        if(kit.kind==='forest')facts.push(countFact(kit.placed,'tree','trees'));
+        if(kit.kind==='forest'){
+          const placed=activityNumber(kit.placed),requested=activityNumber(kit.requested);
+          facts.push(countFact(placed,'placed','placed'),placed!==null&&requested!==null?countFact(requested-placed,'skipped','skipped'):null);
+        }
         const spawn=activityNumber(activityRecord(kit.spawn)?.top);if(spawn!==null)facts.push('spawn at '+Math.round(spawn)+' studs');
       }
       const tris=kits.reduce((sum,kit)=>sum+(activityNumber(kit.triangles)??0),0);if(tris>0)facts.push(compactCount(tris)+' tris');
@@ -1433,7 +1524,12 @@ export function toolResultFacts(tool:string,args:Record<string,unknown>|null,res
       break;
     }
     case 'scene_create':case 'scene_update':case 'script_update':break;
-    default:{const tris=activityNumber(outcome.triangles)??activityNumber(plugin?.triangles);if(tris)facts.push(compactCount(tris)+' tris');}
+    default:{
+      // Imports and removals report a count ({imported}, {removed} or {deleted}).
+      const first=(...values:unknown[])=>values.map(activityNumber).find(value=>value!==null)??null;
+      facts.push(countFact(first(outcome.imported,plugin?.imported),'model','models'),countFact(first(plugin?.removed,plugin?.deleted,outcome.removed,outcome.deleted),'removed','removed'));
+      const tris=activityNumber(outcome.triangles)??activityNumber(plugin?.triangles);if(tris)facts.push(compactCount(tris)+' tris');
+    }
   }
   return [...new Set(facts.filter((fact):fact is string=>!!fact))].slice(0,4);
 }
@@ -1556,7 +1652,8 @@ export function renderToolActivity(doc:Document,activity:ToolActivity,state:Tool
   const status=doc.createElement('span');status.className='visually-hidden';status.textContent=' · '+STATE_WORDS[state];
   line.append(mark,label,status);
   if(activity.tool)line.dataset.toolName=activity.tool;
-  const facts=activity.facts??[];
+  // A row shows at most two fact chips (the headline numbers); the rest stay in the raw details.
+  const facts=(activity.facts??[]).slice(0,TOOL_ROW_FACTS);
   if(facts.length){
     const chips=doc.createElement('span');chips.className='tool-facts';
     const lead=doc.createElement('span');lead.className='visually-hidden';lead.textContent=' · ';chips.append(lead);
@@ -1570,13 +1667,23 @@ export function renderToolActivity(doc:Document,activity:ToolActivity,state:Tool
   const out:HTMLElement[]=[line];
   if(state==='failed'&&activity.reason){const reason=doc.createElement('p');reason.className='tool-activity-reason';reason.textContent=activity.reason;out.push(reason);}
   const thumb=activity.image?renderToolThumbnail(doc,activity.image,activity.facts?.[0]??null):null;if(thumb)out.push(thumb);
-  const more=doc.createElement('details');more.className='message-details tool-details';
-  const summary=doc.createElement('summary');summary.textContent='Details';
+  // Raw details have no per-row "Details" link: the row itself is the disclosure control (click, Enter or Space).
+  const more=doc.createElement('details');more.className='message-details tool-details';more.id='tool-details-'+(++toolDetailsSeq);
+  const summary=doc.createElement('summary');summary.textContent='Details';summary.tabIndex=-1;
   const pre=doc.createElement('pre');pre.className='hint mono';pre.textContent=details;
   more.append(summary,pre);
   out.push(more);
+  line.setAttribute('role','button');line.setAttribute('tabindex','0');line.setAttribute('aria-expanded','false');line.setAttribute('aria-controls',more.id);
+  const sync=()=>line.setAttribute('aria-expanded',String(!!more.open));
+  const toggle=()=>{more.open=!more.open;sync();};
+  line.addEventListener('click',()=>{if(String(doc.defaultView?.getSelection?.()??'').trim())return;toggle();});
+  line.addEventListener('keydown',event=>{const key=(event as KeyboardEvent).key;if(key==='Enter'||key===' '){event.preventDefault();toggle();}});
+  more.addEventListener('toggle',sync);
   return out;
 }
+/** Fact chips shown on one tool row. */
+export const TOOL_ROW_FACTS=2;
+let toolDetailsSeq=0;
 // Captured PNG/JPEG images are shown through blob: URLs (the page allows blob: images, not data: URLs). Bounded; oldest revoked.
 const thumbnailUrls=new Map<string,string>();
 function pngObjectUrl(doc:Document,base64:string):string|null {
@@ -1617,18 +1724,38 @@ export function inferToolFromResult(result:unknown):string|null {
   if(Array.isArray(r.previews)&&typeof r.jobId==='string')return 'assets_preview';
   if(Array.isArray(r.entries)&&typeof r.latest==='number')return 'studio_output_read';
   if(Array.isArray(r.jobs))return 'assets_jobs';
+  if(Array.isArray(r.sessions))return 'sessions';
+  if(Array.isArray(r.skills))return 'skills_get';
+  if(typeof r.jobId==='string'&&activityRecord(r.manifest))return 'assets_manifest';
+  if(typeof r.jobId==='string'&&typeof r.state==='string')return 'assets_procedural';
+  if(Array.isArray(r.runs))return 'work_runs';
+  if(Array.isArray(r.tasks))return 'work_ready';
+  if(typeof r.leaseToken==='string')return 'work_claim';
+  if(Object.keys(r).some(key=>/^playtest/i.test(key)))return 'playtest_status';
   return null;
 }
+/** A plain-text result (often a failure reason) that names what it was about; otherwise null. */
+export function inferToolFromText(text:string,state:ToolActivityState):string|null {
+  const line=text.slice(0,600);
+  if(/\bplaytest/i.test(line))return state==='failed'?'playtest_request':'playtest_status';
+  if(/\bviewport\b|\bcapture\b/i.test(line))return 'studio_viewport_capture';
+  if(/\bblender\b/i.test(line))return 'assets_jobs';
+  if(/\bterrain\b/i.test(line))return 'terrain_generate';
+  if(/\bskill/i.test(line))return 'skills_get';
+  return null;
+}
+/** The step label when nothing names the call: never a raw id, and the same wording in every state. */
+export const UNNAMED_TOOL_TEXT='Running a step';
 export function renderCodexToolArticle(doc:Document,message:Pick<ChatMessage,'scope'|'text'|'toolState'|'toolCall'>&{key?:string},safe:(value:string)=>string=value=>value):{article:HTMLElement;change:ToolChange|null} {
   const read=message.text?readToolResultText(message.text):null,state:ToolActivityState=message.toolState??read?.state??'finished';
   // A failed call's plain-text result is its reason.
   const result=read?.result??(state==='failed'&&message.text?message.text:null);
   // A result that names its own command wins; otherwise the live identity (tool name + display args) describes the call,
   // then a result recognised by its shape; a bare result stays a generic step.
-  const live=message.toolCall,inferred=!read?.name&&!live?inferToolFromResult(read?.result):null;
+  const live=message.toolCall,inferred=!read?.name&&!live?inferToolFromResult(read?.result)??(message.text&&read?.result===null?inferToolFromText(message.text,state):null):null;
   const activity:ToolActivity=read?.name?describeToolActivity(read.name,read.input,read.result,state)
-    :live?describeToolActivity(live.name,live.input,result,state):inferred?describeToolActivity(inferred,null,read?.result,state)
-    :{text:message.text?state==='failed'?'A step failed':'Finished a step':state==='started'?'Using an Arcane tool…':'Used an Arcane tool',change:null,reason:state==='failed'?toolFailureReason(result):null};
+    :live?describeToolActivity(live.name,live.input,result,state):inferred?describeToolActivity(inferred,null,read?.result??result,state)
+    :{text:UNNAMED_TOOL_TEXT+(state==='started'?'…':''),change:null,reason:state==='failed'?toolFailureReason(result):null};
   const article=doc.createElement('article');article.className='codex-message tool';
   article.setAttribute('data-role','tool');article.setAttribute('aria-label','Tool activity');article.dataset.toolState=state;
   if(message.key)article.dataset.toolKey=message.key.slice(0,512);
@@ -1723,7 +1850,8 @@ export function groupToolCards(container:HTMLElement,open:ReadonlySet<string>=ne
 export const BUILD_PROGRESS_MIN=2;
 /** Tools that change the place or make assets: a turn with one reads "Built", otherwise "Done". */
 const BUILDING_TOOLS=new Set(['scene_create','scene_update','scene_build','scene_delete','environment_apply','terrain_generate','studio_asset_insert',
-  'assets_procedural','assets_place_studio_import','assets_adopt_glb','script_update','script_set_enabled','receipt_restore']);
+  'assets_procedural','assets_place_studio_import','assets_stage_studio_import','assets_reconstruct_studio_import','assets_adopt_glb',
+  'script_update','script_set_enabled','receipt_restore']);
 /** 900 -> '<1s', 42000 -> '42s', 134000 -> '2m 14s', 3900000 -> '1h 05m'. */
 export function formatElapsed(ms:number):string {
   if(!(ms>=0))return '';
@@ -1732,29 +1860,31 @@ export function formatElapsed(ms:number):string {
   return Math.floor(minutes/60)+'h '+String(minutes%60).padStart(2,'0')+'m';
 }
 export interface BuildProgressRow { tool:string|null; text:string; state:ToolActivityState }
-export interface BuildProgressSummary { title:string; meta:string; state:ToolActivityState; steps:number; retried:number; failed:number }
+export interface BuildProgressSummary { title:string; meta:string; state:ToolActivityState; steps:number; done:number; retried:number; failed:number }
+/** Index of each failed row that a later call of the same tool retried successfully. */
+export function retriedRows(rows:readonly Pick<BuildProgressRow,'tool'|'state'>[]):Set<number> {
+  const out=new Set<number>();
+  rows.forEach((row,index)=>{if(row.state==='failed'&&row.tool&&rows.slice(index+1).some(later=>later.tool===row.tool&&later.state==='finished'))out.add(index);});
+  return out;
+}
 /**
- * The group header for a turn's calls. Live: "Build progress" plus the running step, the step count and the elapsed time.
- * Ended: one line, e.g. "Built in 2m 14s · 9 steps · 1 retried". A failed call counts as retried when a later call of the
- * same tool finished; otherwise it is failed. `elapsed` is null when the time was not observed (saved history).
+ * The group header for a turn's calls. Live: "Build progress" plus the running step, "N of M" steps ended, retries and the
+ * elapsed time. Ended: one line, e.g. "Built in 2m 14s · 9 steps · 1 retried". A failed call counts as retried when a later
+ * call of the same tool finished; otherwise it is failed. `elapsed` is null when the time was not observed (saved history).
  */
 export function buildProgressSummary(rows:readonly BuildProgressRow[],live:boolean,elapsed:number|null):BuildProgressSummary {
   const steps=rows.length,plural=(n:number,word:string)=>n+' '+word+(n===1?'':'s');
-  let retried=0,failed=0;
-  rows.forEach((row,index)=>{
-    if(row.state!=='failed')return;
-    if(row.tool&&rows.slice(index+1).some(later=>later.tool===row.tool&&later.state==='finished'))retried++;else failed++;
-  });
+  const retried=retriedRows(rows).size,failed=rows.filter(row=>row.state==='failed').length-retried,done=rows.filter(row=>row.state!=='started').length;
   const building=rows.some(row=>!!row.tool&&BUILDING_TOOLS.has(row.tool)),time=elapsed===null?'':formatElapsed(elapsed);
   if(live){
     const running=rows.filter(row=>row.state==='started').at(-1);
-    const meta=[running?running.text.replace(/…$/,'')+'…':'',plural(steps,'step'),retried?retried+' retried':'',failed?failed+' failed':'',time].filter(Boolean).join(' · ');
-    return {title:building?'Build progress':'Working',meta,state:'started',steps,retried,failed};
+    const meta=[running?running.text.replace(/…$/,''):'',done+' of '+steps,retried?retried+' retried':'',failed?failed+' failed':'',time].filter(Boolean).join(' · ');
+    return {title:building?'Build progress':'Working',meta,state:'started',steps,done,retried,failed};
   }
-  const unfinished=rows.filter(row=>row.state==='started').length;
+  const unfinished=steps-done;
   const lead=(failed&&failed===steps?'Stopped':building?'Built':'Done')+(time?' in '+time:'');
   const title=[lead,plural(steps,'step'),retried?retried+' retried':'',failed?failed+' failed':'',unfinished?unfinished+' unfinished':''].filter(Boolean).join(' · ');
-  return {title,meta:'',state:failed||unfinished?'failed':'finished',steps,retried,failed};
+  return {title,meta:'',state:failed||unfinished?'failed':'finished',steps,done,retried,failed};
 }
 interface ToolTime { start:number|null; end:number|null }
 const toolTimes=new WeakMap<Document,Map<string,ToolTime>>();
@@ -1787,8 +1917,19 @@ function makeBuildGroup(doc:Document,id:string):HTMLDetailsElement {
   const status=doc.createElement('span');status.className='visually-hidden build-progress-status';
   const chevron=doc.createElement('span');chevron.className='build-progress-chevron';chevron.setAttribute('aria-hidden','true');
   summary.append(mark,text,facts,status,chevron);
+  // A thin bar under the header: steps ended out of steps started (aria-valuenow/max), painted by paintBuildGroup.
+  const bar=doc.createElement('div');bar.className='build-progress-bar';bar.setAttribute('role','progressbar');bar.setAttribute('aria-label','Build progress');
+  bar.setAttribute('aria-valuemin','0');bar.setAttribute('aria-valuemax','0');bar.setAttribute('aria-valuenow','0');
+  const fill=doc.createElement('span');fill.className='build-progress-fill';fill.setAttribute('aria-hidden','true');bar.append(fill);
   const items=doc.createElement('div');items.className='build-progress-items';
-  group.append(summary,items);return group;
+  group.append(summary,bar,items);return group;
+}
+/** Marks a node that has just appeared (a new message, step or card) for its one entrance; the mark clears itself. */
+export function markEntered(node:Element):void {
+  const view=node.ownerDocument?.defaultView;
+  if(!view||typeof view.setTimeout!=='function')return;
+  node.setAttribute('data-enter','');
+  view.setTimeout(()=>node.removeAttribute('data-enter'),600);
 }
 /** Repaints a group's header and its lines' elapsed times from the recorded times. Moves no nodes. */
 function paintBuildGroup(group:HTMLElement,live:boolean,now:number):void {
@@ -1807,6 +1948,22 @@ function paintBuildGroup(group:HTMLElement,live:boolean,now:number):void {
   const summary=buildProgressSummary(rows,live,elapsed);
   set(group.querySelector('.build-progress-title'),summary.title);
   set(group.querySelector('.build-progress-meta'),summary.meta);
+  const bar=group.querySelector<HTMLElement>('.build-progress-bar');
+  if(bar){
+    const attr=(name:string,value:string)=>{if(bar.getAttribute(name)!==value)bar.setAttribute(name,value);};
+    attr('aria-valuemax',String(summary.steps));attr('aria-valuenow',String(summary.done));attr('aria-valuetext',summary.done+' of '+summary.steps+' steps');
+    const scale=summary.steps?String(Math.round(summary.done/summary.steps*1000)/1000):'0',fill=bar.querySelector<HTMLElement>('.build-progress-fill');
+    if(fill?.style&&fill.style.getPropertyValue?.('--progress')!==scale)fill.style.setProperty?.('--progress',scale);
+  }
+  // A failed step that a later call retried says so under its reason ("Studio was not in edit mode. Retried below.").
+  const retried=retriedRows(rows);
+  articles.forEach((article,index)=>{
+    let reason=article.querySelector<HTMLElement>('.tool-activity-reason'),note=reason?.querySelector<HTMLElement>('.tool-reason-retried')??null;
+    if(!retried.has(index)){if(note)note.remove();if(reason?.dataset.retryOnly==='true')reason.remove();return;}
+    if(note)return;
+    if(!reason){reason=doc.createElement('p');reason.className='tool-activity-reason';reason.dataset.retryOnly='true';toolLine(article)?.after(reason);}
+    note=doc.createElement('span');note.className='tool-reason-retried';note.textContent=reason.dataset.retryOnly==='true'?'Retried below.':' Retried below.';reason.append(note);
+  });
   set(group.querySelector('.build-progress-status'),' · '+STATE_WORDS[summary.state]);
   if(group.dataset.toolState!==summary.state)group.dataset.toolState=summary.state;
   const mark=group.querySelector<HTMLElement>('.build-progress-summary>.tool-activity-mark');if(mark&&mark.dataset.toolState!==summary.state)mark.dataset.toolState=summary.state;
@@ -1848,7 +2005,12 @@ export function groupBuildProgress(container:HTMLElement,open:ReadonlySet<string
     }
     const id='build:'+(articles[0]!.dataset.toolKey??'turn-'+index);
     let group:HTMLElement|null=segment.groups[0]??null;
-    if(!group){const created=makeBuildGroup(doc,id);created.open=live||open.has(id);created.dataset.live=String(live);group=created;}
+    if(!group){
+      const created=makeBuildGroup(doc,id);created.open=live||open.has(id);created.dataset.live=String(live);
+      // The new card enters once as a whole; the steps moving into it do not replay their own entrance.
+      if(live){markEntered(created);for(const article of articles)article.removeAttribute('data-enter');}
+      group=created;
+    }
     used.add(group);
     if(segment.tops[0]!==group)container.insertBefore(group,segment.tops[0]!);
     const items=group.querySelector('.build-progress-items')!,current=[...items.children];
@@ -1895,7 +2057,7 @@ export function installToolGrouping(doc:Document):void {
       if(ticker===null&&container.querySelector('.build-progress[data-live="true"]'))ticker=view.setInterval(tick,1000);
     };
     // Timer repaints (elapsed text) are not structure changes.
-    const own=(target:Node)=>!!(target as Element).closest?.('.tool-activity-time,.build-progress-summary')||!!target.parentElement?.closest?.('.tool-activity-time,.build-progress-summary');
+    const own=(target:Node)=>!!(target as Element).closest?.('.tool-activity-time,.build-progress-summary,.tool-activity-reason')||!!target.parentElement?.closest?.('.tool-activity-time,.build-progress-summary,.tool-activity-reason');
     const observer=new Observer(records=>{
       if(busy||!records.some(record=>(record.target===container||!!(record.target as Element|null)?.closest?.('.tool-group,.build-progress'))&&!own(record.target)))return;
       run();
@@ -2579,7 +2741,32 @@ export class CodexChat {
   attachmentPresentationChanged():void {if(!this.stopped)this.renderComposer();}
   private el<T extends HTMLElement=HTMLElement>(id:string) {const e=this.doc.getElementById(id);if(!e)throw new Error('Missing Codex UI '+id);return e as T;}
   private make<K extends keyof HTMLElementTagNameMap>(tag:K,text?:string,className?:string) {const e=this.doc.createElement(tag);if(text!==undefined)e.textContent=this.api.safe(text);if(className)e.className=className;return e;}
-  private text(id:string,value:string){this.el(id).textContent=this.api.safe(value);}
+  private text(id:string,value:string){this.el(id).textContent=this.api.safe(value);if(id==='codex-notice')this.clearRequestNotice();}
+  /** Shows a request problem in plain words with Review and Details; the next notice line clears them. */
+  private requestNotice(notice:CodexRequestNotice):void{
+    this.text('codex-notice',notice.text);
+    const actions=this.doc.getElementById('codex-notice-actions'),detail=this.doc.getElementById('codex-notice-detail');
+    if(!actions||!detail)return;
+    detail.textContent=this.api.safe(notice.detail);actions.hidden=false;
+    const more=this.doc.getElementById('codex-notice-details') as HTMLDetailsElement|null;if(more)more.open=false;
+    const copy=this.doc.getElementById('codex-notice-copy');if(copy)copy.textContent='Copy';
+  }
+  private clearRequestNotice():void{
+    const actions=this.doc.getElementById('codex-notice-actions');if(!actions||actions.hidden)return;
+    actions.hidden=true;const detail=this.doc.getElementById('codex-notice-detail');if(detail)detail.textContent='';
+  }
+  /** Adds to the current notice line without dropping its Review / Details. */
+  private appendNotice(extra:string):void{const notice=this.el('codex-notice');notice.textContent=this.api.safe((notice.textContent??'')+extra);}
+  /** Copies the notice's support details; without clipboard access it selects them for a manual copy. */
+  private async copyRequestDetail():Promise<void>{
+    const detail=this.doc.getElementById('codex-notice-detail'),button=this.doc.getElementById('codex-notice-copy');
+    const value=detail?.textContent??'';if(!detail||!button||!value)return;
+    try{const clipboard=this.doc.defaultView?.navigator?.clipboard;if(!clipboard)throw new Error('clipboard');await clipboard.writeText(value);button.textContent='Copied';}
+    catch{
+      try{const range=this.doc.createRange(),selection=this.doc.defaultView?.getSelection();if(selection){range.selectNodeContents(detail);selection.removeAllRanges();selection.addRange(range);}}catch{/* Text stays selectable. */}
+      button.textContent='Select and copy';
+    }
+  }
   private value(id:string){return this.surfaceYielded&&id==='codex-composer'?this.yieldedComposer:this.el<HTMLInputElement>(id).value;}
   private setComposer(value:string){if(this.surfaceYielded)this.yieldedComposer=value;else this.el<HTMLTextAreaElement>('codex-composer').value=value;}
   private on(id:string,event:string,fn:(e:Event)=>void){this.el(id).addEventListener(event,e=>{if(this.surfaceYielded&&SHARED_SURFACE_IDS.has(id))return;fn(e);});}
@@ -2610,14 +2797,22 @@ export class CodexChat {
   setReplyUsage(format:ReplyUsageFormat|null):void {this.replyUsage=format;this.replyUsageChanged();}
   /** Cost display preferences changed: redraw the usage lines. */
   replyUsageChanged():void {this.replyUsageVersion++;if(this.state&&!this.stopped&&!this.surfaceYielded)this.render();}
-  private replyUsageLine(threadId:string,turnId:string):HTMLElement|null {
+  private replyUsageLine(threadId:string,turnId:string,live=false):HTMLElement|null {
     const key=threadId+'\0'+turnId;
-    if(!this.replyUsage||!this.transcript.finishedTurns.has(key))return null;
     const model=this.state?.actions.findLast(row=>row.action==='turn-start'&&row.threadId===threadId&&row.turnId===turnId)?.model??this.snapshot()?.thread?.selection.model??null;
+    // While the turn runs: a quiet live line with the tokens reported so far.
+    if(live&&!this.transcript.finishedTurns.has(key)){
+      const sofar=turnReplyUsage(this.transcript.turnUsage.get(key),model);
+      return renderLiveUsage(this.doc,sofar?compactCount(sofar.tokens)+' tokens…':LIVE_USAGE_WORKING_TEXT);
+    }
+    if(!this.replyUsage||!this.transcript.finishedTurns.has(key))return null;
     const usage=turnReplyUsage(this.transcript.turnUsage.get(key),model);if(!usage)return null;
-    let view:{text:string;title:string}|null=null;try{view=this.replyUsage(usage);}catch{view=null;}
+    let view:ReturnType<ReplyUsageFormat>=null;try{view=this.replyUsage(usage);}catch{view=null;}
     if(!view)return null;
-    const line=this.make('p',view.text,'reply-usage');line.title=view.title;line.dataset.tokens=String(usage.tokens);
+    const name=model?this.snapshot()?.models.find(row=>row.model===model)?.displayName??null:null;
+    const rows=[...(view.rows??[]),...(name?[['Model',this.api.safe(name)] as const]:[])];
+    const line=renderReplyUsage(this.doc,{text:view.text,rows,note:view.note??null});
+    const button=line.querySelector<HTMLElement>('.reply-usage');if(button)button.dataset.tokens=String(usage.tokens);
     return line;
   }
   usageLimit():ProviderUsageLimit|null {
@@ -2663,7 +2858,7 @@ export class CodexChat {
     const module=await import('./chat-tabs.js');
     const preferences=options.preferences??module.workspacePreferencesAdapter(this.doc);
     const tabs=new module.ChatTabs(this.doc,value=>this.api.safe(value),{
-      select:key=>this.selectChat(key),close:key=>this.closeChat(key),newChat:()=>this.newChat(),openSaved:id=>this.openSavedChat(id),
+      select:key=>this.selectChat(key),close:key=>this.closeChat(key),newChat:()=>this.newChat(),openSaved:id=>this.openSavedChat(id),unsent:key=>this.unsentDraft(key),
     },{...options,...(preferences?{preferences}:{}),onPersistenceChange:()=>{options.onPersistenceChange?.();this.persistenceChanged(tabs);}});
     if(!this.state||!this.fresh)await this.refresh();
     if(!this.state||!this.fresh)throw new Error('Read the canonical project before restoring chat tabs.');
@@ -2787,6 +2982,21 @@ export class CodexChat {
     if(t?.writeGranted||this.state.nativeAssets?.granted||this.state.nativeAssets?.admissionOpen)return 'Revoke workspace writes and asset permission before changing chats. Grants belong to this chat only.';
     return null;
   }
+  /**
+   * Opening a local draft (New chat, or a draft tab) starts, resumes, retries and deletes no native work, so recorded
+   * receipts, connecting, busy or stale state never hold it: they stay reviewable in the recovery card and keep their own
+   * Send gates. Only a live chat that needs attention (running reply, approval, grants) holds it, because that chat is
+   * brought forward on every state read, and so does an open confirmation.
+   */
+  private draftBlockReason():string|null {
+    const state=this.state,s=this.snapshot(),t=s?.thread;
+    if(this.stopped||!state)return 'Refresh native state before changing chats.';
+    if(this.tabs?.persistenceStatus()==='native-loading')return 'Wait for the canonical project’s native chat preferences.';
+    if(this.confirmation||s?.approvals.length)return 'Finish the visible approval or confirmation before changing chats.';
+    if(t&&(!t.configured||!IDLE.includes(t.turnStatus)))return 'Stop or finish the active native turn before changing chats.';
+    if(t?.writeGranted||state.nativeAssets?.granted)return 'Revoke workspace writes and asset permission before changing chats. Grants belong to this chat only.';
+    return null;
+  }
   private stashTabDraft():void {
     if(this.draftTimer!==undefined)clearTimeout(this.draftTimer);this.draftTimer=undefined;this.draftDirty=false;
     const active=this.tabs?.active();if(!active)return;
@@ -2842,17 +3052,18 @@ export class CodexChat {
       }).finally(()=>{if(this.preferencesLoadingProject===project)this.preferencesLoadingProject=null;});
     }
   }
+  /** A local draft only: it performs no native action, so only draftBlockReason holds it (never receipts, connecting or busy state). */
   async newChat():Promise<boolean> {
-    if(!this.tabs||this.preparingMessage)return false;
-    const blocked=this.tabBlockReason();if(blocked){this.text('codex-notice',blocked);return false;}
+    if(!this.tabs)return false;
+    const blocked=this.draftBlockReason();if(blocked){this.text('codex-notice',blocked);return false;}
     this.stashTabDraft();if(!this.tabs.createDraft()){this.text('codex-notice','Close an open tab before creating another draft. Saved native history is retained.');return false;}
     this.loadTabDraft();this.render();this.publishState();this.el('codex-composer').focus({preventScroll:true});return true;
   }
   async selectChat(key:string):Promise<boolean> {
-    if(this.preparingMessage)return false;
-    const target=this.tabs?.views().find(row=>row.key===key);if(!target)return false;
+    const target=this.tabs?.views().find(row=>row.key===key);if(!target||this.preparingMessage&&target.kind!=='draft')return false;
     if(this.tabs!.active()?.key===key&&(target.kind==='draft'||this.tabs!.bound(this.state)))return true;
-    const blocked=this.tabBlockReason();if(blocked){this.text('codex-notice',blocked);return false;}
+    // Opening a draft tab is local; a saved chat may need a native resume and keeps every native gate.
+    const blocked=target.kind==='draft'?this.draftBlockReason():this.tabBlockReason();if(blocked){this.text('codex-notice',blocked);return false;}
     this.stashTabDraft();
     if(target.kind==='native'&&!this.tabs!.owns(target))return false;
     if(target.kind==='native'&&!(this.state?.snapshot?.thread?.configured&&this.state.snapshot.thread.threadId===target.threadId&&this.state.snapshot.thread.sessionId===target.sessionId)) {
@@ -2865,7 +3076,9 @@ export class CodexChat {
     this.loadTabDraft();this.render();this.publishState();return true;
   }
   async closeChat(key:string):Promise<boolean> {
-    if(this.preparingMessage||!this.tabs||!this.tabs.views().some(row=>row.key===key))return false;
+    if(!this.tabs||!this.tabs.views().some(row=>row.key===key))return false;
+    const draft=this.tabs.views().find(row=>row.key===key&&row.kind==='draft');if(draft)return this.closeDraftChat(draft);
+    if(this.preparingMessage)return false;
     if(this.tabs.active()?.key===key) {
       const blocked=this.tabBlockReason();if(blocked){this.text('codex-notice',blocked);return false;}
       const next=this.tabs.views().find(row=>row.key!==key);
@@ -2873,6 +3086,28 @@ export class CodexChat {
     }
     const closed=this.tabs.remove(key);if(closed)this.tabDraftContexts.delete(key);
     this.render();this.publishState();return closed;
+  }
+  /**
+   * An unsent draft is local text: closing it starts, resumes, retries and deletes no native work, so pending or uncertain
+   * receipts, connecting and busy state never hold it open. Recorded receipts stay in the service journal and in the one
+   * recovery card (this.uncertain belongs to the connection, not a tab), and an open that this draft started stops before
+   * its next step (bindNativeChat's exact() requires the same source tab) without sending anything.
+   */
+  private closeDraftChat(draft:ChatTabView):boolean {
+    const tabs=this.tabs!,active=tabs.active()?.key===draft.key,state=this.state;
+    const blocked=this.stopped||!state?'Refresh native state before changing chats.':tabs.persistenceStatus()==='native-loading'?'Wait for the canonical project’s native chat preferences.':
+      this.queue.some(row=>row.scope===chatQueueScope('codex',state.projectPath,null,null,draft.localId))?'This draft has queued messages. Remove them before closing its tab.':null;
+    if(blocked){this.text('codex-notice',blocked);return false;}
+    if(active){if(this.draftTimer!==undefined)clearTimeout(this.draftTimer);this.draftTimer=undefined;this.draftDirty=false;}
+    if(!tabs.closeDraft(draft.key))return false;
+    this.tabDraftContexts.delete(draft.key);if(active)this.loadTabDraft();
+    this.render();this.publishState();return true;
+  }
+  /** The active draft's live composer text and attachments count as unsent before the debounce stores them. */
+  private unsentDraft(key:string):boolean {
+    if(this.surfaceYielded||this.tabs?.active()?.key!==key)return false;
+    if(this.value('codex-composer').trim())return true;
+    try{return !!this.attachments&&(this.attachments.prepareReferences().length>0||!!this.attachments.prepareText(''));}catch{return true;}
   }
   async openSavedChat(threadId:string):Promise<boolean> {
     if(this.preparingMessage||!this.tabs||!this.tabs.saved().some(row=>row.threadId===threadId))return false;
@@ -2891,7 +3126,7 @@ export class CodexChat {
   }
   private async bindNativeChat(action:'thread-start'|'thread-resume',selection:ChatSelection,threadId?:string):Promise<boolean> {
     if(!this.providerAllowsCodex()){this.text('codex-notice','Choose Codex to open this saved chat. Claude Code uses its native handoff.');return false;}
-    const lifetime=this.messageLifetime,originProject=this.state?.projectPath,provider=this.providerPreference(),source=this.tabs?.active();
+    const lifetime=this.messageLifetime,originProject=this.state?.projectPath,provider=this.providerPreference();let source=this.tabs?.active();
     const sameNavigation=()=>this.messageLifetime===lifetime&&this.state?.projectPath===originProject&&this.providerPreference()===provider;
     const sameSource=()=>{const current=this.tabs?.active();return !!source&&!!current&&current.localId===source.localId&&current.key===source.key&&
       current.kind===source.kind&&current.projectPath===source.projectPath&&current.threadId===source.threadId&&current.sessionId===source.sessionId;};
@@ -2904,7 +3139,9 @@ export class CodexChat {
     // A background read may observe this transition's own acknowledged thread before its HTTP
     // receipt settles; that would bump the asset-scope generation and fence the receipt.
     this.tabTransition=true;this.readVersion++;this.readController?.abort();this.render();this.publishState();
-    const exact=()=>sameNavigation()&&this.state?.projectPath===project&&this.fresh&&!this.stopped&&this.providerAllowsCodex();
+    // New chat and draft close never wait for this transition, so leaving its source tab stops the remaining steps (no
+    // further native action; an in-flight request keeps its receipt) instead of binding or loading another tab.
+    const exact=()=>sameNavigation()&&sameSource()&&this.state?.projectPath===project&&this.fresh&&!this.stopped&&this.providerAllowsCodex();
     const perform=async(name:string,fields:Record<string,unknown>={})=>{if(!exact())return false;const receipt=await this.dispatch(name,fields,true);return exact()&&receipt?.state==='acknowledged';};
     let historyLimited=false,historyHadRecording=false;
     try {
@@ -2945,6 +3182,7 @@ export class CodexChat {
       if(action==='thread-start') {
         const draft=this.tabs?.active();
         if(!this.tabs?.bindDraft(this.state!))return false;
+        source=this.tabs.active()??undefined; // The bound draft is now this chat's tab.
         if(draft){const context=this.tabDraftContexts.get(draft.key);if(context)this.tabDraftContexts.set(this.tabs.active()!.key,context);this.tabDraftContexts.delete(draft.key);}
       }
       // A newly created conversation has no prior history to load. Saved chats
@@ -3114,7 +3352,7 @@ export class CodexChat {
     if(this.stopped)return 'The chat connection is paused. Reopen this conversation to continue.';
     if(!this.fresh)return 'Conversation state is unavailable. Refresh state to continue.';
     if(this.tabTransition)return 'Opening the conversation. Wait for its saved state.';
-    if(this.uncertain.size)return 'A previous request needs review before you can change models or send another message.';
+    if(this.uncertain.size)return 'Check the unconfirmed request above before sending.';
     if(this.state?.displayLimited)return 'The conversation response exceeded the display limit. Refresh and review the recorded request before continuing.';
     if(this.state?.connecting)return 'Connecting to your chat provider.';
     if(this.state?.closing)return 'The previous chat connection is closing.';
@@ -3565,7 +3803,7 @@ export class CodexChat {
     const trigger = this.el<HTMLButtonElement>('codex-model-trigger'); trigger.disabled = !this.pickerCanOpen();
     trigger.setAttribute('aria-busy', String([...this.pending.values()].some(input => input.action === 'select')));
     trigger.setAttribute('aria-label', this.api.safe(selection ? 'Codex reported model: ' + selection.model + ', effort: ' + selection.effort : 'Choose Codex model and effort'));
-    this.text('codex-model-picker-status', this.uncertain.size ? 'Native acknowledgement is uncertain. Review recorded actions.' :
+    this.text('codex-model-picker-status', this.uncertain.size ? 'Check the unconfirmed request in the conversation first.' :
       this.pending.size ? 'Awaiting native acknowledgement.' : !snapshot ? 'Connect Codex to read its reported models.' :
       !this.canSelectModel() ? this.modelBlockReason()! :
       selection ? 'Reported selection: ' + selection.model + ' · ' + selection.effort : 'No model and effort selection acknowledged.');
@@ -3676,9 +3914,10 @@ export class CodexChat {
       if(this.providerAllowsCodex()&&thread?.configured&&thread.turnId&&['starting','inProgress'].includes(thread.turnStatus)&&(!this.tabs||this.tabs.bound(this.state)))this.stopCurrentTask();
     });
     this.on('codex-reconcile','click',()=>void this.refresh());
+    this.doc.getElementById('codex-notice-copy')?.addEventListener('click',()=>void this.copyRequestDetail());
     const usageButton=this.doc.getElementById('codex-refresh-usage');
     if(usageButton)usageButton.addEventListener('click',()=>void this.refreshUsage());
-    this.on('codex-acknowledge','click',()=>{if(!this.canAcknowledge())return;this.uncertain.clear();this.text('codex-notice','Recorded action IDs and native state reviewed. No request was retried.');this.render();});
+    this.on('codex-acknowledge','click',()=>{if(!this.canAcknowledge())return;this.uncertain.clear();this.text('codex-notice','Reviewed. Nothing was sent again, and your draft is kept.');this.render();this.publishState();});
     this.on('codex-confirm-check','change',()=>this.renderControls());
     this.on('codex-confirm-cancel','click',()=>this.closeConfirmation());
     this.on('codex-confirm','close',()=>{if(!this.el<HTMLDialogElement>('codex-confirm').open)this.confirmation=null;});
@@ -3823,7 +4062,7 @@ export class CodexChat {
       if(!sentDraft||!sentDraft.text||this.stopped||this.value('codex-composer')!==''||(this.tabs?.active()?.key??null)!==sentDraft.tab)return;
       this.setComposer(sentDraft.text);
       this.workflowDraftOrigins=sentDraft.origins;this.reviewedDraftTarget=sentDraft.reviewed;this.restoredWorkflowDraft=sentDraft.restored;this.stashTabDraft();
-      this.text('codex-notice',(this.el('codex-notice').textContent??'')+' Your message text was restored to the composer.');
+      this.appendNotice(' Your message text was restored to the composer.');
     };
     if(input.action==='turn-start'){
       try { this.feedbackHooks?.userMessage({key:this.feedbackKey(input.threadId),text:input.displayText??input.text,box:this.el('codex-messages'),anchor:null}); } catch { /* Learning is optional. */ }
@@ -3844,14 +4083,19 @@ export class CodexChat {
       if(!fenced){this.readVersion++;this.applyState(outcome.state);this.fresh=true;
         acknowledgedStateApplied=outcome.record.state==='acknowledged';
         const acknowledged:Record<string,string>={connect:'Connected. Choose a model to continue.',disconnect:'Disconnected.',select:'Model updated.','thread-start':'Conversation ready.','thread-resume':'Conversation opened.','turn-start':'Message accepted. Waiting for a response.','turn-steer':'Steering message accepted by the active reply.','turn-interrupt':'Stop requested.','task-stop':'Task stopped.','grant-writes':'Workspace editing enabled for this conversation.','revoke-writes':'Workspace editing disabled.','grant-assets':'Asset jobs enabled for this conversation.','revoke-assets':'Asset jobs disabled.',approval:'Your review was recorded.','history-load':'History loaded.'};
-        this.text('codex-notice',outcome.record.state==='acknowledged'?(acknowledged[input.action]??'Request confirmed.'):(codexFailureHint(outcome.record.errorCode)?codexFailureHint(outcome.record.errorCode)+' ':'')+input.action+' · native acknowledgement '+outcome.record.state+' · '+input.requestId+'. Review recorded state before continuing.');}
+        if(outcome.record.state==='acknowledged')this.text('codex-notice',acknowledged[input.action]??'Request confirmed.');
+        else if(outcome.record.state==='rejected')this.requestNotice(codexRequestNotice(input.action,outcome.record.state,input.requestId,outcome.record.errorCode??null));
+        else this.text('codex-notice','');} // Unconfirmed: the recovery card says it once.
       if(['pending','unknown'].includes(outcome.record.state))this.uncertain.set(input.requestId,{input,read:false});
       else if(outcome.record.state==='rejected')restoreRejectedDraft();
       const message=this.transcript.messages.find(m=>m.key===input.requestId);if(message)message.acknowledgement='Native acknowledgement: '+outcome.record.state;
       return fenced?undefined:outcome.record;
     } catch(error) {
       if(!(error instanceof CodexHttpError)||error.unknown)this.uncertain.set(input.requestId,{input,read:false});
-      if(!this.stopped&&epoch===this.generation)this.text('codex-notice',(error instanceof Error?error.message:'Unknown native HTTP acknowledgement.')+' Request ID retained: '+input.requestId+'. No automatic retry.');
+      if(!this.stopped&&epoch===this.generation){
+        if(error instanceof CodexHttpError&&!error.unknown)this.requestNotice(codexRequestNotice(input.action,'rejected',input.requestId,null,error.message));
+        else this.text('codex-notice',''); // Unconfirmed: the recovery card says it once, with the recorded details.
+      }
       if(error instanceof CodexHttpError&&!error.unknown)restoreRejectedDraft();
     } finally {
         if(this.imageRequest===imageRequest)this.imageRequest=null;
@@ -3899,6 +4143,9 @@ export class CodexChat {
   private transcriptRows:{sig:string;body:string;nodes:Node[];turn:string|null;change:ToolChange|null;role:string}[]=[];
   /** The conversation (tab key or thread) whose earlier messages were asked for. */
   private earlierView:string|null=null;
+  /** Message keys already drawn for enteredView, so only genuinely new rows get an entrance (presentation only). */
+  private enteredView:string|null=null;
+  private enteredKeys=new Set<string>();
   /**
    * Draws the shared transcript. Rows before the first changed one keep their nodes (and listeners, open details and
    * selection); a reply that is still streaming patches only its open block. Studio changes are summarised once per
@@ -3922,7 +4169,7 @@ export class CodexChat {
     for(let index=first;index<all.length;index++){
       const message=all[index]!,turn=turnOf(message),last=index===all.length-1||turnOf(all[index+1]!)!==turn;
       if(index===first||turn!==turnOf(all[index-1]!))thread=message.threadId??message.key.split('\0')[0]??null;
-      const line=last&&turn&&thread?this.replyUsageLine(thread,turn):null,streaming=running&&index===all.length-1&&message.role==='codex';
+      const line=last&&turn&&thread?this.replyUsageLine(thread,turn,running&&index===all.length-1):null,streaming=running&&index===all.length-1&&message.role==='codex';
       const extra=JSON.stringify([message.role==='codex'?index>lastHuman?'live':nextHuman[index]??null:'',last,line?[line.textContent,line.title]:null,streaming,message.role==='tool'?null:codexMessageDetails(message,this.state)]);
       specs.push({message,index,turn,last,line,streaming,sig:JSON.stringify(message)+extra,body:JSON.stringify({...message,text:''})+extra});
     }
@@ -3944,6 +4191,9 @@ export class CodexChat {
     const from=Math.max(0,keep-offset);
     let changes:ToolChange[]=[];
     for(let j=out.length-1;j>=offset&&from>0&&out[j]!.turn===specs[from]!.turn;j--)if(out[j]!.change)changes.unshift(out[j]!.change!);
+    // Only rows this view has never drawn get an entrance; redraws, history loads and earlier messages do not.
+    const seen=this.enteredView===view&&!reset?this.enteredKeys:null;
+    this.enteredView=view;this.enteredKeys=new Set(all.map(message=>message.key));
     for(const spec of specs.slice(from)){
       const {message}=spec,nodes:Node[]=[];let element:HTMLElement,change:ToolChange|null=null;
       if(message.role==='tool'){const tool=renderCodexToolArticle(this.doc,message,value=>this.api.safe(value));change=tool.change??null;element=tool.article;}
@@ -3960,6 +4210,7 @@ export class CodexChat {
         const metadata=this.make('details',undefined,'message-details');metadata.append(this.make('summary','Message details'),this.make('pre',this.api.safe(codexMessageDetails(message,this.state)),'hint mono'));card.append(metadata);
       }
       messages.append(element);nodes.push(element);if(change)changes.push(change);
+      if(seen&&!seen.has(message.key))markEntered(element);
       if(spec.last){
         const card=renderChangeCard(this.doc,changes);if(card){messages.append(card);nodes.push(card);}changes=[];
         if(spec.line){if(element.className.split(' ').includes('codex'))element.append(spec.line);else{messages.append(spec.line);nodes.push(spec.line);}}
@@ -4015,7 +4266,7 @@ export class CodexChat {
     const approvals=s?.approvals??[],approvalSignature=JSON.stringify(approvals);
     if(approvalSignature!==this.approvalSignature){this.approvalSignature=approvalSignature;const host=this.el('codex-approvals');host.replaceChildren();for(const approval of approvals)this.renderApproval(host,approval);}
     this.el('codex-approval-section').hidden=!approvals.length;
-    this.el('codex-unknown').hidden=!this.uncertain.size;
+    this.renderRecovery();
     this.text('codex-unknown-requests',[...this.uncertain].map(([id,u])=>{const r=this.state?.actions.find(r=>r.requestId===id);return id+' · '+u.input.action+' · '+(r?.state??'not found in recorded actions')+(r?.errorCode?' · '+r.errorCode:'');}).join('\n'));
     const actions=this.el('codex-actions');actions.replaceChildren();for(const r of this.state?.actions??[])actions.append(this.make('p',r.requestId+' · '+r.action+' · native acknowledgement '+r.state+(r.errorCode?' · '+r.errorCode:''),'hint mono'));
     this.renderControls();
@@ -4030,6 +4281,30 @@ export class CodexChat {
     const row=this.make('div',undefined,'button-row');
     for(const decision of ['accept','decline','cancel'] as const){const button=this.make('button',decision==='accept'?'Review acceptance…':decision==='decline'?'Decline':'Cancel request',decision==='accept'?'':'secondary');button.type='button';button.dataset.decision=decision;button.addEventListener('click',()=>{if(decision==='accept')this.openApproval(a);else void this.dispatch('approval',{threadId:a.threadId,turnId:a.turnId,handle:a.handle,decision});});row.append(button);}
     card.append(row);host.append(card);
+  }
+  /**
+   * The one recovery card for unconfirmed requests (#codex-unknown, in the conversation column). Plain words up top; the
+   * request ID, action, recorded state and code stay in its collapsed Details (#codex-unknown-requests). Check status reads
+   * the recorded actions and state (refresh, never a retry); I've reviewed it is the existing acknowledgement. The card
+   * belongs to the connection, not to a tab, so it stays on whichever chat is shown after a draft closes.
+   */
+  private renderRecovery():void {
+    const card=this.el('codex-unknown'),rows=[...this.uncertain.values()];card.hidden=!rows.length;
+    if(!rows.length){delete card.dataset.state;return;}
+    const titles:Record<string,string>={connect:'Arcane couldn’t confirm the connection to ChatGPT','turn-start':'Arcane couldn’t confirm your message went through',
+      'turn-steer':'Arcane couldn’t confirm your steering message went through','thread-start':'Arcane couldn’t confirm the new chat started',
+      'thread-resume':'Arcane couldn’t confirm this chat opened','history-load':'Arcane couldn’t confirm this chat’s history loaded',select:'Arcane couldn’t confirm the model change'};
+    const title=rows.length>1?'Arcane couldn’t confirm '+rows.length+' requests':titles[rows[0]!.input.action]??'Arcane couldn’t confirm your last request';
+    const waiting=!!(this.state?.connecting||this.state?.closing||this.state?.busy||this.pending.size);
+    const state=!rows.every(u=>u.read)||!this.fresh?'unchecked':this.canAcknowledge()?'checked':waiting?'waiting':'unconfirmed';
+    const body={unchecked:'Nothing was sent again. Check its status before you send another message or change models.',
+      checked:'Status checked, and nothing was sent again. Mark it reviewed to carry on.',
+      waiting:'Still waiting for an answer. Nothing was sent again.',
+      unconfirmed:'Still unconfirmed, and nothing was sent again. Reconnect from Conversation settings, then mark it reviewed.'}[state];
+    card.dataset.state=state;
+    const titleNode=this.doc.getElementById('codex-unknown-title'),bodyNode=this.doc.getElementById('codex-unknown-body');
+    if(titleNode&&titleNode.textContent!==title)titleNode.textContent=this.api.safe(title);
+    if(bodyNode&&bodyNode.textContent!==body)bodyNode.textContent=this.api.safe(body);
   }
   private renderControls() {
     this.renderUsage();
@@ -4069,7 +4344,7 @@ export class CodexChat {
     disable('codex-acknowledge',!this.canAcknowledge());
     for(const card of Array.from(this.el('codex-approvals').children)){const a=s?.approvals.find(a=>a.handle===(card as HTMLElement).dataset.handle);for(const b of Array.from(card.querySelectorAll<HTMLButtonElement>('button[data-decision]')))b.disabled=this.stopped||!a||a.connectionId!==s?.connectionId||a.threadId!==t?.threadId||a.turnId!==t?.turnId||a.expiresAt<=Date.now()||[...this.pending.values()].some(p=>p.action==='approval'&&p.handle===a.handle)||(b.dataset.decision==='accept'&&(!this.fresh||!!this.uncertain.size||!approvalEligible(this.state,a)));}
     this.renderPicker();
-    this.tabs?.render(!!this.tabBlockReason());
+    this.tabs?.render(!!this.tabBlockReason(),!!this.draftBlockReason());
     this.applyPendingSelection();
     this.autoReview();
   }
@@ -4087,15 +4362,12 @@ export class CodexChat {
     const signature=JSON.stringify([send,[...this.uncertain.keys()],this.canAcknowledge(),this.stopped,this.state?.actions.filter(row=>this.uncertain.has(row.requestId))]);
     if(root.dataset.signature===signature)return;root.dataset.signature=signature;
     root.replaceChildren(this.make('p',send));
+    // An unconfirmed request is reviewed once, in the recovery card (Check status / I've reviewed it, details collapsed);
+    // the composer keeps its normal look and only says why Send waits.
+    root.dataset.reason=this.uncertain.size?'recovery':'state';
+    if(this.uncertain.size)return;
     const refresh=this.make('button','Refresh state','secondary');refresh.type='button';refresh.disabled=this.stopped;
     refresh.addEventListener('click',()=>{void this.refresh();});root.append(refresh);
-    if(this.uncertain.size){
-      const details=this.make('details',undefined,'message-details');details.append(this.make('summary','Review the recorded request'));
-      const rows=[...this.uncertain].map(([id,value])=>{const action=this.state?.actions.find(row=>row.requestId===id);return `${value.input.action}\nStatus: ${action?.state??'Not yet reported'}\nError: ${action?.errorCode??'No error code reported'}\nRequest: ${id}`;});
-      details.append(this.make('pre',rows.join('\n\n'),'hint mono'));root.append(details);
-      const review=this.make('button','Acknowledge reviewed state','secondary');review.type='button';review.disabled=!this.canAcknowledge();
-      review.addEventListener('click',()=>{if(!this.canAcknowledge())return;this.uncertain.clear();this.text('codex-notice','Recorded request and current state reviewed. Your draft is retained.');this.render();this.publishState();});root.append(review);
-    }
   }
   private renderComposer():void {
     if(this.surfaceYielded){this.renderQueue();return;}

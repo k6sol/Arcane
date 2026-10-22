@@ -1,0 +1,147 @@
+/* Pyx pop-out bar. Values follow the Claude Design ShardBar board (dark only: the bar floats over any app).
+   Palette: red, white, dark red and black, with the C30 neutral inks. No inline styles (CSP style-src 'self'). */
+@font-face{font-family:"IBM Plex Sans";font-style:normal;font-weight:100 700;font-display:fallback;src:url(/fonts/ibm-plex-sans-latin-wght-normal.woff2) format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
+@font-face{font-family:"IBM Plex Sans";font-style:normal;font-weight:100 700;font-display:fallback;src:url(/fonts/ibm-plex-sans-latin-ext-wght-normal.woff2) format("woff2");unicode-range:U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF}
+:root{
+  color-scheme:dark;
+  --pyx-font:"IBM Plex Sans","Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,BlinkMacSystemFont,Arial,sans-serif;
+  --pyx-ink:#f4efef;--pyx-ink-chip:#eadfe1;--pyx-ink-meta:#9c9093;--pyx-ink-placeholder:#757575;
+  --pyx-red:#e5323f;--pyx-red-hot:#ff5a66;--pyx-red-tint:#ff9aa6;--pyx-crimson:#c8102e;--pyx-caret:#ff3340;--pyx-outline:#14040a;
+  --pyx-surface:#0e0c0e;--pyx-line:#33272b;--pyx-raised:#1f1a1d;--pyx-track:#2a2326;--pyx-stop:#2a1114;--pyx-stop-line:#5a1e26;
+  --pyx-send:linear-gradient(180deg,#f0434f,#c8102e);
+  --pyx-glass:rgba(255,255,255,.06);--pyx-glass-line:rgba(255,255,255,.12);--pyx-glass-hi:inset 0 1px 0 rgba(255,255,255,.08);
+  --pyx-hover:rgba(255,255,255,.08);--pyx-hover-line:rgba(255,255,255,.18);--pyx-divider:rgba(255,255,255,.14);--pyx-pip-off:rgba(255,255,255,.18);
+  --pyx-shadow:0 20px 44px rgba(0,0,0,.55);
+  --pyx-d1:120ms;--pyx-d2:180ms;--pyx-d3:240ms;--pyx-d4:360ms;
+  --pyx-e-std:cubic-bezier(.2,0,0,1);--pyx-e-emph:cubic-bezier(.3,0,0,1);--pyx-e-exit:cubic-bezier(.4,0,1,1);
+  /* The pop: a small overshoot that settles, from Pyx's own corner. */
+  --pyx-e-pop:cubic-bezier(.34,1.42,.64,1);--pyx-pop-in:320ms;--pyx-pop-out:150ms;
+}
+*{box-sizing:border-box;scrollbar-width:none}
+*::-webkit-scrollbar{display:none;width:0;height:0}
+html,body{margin:0;background:transparent;overflow:hidden}
+body{font-family:var(--pyx-font);color:var(--pyx-ink);-webkit-font-smoothing:antialiased;-webkit-user-select:none;user-select:none}
+button,input{font:inherit;color:inherit;margin:0}
+[hidden]{display:none!important}
+.pyx-sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+
+/* Window: 772 × 244. The bar row sits at a fixed height so a reply above or suggestions below never move it. */
+.pyx-window{width:100vw;height:100vh;padding:16px;display:flex;justify-content:center}
+.pyx{width:740px;max-width:100%;display:grid;grid-template-rows:56px 60px auto;row-gap:8px;align-content:start;transform-origin:35px 94px}
+/* Closed (also the state the window first paints and is hidden in): nothing visible, nothing to click. */
+.pyx[data-open=false]{opacity:0;transform:translateY(10px) scale(.9);pointer-events:none}
+.pyx-bubble-slot{display:flex;align-items:flex-end;padding-left:64px;min-width:0}
+
+/* Bubble: Pyx's report, popping from Pyx. Two lines at most; the full text is in the title and the live region. */
+.pyx-bubble{display:flex;align-items:center;gap:10px;max-width:calc(100% - 40px);min-width:0;background:#fff;color:var(--pyx-outline);border-radius:14px 14px 14px 4px;padding:9px 14px;
+  font-size:14px;font-weight:500;line-height:1.3;box-shadow:0 8px 20px rgba(0,0,0,.4);transform-origin:0 100%;-webkit-user-select:text;user-select:text}
+.pyx-bubble-text{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2;overflow:hidden;overflow-wrap:anywhere;min-width:0}
+.pyx-bubble[data-tone=alert]{background:var(--pyx-stop);color:#fff;border:1px solid var(--pyx-stop-line);padding:8px 8px 8px 14px}
+.pyx-bubble[data-tone=alert]:not(:has(.pyx-bubble-open:not([hidden]))){padding-right:14px}
+.pyx-bubble-open{flex:none;height:28px;padding:0 10px;border-radius:9px;border:1px solid var(--pyx-red-hot);background:var(--pyx-send);color:#fff;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap}
+
+/* The bar. Its body (and Pyx) is the handle that moves the window; the controls inside keep their own pointers. */
+.pyx-bar{display:flex;align-items:center;gap:8px;height:60px;min-width:0;background:var(--pyx-surface);border:1px solid var(--pyx-line);border-radius:20px;padding:0 10px 0 0;
+  box-shadow:var(--pyx-shadow),inset 0 1px 0 rgba(255,255,255,.04);cursor:grab;touch-action:none}
+.pyx[data-phase=working] .pyx-bar{box-shadow:var(--pyx-shadow),0 0 0 1px rgba(229,50,63,.10)}
+.pyx-bar:focus-within{border-color:rgba(255,77,87,.55);box-shadow:var(--pyx-shadow),0 0 0 4px rgba(255,51,64,.12)}
+.pyx[data-dragging=true],.pyx[data-dragging=true] *{cursor:grabbing!important}
+
+/* Pyx: the 24×24 sprite at an integer 2x inside a 68px box that overhangs the 60px bar by 4px. */
+.pyx-pet{position:relative;display:block;flex:none;width:68px;height:68px;padding:0;border:0;border-radius:16px;background:transparent;cursor:grab;touch-action:none}
+.pyx-pet-hop{display:flex;width:68px;height:68px;align-items:center;justify-content:center}
+.pyx-sprite{display:block;width:48px;height:48px;image-rendering:pixelated;shape-rendering:crispEdges}
+.pyx-badge{position:absolute;left:48px;top:8px;image-rendering:pixelated}
+
+/* One line, as the canvas: long text scrolls inside the box (no scrollbar) and the caret stays in view. The line box is
+   taller than any face's ascent + descent, so nothing is cut at the top or bottom whichever font is loaded. */
+.pyx-input{flex:1 1 auto;min-width:0;width:0;height:40px;padding:0 4px;border:0;outline:0;background:transparent;color:var(--pyx-ink);caret-color:var(--pyx-caret);
+  font-size:15px;line-height:24px;text-overflow:ellipsis;cursor:text;-webkit-user-select:text;user-select:text}
+.pyx-input:focus{text-overflow:clip}
+.pyx-input::placeholder{color:var(--pyx-ink-placeholder);opacity:1}
+.pyx-input::selection{background:rgba(229,50,63,.45);color:#fff}
+
+/* Working: what Pyx is doing, the real step count when known, elapsed time and the progress fill. */
+.pyx-status{flex:1 1 auto;min-width:0;width:0;display:flex;flex-direction:column;gap:6px;padding:0;border:0;background:transparent;text-align:left;cursor:text}
+.pyx-status-head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;min-width:0}
+.pyx-status-title{font-size:14px;font-weight:600;line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.pyx-status-meta{display:flex;align-items:center;gap:8px;font-size:12px;line-height:1.3;font-variant-numeric:tabular-nums;color:var(--pyx-ink-meta);white-space:nowrap}
+.pyx-live-dot{width:6px;height:6px;border-radius:999px;background:var(--pyx-red)}
+.pyx-progress{display:block;height:4px;border-radius:999px;background:var(--pyx-track);overflow:hidden}
+.pyx-progress-fill{display:block;width:100%;height:100%;background:var(--pyx-red);transform-origin:left center;transform:scaleX(0)}
+
+/* Model chip, as the main composer's: provider mark in white, model, divider, reasoning pips, chevron. A long model name
+   shortens with an ellipsis (the full name is in the chip's accessible name). */
+.pyx-model{display:flex;align-items:center;gap:8px;flex:0 1 auto;min-width:0;height:40px;padding:0 10px 0 11px;border-radius:13px;background:var(--pyx-glass);border:1px solid var(--pyx-glass-line);
+  box-shadow:var(--pyx-glass-hi);color:var(--pyx-ink);font-size:13px;font-weight:500;line-height:1.3;white-space:nowrap;cursor:pointer}
+.pyx-model-logo{flex:none;width:14px;height:14px;color:#fff}
+.pyx-model-name{min-width:0;max-width:160px;overflow:hidden;text-overflow:ellipsis}
+.pyx-model-divider{flex:none;width:1px;height:14px;background:var(--pyx-divider)}
+.pyx-model-pips{display:flex;flex:none;gap:3px}
+.pyx-pip{width:4px;height:4px;border-radius:1px;background:var(--pyx-red)}
+.pyx-model-pips[data-level="1"]>.pyx-pip:nth-child(n+2),.pyx-model-pips[data-level="2"]>.pyx-pip:nth-child(3){background:var(--pyx-pip-off)}
+.pyx-model-chevron{flex:none;fill:none;stroke:var(--pyx-ink-meta);stroke-width:2.6;stroke-linecap:round;stroke-linejoin:round}
+
+.pyx-stop{display:flex;align-items:center;gap:6px;flex:none;height:40px;padding:0 12px 0 10px;border-radius:13px;border:1px solid var(--pyx-stop-line);background:var(--pyx-stop);color:#fff;
+  font-size:13px;font-weight:500;line-height:1.3;white-space:nowrap;cursor:pointer}
+.pyx-stop svg{fill:var(--pyx-red)}
+
+.pyx-send{position:relative;display:flex;align-items:center;justify-content:center;flex:none;width:40px;height:40px;padding:0;border-radius:13px;border:1px solid var(--pyx-red-hot);
+  background:var(--pyx-send);box-shadow:inset 0 1px 0 rgba(255,255,255,.22);color:#fff;cursor:pointer}
+.pyx-send svg{position:relative;fill:none;stroke:currentColor;stroke-width:2.6;stroke-linecap:round;stroke-linejoin:round}
+.pyx-send::after{content:"";position:absolute;inset:0;border-radius:inherit;background:rgba(255,255,255,.10);opacity:0;pointer-events:none}
+.pyx-send:disabled{cursor:not-allowed;border-color:var(--pyx-stop-line);background:var(--pyx-stop);box-shadow:none;color:rgba(255,255,255,.5)}
+
+/* Close: a quiet × at the bar's end. */
+.pyx-close{display:flex;align-items:center;justify-content:center;flex:none;width:30px;height:30px;padding:0;margin-left:-2px;border-radius:10px;border:1px solid transparent;background:transparent;
+  color:var(--pyx-ink-meta);cursor:pointer}
+.pyx-close svg{fill:none;stroke:currentColor;stroke-width:2.4;stroke-linecap:round}
+.pyx-close:hover{color:#fff;background-color:var(--pyx-hover);border-color:var(--pyx-hover-line)}
+
+/* Suggestions: fill the box only. One row: each chip shortens with an ellipsis, so all three are always reachable. */
+.pyx-suggestions{display:flex;flex-wrap:nowrap;gap:6px;padding-left:64px;padding-right:8px;min-width:0}
+.pyx-suggestion{display:flex;align-items:center;gap:6px;flex:0 1 auto;min-width:0;background:var(--pyx-raised);border:1px solid var(--pyx-line);color:var(--pyx-ink-chip);border-radius:999px;
+  padding:6px 12px 6px 10px;font-size:13px;line-height:1.3;white-space:nowrap;cursor:pointer}
+.pyx-suggestion>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pyx-suggestion-icon{flex:none;width:12px;height:12px;fill:none;stroke:var(--pyx-red-tint);stroke-width:2.6;stroke-linecap:round}
+
+/* Hover and press: immediate feedback that also works with reduced motion. */
+.pyx-hover:hover:not(:disabled),.pyx-suggestion:hover{background-color:var(--pyx-hover);border-color:var(--pyx-hover-line)}
+.pyx-send:hover:not(:disabled)::after{opacity:1}
+:is(.pyx-hover,.pyx-suggestion,.pyx-send,.pyx-bubble-open,.pyx-close):active:not(:disabled){transform:translateY(1px)}
+
+/* Focus: a white ring on every control; the input shows focus through the bar's red ring. */
+:is(button):focus-visible{outline:2px solid #fff;outline-offset:2px}
+.pyx-pet:focus-visible{outline-offset:-2px}
+
+@media (prefers-reduced-motion: no-preference){
+  @keyframes pyx-rise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+  @keyframes pyx-pop{from{opacity:0;transform:scale(.98)}to{opacity:1;transform:none}}
+  @keyframes pyx-grow{from{transform:scaleX(.5)}}
+  @keyframes pyx-hop{0%{transform:translateY(0)}12%{transform:translateY(-2px)}24%{transform:translateY(-4px)}36%{transform:translateY(-6px)}52%{transform:translateY(-4px)}64%{transform:translateY(-2px)}76%{transform:translateY(0)}88%{transform:translateY(-2px)}100%{transform:translateY(0)}}
+  /* Open pops with a settle; close is quicker and plain (exits never bounce). */
+  .pyx[data-open=true]{transition:opacity var(--pyx-d2) var(--pyx-e-std),transform var(--pyx-pop-in) var(--pyx-e-pop)}
+  .pyx[data-open=false]{transition:opacity var(--pyx-pop-out) var(--pyx-e-exit),transform var(--pyx-pop-out) var(--pyx-e-exit)}
+  .pyx-bubble.is-entering{animation:pyx-pop var(--pyx-d2) var(--pyx-e-std) 400ms both}
+  .pyx-bubble.is-entering[data-tone=alert]{animation:pyx-pop var(--pyx-d2) var(--pyx-e-std) both}
+  .pyx-suggestion.is-entering{animation:pyx-rise var(--pyx-d3) var(--pyx-e-emph) 520ms both}
+  .pyx-suggestion.is-entering:nth-child(2){animation-delay:560ms}
+  .pyx-suggestion.is-entering:nth-child(3){animation-delay:600ms}
+  .pyx-status.is-entering{animation:pyx-rise var(--pyx-d3) var(--pyx-e-emph) 80ms both}
+  .pyx-status.is-entering .pyx-progress-fill{animation:pyx-grow var(--pyx-d4) var(--pyx-e-std) 320ms both}
+  .pyx-progress-fill{transition:transform var(--pyx-d4) var(--pyx-e-std)}
+  .pyx-pet.is-hopping .pyx-pet-hop{animation:pyx-hop var(--pyx-d4) steps(1,end) 120ms both}
+  .pyx-bar{transition:border-color var(--pyx-d2) var(--pyx-e-std),box-shadow var(--pyx-d2) var(--pyx-e-std)}
+  :is(.pyx-hover,.pyx-suggestion,.pyx-close){transition:background-color var(--pyx-d1) var(--pyx-e-std),border-color var(--pyx-d1) var(--pyx-e-std),color var(--pyx-d1) var(--pyx-e-std),transform var(--pyx-d1) var(--pyx-e-std)}
+  .pyx-send{transition:transform var(--pyx-d1) var(--pyx-e-std)}
+  .pyx-send::after{transition:opacity var(--pyx-d1) var(--pyx-e-std)}
+}
+@media (forced-colors: active){
+  .pyx-bar,.pyx-bubble,.pyx-model,.pyx-stop,.pyx-send,.pyx-suggestion,.pyx-close{border:1px solid CanvasText}
+  .pyx-sprite,.pyx-badge{forced-color-adjust:none}
+  :is(button):focus-visible{outline-color:Highlight}
+  .pyx-progress-fill,.pyx-live-dot,.pyx-pip{forced-color-adjust:none;background:CanvasText}
+}
+@media (prefers-reduced-motion: reduce){
+  *,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}
+}

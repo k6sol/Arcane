@@ -69,9 +69,15 @@ test('real Edge in-app dialog: focus, Esc/Enter, inert page, Arcane styling, per
     assert.equal(await page.evaluate(() => document.activeElement?.textContent), 'Cancel', 'focus starts on the default (safe) button');
     assert.equal(await page.evaluate(() => (document.querySelector('.app-shell, body > :not(.arcane-modal-layer)') as HTMLElement).inert), true, 'the page behind is inert');
     const style = await page.evaluate(() => { const box = getComputedStyle(document.querySelector('.arcane-modal')!), primary = getComputedStyle(document.querySelector('.arcane-modal-primary')!);
-      return { top: box.borderTopColor, transition: box.transitionDuration + primary.transitionDuration, primaryBg: primary.backgroundColor, primaryText: primary.color, label: document.querySelector('.arcane-modal-primary')!.textContent }; });
+      return { top: box.borderTopColor, animation: box.animationName, transition: box.transitionDuration, primaryTransition: primary.transitionDuration, primaryBg: primary.backgroundColor, primaryText: primary.color, label: document.querySelector('.arcane-modal-primary')!.textContent }; });
     assert.equal(style.top, 'rgb(255, 51, 64)'); assert.equal(style.primaryBg, 'rgb(200, 16, 46)'); assert.equal(style.primaryText, 'rgb(255, 255, 255)');
-    assert.equal(style.label, 'Always allow'); assert.equal(style.transition, '0s0s', 'no motion');
+    assert.equal(style.label, 'Always allow');
+    // C31 motion contract: the dialog rises in once (no transition on the panel); its buttons take the shared 120 ms fade and press.
+    assert.equal(style.animation, 'c31-rise'); assert.equal(style.transition, '0s'); assert.match(style.primaryTransition, /^0\.12s(?:, 0\.12s)*$/);
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    assert.equal(await page.evaluate(() => { const box = getComputedStyle(document.querySelector('.arcane-modal')!), primary = getComputedStyle(document.querySelector('.arcane-modal-primary')!);
+      return box.animationName + '|' + box.transitionDuration + primary.transitionDuration; }), 'none|0s0s', 'no motion with reduced motion');
+    await page.emulateMedia({ reducedMotion: null });
     if (shots) await page.screenshot({ path: join(shots, 'in-app-dialog-' + colorScheme + '.png') });
     // Focus trap: Tab cycles inside the three buttons.
     for (let i = 0; i < 4; i++) await page.keyboard.press('Tab');

@@ -75,13 +75,26 @@ export interface StudioDiagnosticsOptions {
 export interface StudioDiagnosticsDock { stop(): void; resume(): void; refresh(): Promise<void>; items(): readonly StudioDiagnosticItemView[] }
 
 const SVG = 'http://www.w3.org/2000/svg';
-function alertIcon(doc: Document): SVGSVGElement {
+/** The pill's glyph: a terminal window, for Studio's output. */
+function outputIcon(doc: Document): SVGSVGElement {
   const svg = doc.createElementNS(SVG, 'svg');
   svg.setAttribute('class', 'icon'); svg.setAttribute('viewBox', '0 0 24 24'); svg.setAttribute('fill', 'none');
-  svg.setAttribute('stroke', 'currentColor'); svg.setAttribute('stroke-width', '1.6'); svg.setAttribute('stroke-linecap', 'round');
+  svg.setAttribute('stroke', 'currentColor'); svg.setAttribute('stroke-width', '1.75'); svg.setAttribute('stroke-linecap', 'round');
   svg.setAttribute('stroke-linejoin', 'round'); svg.setAttribute('aria-hidden', 'true');
-  for (const d of ['M12 3 2 20h20Z', 'M12 10v4', 'M12 17h.01']) { const path = doc.createElementNS(SVG, 'path'); path.setAttribute('d', d); svg.append(path); }
+  const frame = doc.createElementNS(SVG, 'rect');
+  for (const [name, value] of [['x', '3.5'], ['y', '4.5'], ['width', '17'], ['height', '15'], ['rx', '2.5']] as const) frame.setAttribute(name, value);
+  svg.append(frame);
+  for (const d of ['m7.5 9.5 3 2.5-3 2.5', 'M12.5 15h4']) { const path = doc.createElementNS(SVG, 'path'); path.setAttribute('d', d); svg.append(path); }
   return svg;
+}
+/** Which state the pill shows. Green, yellow and red come only from a current read; anything else is neutral. */
+export type StudioDiagnosticsTone = 'clear' | 'warnings' | 'errors' | 'neutral';
+/** How fresh the dock's list is: never read, the latest read (current), an older list kept after a failed or skipped read
+ * (stale), or no list because the latest read failed (failed). */
+export type StudioDiagnosticsRead = 'none' | 'current' | 'stale' | 'failed';
+export function studioDiagnosticsTone(read: StudioDiagnosticsRead, items: readonly Pick<StudioDiagnosticItem, 'kind'>[]): StudioDiagnosticsTone {
+  if (read !== 'current') return 'neutral';
+  return items.some(item => item.kind === 'error') ? 'errors' : items.length ? 'warnings' : 'clear';
 }
 
 export function startStudioDiagnostics(doc: Document, options: StudioDiagnosticsOptions): StudioDiagnosticsDock {
@@ -106,7 +119,7 @@ export function startStudioDiagnostics(doc: Document, options: StudioDiagnostics
   toggle.setAttribute('aria-expanded', 'false'); toggle.setAttribute('aria-controls', 'studio-diagnostics-panel');
   const count = doc.createElement('span'); count.className = 'studio-diagnostics-count';
   const label = doc.createElement('span'); label.className = 'studio-diagnostics-label'; label.textContent = 'Studio';
-  toggle.append(alertIcon(doc), label, count);
+  toggle.append(outputIcon(doc), label, count);
   const panel = doc.createElement('section');
   panel.id = 'studio-diagnostics-panel'; panel.className = 'studio-diagnostics-panel'; panel.hidden = true;
   panel.setAttribute('aria-labelledby', 'studio-diagnostics-title');
@@ -119,18 +132,25 @@ export function startStudioDiagnostics(doc: Document, options: StudioDiagnostics
   panel.append(header, status, list);
   mount.replaceChildren(toggle, panel);
 
-  let stopped = false, cancelTimer: (() => void) | null = null, generation = 0;
+  let stopped = false, cancelTimer: (() => void) | null = null, generation = 0, read: StudioDiagnosticsRead = 'none';
   const inFlight = new Set<AbortController>();
+  const studioActive = () => { try { return options.active?.() ?? true; } catch { return false; } };
   const open = () => toggle.getAttribute('aria-expanded') === 'true';
   const setOpen = (value: boolean) => { toggle.setAttribute('aria-expanded', String(value)); panel.hidden = !value; };
   const render = () => {
     const errors = items.filter(item => item.kind === 'error').length, warnings = items.length - errors;
-    mount.hidden = items.length === 0 && !open();
-    mount.dataset.severity = errors ? 'error' : warnings ? 'warning' : 'none';
-    count.textContent = String(items.length);
+    // Severity needs a current read of a live session; a stopped dock or a session that went away is neutral.
+    const tone = studioDiagnosticsTone(!stopped && studioActive() ? read : read === 'current' ? 'stale' : read, items);
+    mount.hidden = items.length === 0 && !open() && !studioActive();
+    for (const name of ['clear', 'warnings', 'errors', 'neutral'] as const) mount.classList.toggle('studio-diagnostics--' + name, tone === name);
+    mount.dataset.severity = tone === 'neutral' ? 'unknown' : errors ? 'error' : warnings ? 'warning' : 'none';
+    // Clear shows a dot, so it has no count; an unproven read never shows 0.
+    count.textContent = tone === 'clear' ? '' : items.length ? String(items.length) : '\u2013';
     const summary = (errors ? errors + (errors === 1 ? ' error' : ' errors') : '') + (errors && warnings ? ', ' : '') + (warnings ? warnings + (warnings === 1 ? ' warning' : ' warnings') : '');
-    toggle.setAttribute('aria-label', 'Studio output: ' + (summary || 'no errors'));
-    toggle.title = summary ? 'Studio output: ' + summary : 'Studio output';
+    const state = tone !== 'neutral' ? summary || 'no errors or warnings'
+      : summary ? summary + ' (from an earlier read)' : read === 'failed' ? 'could not be read' : 'not checked yet';
+    toggle.setAttribute('aria-label', 'Studio output: ' + state);
+    toggle.title = 'Studio output: ' + state;
     clear.disabled = items.length === 0;
     const rows = items.map(item => {
       const row = doc.createElement('li'); row.className = 'studio-diagnostic'; row.dataset.kind = item.kind; row.dataset.id = item.id;
@@ -151,8 +171,10 @@ export function startStudioDiagnostics(doc: Document, options: StudioDiagnostics
       row.append(body, fix); return row;
     });
     list.replaceChildren(...rows);
-    if (!items.length) status.textContent = 'No Studio errors or warnings.';
-    else if (status.textContent === 'No Studio errors or warnings.') status.textContent = '';
+    if (!items.length) status.textContent = tone === 'clear' ? 'No Studio errors or warnings.' : read === 'failed' ? 'Studio output could not be read. Arcane will try again.' : 'Checking Studio output\u2026';
+    else if (tone === 'neutral') status.textContent = 'Showing an earlier read of Studio output.';
+    // A list is showing: drop any empty-list line this renderer wrote earlier (including 'Checking' from before the first read).
+    else if (['No Studio errors or warnings.', 'Showing an earlier read of Studio output.', 'Checking Studio output…', 'Studio output could not be read. Arcane will try again.'].includes(status.textContent ?? '')) status.textContent = '';
   };
   const request = async (path: string, body?: unknown): Promise<unknown> => {
     const token = options.token();
@@ -173,12 +195,17 @@ export function startStudioDiagnostics(doc: Document, options: StudioDiagnostics
     try {
       const next = readStudioDiagnostics(await request(STUDIO_DIAGNOSTICS_ROUTE));
       if (mine !== generation || stopped) return;
-      items = next; render();
-    } catch { /* Keep the last view; the dock never interrupts the conversation. */ }
+      items = next; read = 'current'; render();
+    } catch {
+      // Keep the last list but stop vouching for it: the pill turns neutral. The dock never interrupts the conversation.
+      if (mine !== generation || stopped) return;
+      read = items.length ? 'stale' : 'failed'; render();
+    }
   };
   const loop = () => {
     cancelTimer = null; if (stopped) return;
     let wanted = true; try { wanted = options.active?.() ?? true; } catch { wanted = false; }
+    if (!wanted) { if (read === 'current') read = 'stale'; render(); }
     void (wanted ? refresh() : Promise.resolve()).finally(() => { if (!stopped && !cancelTimer) cancelTimer = schedule(loop, interval); });
   };
   toggle.addEventListener('click', () => { setOpen(!open()); render(); });
@@ -186,7 +213,7 @@ export function startStudioDiagnostics(doc: Document, options: StudioDiagnostics
     clear.disabled = true; const mine = ++generation;
     try {
       await request(STUDIO_DIAGNOSTICS_CLEAR_ROUTE, {});
-      if (mine === generation) { items = []; status.textContent = 'Cleared.'; render(); }
+      if (mine === generation) { items = []; read = 'none'; render(); status.textContent = 'Cleared.'; }
     } catch { status.textContent = 'Studio output could not be cleared.'; clear.disabled = items.length === 0; }
   });
   panel.addEventListener('keydown', event => { if (event.key === 'Escape') { setOpen(false); render(); toggle.focus(); } });

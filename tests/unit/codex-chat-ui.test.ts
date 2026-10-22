@@ -789,3 +789,41 @@ test('synthetic Codex reply with an arcane-choices block renders option buttons;
   f.set(invalid);await f.chat.refresh();
   assert.equal(walk(f.doc.getElementById('codex-messages')).filter(node=>node.className==='chat-choices').length,1,'an invalid block stays text');
 });
+
+test('real Edge draft chats close from the chat chip menu and Ctrl+W; a draft with text asks Discard draft? inline', {skip:!browserModule,timeout:60000},async t=>{
+  const h=await harness(t),b=await browser(t,h.origin),{page}=b;
+  await b.open();await b.connect();
+  if(await page.locator('#settings-drawer').isVisible())await page.locator('[data-settings-close]').click();
+  // The top bar shows one chat chip at every width; its menu lists the open chats with their own x (the strip stays in the DOM, undrawn).
+  const posts=b.posts.length,tabs=page.locator('#workspace-chat-tabs [role="tab"]'),menu=page.locator('#workspace-saved-chats'),summary=menu.locator(':scope > summary');
+  const close=(key:string)=>menu.locator(`[data-close-chat="${key}"]`),selected=()=>page.locator('#workspace-chat-tabs [role="tab"][aria-selected="true"]').getAttribute('data-chat-key');
+  const focused=()=>page.evaluate(()=>({...(document.activeElement as HTMLElement|null)?.dataset}));
+  const open=async()=>{if(!await menu.evaluate((node:HTMLDetailsElement)=>node.open))await summary.click();};
+  await page.locator('#workspace-new-chat').click();await page.locator('#workspace-new-chat').click();
+  const keys=await tabs.evaluateAll((nodes:HTMLElement[])=>nodes.map(node=>node.dataset.chatKey!));assert.equal(keys.length,3);assert.equal(await selected(),keys[2]);
+  assert.equal(await page.locator('#workspace-chat-tabs').isVisible(),false,'the strip is folded into the chip');
+  const chip=await summary.evaluate((node:HTMLElement)=>{const style=getComputedStyle(node);return {height:node.getBoundingClientRect().height,radius:style.borderTopLeftRadius};});
+  assert.deepEqual(chip,{height:36,radius:'10px'},'design canvas chip: 36 px, radius 10');
+  await open();
+  assert.deepEqual(await menu.locator('.chat-switch-select').evaluateAll((nodes:HTMLElement[])=>nodes.map(node=>node.dataset.openChat)),keys,'the menu lists the open chats');
+  await page.locator('#codex-composer').fill('Edge unsent draft');
+  await open();await close(keys[2]!).click();
+  const question=menu.locator('.chat-tab-confirm');await question.waitFor();
+  assert.match((await question.textContent())!,/Discard draft\?\s*Discard\s*Keep/);
+  if(process.env.ARCANE_UI_SCREENSHOT)await page.locator('.workspace-topbar').screenshot({path:process.env.ARCANE_UI_SCREENSHOT+'.draft-close-confirm.png'});
+  await menu.locator('.chat-tab-keep').click();
+  assert.equal(await question.count(),0);
+  assert.equal(await page.locator('#codex-composer').inputValue(),'Edge unsent draft');assert.equal(await tabs.count(),3);
+  await open();await close(keys[2]!).click();await question.waitFor();await menu.locator('.chat-tab-discard').click();
+  await page.waitForFunction(()=>document.querySelectorAll('#workspace-chat-tabs [role="tab"]').length===2);
+  assert.equal(await selected(),keys[1]);
+  assert.equal(await page.locator('#codex-composer').inputValue(),'');
+  // An empty draft closes at once from its x.
+  await open();await close(keys[0]!).click();
+  await page.waitForFunction(()=>document.querySelectorAll('#workspace-chat-tabs [role="tab"]').length===1);assert.equal(await selected(),keys[1]);
+  // Ctrl+W closes the current chat through the chip menu's own x.
+  await page.mouse.click(700,500);await page.locator('#codex-composer').focus();await page.keyboard.press('Control+w');
+  await page.waitForFunction((old:string)=>{const nodes=document.querySelectorAll<HTMLElement>('#workspace-chat-tabs [role="tab"]');return nodes.length===1&&nodes[0]!.dataset.chatKey!==old;},keys[1]);
+  assert.equal(await tabs.first().getAttribute('aria-selected'),'true','closing the last chat leaves a fresh empty chat');
+  assert.equal(b.posts.length,posts,'closing drafts sends no native action');assert.deepEqual(b.errors,[]);void focused;
+});

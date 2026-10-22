@@ -1,0 +1,104 @@
+{
+  "version": 1,
+  "license": "OFL-1.1",
+  "packages": [
+    {
+      "name": "@fontsource-variable/ibm-plex-sans",
+      "version": "5.3.0",
+      "npmIntegrity": "sha512-agG8tXFEo0hD9+J7npa4vbbWult52eMLVaQ6WQRlhs/iCAojrMAoejru85W9HTVXHfyUj96KM7gp/KGAS87XaQ==",
+      "licence": "OFL-IBM-Plex-Sans.txt"
+    },
+    {
+      "name": "@fontsource-variable/archivo",
+      "version": "5.3.0",
+      "npmIntegrity": "sha512-HogK8FJelrD1o7TlZlkIVtHgc20bO5PZRWE7mUeUTdMN055alznQV6/00J00IBeu8FQAH4s3zW9UJNvKExXf+g==",
+      "licence": "OFL-Archivo.txt"
+    },
+    {
+      "name": "@fontsource/ibm-plex-mono",
+      "version": "5.3.0",
+      "npmIntegrity": "sha512-eTgnZjZEGk1QtD3ZstF+Vclo2HLAni8YMy34/DxllwZvyz1lR/1RF/xTiAquOBO7MvqBx8D2Ig2WCPMVfdZu7Q==",
+      "licence": "OFL-IBM-Plex-Mono.txt"
+    }
+  ],
+  "transform": "Byte-identical copies of the latin and latin-ext subsets; same-origin only, no runtime CDN.",
+  "files": [
+    {
+      "path": "OFL-IBM-Plex-Sans.txt",
+      "package": "@fontsource-variable/ibm-plex-sans",
+      "sourceSha256": "d0283623ef57e722fd0eb688a8041589670c608ab780cd3612d06ba6f153d3fd",
+      "sha256": "d0283623ef57e722fd0eb688a8041589670c608ab780cd3612d06ba6f153d3fd",
+      "bytes": 4429
+    },
+    {
+      "path": "ibm-plex-sans-latin-wght-normal.woff2",
+      "package": "@fontsource-variable/ibm-plex-sans",
+      "sourceSha256": "e2291e842cf5af167122a22881a740c7f2dda7716f1e8cd76680264f4a859470",
+      "sha256": "e2291e842cf5af167122a22881a740c7f2dda7716f1e8cd76680264f4a859470",
+      "bytes": 45712
+    },
+    {
+      "path": "ibm-plex-sans-latin-ext-wght-normal.woff2",
+      "package": "@fontsource-variable/ibm-plex-sans",
+      "sourceSha256": "d160e20920ae4d6556518d352d3af27a74e9b0de3d8fe17b1c1044fc75aa2f81",
+      "sha256": "d160e20920ae4d6556518d352d3af27a74e9b0de3d8fe17b1c1044fc75aa2f81",
+      "bytes": 30964
+    },
+    {
+      "path": "OFL-Archivo.txt",
+      "package": "@fontsource-variable/archivo",
+      "sourceSha256": "c3c8402eec0e31dc9a76851235b1c02a0bb821488b2db8e35bcc2ab60ca8fc2b",
+      "sha256": "c3c8402eec0e31dc9a76851235b1c02a0bb821488b2db8e35bcc2ab60ca8fc2b",
+      "bytes": 4503
+    },
+    {
+      "path": "archivo-latin-wght-normal.woff2",
+      "package": "@fontsource-variable/archivo",
+      "sourceSha256": "8f704806dbedeaaeca334b11ec348bc3ac3a439d6431544b3afb54f534ee4967",
+      "sha256": "8f704806dbedeaaeca334b11ec348bc3ac3a439d6431544b3afb54f534ee4967",
+      "bytes": 34928
+    },
+    {
+      "path": "archivo-latin-ext-wght-normal.woff2",
+      "package": "@fontsource-variable/archivo",
+      "sourceSha256": "ff4f17d21930e36d6d93baba663e624cb767afc3feebf7adaebd82242638de05",
+      "sha256": "ff4f17d21930e36d6d93baba663e624cb767afc3feebf7adaebd82242638de05",
+      "bytes": 32608
+    },
+    {
+      "path": "OFL-IBM-Plex-Mono.txt",
+      "package": "@fontsource/ibm-plex-mono",
+      "sourceSha256": "23b0a9d0c6d3f140a0b77e483c5cfa6bba574325ef5cb189ed9f2fec4884533f",
+      "sha256": "23b0a9d0c6d3f140a0b77e483c5cfa6bba574325ef5cb189ed9f2fec4884533f",
+      "bytes": 5299
+    },
+    {
+      "path": "ibm-plex-mono-latin-400-normal.woff2",
+      "package": "@fontsource/ibm-plex-mono",
+      "sourceSha256": "08949f728dc52d528e69b1667d15c89a5686a4ee9a296ff90983985f99c380f7",
+      "sha256": "08949f728dc52d528e69b1667d15c89a5686a4ee9a296ff90983985f99c380f7",
+      "bytes": 14708
+    },
+    {
+      "path": "ibm-plex-mono-latin-ext-400-normal.woff2",
+      "package": "@fontsource/ibm-plex-mono",
+      "sourceSha256": "6bc0f226a5b7884a8170e3f62c63d7675609d4631bdc5931b5cdab81821f00eb",
+      "sha256": "6bc0f226a5b7884a8170e3f62c63d7675609d4631bdc5931b5cdab81821f00eb",
+      "bytes": 13348
+    },
+    {
+      "path": "ibm-plex-mono-latin-500-normal.woff2",
+      "package": "@fontsource/ibm-plex-mono",
+      "sourceSha256": "01d285447409c8a588692162439a038b8cbd7871309ee20267b0d2d91c6e8e22",
+      "sha256": "01d285447409c8a588692162439a038b8cbd7871309ee20267b0d2d91c6e8e22",
+      "bytes": 14888
+    },
+    {
+      "path": "ibm-plex-mono-latin-ext-500-normal.woff2",
+      "package": "@fontsource/ibm-plex-mono",
+      "sourceSha256": "6bb06407c97584b0867a959e05e8874693bfeb8c317de190811c51598f2d99ea",
+      "sha256": "6bb06407c97584b0867a959e05e8874693bfeb8c317de190811c51598f2d99ea",
+      "bytes": 13432
+    }
+  ]
+}

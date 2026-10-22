@@ -33,6 +33,27 @@ export interface ChatTabPreferences {
 export interface ChatTabsCallbacks {
   select(key: string): Promise<boolean>; close(key: string): Promise<boolean>;
   newChat(): Promise<boolean>; openSaved(threadId: string): Promise<boolean>;
+  /** Optional: the tab also holds unsent content its row has not stored yet (live composer text or attachments). */
+  unsent?(key: string): boolean;
+}
+/** Closing an unsent draft: an empty one closes at once, one with text asks Discard/Keep first. Chats with sent turns keep their own close. */
+export function draftCloseStep(tab: Pick<ChatTabView,'kind'|'draft'>, unsent = false): 'native'|'close'|'confirm' {
+  return tab.kind!=='draft' ? 'native' : unsent || tab.draft.trim().length>0 ? 'confirm' : 'close';
+}
+/** The tab that takes over when one closes: its left neighbour, else its right one; null when it was the last tab. */
+export function closeNeighbour(keys: readonly string[], key: string): string | null {
+  const index = keys.indexOf(key); return index<0 ? null : keys[index-1] ?? keys[index+1] ?? null;
+}
+/** Arcane inline confirmation for closing a draft that holds text: Discard (red) and Keep. Presentation only; text via textContent. */
+export function draftCloseConfirm(doc: Document, key: string, label: string, actions: { discard(): void; keep(): void }): HTMLElement {
+  const group = doc.createElement('span'); group.className = 'chat-tab-confirm'; group.setAttribute('role', 'group'); group.setAttribute('aria-label', 'Discard draft? ' + label);
+  const question = doc.createElement('span'); question.className = 'chat-tab-confirm-text'; question.textContent = 'Discard draft?';
+  const make = (text: string, action: 'discard'|'keep', run: () => void) => {
+    const button = doc.createElement('button'); button.type = 'button'; button.className = 'chat-tab-' + action; button.textContent = text;
+    button.dataset.confirmChat = key; button.dataset.confirmAction = action; button.addEventListener('click', run); return button;
+  };
+  group.append(question, make('Discard', 'discard', () => actions.discard()), make('Keep', 'keep', () => actions.keep()));
+  return group;
 }
 const bytes = (text: string) => new TextEncoder().encode(text).byteLength;
 const id = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(value);
@@ -82,6 +103,11 @@ export class ChatTabs {
   private mounted = false;
   private newChatAllowed = false;
   private savedMenu: HTMLDetailsElement | null = null;
+  /** The draft whose inline Discard/Keep question is showing, and the last render's block state for re-rendering it. */
+  private confirmingKey: string | null = null;
+  private lastBlocked = false;
+  /** The last render's draft gate: drafts are local, so a host may hold them by less than it holds saved chats. */
+  private lastDraftBlocked = false;
   private nativeReady = false;
   private nativeError = false;
   /** A save failed; its snapshot stays queued and is retried at the next persist boundary. */
@@ -281,6 +307,26 @@ export class ChatTabs {
     if (key===this.activeKey || !this.rows.some(row=>row.key===key)) return false;
     this.rows = this.rows.filter(row=>row.key!==key);this.presentationRevision++;this.persistenceDirty=true; this.persist(); return true;
   }
+  /**
+   * Removes an unsent local draft and its stored text. It never touches a native thread: an active draft hands over to its
+   * left (else right) neighbour without resuming it (a saved chat resumes only on its own explicit gesture), and closing
+   * the last tab leaves a fresh empty draft that keeps the closed draft's model choice.
+   */
+  closeDraft(key: string): boolean {
+    const index=this.rows.findIndex(row=>row.key===key),row=this.rows[index];
+    if(!row||row.kind!=='draft')return false;
+    const neighbour=closeNeighbour(this.rows.map(row=>row.key),key);
+    this.rows.splice(index,1);if(this.confirmingKey===key)this.confirmingKey=null;
+    if(this.activeKey===key) {
+      const next=[this.rows.find(row=>row.key===neighbour),...this.rows].find(row=>row!==undefined&&(row.kind==='draft'||this.owns(row)));
+      if(next)this.activeKey=next.key;
+      else {
+        const localId=crypto.randomUUID(),fresh:Tab={key:'draft:'+localId,localId,title:'Draft',tool:'all',previewOpen:false,kind:'draft',provider:'codex',projectPath:row.projectPath,threadId:null,sessionId:null,selection:structuredClone(row.selection),draft:'',workflowDraft:false};
+        this.rows.push(fresh);this.activeKey=fresh.key;
+      }
+    }
+    this.presentationRevision++;this.persistenceDirty=true;this.persist();return true;
+  }
   flushPreferences():void {
     if(this.nativeReady&&!this.nativeError&&this.nativeProject===this.projectPath)this.persistenceDirty=true;
     this.persist();
@@ -365,10 +411,12 @@ export class ChatTabs {
     }
     listen(mount,'keydown',event=>{
       const input=event as KeyboardEvent, key=(input.target as HTMLElement)?.dataset?.chatKey;
+      const confirming=(input.target as HTMLElement)?.dataset?.confirmChat;
+      if (confirming && input.key==='Escape' && !input.altKey && !input.ctrlKey && !input.metaKey && !input.shiftKey) {event.preventDefault();this.keepDraft(confirming);return;}
       if (!key || input.altKey || input.ctrlKey || input.metaKey || input.shiftKey) return;
       const index = this.rows.findIndex(row=>row.key===key);
       if (index<0) return;
-      if (input.key==='Delete') {event.preventDefault();void this.callbacks.close(key);return;}
+      if (input.key==='Delete') {event.preventDefault();this.requestClose(key);return;}
       const next = input.key==='Home'?0:input.key==='End'?this.rows.length-1:input.key==='ArrowRight'?(index+1)%this.rows.length:input.key==='ArrowLeft'?(index+this.rows.length-1)%this.rows.length:-1;
       if(next<0)return;event.preventDefault();const target=this.rows[next]!.key;
       void this.callbacks.select(target).then(ok=>{if(ok)Array.from(mount.querySelectorAll<HTMLElement>('[role=tab]')).find(button=>button.dataset.chatKey===target)?.focus();});
@@ -377,15 +425,23 @@ export class ChatTabs {
     this.savedMenu=this.doc.createElement('details');this.savedMenu.className='chat-tabs-history';this.savedMenu.id='workspace-saved-chats';
     if(mount.hidden===true)this.savedMenu.hidden=true;mount.after(this.savedMenu);
   }
-  render(blocked: boolean): void {
+  /**
+   * `blocked` holds switching to saved chats (a native resume); `draftBlocked` (default: the same) holds New chat and
+   * switching to a draft, which perform no native action. Closing a draft is never held here.
+   */
+  render(blocked: boolean, draftBlocked: boolean = blocked): void {
     if (!this.mounted) return;
-    this.newChatAllowed = !blocked && this.rows.length < CHAT_TAB_LIMITS.open;
+    this.lastBlocked = blocked;this.lastDraftBlocked = draftBlocked;
+    if (this.confirmingKey && !this.rows.some(row=>row.key===this.confirmingKey&&row.kind==='draft')) this.confirmingKey = null;
+    this.newChatAllowed = !draftBlocked && this.rows.length < CHAT_TAB_LIMITS.open;
     const alternate = this.alternateNewChat();
-    const signature = JSON.stringify([this.presentationRevision,this.activeKey,blocked,alternate]);
+    const selectBlocked = (row:Tab) => (row.kind==='draft'?draftBlocked:blocked) && row.key!==this.activeKey;
+    const signature = JSON.stringify([this.presentationRevision,this.activeKey,blocked,draftBlocked,alternate,this.confirmingKey]);
     if (signature!==this.signature) {
       this.signature=signature;
       const mount = this.doc.getElementById('workspace-chat-tabs')!;
-      const focusKey = (this.doc.activeElement as HTMLElement|null)?.dataset.chatKey;
+      const focused = this.doc.activeElement as HTMLElement|null, focusData = focused?.dataset ?? ({} as DOMStringMap), focusKey = focusData.chatKey;
+      const focusInStrip = !!focused && typeof mount.contains==='function' && mount.contains(focused);
       mount.replaceChildren();
       for (const [index,row] of this.rows.entries()) {
         const wrap=this.doc.createElement('span');wrap.setAttribute('role','presentation');wrap.className='chat-tab';
@@ -394,25 +450,39 @@ export class ChatTabs {
         prependProviderLogo(this.doc,button,'codex'); // Codex tabs belong to ChatGPT.
         button.title=this.safe(row.kind==='draft'?'Unsent local draft':row.threadId!);
         button.setAttribute('aria-selected',String(row.key===this.activeKey));button.setAttribute('aria-controls','codex-messages');button.tabIndex=row.key===this.activeKey?0:-1;
-        button.disabled=blocked&&row.key!==this.activeKey;button.addEventListener('click',()=>void this.callbacks.select(row.key));
-        const close=this.doc.createElement('button');close.type='button';close.textContent='×';close.setAttribute('aria-label','Close '+button.textContent);close.disabled=blocked&&row.key===this.activeKey;
-        close.addEventListener('click',()=>void this.callbacks.close(row.key));wrap.append(button,close);mount.append(wrap);
+        button.disabled=selectBlocked(row);button.addEventListener('click',()=>void this.callbacks.select(row.key));
+        // An unsent draft is local text, so its close is never held by native work; a chat with sent turns keeps its rule.
+        const closeDisabled=this.closeDisabled(row,blocked);
+        if (row.key===this.confirmingKey) {
+          wrap.dataset.confirming='true';
+          wrap.append(button,draftCloseConfirm(this.doc,row.key,button.textContent??'',{discard:()=>void this.discardDraft(row.key,'strip'),keep:()=>this.keepDraft(row.key,'strip')}));
+        } else {
+          const close=this.doc.createElement('button');close.type='button';close.className='chat-tab-close';close.textContent='×';close.dataset.closeChat=row.key;
+          close.setAttribute('aria-label','Close '+button.textContent);close.title='Close '+button.textContent;close.disabled=closeDisabled;
+          close.addEventListener('click',()=>this.requestClose(row.key,'strip'));wrap.append(button,close);
+        }
+        // Middle-click closes a tab, as in browsers; the press itself must not start autoscroll.
+        wrap.addEventListener('mousedown',event=>{if((event as MouseEvent).button===1)event.preventDefault();});
+        wrap.addEventListener('auxclick',event=>{if((event as MouseEvent).button!==1)return;event.preventDefault();if(!closeDisabled&&row.key!==this.confirmingKey)this.requestClose(row.key);});
+        mount.append(wrap);
       }
       if (focusKey) Array.from(mount.querySelectorAll<HTMLElement>('[role=tab]')).find(button=>button.dataset.chatKey===focusKey)?.focus({preventScroll:true});
+      else if (focusInStrip && (focusData.closeChat||focusData.confirmChat)) this.focusStrip(node=>focusData.closeChat?node.dataset.closeChat===focusData.closeChat:node.dataset.confirmChat===focusData.confirmChat&&node.dataset.confirmAction===focusData.confirmAction);
       for (const id of ['workspace-new-chat', ...(this.options.captureLegacyNewChat ? ['new-chat'] : [])]) {
         const create=this.doc.getElementById(id) as HTMLButtonElement|null;
         if(create)create.disabled=!this.newChatAllowed&&!alternate;
       }
     }
-    const savedSignature=JSON.stringify([this.catalogueRevision,blocked,this.presentationRevision,this.activeKey,alternate]);
+    const savedSignature=JSON.stringify([this.catalogueRevision,blocked,draftBlocked,this.presentationRevision,this.activeKey,alternate,this.confirmingKey]);
     if (this.savedMenu&&savedSignature!==this.savedSignature) {
       this.savedSignature=savedSignature;const menu=this.savedMenu,focus=chatSwitchFocus(this.doc,menu);
       const active=this.rows.findIndex(row=>row.key===this.activeKey);
       menu.replaceChildren(chatSwitchSummary(this.doc,active<0?'Saved chats':this.rowLabel(this.rows[active]!,active),'codex'));
       // Narrow widths hide the tab strip; this sheet then lists the open chats and New chat above Saved chats.
       menu.append(chatSwitchOpenSection(this.doc,menu,this.rows.map((row,index)=>({key:row.key,label:this.rowLabel(row,index),current:row.key===this.activeKey,
-        selectDisabled:blocked&&row.key!==this.activeKey,closeDisabled:blocked&&row.key===this.activeKey})),{
-        select:key=>void this.callbacks.select(key),close:key=>void this.callbacks.close(key),newChat:()=>this.requestNewChat(),newDisabled:!this.newChatAllowed&&!alternate}));
+        selectDisabled:selectBlocked(row),closeDisabled:this.closeDisabled(row,blocked),confirm:row.key===this.confirmingKey})),{
+        select:key=>void this.callbacks.select(key),close:key=>this.requestClose(key,'switcher'),newChat:()=>this.requestNewChat(),newDisabled:!this.newChatAllowed&&!alternate,
+        discard:key=>void this.discardDraft(key,'switcher'),keep:key=>this.keepDraft(key,'switcher')}));
       for(const saved of this.catalogue) {
         const button=this.doc.createElement('button');button.type='button';button.textContent=this.safe(saved.threadId);button.disabled=blocked;
         button.addEventListener('click',()=>void this.callbacks.openSaved(saved.threadId));this.savedMenu.append(button);
@@ -422,6 +492,48 @@ export class ChatTabs {
     }
   }
   private rowLabel(row:Tab,index:number):string{return this.safe(row.title==='Draft'?`Draft ${index+1}`:row.title==='Chat'?`Chat ${index+1}`:row.title);}
+  private closeDisabled(row:Tab,blocked:boolean):boolean{return row.kind!=='draft'&&blocked&&row.key===this.activeKey;}
+  /** Focus a control where the gesture came from (tab strip or open chat switcher), else in the other one when it is shown. */
+  private focusStrip(match:(node:HTMLElement)=>boolean,from:'strip'|'switcher'='strip'):boolean {
+    const strip=this.doc.getElementById('workspace-chat-tabs'),menu=this.savedMenu?.open?this.savedMenu:null;
+    for (const root of from==='switcher'?[menu,strip]:[strip,menu]) {
+      let nodes:HTMLElement[]=[];try{nodes=Array.from(root?.querySelectorAll<HTMLElement>('button')??[]);}catch{/* Focus is presentation only. */}
+      const target=nodes.find(node=>match(node)&&!(node as HTMLButtonElement).disabled&&!(typeof node.getClientRects==='function'&&node.getClientRects().length===0));
+      if(target){try{target.focus({preventScroll:true});return true;}catch{/* Focus is presentation only. */}}
+    }
+    return false;
+  }
+  /**
+   * Every close gesture lands here (×, middle-click, Delete, and Ctrl+W through the selected tab's ×). A chat with sent
+   * turns keeps its existing close. An empty draft closes at once; a draft with text first asks Discard draft? inline.
+   */
+  requestClose(key: string, from: 'strip'|'switcher' = 'strip'): void {
+    const row=this.rows.find(row=>row.key===key);if(!row||!this.mounted)return;
+    let unsent=false;try{unsent=this.callbacks.unsent?.(key)===true;}catch{unsent=true;}
+    const step=draftCloseStep(row,unsent);
+    if(step==='native'){void this.callbacks.close(key);return;}
+    if(step==='close'){void this.discardDraft(key,from);return;}
+    this.confirmingKey=key;this.render(this.lastBlocked,this.lastDraftBlocked);
+    this.focusStrip(node=>node.dataset.confirmChat===key&&node.dataset.confirmAction==='keep',from);
+  }
+  /** Keep answers the question: the draft and its text stay, and focus returns to its close button. */
+  keepDraft(key: string, from: 'strip'|'switcher' = 'strip'): void {
+    if(this.confirmingKey!==key)return;
+    this.confirmingKey=null;this.render(this.lastBlocked,this.lastDraftBlocked);
+    if(!this.focusStrip(node=>node.dataset.closeChat===key,from))this.focusStrip(node=>node.dataset.chatKey===key||node.dataset.openChat===key,from);
+  }
+  /** Discard (or closing an empty draft) deletes the draft and its stored text; focus moves to the neighbouring chat. */
+  private async discardDraft(key: string, from: 'strip'|'switcher'): Promise<void> {
+    const row=this.rows.find(row=>row.key===key);if(!row||row.kind!=='draft')return;
+    const neighbour=closeNeighbour(this.rows.map(row=>row.key),key);
+    if(this.confirmingKey===key)this.confirmingKey=null;
+    const closed=await this.callbacks.close(key);
+    if(!this.mounted)return;
+    this.render(this.lastBlocked,this.lastDraftBlocked);
+    if(!closed){if(!this.focusStrip(node=>node.dataset.closeChat===key,from))this.focusStrip(node=>node.dataset.chatKey===key||node.dataset.openChat===key,from);return;}
+    const next=this.rows.some(row=>row.key===neighbour)?neighbour:this.activeKey;
+    if(next)this.focusStrip(node=>node.dataset.chatKey===next||node.dataset.openChat===next,from);
+  }
   private alternateNewChat(): boolean { try { return this.options.alternateNewChat?.active()===true; } catch { return false; } }
   private requestNewChat(): void {
     if (!this.mounted) return;
@@ -436,8 +548,8 @@ export class ChatTabs {
 }
 
 /** One open chat in the narrow chat switcher (both providers). Presentation only. */
-export interface ChatSwitchRow { key:string; label:string; current:boolean; selectDisabled:boolean; closeDisabled:boolean }
-export interface ChatSwitchActions { select(key:string):void; close(key:string):void; newChat():void; newDisabled:boolean }
+export interface ChatSwitchRow { key:string; label:string; current:boolean; selectDisabled:boolean; closeDisabled:boolean; /** Show the inline Discard draft? question in place of × */ confirm?:boolean }
+export interface ChatSwitchActions { select(key:string):void; close(key:string):void; newChat():void; newDisabled:boolean; discard?(key:string):void; keep?(key:string):void }
 /** Saved chats summary. Wide layouts show "Saved chats"; on narrow layouts studio.css shows the current chat instead, so the
  * summary becomes the chat switcher and the accessible name still starts with the visible title. */
 export function chatSwitchSummary(doc:Document,current:string,provider:'codex'|'claude'|'arcane'):HTMLElement {
@@ -455,6 +567,12 @@ export function chatSwitchOpenSection(doc:Document,menu:HTMLDetailsElement,rows:
     const open=doc.createElement('button');open.type='button';open.className='chat-switch-select';open.textContent=row.label;open.dataset.openChat=row.key;
     open.setAttribute('aria-current',String(row.current));open.disabled=row.selectDisabled;
     open.addEventListener('click',()=>{menu.open=false;if(!row.current)actions.select(row.key);});
+    const discard=actions.discard,keep=actions.keep;
+    if(row.confirm&&discard&&keep){
+      const confirm=draftCloseConfirm(doc,row.key,row.label,{discard:()=>discard(row.key),keep:()=>keep(row.key)});
+      confirm.addEventListener('keydown',event=>{const key=event as KeyboardEvent;if(key.key==='Escape'&&!key.altKey&&!key.ctrlKey&&!key.metaKey&&!key.shiftKey){event.preventDefault();event.stopPropagation();keep(row.key);}});
+      line.append(open,confirm);section.append(line);continue;
+    }
     const close=doc.createElement('button');close.type='button';close.className='chat-switch-close';close.textContent='×';close.dataset.closeChat=row.key;
     close.setAttribute('aria-label','Close '+row.label);close.title='Close '+row.label;close.disabled=row.closeDisabled;
     close.addEventListener('click',()=>actions.close(row.key));

@@ -48,3 +48,14 @@ test('history data cannot execute accessors and failed attachment preserves the 
   let calls=0;const value={...before};Object.defineProperty(value,'folders',{enumerable:true,get(){calls++;return[];}});
   assert.throws(()=>readConversationLibrary(value,project));assert.equal(calls,0);
 });
+test('open sidebar folders persist with the library, follow removal and reject unknown ids',()=>{
+  const library=fixture();library.observe(transcript('codex','thread-1','Prompt'));const forest=library.createFolder('Forest'),shop=library.createFolder('Shop');
+  assert.equal('expandedFolderIds' in library.snapshot(),false,'a library with no open folder keeps the original record shape');
+  assert.equal(library.setFolderExpanded(forest,true),true);assert.equal(library.setFolderExpanded(forest,true),false);library.setFolderExpanded(shop,true);
+  const restored=new ConversationLibrary(project,library.snapshot());assert.deepEqual(restored.snapshot().expandedFolderIds,[forest,shop]);assert.equal(restored.expanded(shop),true);
+  restored.removeFolder(shop);assert.deepEqual(restored.snapshot().expandedFolderIds,[forest]);
+  restored.setFolderExpanded(forest,false);assert.equal('expandedFolderIds' in restored.snapshot(),false);
+  assert.throws(()=>restored.setFolderExpanded('missing-folder',true));
+  const snapshot=library.snapshot();
+  for(const open of [['missing-folder'],[forest,forest],[],[7]])assert.throws(()=>readConversationLibrary({...snapshot,expandedFolderIds:open},project));
+});

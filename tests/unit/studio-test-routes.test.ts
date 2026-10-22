@@ -127,7 +127,35 @@ async function httpFixture(t: TestContext) {
     });
   const post = (endpoint: string, input: unknown, token: string | null = AGENT_A, headers: Record<string, string> = {}) =>
     call({ path: '/v1/playtests/' + endpoint, body: JSON.stringify(input), token, headers });
-  return { ...fake, call, post, origin };
+  // Oversized POST that the route must refuse before it reads the whole body. A refusal is sent with
+  // Connection: close; if body bytes are still unread in the server's receive buffer at that point the
+  // loopback stack answers with RST, and the client (on Windows) loses the 413 to ECONNRESET. So only
+  // bytes the route has to read before it can refuse go on the wire: none when the declared
+  // Content-Length is refused, or the chunked (undeclared) body when streamed bytes are counted. The
+  // request is never ended and is destroyed once the refusal has been read.
+  const refusal = (options: { path: string; declaredBytes?: number; streamed?: string | Buffer }) =>
+    new Promise<{ status: number; text: string }>((resolve, reject) => {
+      assert.ok((options.declaredBytes === undefined) !== (options.streamed === undefined));
+      const outgoing = httpRequest(origin + options.path, { method: 'POST', agent: false, headers: {
+        Authorization: 'Bearer ' + AGENT_A, 'Content-Type': 'application/json',
+        ...(options.declaredBytes === undefined ? {} : { 'Content-Length': String(options.declaredBytes) }),
+      } }, response => {
+        const chunks: Buffer[] = [];
+        response.on('data', chunk => chunks.push(Buffer.from(chunk)));
+        response.once('error', reject);
+        response.once('end', () => {
+          outgoing.destroy();
+          resolve({ status: response.statusCode!, text: Buffer.concat(chunks).toString('utf8') });
+        });
+      });
+      outgoing.once('socket', socket => {
+        if (!clientSockets.has(socket)) clientSockets.set(socket, new Promise<void>(resolve => socket.once('close', resolve)));
+      });
+      outgoing.once('error', reject);
+      if (options.streamed === undefined) outgoing.flushHeaders();
+      else { assert.equal(outgoing.getHeader('content-length'), undefined); outgoing.write(options.streamed); }
+    });
+  return { ...fake, call, post, refusal, origin };
 }
 
 class ResponseFixture extends EventEmitter {
@@ -304,9 +332,16 @@ test('16 KiB body limit counts declared and streamed bytes; exact maximum remain
   const json = JSON.stringify(PREPARE);
   const exact = json + ' '.repeat(STUDIO_TEST_HTTP_LIMITS.bodyBytes - Buffer.byteLength(json));
   assert.equal((await f.call({ path: '/v1/playtests/prepare', body: exact, headers: { 'Content-Length': String(Buffer.byteLength(exact)) } })).status, 200);
-  assert.equal((await f.call({ path: '/v1/playtests/prepare', body: exact + ' ' })).status, 413);
-  assert.equal((await f.call({ path: '/v1/playtests/prepare', body: exact + ' ', headers: { 'Content-Length': String(Buffer.byteLength(exact) + 1) } })).status, 413);
-  assert.equal((await f.call({ path: '/v1/playtests/prepare', body: 'é'.repeat(9_000) })).status, 413);
+  const limit = STUDIO_TEST_HTTP_LIMITS.bodyBytes;
+  // Streamed (chunked, no Content-Length) bodies are counted in bytes: one byte over is refused, and
+  // 8,193 characters of two-byte UTF-8 (one byte over) are refused although far fewer than 16 Ki chars.
+  const refusedStreamed = await f.refusal({ path: '/v1/playtests/prepare', streamed: exact + ' ' });
+  assert.equal(refusedStreamed.status, 413); assert.equal(JSON.parse(refusedStreamed.text).error, 'BODY_LIMIT');
+  const wide = 'é'.repeat(limit / 2) + ' '; assert.equal(Buffer.byteLength(wide), limit + 1);
+  assert.equal((await f.refusal({ path: '/v1/playtests/prepare', streamed: wide })).status, 413);
+  // Declared lengths are refused from the header alone, before any body byte is read.
+  assert.equal((await f.refusal({ path: '/v1/playtests/prepare', declaredBytes: Buffer.byteLength(exact) + 1 })).status, 413);
+  assert.equal((await f.refusal({ path: '/v1/playtests/prepare', declaredBytes: Buffer.byteLength('é'.repeat(9_000)) })).status, 413);
   assert.equal(f.calls.length, 1);
   const s = streamFixture(t, { path: '/v1/playtests/prepare' });
   s.request.headers['content-length'] = '-1';

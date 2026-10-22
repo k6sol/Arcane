@@ -365,7 +365,10 @@ test('browser rejects optimistic labels and blocks busy, unconfigured, stale and
   const f = await browserFixture(t), { page } = f;
   f.handler(async input => { const record = receipt(input, 'rejected'), next = f.observed(); next.actions = [record]; f.set(next); return { record, state: next }; });
   await f.choose();
-  await page.waitForFunction(() => document.getElementById('codex-notice')?.textContent?.includes('rejected'));
+  // The visible line says what failed in plain words; the rejected state and request stay in the notice details.
+  await page.waitForFunction(() => document.getElementById('codex-notice')?.textContent?.includes('Couldn’t change the model.'));
+  assert.match(await page.locator('#codex-notice-detail').textContent() ?? '', /^Request \S+ · select · rejected\b/);
+  assert.doesNotMatch(await page.locator('#codex-notice').textContent() ?? '', /rejected|Request /);
   assert.equal(await page.locator('#codex-model-label').textContent(), 'Fixture Alpha'); assert.equal(f.posts.length, 1);
   const baseline = f.observed();
   for (const guard of ['busy', 'unconfigured', 'starting', 'inProgress', 'cancelling', 'unknown', 'limited', 'disconnected', 'notReady', 'connecting', 'closing'] as const) {

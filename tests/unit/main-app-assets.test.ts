@@ -50,6 +50,7 @@ async function fixture(t:TestContext,{switching=false,heldOpen=false}={}){
     projectPermissions:null,billing:null,productRoot:'/fixed-product',dialog:{},learnedContext:async()=>'',join,
     ownedDirectory:async(path:string)=>path,providerSetup:{cancelPending(){calls.push('provider-cancel');}},retireDiagnosticChild(){calls.push('diagnostics-retire');},
     runtimeRecovery:{invalidate(){calls.push('recovery-invalidate');},navigatedInPage(){}},
+    pyxBar:{reset(){calls.push('pyx-reset');},hide(){calls.push('pyx-hide');},dispose(){calls.push('pyx-dispose');}},
     ipcMain:{handle(channel:string,handler:(event:unknown,...args:unknown[])=>Promise<{state:string}>){assert.ok(!handlers.has(channel));handlers.set(channel,handler);}},
     require(name:string){
       if(name==='./app-asset-host.cjs'){
@@ -168,6 +169,7 @@ test('main navigation clears only the current non-inPlace mainframe and stale se
   f.child.answer(oldRequest);assert.equal((await old).state,'unavailable');assert.equal(f.context.assetSelectionReady,false);
   f.child.answer(latestRequest);assert.equal((await latest).state,'selected');assert.equal(f.context.assetSelectionReady,true);
   const count=f.child.requests.length;f.context.window={...f.owner};f.contents.emit('did-start-navigation',{},ORIGIN+'/studio',false,true);assert.equal(f.child.requests.length,count,'Inactive window cannot clear another view.');
+  assert.equal(f.calls.filter(call=>call==='pyx-reset').length,1,'Only the current window\'s replaced main frame resets the Pyx bar.');
 });
 test('main shutdown fences and clears app authority synchronously, requests daemon shutdown immediately and closes the broker after owned cleanup',{timeout:10000},async t=>{
   const f=await fixture(t);await f.start();const cleanup=deferred<void>();f.context.nativeHandoff={dispose(){f.calls.push('handoff-dispose');return cleanup.promise;}};

@@ -109,11 +109,29 @@ test('live transcript lines use the same friendly mapping as the Claude chat, wi
     item(8, 'o1', 'inProgress', { server: 'other', tool: 'scene_create', args: null }), item(9, 'n1', 'inProgress')]));
   assert.deepEqual(render(), [{ group: 'Created 2 parts in Workspace.Forest · 1 failed', state: 'failed', count: '3 steps' },
     { tool: 'Updating script ServerScriptService.Spawner…', state: 'started' },
-    { tool: 'Using an Arcane tool…', state: 'started' }, { tool: 'Using an Arcane tool…', state: 'started' }]);
+    { tool: 'Running a step…', state: 'started' }, { tool: 'Running a step…', state: 'started' }]);
   for (const [tool, expected] of [['assets_procedural', 'Modelling a procedural mesh…'], ['assets_preview', 'Previewing a mesh…'], ['assets_place_studio_import', 'Placing a mesh in Studio…']] as const)
     assert.equal(describeToolActivity(tool, null, null, 'started').text, expected);
   assert.deepEqual(describeToolActivity('assets_procedural', null, null, 'started').group?.noun, ['mesh', 'meshes']);
   assert.equal(transcript.messages.find(message => message.key.endsWith('\0t2'))?.toolCall?.name, 'scene_create', 'a completion without identity keeps the started call');
+});
+
+test('saved ChatGPT history uses the same labels: a named result, a recognised shape or text, then one neutral label (never a raw id)', () => {
+  const doc = new DocumentFixture(false, null);
+  const saved = (text: string, toolState?: 'failed') => renderCodexToolArticle(doc as unknown as Document, { key: 't\0v\0i', scope: 't · v · i', text, ...(toolState ? { toolState } : {}) }).article as unknown as Element;
+  const label = (article: Element) => article.querySelector('.tool-activity-text')!.textContent;
+  assert.equal(label(saved(JSON.stringify({ sessions: [] }))), 'Checking the Studio connection');
+  const playtest = saved('A playtest operation is already in progress.', 'failed');
+  assert.equal(label(playtest), 'Starting a playtest');
+  assert.equal(playtest.querySelector('.tool-activity-reason')!.textContent, 'A playtest operation is already in progress.');
+  for (const text of [JSON.stringify({ ok: true }), 'done', '']) assert.equal(label(saved(text)), 'Running a step', 'neutral label for ' + JSON.stringify(text));
+  assert.equal(label(saved(JSON.stringify({ x: 1 }), 'failed')), 'Running a step', 'a failed step without a name is not "A step failed"');
+  // The row is the disclosure for its raw details: no Details link to click, Enter or a click opens them.
+  const row = playtest.querySelector('.tool-activity')!, details = playtest.querySelector('.tool-details')!;
+  assert.equal(row.getAttribute('role'), 'button'); assert.equal(row.getAttribute('aria-controls'), details.id); assert.equal(row.getAttribute('aria-expanded'), 'false');
+  row.click(); assert.equal(details.open, true); assert.equal(row.getAttribute('aria-expanded'), 'true');
+  const enter = new Event('keydown', { cancelable: true }); Object.defineProperty(enter, 'key', { value: 'Enter' }); row.dispatchEvent(enter);
+  assert.equal(details.open, false); assert.equal(enter.defaultPrevented, true);
 });
 
 test('the ChatGPT chat renders live tool lines from public state while the turn runs', async t => {
@@ -123,7 +141,9 @@ test('the ChatGPT chat renders live tool lines from public state while the turn 
   await chat.start(); t.after(() => chat.stop());
   const messages = doc.getElementById('codex-messages')!;
   groupToolCards(messages as unknown as HTMLElement);
-  assert.deepEqual(lines(messages), [{ group: 'Creating 2 parts in Workspace.Forest…', state: 'started', count: '2 steps' }]);
+  const liveLines = messages.children.filter(node => node.classList.contains('message-usage'));
+  assert.deepEqual(liveLines.map(node => [node.getAttribute('data-live'), node.textContent]), [['true', 'Working…']], 'a quiet live line follows the running turn');
+  assert.deepEqual(lines({ children: messages.children.filter(node => !liveLines.includes(node)) } as unknown as Element), [{ group: 'Creating 2 parts in Workspace.Forest…', state: 'started', count: '2 steps' }]);
   assert.deepEqual(messages.querySelectorAll('.tool-activity-text').map(node => node.textContent),
     ['Creating Part "Tree1" in Workspace.Forest…', 'Creating Part "Tree2" in Workspace.Forest…']);
 });

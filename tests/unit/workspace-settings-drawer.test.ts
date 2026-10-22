@@ -63,7 +63,8 @@ async function fixture(t: TestContext, viewport: { width: number; height: number
         f.restart = () => { f.shell.cleanup(); f.shell = startWorkspaceShell(document, dismiss); };
       ` }); return;
     }
-    const file = files.get(url.pathname);
+    // The shipped faces (studio.css @font-face, same-origin /fonts) are part of the product page.
+    const file = files.get(url.pathname) ?? (/^\/fonts\/[a-z0-9-]+\.woff2$/.test(url.pathname) ? [join(assets, url.pathname.slice(1)), 'font/woff2'] : undefined);
     if (!file) { unexpected.push(request.url()); await route.abort(); return; }
     await route.fulfill({ contentType: file[1]!, body: await readFile(resolve(file[0]!)) });
   });
