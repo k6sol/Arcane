@@ -39,10 +39,11 @@ async function evidence(result) {
   return { log: await readFile(result.logPath, 'utf8'), progress };
 }
 
-test('stage budgets cover the sealed 19.5 minute inventory without changing fixture deadlines', () => {
-  assert.deepEqual(DESKTOP_STAGE_BUDGETS, { compile: 300000, 'plugin-build': 120000, 'unit-browser': 2700000, 'offline-release-plugin': 900000 });
+test('stage budgets cover the measured 49 minute unit and 32 minute offline inventory without changing fixture deadlines', () => {
+  assert.deepEqual(DESKTOP_STAGE_BUDGETS, { compile: 300000, 'plugin-build': 120000, 'unit-browser': 5400000, 'offline-release-plugin': 3000000 });
   assert.ok(Object.isFrozen(DESKTOP_STAGE_BUDGETS));
-  assert.ok(DESKTOP_STAGE_BUDGETS['unit-browser'] > 1169910);
+  assert.ok(DESKTOP_STAGE_BUDGETS['unit-browser'] > 2927464);
+  assert.ok(DESKTOP_STAGE_BUDGETS['offline-release-plugin'] > 32 * 60000);
   assert.ok(DESKTOP_STAGE_BUDGETS.compile < DESKTOP_STAGE_BUDGETS['offline-release-plugin']);
 });
 

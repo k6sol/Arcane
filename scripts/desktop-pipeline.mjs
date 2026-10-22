@@ -6,18 +6,21 @@ import { fileURLToPath } from 'node:url';
 
 const repository = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const minute = 60 * 1000;
-// Sealed inventory: 922 tests at concurrency 1 took 1,169,910 ms (~19.5 min),
-// with 10 browser cases skipped. A 15-minute unit deadline cannot reach terminal.
-// Allow 45 minutes for that inventory plus the required browser cases. The
-// offline release fixture gate took ~10.6 minutes; its budget remains 15 minutes.
-// Compile/plugin are short stages. These are outer stage budgets only; security
-// checker and individual fixture deadlines are unchanged.
+// Measured inventory: 322 unit files (4,847 tests) at concurrency 1 with the
+// required browser cases took 2,927,464 ms (~49 min) on a developer machine, and
+// the offline skills/release/plugin gate took ~32 minutes. Allow 90 and 50
+// minutes so a slower machine still reaches terminal. Compile/plugin are short
+// stages. These are outer stage budgets only; security checker and individual
+// fixture deadlines are unchanged.
 export const DESKTOP_STAGE_BUDGETS = Object.freeze({
   compile: 5 * minute,
   'plugin-build': 2 * minute,
-  'unit-browser': 45 * minute,
-  'offline-release-plugin': 15 * minute,
+  'unit-browser': 90 * minute,
+  'offline-release-plugin': 50 * minute,
 });
+// Sanity bounds on the unit file inventory, so an empty or runaway glob never
+// counts as verification.
+const UNIT_INVENTORY = Object.freeze({ min: 10, max: 512 });
 const maximumOutput = 16 * 1024 * 1024;
 
 function exclusiveJson(directory, name, record) {
@@ -193,7 +196,7 @@ export async function buildDesktopPipeline({ signal } = {}) {
     await run('compile', ['scripts/compile-product.mjs']);
     await run('plugin-build', ['scripts/build-plugin.mjs']);
     const unit = (await readdir(join(repository, 'dist/tests/unit'))).filter(x => /^[a-z0-9-]+\.test\.js$/.test(x)).sort().map(x => join('dist/tests/unit', x));
-    if (unit.length < 10 || unit.length > 256) throw new Error('Unexpected unit verification inventory.');
+    if (unit.length < UNIT_INVENTORY.min || unit.length > UNIT_INVENTORY.max) throw new Error('Unexpected unit verification inventory.');
     await run('unit-browser', ['--test', '--test-concurrency=1', ...unit]);
     const offline = [];
     for (const category of ['skills', 'release', 'plugin']) for (const file of (await readdir(join(repository, 'tests', category))).sort()) if (/^[a-z0-9-]+\.test\.mjs$/.test(file)) offline.push(join('tests', category, file));
