@@ -17,9 +17,11 @@ jobs:
   local-contracts:
     name: Local contracts (${{ matrix.os }}, ${{ matrix.suite }})
     runs-on: ${{ matrix.os }}
-    # Partition the complete inventory; each lane retains the existing job and
+    # Partition the complete inventory; each lane retains the existing
     # per-test/runtime deadlines, assertions and serialized unit execution.
-    timeout-minutes: 25
+    # The Windows release lane grows with the shipped frontend inventory
+    # (each required file is verified with its own release build).
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:

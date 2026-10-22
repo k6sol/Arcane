@@ -31,7 +31,7 @@ test('a new update cannot cancel an already running verification',()=>{
   assert.match(block,/^  cancel-in-progress: false$/m);
   assert.match(source,/os: \[ubuntu-latest, windows-latest\]/);
   assert.match(source,/^      fail-fast: false$/m);
-  assert.deepEqual([...source.matchAll(/^    timeout-minutes: (\d+)$/gm)].map(match=>Number(match[1])),[25]);
+  assert.deepEqual([...source.matchAll(/^    timeout-minutes: (\d+)$/gm)].map(match=>Number(match[1])),[35]);
 });
 
 test('both native unit shards and the full release lane preserve the existing verification inventory',()=>{
