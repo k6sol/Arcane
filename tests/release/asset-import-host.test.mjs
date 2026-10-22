@@ -2,9 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
-import { mkdtemp, mkdir, rm, writeFile, symlink, truncate } from 'node:fs/promises';
+import { mkdtemp, mkdir, realpath, rm, writeFile, symlink, truncate } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import vm from 'node:vm';
 
 // Main-process import host and the preload contract, from source: no Electron, build, network or user files.
@@ -18,7 +18,7 @@ function glb() {
   const out = Buffer.alloc(20 + length); out.writeUInt32LE(0x46546c67, 0); out.writeUInt32LE(2, 4); out.writeUInt32LE(out.length, 8);
   out.writeUInt32LE(length, 12); out.writeUInt32LE(0x4e4f534a, 16); out.fill(0x20, 20); json.copy(out, 20); return out;
 }
-async function folder(t) { const path = await mkdtemp(join(tmpdir(), 'arcane-import-host-')); t.after(() => rm(path, { recursive: true, force: true })); return path; }
+async function folder(t) { const path = await realpath(await mkdtemp(join(tmpdir(), 'arcane-import-host-'))); t.after(() => rm(path, { recursive: true, force: true })); return path; }
 
 test('file admission: extension, first bytes, size, links and .gltf siblings', async t => {
   const dir = await folder(t);
@@ -43,7 +43,7 @@ test('file admission: extension, first bytes, size, links and .gltf siblings', a
   await assert.rejects(prepareImport(join(dir, 'empty.glb')), /empty/);
   await writeFile(join(dir, 'huge.glb'), glb()); await truncate(join(dir, 'huge.glb'), ASSET_IMPORT_LIMITS.glbBytes + 1);
   await assert.rejects(prepareImport(join(dir, 'huge.glb')), /up to 64 MB/);
-  for (const bad of ['relative.glb', '\\\\server\\share\\oak.glb', dir + '\\..\\x\\..\\oak.glb', 'C:\\con\\oak.glb', 42, ''])
+  for (const bad of ['relative.glb', '\\\\server\\share\\oak.glb', [dir, '..', 'x', '..', 'oak.glb'].join(sep), 'C:\\con\\oak.glb', 42, ''])
     await assert.rejects(prepareImport(bad), /ordinary files|can’t be opened|imports GLB/, String(bad));
   // A junction (no admin rights needed on Windows) is a link in the path: refused.
   await mkdir(join(dir, 'real')); await writeFile(join(dir, 'real', 'oak.glb'), glb());

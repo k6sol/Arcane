@@ -9,7 +9,7 @@ import vm from 'node:vm';
 import type { Page } from 'playwright-core';
 
 const main = readFileSync('apps/desktop/electron/main.cjs', 'utf8').replaceAll('\r\n', '\n');
-const css = readFileSync('apps/desktop/public/studio.css', 'utf8');
+const css = readFileSync('apps/desktop/public/studio.css', 'utf8').replaceAll('\r\n', '\n');
 
 /** The exact options object makeWindow() passes to new BrowserWindow, evaluated with stand-ins for its free names. */
 function mainWindowOptions(): Record<string, unknown> {
@@ -57,9 +57,9 @@ test('main window: the window buttons take the colour of the surface shown, from
   for (const bad of ['#ff0000', 'red', null, { color: '#fff' }]) tone({}, bad);
   context.trusted = false; tone({}, 'page');
   assert.equal(set.length, 2, 'no other value and no untrusted sender changes the buttons');
-  const preload = readFileSync('apps/desktop/electron/preload.cjs', 'utf8');
+  const preload = readFileSync('apps/desktop/electron/preload.cjs', 'utf8').replaceAll('\r\n', '\n');
   assert.match(preload, /const windowChrome = Object\.freeze\(\{ version: 1,\n  tone: \(\.\.\.args\) => \{\n    if \(args\.length !== 1 \|\| \(args\[0\] !== 'workspace' && args\[0\] !== 'page'\)\) throw/);
-  const boot = readFileSync('apps/desktop/src/studio.ts', 'utf8');
+  const boot = readFileSync('apps/desktop/src/studio.ts', 'utf8').replaceAll('\r\n', '\n');
   assert.match(boot, /getAttribute\('data-provider-view'\) === 'workspace' \? 'workspace' : 'page'/, 'every view but the workspace (sign-in, checking) takes the page tone');
 });
 
