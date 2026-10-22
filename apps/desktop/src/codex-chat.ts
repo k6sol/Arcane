@@ -2636,6 +2636,12 @@ export class CodexChat {
   /** While another provider's chat renders into the shared transcript/composer/picker, Codex keeps its state but stops drawing there. */
   private surfaceYielded=false;
   private yieldedComposer='';
+  /**
+   * The workspace's visible project (the canonical product read) and, while it differs from the project this chat's state
+   * still describes, that hidden project: its unsent draft stays in its own tab and the composer shows nothing.
+   */
+  private workspaceProject:string|null=null;
+  private foreignDraft:{project:string;workspace:string;handoff:string}|null=null;
   private crossProvider:CrossProviderModels|null=null;
   private pendingSelection:{model:string;effort:string|null;at:number}|null=null;
   /** Project switch "Auto-approve edits and tool use" (off until the desktop host reports the saved setting). */
@@ -2781,6 +2787,27 @@ export class CodexChat {
     this.render();
   }
   surfaceIsYielded():boolean {return this.surfaceYielded;}
+  /**
+   * The workspace switched project. The product read calls this synchronously before it draws the new project, so no frame
+   * shows one project's unsent draft beside another: the draft stays in its own project's tab, and the composer is emptied
+   * and held until this chat's state reads the new project (or the workspace returns to the draft's project).
+   */
+  observeWorkspaceProject(path:string|null):void {
+    const previous=this.workspaceProject;this.workspaceProject=path||null;
+    if(this.stopped||!this.workspaceProject||this.workspaceProject===previous||!this.tabs)return;
+    const project=this.state?.projectPath??null;
+    if(this.foreignDraft){if([this.foreignDraft.project,this.foreignDraft.workspace].includes(this.workspaceProject)){this.releaseForeignDraft();this.render();this.publishState();}return;}
+    if(!previous||!project||this.workspaceProject===project)return;
+    this.flushDraft();this.closePicker();
+    this.foreignDraft={project,workspace:previous,handoff:''};this.setComposer('');this.render();this.publishState();
+    void this.refresh();
+  }
+  /** Shows the active tab's own draft again (then any provider hand-off that arrived while the composer was held). */
+  private releaseForeignDraft():void {
+    const held=this.foreignDraft;if(!held)return;
+    this.foreignDraft=null;this.loadTabDraft();
+    if(held.handoff){this.setComposer(held.handoff);this.composerInput();}
+  }
   /** The other provider's section of the shared model list (null hides it). */
   setCrossProviderModels(source:CrossProviderModels|null):void {this.crossProvider=source;this.crossProviderChanged();}
   /** The other provider's models or sign-in changed: redraw an open list. */
@@ -2834,7 +2861,8 @@ export class CodexChat {
    */
   receiveHandoff(handoff:{draft:string;model:string|null;effort:string|null}):void {
     if(this.stopped)return;
-    if(handoff.draft){this.setComposer(handoff.draft);this.composerInput();}
+    if(handoff.draft&&this.foreignDraft)this.foreignDraft.handoff=handoff.draft; // Placed once this project's draft is shown.
+    else if(handoff.draft){this.setComposer(handoff.draft);this.composerInput();}
     this.pendingSelection=handoff.model?{model:handoff.model,effort:handoff.effort,at:Date.now()}:null;
     this.applyPendingSelection();
   }
@@ -2973,7 +3001,7 @@ export class CodexChat {
   }
   private tabBlockReason(includeTransition=true):string|null {
     const s=this.snapshot(),t=s?.thread;
-    if(this.stopped||!this.fresh||!this.state)return 'Refresh native state before changing chats.';
+    if(this.stopped||!this.fresh||!this.state||this.foreignDraft)return 'Refresh native state before changing chats.';
     if(this.tabs?.persistenceStatus()==='native-loading')return 'Wait for the canonical project’s native chat preferences.';
     if(includeTransition&&this.tabTransition||this.pending.size||this.uncertain.size||this.state.busy||this.state.connecting||this.state.closing)return 'Wait for the pending native action and review uncertain receipts before changing chats.';
     if(this.confirmation||this.state.displayLimited||s?.approvals.length)return 'Finish the visible approval or confirmation before changing chats.';
@@ -2990,7 +3018,7 @@ export class CodexChat {
    */
   private draftBlockReason():string|null {
     const state=this.state,s=this.snapshot(),t=s?.thread;
-    if(this.stopped||!state)return 'Refresh native state before changing chats.';
+    if(this.stopped||!state||this.foreignDraft)return 'Refresh native state before changing chats.';
     if(this.tabs?.persistenceStatus()==='native-loading')return 'Wait for the canonical project’s native chat preferences.';
     if(this.confirmation||s?.approvals.length)return 'Finish the visible approval or confirmation before changing chats.';
     if(t&&(!t.configured||!IDLE.includes(t.turnStatus)))return 'Stop or finish the active native turn before changing chats.';
@@ -2999,7 +3027,8 @@ export class CodexChat {
   }
   private stashTabDraft():void {
     if(this.draftTimer!==undefined)clearTimeout(this.draftTimer);this.draftTimer=undefined;this.draftDirty=false;
-    const active=this.tabs?.active();if(!active)return;
+    // A held composer is empty on purpose: its project's draft is already in its tab and must not be overwritten.
+    const active=this.tabs?.active();if(!active||this.foreignDraft)return;
     this.tabs!.updateDraft(this.value('codex-composer'),active.kind==='draft'?active.selection:undefined,!!this.workflowDraftOrigins.length||this.restoredWorkflowDraft);
     // Compatibility seam for the independently owned tab persistence debounce.
     const persistence=this.tabs as ChatTabs&{flushPreferences?:()=>void};
@@ -3008,7 +3037,7 @@ export class CodexChat {
   }
   private flushDraft():void {if(this.draftDirty)this.stashTabDraft();}
   private composerInput():void {
-    if(this.stopped)return;
+    if(this.stopped||this.foreignDraft)return;
     if(this.queueEnqueue)this.queueEnqueueContext=null;
     if(!this.value('codex-composer'))this.clearDraftOrigins();
     this.renderComposer();
@@ -3028,6 +3057,7 @@ export class CodexChat {
   }
   private loadTabDraft():void {
     const active=this.tabs?.active();if(!active)return;
+    if(this.foreignDraft){this.setComposer('');return;}
     this.setComposer(active.draft);
     const context=this.tabDraftContexts.get(active.key);
     this.workflowDraftOrigins=structuredClone(context?.origins??[]);this.reviewedDraftTarget=context?.reviewed??null;
@@ -3246,7 +3276,7 @@ export class CodexChat {
   /** Host-prepared metadata is context, never a write grant or workflow acceptance. */
   appendWorkflowDraft(value: string, provenance: WorkflowDraftProvenance): boolean {
     const native = this.workflowConversation(), model = this.workflowModelSelection();
-    if (!this.fresh || this.stopped || this.surfaceYielded || !native || !model || this.workflowDraftOrigins.length >= 20 ||
+    if (!this.fresh || this.stopped || this.surfaceYielded || this.foreignDraft || !native || !model || this.workflowDraftOrigins.length >= 20 ||
         provenance.projectPath !== this.state?.projectPath || provenance.conversation.provider !== native.provider ||
         provenance.conversation.threadId !== native.threadId || provenance.conversation.sessionId !== native.sessionId ||
         !sameWorkflowModel(provenance.model,model)) return false;
@@ -3344,7 +3374,7 @@ export class CodexChat {
     this.el<HTMLButtonElement>('codex-assets-revoke').disabled = !this.assetEligible('revoke-assets');
   }
   private scope(){const s=this.snapshot();return JSON.stringify([s?.connectionId,s?.thread?.threadId,s?.thread?.turnId,this.state?.projectPath,s?.thread?.selection.model,s?.thread?.selection.effort]);}
-  private normal(){const s=this.snapshot();return !this.state?.displayLimited&&this.fresh&&!this.stopped&&!this.uncertain.size&&!this.pending.size&&!this.state?.busy&&!this.state?.connecting&&!this.state?.closing&&!!s?.connected&&s.ready;}
+  private normal(){const s=this.snapshot();return !this.state?.displayLimited&&this.fresh&&!this.stopped&&!this.foreignDraft&&!this.uncertain.size&&!this.pending.size&&!this.state?.busy&&!this.state?.connecting&&!this.state?.closing&&!!s?.connected&&s.ready;}
   private modelBlockReason():string|null {
     const snapshot=this.snapshot(),active=this.tabs?.active(),thread=snapshot?.thread;
     if(this.preparingMessage)return 'Preparing this message. Your draft is retained.';
@@ -3990,7 +4020,9 @@ export class CodexChat {
     else if(this.assetScope()!==this.assetScope(state)) { this.generation++; this.closePicker(true); } // Invalidate gestures/replies; retain the disabled stale review for explicit dismissal.
     if(state.snapshot)this.transcript.consume(state.snapshot);
     this.state = state;
-    this.syncTabs();
+    this.syncTabs(); // A held composer stays empty while the outgoing project's tabs are synced, so its draft is never overwritten.
+    // The chat state now reads another project than the held one: show that project's own tab draft.
+    if(this.foreignDraft&&state.projectPath!==this.foreignDraft.project)this.releaseForeignDraft();
     // Recover unresolved IDs from the service journal after reload, without new browser storage.
     for(const r of state.actions) if(['pending','unknown'].includes(r.state)&&!this.pending.has(r.requestId)&&!this.uncertain.has(r.requestId)&&(r.connectionId===state.snapshot?.connectionId||r.nextConnectionId===state.snapshot?.connectionId||r.action==='connect'&&state.connecting)) {
       this.uncertain.set(r.requestId,{input:{requestId:r.requestId,connectionId:r.action==='connect'?null:r.connectionId,action:r.action} as ChatAction,read:true});
@@ -4314,7 +4346,7 @@ export class CodexChat {
     const disable=(id:string,value:boolean)=>{this.el<HTMLButtonElement>(id).disabled=value;};
     const pending=(action:string)=>[...this.pending.values()].some(p=>p.action===action);
     disable('codex-connect',!this.fresh||this.stopped||connected||!!this.pending.size||!!this.uncertain.size||!!this.state?.connecting||!!this.state?.closing);
-    if(!this.surfaceYielded)this.el<HTMLTextAreaElement>('codex-composer').disabled=this.tabs?.persistenceStatus()==='native-loading';
+    if(!this.surfaceYielded)this.el<HTMLTextAreaElement>('codex-composer').disabled=this.tabs?.persistenceStatus()==='native-loading'||!!this.foreignDraft;
     disable('codex-disconnect',this.stopped||!s||pending('disconnect'));
     const reportedPair=s?.models.some(model=>model.model===this.value('codex-model')&&model.efforts.includes(this.value('codex-effort')));
     disable('codex-select',!this.canSelectModel()||pair||!reportedPair);

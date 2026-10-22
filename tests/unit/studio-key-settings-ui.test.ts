@@ -203,7 +203,25 @@ test('real Edge synthetic native key fixture: masked mount, trusted Show/Copy, c
     await page.evaluate(() => (window as unknown as FixtureWindow).keyFixture.settle?.());
     assert.equal((await page.locator('body').textContent())?.includes(f.secret), false);
     await f.open(); await page.locator('#settings-key-show').click();
+    // Privacy, not timing: from the moment the switch can land, record the composer whenever the project label changes and on
+    // every frame; no sample may show the foreign project beside the previous project's unsent draft.
+    type DraftSampler = { leaks: string[]; mutations: number; frames: number; stop: () => void };
+    await page.evaluate(draft => {
+      const composer = document.getElementById('codex-composer') as HTMLTextAreaElement, label = document.getElementById('project-path')!;
+      const sampler: DraftSampler = { leaks: [], mutations: 0, frames: 0, stop: () => {} };
+      const sample = (when: 'mutation' | 'frame') => { sampler[when === 'mutation' ? 'mutations' : 'frames']++;
+        if (label.textContent?.endsWith('eeeeeeee') && composer.value === draft) sampler.leaks.push(when); };
+      const observer = new MutationObserver(() => sample('mutation')); observer.observe(label, { childList: true, characterData: true, subtree: true });
+      let frame = 0; const tick = () => { sample('frame'); frame = requestAnimationFrame(tick); }; frame = requestAnimationFrame(tick);
+      sampler.stop = () => { observer.disconnect(); cancelAnimationFrame(frame); };
+      Object.assign(window, { draftSampler: sampler });
+    }, DRAFT);
     f.projectSwitch(); await page.waitForFunction(() => document.getElementById('project-path')?.textContent?.endsWith('eeeeeeee'), { timeout: 6000 });
+    await page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
+    const sampled = await page.evaluate(() => { const sampler = (window as unknown as { draftSampler: DraftSampler }).draftSampler; sampler.stop();
+      return { leaks: sampler.leaks, mutations: sampler.mutations, frames: sampler.frames }; });
+    assert.ok(sampled.mutations > 0 && sampled.frames > 0, 'The sampler observed the project switch and painted frames.');
+    assert.deepEqual(sampled.leaks, [], 'No frame or project label change may show the previous project draft beside a foreign project.');
     await page.evaluate(() => (window as unknown as FixtureWindow).keyFixture.settle?.());
     assert.equal((await page.locator('body').textContent())?.includes(f.secret), false);
     await page.setViewportSize({ width: 390, height: 844 }); await page.screenshot({ path: join(f.proof, 'general-mobile-masked.png') });

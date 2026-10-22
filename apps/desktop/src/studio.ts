@@ -2611,6 +2611,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   reviewProjectPath = () => workbench.historyProjectPath() || null;
   if (reviewSelection) workbench.subscribeProjectChange(syncReviewSelection);
   syncReviewSelection();
+  // Runs synchronously before the product read draws the new project, so one project's unsent draft is never shown in another.
+  workbench.subscribeProjectChange(() => { try { codexChat.observeWorkspaceProject(workbench.historyProjectPath() || null); } catch { /* Presentation only. */ } });
   // Script-editor drafts: recovered source text only fills the editor on an explicit click and never submits a command.
   if (editorDrafts) {
     scriptDrafts = startScriptEditorDrafts(document, { drafts: editorDrafts, target: () => workbench.sourceDraftTarget(),
