@@ -277,7 +277,7 @@ test('A failed or malformed read keeps the last output, labelled stale, and neve
   assert.doesNotMatch(await toggle.getAttribute('aria-label') ?? '', /no errors/i);
   assert.ok(requests.every(r => r.method === 'GET' && r.path === '/v1/studio/diagnostics'), 'reads never clear anything');
   // Preserve the current-main recovery check: a new exact complete read restores the original errors presentation.
-  setReport(report()); await refresh();
+  failWith(null); setReport(report()); await refresh();
   assert.equal(await dock.getAttribute('data-reader'), 'current');
   assert.equal(await tones(page), 'studio-diagnostics--errors');
   assert.equal(await dock.getAttribute('data-severity'), 'error');
