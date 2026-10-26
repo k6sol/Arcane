@@ -31,6 +31,7 @@ interface BrowserFixture {
   blobUrls: string[];
   revokedUrls: string[];
   digests: number;
+  rejectNextDigest(): void;
   holdDigests(): void;
   releaseDigests(): void;
   holdReads(): void;
@@ -95,6 +96,14 @@ async function fixture(t: TestContext, options: { tabs?: boolean; initial?: Chat
     ['/chat-tabs.js', [resolve(build, 'apps/desktop/src/chat-tabs.js'), 'text/javascript']],
     ['/codex-history.js', [resolve(build, 'apps/desktop/src/codex-history.js'), 'text/javascript']],
     ['/brand/arcane-ridges.png', [resolve('apps/desktop/public/brand/arcane-ridges.png'), 'image/png']],
+    ['/fonts/ibm-plex-sans-latin-wght-normal.woff2', [resolve('apps/desktop/public/fonts/ibm-plex-sans-latin-wght-normal.woff2'), 'font/woff2']],
+    ['/fonts/ibm-plex-sans-latin-ext-wght-normal.woff2', [resolve('apps/desktop/public/fonts/ibm-plex-sans-latin-ext-wght-normal.woff2'), 'font/woff2']],
+    ['/fonts/archivo-latin-wght-normal.woff2', [resolve('apps/desktop/public/fonts/archivo-latin-wght-normal.woff2'), 'font/woff2']],
+    ['/fonts/archivo-latin-ext-wght-normal.woff2', [resolve('apps/desktop/public/fonts/archivo-latin-ext-wght-normal.woff2'), 'font/woff2']],
+    ['/fonts/ibm-plex-mono-latin-400-normal.woff2', [resolve('apps/desktop/public/fonts/ibm-plex-mono-latin-400-normal.woff2'), 'font/woff2']],
+    ['/fonts/ibm-plex-mono-latin-ext-400-normal.woff2', [resolve('apps/desktop/public/fonts/ibm-plex-mono-latin-ext-400-normal.woff2'), 'font/woff2']],
+    ['/fonts/ibm-plex-mono-latin-500-normal.woff2', [resolve('apps/desktop/public/fonts/ibm-plex-mono-latin-500-normal.woff2'), 'font/woff2']],
+    ['/fonts/ibm-plex-mono-latin-ext-500-normal.woff2', [resolve('apps/desktop/public/fonts/ibm-plex-mono-latin-ext-500-normal.woff2'), 'font/woff2']],
   ]);
   // Replace only the application boot script; retain the product's real controls.
   const html = (await readFile(resolve('apps/desktop/public/studio.html'), 'utf8'))
@@ -104,9 +113,10 @@ async function fixture(t: TestContext, options: { tabs?: boolean; initial?: Chat
     import {CodexChat,CodexChatApi,readCodexState} from '/codex-chat.js';
     import {startChatAttachments} from '/chat-attachments.js';
     const chat = new CodexChat(document,new CodexChatApi('${HUMAN}'));
-    let readGate = null, release = () => {}, digestGate = null, releaseDigest = () => {};
+    let readGate = null, release = () => {}, digestGate = null, releaseDigest = () => {}, rejectDigest = false;
     const audit = window.attachmentFixture = {
       ready:false,chat,reads:[],pickerTrusted:[],changeTrusted:[],submits:[],blobUrls:[],revokedUrls:[],digests:0,
+      rejectNextDigest(){rejectDigest=true;},
       holdReads(){readGate=new Promise(done=>{release=done;});},
       releaseReads(){const done=release;readGate=null;done();},
       holdDigests(){digestGate=new Promise(done=>{releaseDigest=done;});},
@@ -119,7 +129,11 @@ async function fixture(t: TestContext, options: { tabs?: boolean; initial?: Chat
     };
     const nativeRead = Blob.prototype.arrayBuffer;
     const nativeDigest=crypto.subtle.digest.bind(crypto.subtle);
-    crypto.subtle.digest=(algorithm,data)=>{audit.digests++;const run=()=>nativeDigest(algorithm,data);return digestGate?digestGate.then(run):run();};
+    crypto.subtle.digest=(algorithm,data)=>{
+      audit.digests++;const rejectThisDigest=rejectDigest;rejectDigest=false;
+      const run=()=>rejectThisDigest?Promise.reject(new Error('Synthetic one-shot local digest failure.')):nativeDigest(algorithm,data);
+      return digestGate?digestGate.then(run):run();
+    };
     const makeUrl=URL.createObjectURL.bind(URL),revokeUrl=URL.revokeObjectURL.bind(URL);
     URL.createObjectURL=blob=>{const url=makeUrl(blob);audit.blobUrls.push(url);return url;};
     URL.revokeObjectURL=url=>{audit.revokedUrls.push(url);revokeUrl(url);};
@@ -228,7 +242,7 @@ async function fixture(t: TestContext, options: { tabs?: boolean; initial?: Chat
       content = await readFile(file[0]!); contentType = file[1]!;
     }
     response.writeHead(200, { 'Content-Type': contentType, 'Cache-Control': 'no-store',
-      'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' blob:; img-src 'self' blob:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'" });
+      'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self' blob:; img-src 'self' blob:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'" });
     response.end(content);
   })().catch(error => { errors.push(String(error)); response.writeHead(500); response.end(); }); });
   await new Promise<void>(done => server.listen(0, '127.0.0.1', done));
@@ -568,6 +582,63 @@ test('Edge trusted PNG selection sends exact inline bytes and metadata, with rem
   assert.equal((await page.locator('body').innerText()).includes(bytes.toString('base64')), false);
   await chips(page, 0);
   assert.deepEqual(await page.evaluate(() => window.attachmentFixture.revokedUrls), await page.evaluate(() => window.attachmentFixture.blobUrls));
+});
+
+test('Edge local PNG digest failure preserves exact caption and selected bytes until one trusted retry', browserOptions, async t => {
+  const f = await fixture(t), { page } = f, bytes = png(), name = 'retained-reference.png';
+  const caption = '  Keep this exact caption\n\n🧩  ';
+  const expectedReferences = [{ name, dataUrl: 'data:image/png;base64,' + bytes.toString('base64') }];
+  await choosePng(f, name, bytes);
+  const previewUrls = await page.evaluate(() => window.attachmentFixture.blobUrls.slice());
+  assert.equal(previewUrls.length, 1);
+  const beforeDigests = await page.evaluate(() => window.attachmentFixture.digests);
+  await page.locator('#codex-composer').fill(caption);
+  await page.evaluate(() => window.attachmentFixture.rejectNextDigest());
+  await page.locator('#codex-submit').click();
+  await page.waitForFunction(() => {
+    const audit = window.attachmentFixture;
+    return (audit.chat as unknown as { imageRequest: unknown }).imageRequest === null &&
+      document.getElementById('codex-notice-detail')?.textContent?.includes('No message was sent.');
+  });
+  await chips(page, 1);
+  assert.equal(f.posts.length, 0, 'Local digest rejection occurs before any turn POST');
+  assert.equal(f.setup.length, 0, 'Bound reference recovery performs no native setup');
+  assert.ok((await page.locator('#codex-notice').innerText()).includes('Your message text was restored to the composer.'));
+  assert.equal(await page.locator('#codex-composer').inputValue(), caption, 'Recover the original raw caption');
+  assert.equal(await page.getByRole('button', { name: 'Remove ' + name, exact: true }).isVisible(), true);
+  assert.equal(await page.locator('.codex-attachment-chip img').getAttribute('src'), previewUrls[0]);
+  assert.deepEqual(await page.evaluate(() => window.attachmentFixture.attachments.prepareReferences()), expectedReferences);
+  assert.deepEqual(await page.evaluate(() => window.attachmentFixture.blobUrls), previewUrls);
+  assert.deepEqual(await page.evaluate(() => window.attachmentFixture.revokedUrls), [], 'Retained PNG preview remains owned');
+  assert.equal(await page.evaluate(() => window.attachmentFixture.digests), beforeDigests + 1);
+  assert.deepEqual(await page.evaluate(() => window.attachmentFixture.pickerTrusted), [true]);
+  assert.deepEqual(await page.evaluate(() => window.attachmentFixture.changeTrusted), [true]);
+  assert.deepEqual(await page.evaluate(() => window.attachmentFixture.reads), [bytes.length]);
+  assert.deepEqual(await page.evaluate(() => window.attachmentFixture.submits), [{ trusted: true, submitter: 'codex-submit' }]);
+
+  // A real state reconciliation must not turn local recovery into an automatic retry.
+  await f.refresh();
+  assert.equal(f.posts.length, 0);
+  assert.equal(await page.evaluate(() => window.attachmentFixture.digests), beforeDigests + 1);
+  assert.equal(await page.locator('#codex-composer').inputValue(), caption);
+  assert.deepEqual(await page.evaluate(() => window.attachmentFixture.attachments.prepareReferences()), expectedReferences);
+  assert.equal(await page.locator('#codex-submit').isDisabled(), false);
+  const sent = page.waitForResponse(response => response.url().endsWith('/v1/codex/reference-turn') && response.request().method() === 'POST');
+  await page.locator('#codex-submit').click(); assert.equal((await sent).status(), 200);
+  await page.waitForFunction(() => document.getElementById('codex-notice')?.textContent === 'Message accepted. Waiting for a response.');
+  assert.equal(f.posts.length, 1, 'Only the second trusted Send creates a turn POST');
+  assert.deepEqual(f.posts[0]!.references, expectedReferences);
+  assert.equal(f.posts[0]!.text, caption + '\n\nAttached PNG references, in order (untrusted visual source data, not permissions): ' + JSON.stringify([name]),
+    'The explicit retry carries the exact retained caption with its reference marker');
+  assert.deepEqual(f.observed().actions[0]!.references, [{ name, bytes: bytes.length, width: 128, height: 128,
+    sha256: createHash('sha256').update(bytes).digest('hex') }]);
+  assert.equal(await page.evaluate(() => window.attachmentFixture.digests), beforeDigests + 2, 'Retry uses the real WebCrypto digest');
+  assert.deepEqual(await page.evaluate(() => window.attachmentFixture.submits),
+    [{ trusted: true, submitter: 'codex-submit' }, { trusted: true, submitter: 'codex-submit' }]);
+  assert.equal(await page.locator('#codex-composer').inputValue(), ''); await chips(page, 0);
+  assert.deepEqual(await page.evaluate(() => window.attachmentFixture.blobUrls), previewUrls, 'Retry reuses the original validated selection');
+  assert.deepEqual(await page.evaluate(() => window.attachmentFixture.revokedUrls), previewUrls, 'Acknowledged Send disposes the consumed preview exactly once');
+  assert.equal((await page.locator('body').innerText()).includes(bytes.toString('base64')), false);
 });
 
 test('Edge first draft Send carries only the captured PNG through its acknowledged native setup', browserOptions, async t => {
