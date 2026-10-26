@@ -1,5 +1,5 @@
 """Controlled real-file custody/refusal tests; no Blender or subprocess runs."""
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 import importlib.util
@@ -25,6 +25,8 @@ SPEC.loader.exec_module(audit)
 def changed(info, **overrides):
     fields = ("st_mode", "st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns", "st_nlink", "st_file_attributes")
     values = {name: getattr(info, name, 0) for name in fields}
+    if hasattr(info, "st_birthtime_ns"):
+        values["st_birthtime_ns"] = info.st_birthtime_ns
     return SimpleNamespace(**dict(values, **overrides))
 
 
@@ -121,10 +123,68 @@ class ConversionAuditIoTests(unittest.TestCase):
                     info = original_fstat(handle)
                     return changed(info, **{field: getattr(info, field) + 1})
 
-                with patch.object(audit.os, "fstat", inspect), patch.object(audit.os, "close", wraps=original_close) as closed:
+                with patch.object(audit, "WINDOWS_FILE_SNAPSHOTS", False), patch.object(audit.os, "fstat", inspect), patch.object(audit.os, "close", wraps=original_close) as closed:
                     self.refused("IO_IDENTITY", lambda: audit.read_owned(self.path, len(self.payload)))
                 closed.assert_called_once()
         self.assertEqual(self.path.read_bytes(), self.payload)
+
+    @contextmanager
+    def windows_metadata(self, opening_field=None, handle_after_field=None, named_after_field=None, birthtime=123456789):
+        # Controlled API-channel semantics on either OS; os.name/pathlib's real
+        # platform choice is never patched. The bytes/handles remain real files.
+        original_named, original_fstat = audit.no_links, os.fstat
+        path_info = self.path.stat()
+        calls = {"named": 0, "handle": 0}
+
+        def increment(info, field):
+            return changed(info, **{field: getattr(info, field) + 1}) if field else info
+
+        def named(path, directory=False):
+            info = original_named(path, directory=directory)
+            if Path(path) == self.path:
+                calls["named"] += 1
+                info = changed(info, st_birthtime_ns=birthtime)
+                if calls["named"] == 2:
+                    info = increment(info, named_after_field)
+            return info
+
+        def opened(handle):
+            calls["handle"] += 1
+            info = changed(original_fstat(handle), st_ctime_ns=path_info.st_ctime_ns + 1000, st_birthtime_ns=birthtime)
+            if calls["handle"] == 1:
+                return increment(info, opening_field)
+            return increment(info, handle_after_field)
+
+        with patch.object(audit, "WINDOWS_FILE_SNAPSHOTS", True), patch.object(audit, "no_links", named), patch.object(audit.os, "fstat", opened):
+            yield calls
+
+    def test_windows_different_stable_path_and_handle_ctimes_preserve_real_binary_bytes(self):
+        for birthtime in (None, 123456789):
+            with self.subTest(birthtime_available=birthtime is not None), self.windows_metadata(birthtime=birthtime) as calls:
+                self.assertEqual(audit.read_owned(self.path, len(self.payload)), self.payload)
+            self.assertEqual(calls, {"named": 2, "handle": 2})
+        self.assertEqual(self.path.read_bytes(), self.payload)
+
+    def test_windows_opening_identity_and_birthtime_mismatches_still_refuse(self):
+        original_close = os.close
+        for field in ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_nlink", "st_birthtime_ns"):
+            with self.subTest(field=field), self.windows_metadata(opening_field=field), patch.object(audit.os, "close", wraps=original_close) as closed:
+                self.refused("IO_IDENTITY", lambda: audit.read_owned(self.path, len(self.payload)))
+            closed.assert_called_once()
+
+    def test_windows_handle_ctime_and_birthtime_changes_after_read_still_refuse(self):
+        original_close = os.close
+        for field in ("st_ctime_ns", "st_birthtime_ns"):
+            with self.subTest(field=field), self.windows_metadata(handle_after_field=field), patch.object(audit.os, "close", wraps=original_close) as closed:
+                self.refused("IO_CHANGED", lambda: audit.read_owned(self.path, len(self.payload)))
+            closed.assert_called_once()
+
+    def test_windows_named_ctime_and_birthtime_changes_after_read_still_refuse(self):
+        original_close = os.close
+        for field in ("st_ctime_ns", "st_birthtime_ns"):
+            with self.subTest(field=field), self.windows_metadata(named_after_field=field), patch.object(audit.os, "close", wraps=original_close) as closed:
+                self.refused("IO_CHANGED", lambda: audit.read_owned(self.path, len(self.payload)))
+            closed.assert_called_once()
 
     def test_opened_nonregular_handle_refuses_as_type_not_identity(self):
         original_fstat, original_close = os.fstat, os.close

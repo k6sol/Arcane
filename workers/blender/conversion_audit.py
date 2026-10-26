@@ -126,6 +126,23 @@ def no_links(path, directory=False):
     return info
 
 
+# Windows path stat and handle fstat can expose different ctime meanings.
+# Compare the same metadata channel before/after reading; keep both change-time
+# checks instead of equating creation time with handle metadata-change time.
+WINDOWS_FILE_SNAPSHOTS = os.name == "nt"
+
+
+def _file_snapshot(info):
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns,
+            info.st_ctime_ns, info.st_nlink, getattr(info, "st_birthtime_ns", None))
+
+
+def _opening_identity(info):
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns,
+            None if WINDOWS_FILE_SNAPSHOTS else info.st_ctime_ns,
+            info.st_nlink, getattr(info, "st_birthtime_ns", None))
+
+
 def read_owned(path, maximum, minimum=1):
     before = no_links(path)
     require(minimum <= before.st_size <= maximum, "IO_SIZE")
@@ -133,8 +150,7 @@ def read_owned(path, maximum, minimum=1):
     handle = os.open(path, flags)
     try:
         opened = os.fstat(handle)
-        signature = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns, s.st_nlink)
-        require(signature(opened) == signature(before), "IO_IDENTITY")
+        require(_opening_identity(opened) == _opening_identity(before), "IO_IDENTITY")
         require(stat.S_ISREG(opened.st_mode), "IO_TYPE")
         chunks, remaining = [], before.st_size
         while remaining:
@@ -143,8 +159,8 @@ def read_owned(path, maximum, minimum=1):
             chunks.append(chunk)
             remaining -= len(chunk)
         require(not os.read(handle, 1), "IO_READ")
-        require(signature(os.fstat(handle)) == signature(before), "IO_CHANGED")
-        require(signature(no_links(path)) == signature(before), "IO_CHANGED")
+        require(_file_snapshot(os.fstat(handle)) == _file_snapshot(opened), "IO_CHANGED")
+        require(_file_snapshot(no_links(path)) == _file_snapshot(before), "IO_CHANGED")
         return b"".join(chunks)
     finally:
         os.close(handle)
