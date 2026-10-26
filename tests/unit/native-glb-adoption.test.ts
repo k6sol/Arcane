@@ -379,7 +379,7 @@ for(const provider of ['claude-code','arcane'] as const){
    {provider,threadId:'app:'+f.conversationId,sessionId:null,connectionId:'not-provenance'},
   ];
   for(const conversation of invalidScopes){
-   const changed={...manifest,provenance:{...manifest.provenance,conversation}};
+   const changed:Record<string,unknown>={...manifest,provenance:{...manifest.provenance,conversation}};
    assert.throws(()=>parseAdoptedGlbManifest(changed));assert.equal(manifestSchema.safeParse(changed).success,false);
    await assert.rejects(validateAdoptedGlbManifest(job.directory,changed));
   }
