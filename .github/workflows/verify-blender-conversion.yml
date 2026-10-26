@@ -1,0 +1,90 @@
+name: Verify native Blender conversion
+
+on:
+  push:
+    paths:
+      - '.github/workflows/verify-blender-conversion.yml'
+      - 'packages/asset-pipeline/**'
+      - 'packages/core/src/spatial-math.ts'
+      - 'packages/protocol/**'
+      - 'apps/desktop/src/glb-preflight.ts'
+      - 'workers/blender/**'
+      - 'scripts/blender-test-runtime.py'
+      - 'scripts/compile-product.mjs'
+      - 'tests/native/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'tsconfig.json'
+  pull_request:
+    paths:
+      - '.github/workflows/verify-blender-conversion.yml'
+      - 'packages/asset-pipeline/**'
+      - 'packages/core/src/spatial-math.ts'
+      - 'packages/protocol/**'
+      - 'apps/desktop/src/glb-preflight.ts'
+      - 'workers/blender/**'
+      - 'scripts/blender-test-runtime.py'
+      - 'scripts/compile-product.mjs'
+      - 'tests/native/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'tsconfig.json'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: arcane-native-blender-${{ github.ref }}-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  native-conversion:
+    name: Native Blender conversion (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: Check out source without persistent Git credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Node 24
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: package-lock.json
+      - name: Install pinned dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Build the actual tested pipeline
+        run: npm run build
+      - name: Verify bounded runtime archive handling
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+          PYTHONUTF8: '1'
+        run: python tests/native/blender_runtime_install_test.py
+      - name: Acquire and verify the pinned official Blender runtime
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+          PYTHONUTF8: '1'
+        run: python scripts/blender-test-runtime.py --github-env
+      - name: Verify real source conversion and owned cancellation
+        id: native-conversion
+        run: node --test --test-concurrency=1 tests/native/blender-conversion.test.mjs
+      - name: Retain bounded native conversion evidence
+        if: ${{ always() && steps.native-conversion.outcome != 'skipped' && steps.native-conversion.outcome != '' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: arcane-blender-conversion-${{ matrix.os }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            runtime/ci-blender-conversion-artifacts/native-conversion.json
+            runtime/ci-blender-conversion-artifacts/none-hero.png
+            runtime/ci-blender-conversion-artifacts/none-side.png
+            runtime/ci-blender-conversion-artifacts/hull-hero.png
+            runtime/ci-blender-conversion-artifacts/hull-side.png
+          if-no-files-found: error
+          retention-days: 7
