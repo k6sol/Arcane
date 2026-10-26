@@ -161,7 +161,7 @@ env.Content={fromObject=function(o) return {object=o} end}
 env.Enum={CollisionFidelity={Hull='Hull',Box='Box'},RenderFidelity={Precise='Precise'},Material={SmoothPlastic='SmoothPlastic',Wood='Wood',Grass='Grass',Slate='Slate',Marble='Marble'}}
 env.Color3={new=function(r,g,b) return {r,g,b} end}
 env.Vector2={new=function(x,y) return {X=x,Y=y} end}
-env.CFrame={new=function(x,y,z) return {x,y,z} end}
+env.CFrame={new=function(...) assert(select('#',...)==12,'all rotation components required');return {...} end}
 function service:CreateMeshPartAsync(content,options) local p=inst('MeshPart');p.content=content;p.options=options;made[#made+1]=p;return p end
 function service:CreateEditableImage(options)
  imageCreates+=1;if self.imageNilAt==imageCreates then return nil end
@@ -198,6 +198,57 @@ creatorId=124;rejects(function() ops:materializeReconstruction(expected.digest,g
 ops:retireAssetContinuity({sessionId=target.sessionId,mode='Play',playEpoch=1})
 rejects(function() ops:materializeReconstruction(expected.digest,guard) end,'WATCH');assert(#made==16)
 `,true));
+test('sealed nondefault units determine every placed size and transformed centre',options,t=>run(t,setup+meshParts+`
+stage();ops:reconstructAsset(args(),guard);ops:materializeReconstruction(expected.digest,guard)
+local originals={};for _,json in ipairs(packets) do local p=decode(json);if p.kind=='object' then originals[#originals+1]=p.object end end
+assert(decode(packets[1]).conversion.studsPerMeter==2)
+assert(#made==#originals)
+for index,part in ipairs(made) do
+ local object=originals[index];local m=object.exportTransform;local b=object.bounds
+ local c={(b.min[1]+b.max[1])/2,(b.min[2]+b.max[2])/2,(b.min[3]+b.max[3])/2}
+ for axis=1,3 do
+  local at=(axis-1)*4
+  local scale=math.sqrt(m[at+1]^2+m[at+2]^2+m[at+3]^2)
+  assert(math.abs(part.Size[axis]-math.max(0.05,(b.max[axis]-b.min[axis])*scale*2))<1e-8)
+  local centre=(m[axis]*c[1]+m[axis+4]*c[2]+m[axis+8]*c[3]+m[axis+12])*2
+  assert(math.abs(part.CFrame[axis]-centre)<1e-8)
+  for row=1,3 do assert(math.abs(part.CFrame[3+(row-1)*3+axis]-m[at+row]/scale)<1e-8) end
+ end
+ assert(#part.CFrame==12 and part.content.object==resources[index])
+end
+ops:cancelAssetTransfers();assert(destroyed==8)
+`,true,{studsPerMeter:2}));
+
+test('planar sizing keeps source geometry exact and separates physical padding from rotated bounds',options,t=>run(t,`
+local q=math.sqrt(0.5)
+local object={role='render',bounds={min={0,0,0},max={2,1,0}},
+ worldBounds={min={3-3*q,5,7},max={3+4*q,5+4*q,7}},
+ scale={2,3,4},exportTransform={2*q,2*q,0,0,-3*q,3*q,0,0,0,0,4,0,3,5,7,1}}
+local conversion={sourceUnits='meters',sourceUp='Z',exportUnits='meters',exportUp='Y',targetUnits='studs',targetUp='Y',studsPerMeter=2}
+local plan=AssetTransfer.meshPartPlan(object,conversion)
+assert(table.isfrozen(plan) and table.isfrozen(plan.size) and table.isfrozen(plan.cframe) and table.isfrozen(plan.physicalPaddingStuds))
+assert(math.abs(plan.size[1]-8)<1e-9 and math.abs(plan.size[2]-6)<1e-9 and plan.size[3]==0.05)
+assert(plan.physicalPaddingStuds[1]==0 and plan.physicalPaddingStuds[2]==0 and plan.physicalPaddingStuds[3]==0.05)
+assert(math.abs(plan.cframe[1]-(6+q))<1e-9 and math.abs(plan.cframe[2]-(10+7*q))<1e-9 and plan.cframe[3]==14)
+local rotation={q,-q,0,q,q,0,0,0,1}
+for i=1,9 do assert(math.abs(plan.cframe[i+3]-rotation[i])<1e-9) end
+-- The asymmetric triangle's actual world AABB centre differs from the transformed local AABB centre.
+assert(math.abs(plan.cframe[2]-(object.worldBounds.min[2]+object.worldBounds.max[2]))>1)
+assert(object.bounds.max[3]==0 and object.exportTransform[1]==2*q and creates==0)
+local bad=table.clone(conversion);bad.studsPerMeter=0
+rejects(function() AssetTransfer.meshPartPlan(object,bad) end,'INPUT')
+bad=table.clone(conversion);bad.exportUp='Z'
+rejects(function() AssetTransfer.meshPartPlan(object,bad) end,'INPUT')
+local collider=table.clone(object);collider.role='collision'
+rejects(function() AssetTransfer.meshPartPlan(collider,conversion) end,'INPUT')
+local shear=table.clone(object);shear.exportTransform=table.clone(object.exportTransform);shear.exportTransform[5]+=0.5
+rejects(function() AssetTransfer.meshPartPlan(shear,conversion) end,'UNSUPPORTED_TRANSFORM')
+local reflected=table.clone(object);reflected.exportTransform=table.clone(object.exportTransform)
+for i=1,3 do reflected.exportTransform[i]=-reflected.exportTransform[i] end
+rejects(function() AssetTransfer.meshPartPlan(reflected,conversion) end,'UNSUPPORTED_TRANSFORM')
+assert(creates==0 and destroyed==0)
+`));
+
 test('engine failure while materializing releases the partial model and allows a later attempt',options,t=>run(t,setup+meshParts+`
 stage();ops:reconstructAsset(args(),guard)
 local create=service.CreateMeshPartAsync

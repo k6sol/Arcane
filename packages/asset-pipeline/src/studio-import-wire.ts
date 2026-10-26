@@ -15,7 +15,8 @@ const importNumber=z.number().finite().min(-1_000_000).max(1_000_000);
 const importVector=z.tuple([importNumber,importNumber,importNumber]);
 const importIndex=z.number().int().nonnegative().max(4095);
 const importMatrix=z.array(importNumber).length(16).refine(m=>m[3]===0&&m[7]===0&&m[11]===0&&m[15]===1);
-const importBounds=z.strictObject({min:importVector,max:importVector}).refine(b=>b.min.every((n,i)=>n<b.max[i]!));
+const importBounds=z.strictObject({min:importVector,max:importVector}).refine(b=>
+ b.min.every((n,i)=>n<=b.max[i]!)&&b.min.filter((n,i)=>n<b.max[i]!).length>=2);
 const importTextureUse=z.strictObject({sha256:importHash,channel:z.enum(['rgba','rgb','g','b']),texCoord:z.literal(0)});
 const importChild=z.strictObject({instanceRef:importId,kind:z.enum(['script','attachment','constraint']),stateSha256:importHash});
 const importMapping={sourceObjectId:importId,instanceRef:importId,meshAssetId:importAssetId,ownedStateSha256:importHash,
@@ -46,7 +47,8 @@ const importResponse=z.strictObject({prepared:z.strictObject({status:z.literal('
   objects:z.array(z.strictObject({sourceObjectId:importId,name:z.string().min(1).max(256),role:z.enum(['render','collision']),parentSourceObjectId:importId.nullable(),
    exportFileId:importId,nodeIndex:importIndex,meshExportSha256:importHash,triangles:z.number().int().positive().max(STUDIO_IMPORT_LIMITS.meshTriangles),
    materialSha256:importHash.nullable(),textureSha256s:z.array(importHash).max(4),exportTransform:importMatrix,scale:importVector,pivot:importVector,
-   bounds:importBounds,worldBounds:importBounds,collisionFor:z.array(importId).max(128)})).min(1).max(128),
+   bounds:importBounds,worldBounds:importBounds,collisionFor:z.array(importId).max(128)}).refine(o=>o.role!=='collision'||
+    [o.bounds,o.worldBounds].every(b=>b.min.every((n,i)=>n<b.max[i]!)))).min(1).max(128),
   materials:z.array(z.strictObject({sha256:importHash,baseColor:z.tuple([importNumber,importNumber,importNumber,importNumber]),
    metallic:z.number().min(0).max(1),roughness:z.number().min(0).max(1),alphaMode:z.enum(['OPAQUE','MASK','BLEND']),alphaCutoff:z.number().min(0).max(1),
    doubleSided:z.boolean(),normalScale:importNumber,colorMap:importTextureUse.nullable(),normalMap:importTextureUse.nullable(),

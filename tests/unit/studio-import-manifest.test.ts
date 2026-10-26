@@ -33,7 +33,8 @@ function pack(doc: Doc, bin: Buffer): Buffer {
   bytes.writeUInt32LE(jsonSize, 12); bytes.writeUInt32LE(0x4e4f534a, 16); bytes.fill(0x20, 20, 20 + jsonSize); json.copy(bytes, 20);
   bytes.writeUInt32LE(binSize, 20 + jsonSize); bytes.writeUInt32LE(0x004e4942, 24 + jsonSize); bin.copy(bytes, 28 + jsonSize); return bytes;
 }
-function fixture(options: { wide?: boolean; material?: number; texture?: Buffer; removed?: boolean; extra?: boolean; translated?: boolean } = {}) {
+function fixture(options: { wide?: boolean; material?: number; texture?: Buffer; removed?: boolean; extra?: boolean; translated?: boolean;
+  surface?: 'xy' | 'xz' | 'yz' | 'seams' | 'diagonal'; flatCollision?: boolean; rotated?: boolean } = {}) {
   const doc: Doc = { asset: { version: '2.0' }, buffers: [{ byteLength: 0 }], bufferViews: [], accessors: [], meshes: [], nodes: [], scene: 0, scenes: [{ nodes: [] }] };
   let bin: Buffer = Buffer.alloc(0);
   function view(bytes: Buffer): number {
@@ -49,6 +50,7 @@ function fixture(options: { wide?: boolean; material?: number; texture?: Buffer;
     doc.accessors.push(a); return result;
   }
   doc.materials = [{ pbrMetallicRoughness: { baseColorFactor: [0.2, 0.4, 0.6, 1], metallicFactor: options.material ?? 0.25, roughnessFactor: 0.7 } }];
+  if (options.surface) doc.materials[0].doubleSided = true;
   if (options.texture) {
     doc.images = [{ bufferView: view(options.texture), mimeType: 'image/png' }]; doc.textures = [{ source: 0 }];
     doc.materials[0].pbrMetallicRoughness.baseColorTexture = { index: 0 };
@@ -59,13 +61,19 @@ function fixture(options: { wide?: boolean; material?: number; texture?: Buffer;
   for (const name of ['blade', ...(options.removed ? [] : ['handle']), ...(options.extra ? ['guard'] : []), 'proxy']) {
     const role = name === 'proxy' ? 'collision' as const : 'render' as const;
     const x = name === 'blade' && options.wide ? 1.5 : 1;
-    const positions = [0, 0, 0, x, 0, 0, x, 1, 0, 0, 1, 0, 0, 0, 1, x, 0, 1, x, 1, 1, 0, 1, 1];
-    const indices = [0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4, 3, 7, 6, 3, 6, 2, 0, 4, 7, 0, 7, 3, 1, 2, 6, 1, 6, 5];
-    const primitive: Doc = { attributes: { POSITION: accessor(positions, 'VEC3'), NORMAL: accessor(Array.from({ length: 8 }, () => [0, 1, 0]).flat(), 'VEC3') }, indices: accessor(indices, 'SCALAR', true) };
+    const surface = role === 'render' ? options.surface : options.flatCollision ? 'xy' : undefined;
+    const cards = { xy: [0,0,0,x,0,0,x,1,0,0,1,0], xz: [0,0,0,x,0,0,x,0,1,0,0,1], yz: [0,0,0,0,x,0,0,x,1,0,0,1],
+      seams: [0,0,0,x,0,0,x,1,0,0,0,0,x,1,0,0,1,0], diagonal: [0,0,0,1,1,1,2,2,2] };
+    const positions = surface ? cards[surface] : [0, 0, 0, x, 0, 0, x, 1, 0, 0, 1, 0, 0, 0, 1, x, 0, 1, x, 1, 1, 0, 1, 1];
+    const indices = surface ? surface === 'seams' ? [0,1,2,3,4,5] : surface === 'diagonal' ? [0,1,2] : [0,1,2,0,2,3] :
+      [0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4, 3, 7, 6, 3, 6, 2, 0, 4, 7, 0, 7, 3, 1, 2, 6, 1, 6, 5];
+    const normal = surface === 'xy' || surface === 'seams' ? [0,0,1] : surface === 'yz' ? [1,0,0] : [0,1,0];
+    const primitive: Doc = { attributes: { POSITION: accessor(positions, 'VEC3'), NORMAL: accessor(Array.from({ length: positions.length / 3 }, () => normal).flat(), 'VEC3') }, indices: accessor(indices, 'SCALAR', true) };
     if (role === 'render') primitive.material = 0;
-    if (options.texture && role === 'render') primitive.attributes.TEXCOORD_0 = accessor(Array.from({ length: 8 }, () => [0, 0]).flat(), 'VEC2');
+    if (options.texture && role === 'render') primitive.attributes.TEXCOORD_0 = accessor(Array.from({ length: positions.length / 3 }, (_, at) => surface ? [at % 2, Math.floor(at / 2) % 2] : [0, 0]).flat(), 'VEC2');
     const nodeIndex = doc.nodes.length;
     doc.meshes.push({ primitives: [primitive] }); doc.nodes.push({ name: name === 'proxy' ? 'COL_proxy' : 'SM_' + name, mesh: nodeIndex, ...(options.translated && name === 'blade' ? { translation: [2, 3, 4] } : {}) });
+    if (options.rotated && role === 'render') { doc.nodes[nodeIndex].rotation = [0,0,Math.SQRT1_2,Math.SQRT1_2]; doc.nodes[nodeIndex].scale = [2,3,4]; }
     doc.scenes[0].nodes.push(nodeIndex);
     objects.push({ sourceObjectId: name, nodeIndex, role, pivot: [0, 0, 0], collisionFor: role === 'collision' ? ['blade'] : [] });
   }
@@ -93,6 +101,37 @@ async function prepare(input: HostGeneratedStudioImport, limits?: Parameters<typ
   return host.prepare(await host.admit(input.revisionId));
 }
 const errorCode = (code: StudioImportManifestError['code']) => (error: unknown) => error instanceof StudioImportManifestError && error.code === code;
+
+for (const [surface, high] of [['xy',[1,1,0]],['xz',[1,0,1]],['yz',[0,1,1]]] as const)
+  test('planar '+surface+' render bounds survive preparation, native wire and retained baseline without thickness', async () => {
+    const f = fixture({surface,removed:true}), source = Buffer.from(f.input.files[0]!.bytes), prepared = await prepare(f.input);
+    const render = prepared.manifest.objects.find(o => o.role === 'render')!;
+    assert.deepEqual(render.bounds,{min:[0,0,0],max:[...high]}); assert.deepEqual(render.worldBounds,render.bounds);
+    assert.deepEqual(prepared.manifest.bounds,render.bounds); assert.equal(render.triangles,2);
+    assert.equal(prepared.manifest.materials[0]!.doubleSided,true);
+    assert.deepEqual(f.input.files[0]!.bytes,source); assert.equal(prepared.manifest.files[0]!.sha256,sha(source));
+    assert.deepEqual(parseNativeStudioImportResponse({prepared},JOB,f.input.projectId).prepared,prepared);
+    f.input.revisionId=NEXT_JOB; f.input.baseline=baseline(prepared);
+    const next=await prepare(f.input); assert.deepEqual(next.manifest.bounds,prepared.manifest.bounds);
+    assert.ok(next.delta.objects.every(o=>o.action==='reuse')); assert.equal(next.manifest.engineVerification,'pending');
+    assert.deepEqual(parseNativeStudioImportResponse({prepared:next},NEXT_JOB,f.input.projectId).prepared,next);
+  });
+
+test('planar seam vertices and nonuniform rotated ancestry retain measured source and world bounds', async () => {
+  const f=fixture({surface:'seams',removed:true,translated:true,rotated:true}), source=Buffer.from(f.input.files[0]!.bytes);
+  const prepared=await prepare(f.input), render=prepared.manifest.objects.find(o=>o.role==='render')!;
+  assert.deepEqual(render.bounds,{min:[0,0,0],max:[1,1,0]}); render.scale.forEach((v,i)=>assert.ok(Math.abs(v-[2,3,4][i]!)<1e-12));
+  const expectedLow=[-1,3,4],expectedHigh=[2,5,4];
+  render.worldBounds.min.forEach((v,i)=>assert.ok(Math.abs(v-expectedLow[i]!)<1e-12));
+  render.worldBounds.max.forEach((v,i)=>assert.ok(Math.abs(v-expectedHigh[i]!)<1e-12));
+  assert.equal(render.triangles,2); assert.deepEqual(f.input.files[0]!.bytes,source);
+  assert.deepEqual(parseNativeStudioImportResponse({prepared},JOB,f.input.projectId).prepared,prepared);
+});
+
+test('true diagonal zero-area triangles and flat collision hulls remain refused', async () => {
+  await assert.rejects(prepare(fixture({surface:'diagonal',removed:true}).input),errorCode('EXPORT'));
+  await assert.rejects(prepare(fixture({surface:'xy',flatCollision:true,removed:true}).input));
+});
 
 test('emissive glTF lamp data survives preparation and native wire validation without engine acceptance', async () => {
   const f = fixture({ texture: PNG });

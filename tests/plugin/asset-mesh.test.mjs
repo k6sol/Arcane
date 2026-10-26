@@ -29,14 +29,15 @@ function descriptor(semantic, type, componentType, values, normalized = false) {
   return `{semantic="${semantic}", type="${type}", componentType=${componentType}, count=${values.length / size}, normalized=${normalized}, byteLength=${bytes.length}, bytes=${literalBytes(bytes)}, sha256="${sha(bytes)}", chunks={}, streamId="fixture-${semantic}"}`;
 }
 
-const positions = [-1.5, 2.25, 0.125, 3.5, -4, 5.75, 0, 1, -2, -1.5, 2.25, 0.125];
-const normals = [0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, -1];
-const uvs = [-2, 4, 0.5, 0.25, 1, 1, 0.75, -0.5];
-const exactPrimitive = `{mode=4, vertexCount=4, triangleCount=2, attributes={
+const positions = [-1.5, 2.25, 0.125, 3.5, -4, 5.75, 0, 1, -2, -1.5, 2.25, 0.125, -5, 7.25, -7.625];
+const normals = [0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, -1, 0, -1, 0];
+const uvs = [-2, 4, 0.5, 0.25, 1, 1, 0.75, -0.5, -0.25, 0.75];
+// Two nondegenerate quad faces meet at the coincident 0/3 seam vertices.
+const exactPrimitive = `{mode=4, vertexCount=5, triangleCount=2, attributes={
  POSITION=${descriptor('POSITION', 'VEC3', 5126, positions)},
  NORMAL=${descriptor('NORMAL', 'VEC3', 5126, normals)},
  TEXCOORD_0=${descriptor('TEXCOORD_0', 'VEC2', 5126, uvs)}},
- indices=${descriptor('indices', 'SCALAR', 5123, [2, 0, 1, 0, 2, 3])}}`;
+ indices=${descriptor('indices', 'SCALAR', 5123, [2, 0, 1, 3, 2, 4])}}`;
 
 const doubles = `
 local function forbidden(): never error("unexpected engine/service/global access") end
@@ -128,7 +129,9 @@ local function fixture(vertices: number?, triangles: number?, attributes: boolea
  local indices = packed("indices", 5125, 1, triangles * 3)
  for index = 0, vertices - 1 do
   buffer.writef32(point.bytes, index * 12, index + 0.5)
-  buffer.writef32(point.bytes, index * 12 + 4, -index)
+  -- Every consecutive triple is a real positive-area XY face, including the
+  -- large-index fixture. Keep distinct x coordinates and the old last sample.
+  buffer.writef32(point.bytes, index * 12 + 4, -index - (if index % 3 == 1 then 1 else 0))
   buffer.writef32(point.bytes, index * 12 + 8, 2.25)
  end
  for index = 0, triangles * 3 - 1 do buffer.writeu32(indices.bytes, index * 4, index % vertices) end
@@ -201,19 +204,19 @@ local state = service()
 local result = AssetMesh.create(data, state, alive, noYield)
 assert(result.editableMesh == state.resources[1] and state.creates == 1)
 assert(result.editableMesh.destroyed == 0 and result.engineVerification == "pending")
-assert(result.coordinateSpace == "export-meters" and result.vertexCount == 8 and result.triangleCount == 4)
+assert(result.coordinateSpace == "export-meters" and result.vertexCount == 10 and result.triangleCount == 4)
 assert(result.verified == nil and result.primitives[1] ~= result.primitives[2])
-local expectedPoints = {{-1.5,2.25,0.125},{3.5,-4,5.75},{0,1,-2},{-1.5,2.25,0.125}}
-local expectedNormals = {{0,0,1},{0,1,0},{1,0,0},{0,0,-1}}
-local expectedUVs = {{-2,4},{0.5,0.25},{1,1},{0.75,-0.5}}
+local expectedPoints = {{-1.5,2.25,0.125},{3.5,-4,5.75},{0,1,-2},{-1.5,2.25,0.125},{-5,7.25,-7.625}}
+local expectedNormals = {{0,0,1},{0,1,0},{1,0,0},{0,0,-1},{0,-1,0}}
+local expectedUVs = {{-2,4},{0.5,0.25},{1,1},{0.75,-0.5},{-0.25,0.75}}
 for index, mapping in ipairs(result.primitives) do
- assert(#mapping.vertexIds == 4 and #mapping.faceIds == 2 and #mapping.normalIds == 4 and #mapping.uvIds == 4)
- for vertex = 1, 4 do
+ assert(#mapping.vertexIds == 5 and #mapping.faceIds == 2 and #mapping.normalIds == 5 and #mapping.uvIds == 5)
+ for vertex = 1, 5 do
   equal(result.editableMesh.vertices[mapping.vertexIds[vertex]], expectedPoints[vertex])
   equal(result.editableMesh.normals[mapping.normalIds[vertex]], expectedNormals[vertex])
   equal(result.editableMesh.uvs[mapping.uvIds[vertex]], expectedUVs[vertex])
  end
- local corners = {{3,1,2},{1,3,4}}
+ local corners = {{3,1,2},{4,3,5}}
  for face, order in ipairs(corners) do
   equal(result.editableMesh.faces[mapping.faceIds[face]], {mapping.vertexIds[order[1]],mapping.vertexIds[order[2]],mapping.vertexIds[order[3]]})
   equal(result.editableMesh.faceNormals[mapping.faceIds[face]], {mapping.normalIds[order[1]],mapping.normalIds[order[2]],mapping.normalIds[order[3]]})
@@ -230,6 +233,53 @@ local second = AssetMesh.create(fixture(), state, alive, noYield)
 assert(second.editableMesh ~= result.editableMesh)
 assert(#second.primitives[1].normalIds == 0 and #second.primitives[1].uvIds == 0)
 assert(state.counts.SetFaceNormals == 4 and state.counts.SetFaceUVs == 4)
+`);
+});
+
+test('planar XY faces retain exact zero thickness and distinct UV seam vertices', runtimeOptions, async () => {
+  const points = [0,0,0, 2,0,0, 2,1,0, 0,1,0, 0,0,0];
+  const planar = `{mode=4,vertexCount=5,triangleCount=2,attributes={
+ POSITION=${descriptor('POSITION','VEC3',5126,points)},
+ NORMAL=${descriptor('NORMAL','VEC3',5126,[0,0,1, 0,0,1, 0,0,1, 0,0,1, 0,0,1])},
+ TEXCOORD_0=${descriptor('TEXCOORD_0','VEC2',5126,[0,0, 1,0, 1,1, 0,1, 0.25,0.5])}},
+ indices=${descriptor('indices','SCALAR',5123,[0,1,2,4,2,3])}}`;
+  await runFixture('planar-seams', `
+local state=service()
+local result=AssetMesh.create({primitives={${planar}}},state,alive,noYield)
+local m=result.primitives[1]
+assert(state.creates==1 and state.counts.AddVertex==5 and state.counts.AddTriangle==2)
+assert(result.vertexCount==5 and result.triangleCount==2 and result.coordinateSpace=='export-meters' and result.engineVerification=='pending')
+local expected={{0,0,0},{2,0,0},{2,1,0},{0,1,0},{0,0,0}}
+for i,id in ipairs(m.vertexIds) do equal(result.editableMesh.vertices[id],expected[i]);assert(result.editableMesh.vertices[id][3]==0,'no physical-size padding may alter source vertices') end
+assert(m.vertexIds[1]~=m.vertexIds[5] and m.uvIds[1]~=m.uvIds[5],'UV seam vertices remain distinct')
+equal(result.editableMesh.uvs[m.uvIds[1]],{0,0});equal(result.editableMesh.uvs[m.uvIds[5]],{0.25,0.5})
+equal(result.editableMesh.faces[m.faceIds[1]],{m.vertexIds[1],m.vertexIds[2],m.vertexIds[3]})
+equal(result.editableMesh.faces[m.faceIds[2]],{m.vertexIds[5],m.vertexIds[3],m.vertexIds[4]})
+equal(result.editableMesh.faceUVs[m.faceIds[2]],{m.uvIds[5],m.uvIds[3],m.uvIds[4]})
+assert(result.editableMesh.destroyed==0)
+`);
+});
+
+test('true zero-area and below-policy faces refuse before allocating even after a valid primitive', runtimeOptions, async () => {
+  const cases = [
+    {points:[0,0,0, 1,1,1, 2,2,2],indices:[0,1,2]}, // Positive AABB extents do not prove area.
+    {points:[0,0,0, 1,0,0, 0,0,0],indices:[0,1,2]},
+    {points:[0,0,0, 1,0,0, 0,1,0],indices:[0,1,1]},
+    {points:[0,0,0, 1,0,0, 0,1e-11,0],indices:[0,1,2]},
+  ];
+  const checks = cases.map(({points,indices}) => `do
+ local invalid={mode=4,vertexCount=3,triangleCount=1,attributes={POSITION=${descriptor('POSITION','VEC3',5126,points)}},indices=${descriptor('indices','SCALAR',5123,indices)}}
+ local state,err=rejects({primitives={fixture().primitives[1],invalid}},'INPUT')
+ assert(state.creates==0 and state.calls==0 and #state.resources==0,'all face-area checks precede the first engine call')
+ assert(string.find(err.message,'doubled area',1,true),'refusal must come from actual triangle area')
+end`).join('\n');
+  await runFixture('triangle-area', `${checks}
+-- The policy does not reject every thin triangle: a small positive area above
+-- 1e-10 survives its actual float32 input without widening or geometry repair.
+local small={mode=4,vertexCount=3,triangleCount=1,attributes={POSITION=${descriptor('POSITION','VEC3',5126,[0,0,0, 1,0,0, 0,1e-9,0])}},indices=${descriptor('indices','SCALAR',5123,[0,1,2])}}
+local result=AssetMesh.create({primitives={small}},service(),alive,noYield)
+local y=result.editableMesh.vertices[result.primitives[1].vertexIds[3]][2]
+assert(y>1e-10 and y<2e-9 and result.editableMesh.destroyed==0)
 `);
 });
 

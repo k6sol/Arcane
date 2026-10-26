@@ -231,7 +231,8 @@ function Operations:reconstructAsset(args: any, guard: () -> ()): any
 		owned.guard()
 		local entries = owned.receiver:reconstruct(service, AssetMaterials.admitTextures)
 		-- No guard/yield between receiving ownership and registering EVERY mesh.
-		for _, entry in ipairs(entries) do owner.meshes[#owner.meshes + 1] = {mesh = entry.mesh.editableMesh, disposed = false, object = entry.object, material = entry.material, textures = entry.textures} end
+		for _, entry in ipairs(entries) do owner.meshes[#owner.meshes + 1] = {mesh = entry.mesh.editableMesh, disposed = false,
+			object = entry.object, material = entry.material, textures = entry.textures, conversion = entry.conversion} end
 		owner.service = service -- Retained for materialization; never re-acquired elsewhere.
 		owned.guard()
 		local summary = {}
@@ -266,7 +267,6 @@ end
 -- one undo recording and receipt. No upload, publication or asset ID is created: the
 -- MeshParts reference the in-memory EditableMeshes owned by this plugin lifetime.
 -- API (create.roblox.com AssetService.CreateMeshPartAsync, checked 2026-10-18): meshContent = Content.fromObject(editableMesh).
-local STUDS_PER_METER = 1 / 0.28
 local function srgb(linear: number): number
 	local c = math.clamp(if linear == linear then linear else 0, 0, 1)
 	return if c <= 0.0031308 then c * 12.92 else 1.055 * c ^ (1 / 2.4) - 0.055
@@ -287,8 +287,12 @@ function Operations:materializeReconstruction(digest: string, guard: () -> ()): 
 		if owner.retired then V.fail("SCOPE", "Materialization owner was retired.") end
 	end
 	current()
-	-- Validate every material before allocating parts or image resources.
-	for _, resource in ipairs(owner.meshes) do
+	-- Snapshot every numeric transform/size plan and validate every material
+	-- before the first MeshPart/image allocation or yielding engine callback.
+	local plans = {}
+	for index, resource in ipairs(owner.meshes) do
+		current()
+		plans[index] = AssetTransfer.meshPartPlan(resource.object, resource.conversion)
 		if resource.object.role ~= "collision" then
 			local plan = AssetMaterials.plan(resource.material, resource.textures)
 			if not plan.supported then V.fail("UNSUPPORTED_MATERIAL", "Nonzero emission cannot be mapped faithfully.") end
@@ -315,11 +319,10 @@ function Operations:materializeReconstruction(digest: string, guard: () -> ()): 
 			if part == nil or not part:IsA("MeshPart") then V.fail("ENGINE", "CreateMeshPartAsync did not return a MeshPart.") end
 			part.Parent = model
 			-- Keep this mesh swaps exactly these session parts (AssetPlacement.keep).
-			local low, high = object.worldBounds.min, object.worldBounds.max
-			local size = {}
-			for axis = 1, 3 do size[axis] = math.max(0.05, (high[axis] - low[axis]) * STUDS_PER_METER) end
+			local plan = plans[index]
+			local size, c = plan.size, plan.cframe
 			part.Size = Vector3.new(size[1], size[2], size[3])
-			part.CFrame = CFrame.new((low[1] + high[1]) / 2 * STUDS_PER_METER, (low[2] + high[2]) / 2 * STUDS_PER_METER, (low[3] + high[3]) / 2 * STUDS_PER_METER)
+			part.CFrame = CFrame.new(c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9], c[10], c[11], c[12])
 			local name = if type(object.name) == "string" then string.sub(object.name, 1, 100) else "Part" .. index
 			part.Name = name
 			if collision then

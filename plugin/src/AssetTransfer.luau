@@ -19,6 +19,97 @@ local function plain(value: any, label: string): any
 	if type(value) ~= "table" or getmetatable(value) ~= nil then fail("INPUT", label .. " must be plain data.") end
 	return value
 end
+local function finite(value: any, maximum: number, label: string): number
+	if type(value) ~= "number" or value ~= value or math.abs(value) == math.huge or math.abs(value) > maximum then fail("INPUT", "Invalid " .. label .. ".") end
+	return value
+end
+local function numbers(value: any, count: number, label: string): {number}
+	plain(value, label)
+	local keys = 0
+	for key in pairs(value) do
+		if type(key) ~= "number" or key % 1 ~= 0 or key < 1 or key > count then fail("INPUT", "Invalid " .. label .. " array.") end
+		keys += 1
+	end
+	if keys ~= count then fail("INPUT", "Incomplete " .. label .. " array.") end
+	local copy: {number} = {}
+	for index = 1, count do copy[index] = finite(value[index], 1000000, label) end
+	return table.freeze(copy)
+end
+local function conversionSnapshot(value: any): any
+	plain(value, "Conversion")
+	local allowed = {sourceUnits = true, sourceUp = true, exportUnits = true, exportUp = true,
+		targetUnits = true, targetUp = true, studsPerMeter = true}
+	local count = 0
+	for key in pairs(value) do if not allowed[key] then fail("INPUT", "Unsupported conversion field.") end; count += 1 end
+	if count ~= 7 or value.sourceUnits ~= "meters" or value.sourceUp ~= "Z" or value.exportUnits ~= "meters"
+		or value.exportUp ~= "Y" or value.targetUnits ~= "studs" or value.targetUp ~= "Y" then fail("INPUT", "Unsupported conversion literals.") end
+	local units = finite(value.studsPerMeter, 1000, "studs per meter")
+	if units <= 0 then fail("INPUT", "Positive studs per meter required.") end
+	return table.freeze({sourceUnits = "meters", sourceUp = "Z", exportUnits = "meters", exportUp = "Y",
+		targetUnits = "studs", targetUp = "Y", studsPerMeter = units})
+end
+local function measuredBounds(value: any, collision: boolean): any
+	plain(value, "Measured bounds")
+	local count = 0
+	for key in pairs(value) do if key ~= "min" and key ~= "max" then fail("INPUT", "Unsupported bounds field.") end; count += 1 end
+	if count ~= 2 then fail("INPUT", "Incomplete measured bounds.") end
+	local low, high = numbers(value.min, 3, "bounds minimum"), numbers(value.max, 3, "bounds maximum")
+	local positive = 0
+	for axis = 1, 3 do
+		if low[axis] > high[axis] then fail("INPUT", "Reversed measured bounds.") end
+		if low[axis] < high[axis] then positive += 1 end
+	end
+	if positive < (if collision then 3 else 2) then fail("INPUT", "Expected measured surface or collision volume bounds.") end
+	return {min = low, max = high}
+end
+
+-- Pure numeric plan, never engine evidence or authority. Geometry and measured
+-- bounds stay unchanged. Only the physical MeshPart size has an explicit floor.
+function AssetTransfer.meshPartPlan(object: any, conversion: any): any
+	plain(object, "Mesh object")
+	if object.role ~= "render" and object.role ~= "collision" then fail("INPUT", "Unsupported mesh role.") end
+	local bounds = measuredBounds(object.bounds, object.role == "collision")
+	measuredBounds(object.worldBounds, object.role == "collision")
+	local units = conversionSnapshot(conversion).studsPerMeter
+	local m, declared = numbers(object.exportTransform, 16, "export transform"), numbers(object.scale, 3, "export scale")
+	if m[4] ~= 0 or m[8] ~= 0 or m[12] ~= 0 or m[16] ~= 1 then fail("UNSUPPORTED_TRANSFORM", "Expected an affine export transform.") end
+	local scales: {number}, r: {number} = {}, {}
+	for column = 1, 3 do
+		local at = (column - 1) * 4
+		local scale = math.sqrt(m[at + 1] ^ 2 + m[at + 2] ^ 2 + m[at + 3] ^ 2)
+		if scale <= 0 or declared[column] <= 0 or math.abs(scale - declared[column]) > 1e-6 * math.max(1, scale, declared[column]) then
+			fail("UNSUPPORTED_TRANSFORM", "Export scale disagrees with positive matrix columns.")
+		end
+		scales[column] = scale
+		r[at + 1], r[at + 2], r[at + 3] = m[at + 1] / scale, m[at + 2] / scale, m[at + 3] / scale
+	end
+	for a = 0, 1 do
+		for b = a + 1, 2 do
+			local dot = r[a * 4 + 1] * r[b * 4 + 1] + r[a * 4 + 2] * r[b * 4 + 2] + r[a * 4 + 3] * r[b * 4 + 3]
+			if math.abs(dot) > 1e-6 then fail("UNSUPPORTED_TRANSFORM", "Sheared export transform requires baking.") end
+		end
+	end
+	local determinant = r[1] * (r[6] * r[11] - r[7] * r[10]) - r[5] * (r[2] * r[11] - r[3] * r[10]) + r[9] * (r[2] * r[7] - r[3] * r[6])
+	if math.abs(determinant - 1) > 1e-6 then fail("UNSUPPORTED_TRANSFORM", "Expected a proper positive rotation.") end
+	local centre: {number} = {}
+	local size: {number}, padding: {number} = {}, {}
+	for axis = 1, 3 do
+		centre[axis] = (bounds.min[axis] + bounds.max[axis]) / 2
+		local measuredSize = (bounds.max[axis] - bounds.min[axis]) * scales[axis] * units
+		size[axis] = math.max(0.05, measuredSize) -- Existing Arcane physical-size policy, not mesh thickness.
+		padding[axis] = size[axis] - measuredSize
+	end
+	local cframe = {
+		(m[1] * centre[1] + m[5] * centre[2] + m[9] * centre[3] + m[13]) * units,
+		(m[2] * centre[1] + m[6] * centre[2] + m[10] * centre[3] + m[14]) * units,
+		(m[3] * centre[1] + m[7] * centre[2] + m[11] * centre[3] + m[15]) * units,
+		r[1], r[5], r[9], r[2], r[6], r[10], r[3], r[7], r[11],
+	}
+	for _, values in ipairs({size, padding, cframe}) do
+		for _, value in ipairs(values) do finite(value, math.huge, "physical sizing result") end
+	end
+	return table.freeze({size = table.freeze(size), cframe = table.freeze(cframe), physicalPaddingStuds = table.freeze(padding)})
+end
 local function snapshot(value: any, depth: number, budget: any): any
 	budget.count += 1
 	if depth > 32 or budget.count > 60000 then fail("BUDGET", "Decoded packet complexity exceeded.") end
@@ -83,6 +174,7 @@ function AssetTransfer.new(expected: any, decodeJson: (string) -> any, guard: ()
 	local state = "receiving"
 	local ordinal, bytes, binaryBytes = 0, 0, 0
 	local begin: any = nil
+	local sealedConversion: any = nil
 	local objects: {any} = {}
 	local objectIds: {[string]: boolean} = {}
 	local streams: {[string]: any} = {}
@@ -149,6 +241,7 @@ function AssetTransfer.new(expected: any, decodeJson: (string) -> any, guard: ()
 				if ordinal ~= 0 or begin ~= nil then fail("STATE", "Begin must be first and unique.") end
 				integer(packet.objectCount, 1, LIMITS.objects)
 				integer(packet.textureCount or 0, 0, 256)
+				sealedConversion = conversionSnapshot(packet.conversion)
 				begin = packet
 			elseif packet.kind == "texture" then
 				if begin == nil or #objects ~= 0 then fail("STATE", "Textures must follow begin and precede objects.") end
@@ -249,6 +342,12 @@ function AssetTransfer.new(expected: any, decodeJson: (string) -> any, guard: ()
 		local ok, result = pcall(function(): any
 			check()
 			local reconstructed = {}
+			-- Validate every retained transform/conversion before images or meshes
+			-- can allocate; no model output or caller metadata supplies authority.
+			for _, entry in ipairs(objects) do
+				AssetTransfer.meshPartPlan(entry.object, sealedConversion)
+				check()
+			end
 			local function materialize(descriptor: any): any
 				local stream = streams[descriptor.streamId]
 				return {semantic = descriptor.semantic, componentType = descriptor.componentType, type = descriptor.type,
@@ -289,7 +388,8 @@ function AssetTransfer.new(expected: any, decodeJson: (string) -> any, guard: ()
 				local mesh = AssetMesh.create({primitives = primitives}, assetService, check, yieldBatch)
 				resources[#resources + 1] = mesh.editableMesh
 				check()
-				reconstructed[#reconstructed + 1] = {object = entry.object, material = entry.material, mesh = mesh, textures = objectHandles[index]}
+				reconstructed[#reconstructed + 1] = {object = entry.object, material = entry.material, mesh = mesh,
+					textures = objectHandles[index], conversion = sealedConversion}
 			end
 			check()
 			state = "taken"

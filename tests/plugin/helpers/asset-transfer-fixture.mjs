@@ -21,13 +21,13 @@ const literal = value => {
   if (Array.isArray(value)) return '{' + value.map(literal).join(',') + '}';
   return '{' + Object.entries(value).map(([k,v]) => '[' + literal(k) + ']=' + literal(v)).join(',') + '}';
 };
-export async function run(t, body, operations = false) {
+export async function run(t, body, operations = false, fixtureOptions = {}) {
   const boundary = tmpdir(), directory = await mkdtemp(join(boundary, 'arcane-transfer-vm-'));
   t.after(async () => {const r=relative(boundary,directory);assert.ok(r.startsWith('arcane-transfer-vm-')&&!isAbsolute(r)&&!r.includes('..'));await rm(directory,{recursive:true,force:true});});
   const manifest = await saveStudioFixture(directory, JOB);
   const exports = new Map();
   for (const path of ['asset.glb','collision.glb']) exports.set(path,await readFile(join(directory,path)));
-  const generated=adaptCompletedStudioImport(manifest,exports,sha('project'),{target:{sessionId:'synthetic-session',placeId:0,universeId:0,root:'Workspace',parentRef:'synthetic-parent',creator:{kind:'user',id:'123'}},placement:{mode:'origin'},studsPerMeter:1/0.28},null);
+  const generated=adaptCompletedStudioImport(manifest,exports,sha('project'),{target:{sessionId:'synthetic-session',placeId:0,universeId:0,root:'Workspace',parentRef:'synthetic-parent',creator:{kind:'user',id:'123'}},placement:{mode:'origin'},studsPerMeter:fixtureOptions.studsPerMeter ?? 1/0.28},null);
   const authority=createStudioImportManifestAuthority({loadGeneratedFiles:async()=>generated});
   t.after(()=>authority.close());
   const prepared=authority.prepare(await authority.admit(JOB));

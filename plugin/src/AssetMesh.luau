@@ -170,6 +170,17 @@ function AssetMesh.create(data: Data, assetService: MeshService, guard: () -> bo
 				indices[ordinal] = vertex + 1
 				tick()
 			end
+			-- Arcane policy shared with host preparation: doubled area in square
+			-- meters must exceed 1e-10. Validate before every engine allocation;
+			-- duplicated positions at distinct UV seams are not globally welded.
+			for at = 1, #indices, 3 do
+				local a, b, c = positions[indices[at]], positions[indices[at + 1]], positions[indices[at + 2]]
+				local ux, uy, uz = b[1] - a[1], b[2] - a[2], b[3] - a[3]
+				local vx, vy, vz = c[1] - a[1], c[2] - a[2], c[3] - a[3]
+				local x, y, z = uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx
+				if math.sqrt(x * x + y * y + z * z) <= 1e-10 then fail("INPUT", "Degenerate triangle; doubled area must exceed 1e-10.") end
+				tick()
+			end
 			decoded[index] = {positions = positions, normals = normals, uvs = uvs, indices = indices}
 		end
 		check()

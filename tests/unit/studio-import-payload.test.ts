@@ -24,7 +24,7 @@ function pack(doc: Doc, bin: Buffer): Buffer {
   out.writeUInt32LE(n,12);out.writeUInt32LE(0x4e4f534a,16);out.fill(32,20,20+n);j.copy(out,20);
   out.writeUInt32LE(b,20+n);out.writeUInt32LE(0x004e4942,24+n);bin.copy(out,28+n);return out;
 }
-function fixture() {
+function fixture(options:{planar?:boolean}={}) {
   const doc:Doc={asset:{version:'2.0',generator:'Khronos glTF Blender I/O v4.5.48'},buffers:[{byteLength:0}],bufferViews:[],accessors:[],meshes:[],nodes:[],scene:0,scenes:[{nodes:[0,1]}]};
   let bin:Buffer=Buffer.alloc(0);
   const add=(values:number[],type:string,componentType=5126)=>{
@@ -41,7 +41,11 @@ function fixture() {
   const objects:HostGeneratedStudioImport['models'][number]['objects']=[];
   for(const [i,id,role,key] of [[0,R,'render','body'],[1,C,'collision','body-proxy']] as const){
     const collisionFor=role==='render'?[]:[R];
-    doc.meshes.push({name:key,primitives:[{attributes:{POSITION:pos,NORMAL:normal,...(role==='render'?{TEXCOORD_0:uv}:{})},indices,...(role==='render'?{material:0}:{})}]});
+    const flat=options.planar&&role==='render';
+    const position=flat?add([0,0,0,1,0,0,1,1,0,0,1,0],'VEC3'):pos;
+    const normals=flat?add([0,0,1,0,0,1,0,0,1,0,0,1],'VEC3'):normal;
+    const triangles=flat?add([0,1,2,0,2,3],'SCALAR',5123):indices;
+    doc.meshes.push({name:key,primitives:[{attributes:{POSITION:position,NORMAL:normals,...(role==='render'?{TEXCOORD_0:uv}:{})},indices:triangles,...(role==='render'?{material:0}:{})}]});
     doc.nodes.push({mesh:i,name:key,extras:{arcane_identity_scheme:'arcane-semantic-v1',arcane_source_object_id:id,arcane_role:role,arcane_source_key:key,arcane_pivot:[0,0,0],arcane_collision_for:JSON.stringify(collisionFor),retained_semantic:'authored'}});
     objects.push({sourceObjectId:id,nodeIndex:i,role,pivot:[0,0,0],collisionFor});
   }
@@ -86,6 +90,33 @@ function verifyChunks(payload:StudioImportPayload) {
   assert.equal(binary,payload.binaryByteLength);assert.equal(count,payload.chunkCount);assert.ok(payload.aggregateEncodedByteLength<=STUDIO_IMPORT_PAYLOAD_LIMITS.encodedBytes);
   return {binary,count};
 }
+test('planar render payload and sealed transfer preserve exact source coordinates, UVs and measured bounds',async()=>{
+  const f=fixture({planar:true}),g=f.generated(),source=Buffer.from(g.files[0]!.bytes),p=await prepare(g);
+  const payload=decodeStudioImportPayload(p,new Map([['export',g.files[0]!.bytes]]));
+  const render=payload.objects.find(entry=>entry.object.role==='render')!,positions=render.primitives[0]!.attributes.POSITION!;
+  assert.deepEqual(render.object.bounds,{min:[0,0,0],max:[1,1,0]});assert.deepEqual(render.object.worldBounds,render.object.bounds);
+  assert.deepEqual(payload.bounds,render.object.bounds);assert.equal(render.material!.doubleSided,true);
+  assert.equal(render.primitives[0]!.vertexCount,4);assert.equal(render.primitives[0]!.triangleCount,2);
+  const raw=Buffer.from(positions.bytes),expected=[0,0,0,1,0,0,1,1,0,0,1,0];
+  assert.deepEqual(Array.from({length:12},(_,i)=>raw.readFloatLE(i*4)),expected);
+  assert.deepEqual(g.files[0]!.bytes,source);verifyChunks(payload);
+  const transfer=createStudioImportTransfer(p,payload);
+  const begin=transfer.packets.find(packet=>packet.kind==='begin')!;
+  assert.deepEqual((JSON.parse(begin.json) as Doc).bounds,render.object.bounds);
+  const objectPacket=transfer.packets.filter(packet=>packet.kind==='object').map(packet=>JSON.parse(packet.json) as Doc).find(packet=>packet.object.role==='render')!;
+  assert.deepEqual(objectPacket.object.bounds,render.object.bounds);assert.deepEqual(objectPacket.object.worldBounds,render.object.worldBounds);
+  assert.equal(payload.engineVerification,'pending');
+});
+
+test('independent payload decode rejects digest-consistent diagonal zero-area export bytes before geometry matching',async()=>{
+  const f=fixture(),g=f.generated(),p=await prepare(g),accessor=f.doc.accessors[f.doc.meshes[0].primitives[0].attributes.POSITION];
+  const view=f.doc.bufferViews[accessor.bufferView],start=(view.byteOffset??0)+(accessor.byteOffset??0);
+  for(let vertex=0;vertex<4;vertex++)for(let axis=0;axis<3;axis++)f.bin.writeFloatLE(vertex,start+(vertex*3+axis)*4);
+  accessor.min=[0,0,0];accessor.max=[3,3,3];
+  const changed=replaceExport(p,f.doc,f.bin);
+  refuse(()=>decodeStudioImportPayload(changed.prepared,changed.files),'EXPORT',/area|degenerate/i);
+});
+
 test('owned tiny GLB: stable objects, binary attributes, scalar emission and exact pending metadata',async()=>{
   const f=fixture(),g=f.generated(),p=await prepare(g),payload=decodeStudioImportPayload(p,new Map([['export',g.files[0]!.bytes]]));
   assert.equal(payload.formatVersion,1);assert.equal(payload.engineVerification,'pending');assert.equal(payload.preparedDigest,p.digest);assert.equal(payload.manifestDigest,p.manifest.digest);

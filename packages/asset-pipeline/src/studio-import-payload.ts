@@ -285,6 +285,14 @@ export function decodeStudioImportPayload(prepared: PreparedStudioImport, files:
         if (p.indices!==undefined) indices=read(p.indices,'indices');
         else { binary=bound(binary+pos.count*4,limits.binaryBytes,'Implicit indices'); const raw=new Uint8Array(pos.count*4), v=new DataView(raw.buffer); for(let i=0;i<pos.count;i++)v.setUint32(i*4,i,true); values.indices=Array.from({length:pos.count},(_,i)=>[i]); indices=buffer(raw,'indices',5125,'SCALAR',pos.count,false,null,o,pi); }
         if (indices.count%3 || values.indices!.some(r=>r[0]!>=pos.count||r[0]===2**(indices.componentType===5121?8:indices.componentType===5123?16:32)-1)) fail('EXPORT','Invalid triangle indices.');
+        // Independently enforce the same Arcane doubled-area policy as host
+        // preparation; positive AABB extents do not prove a nondegenerate face.
+        for(let at=0;at<values.indices!.length;at+=3){
+          const a=values.POSITION![values.indices![at]![0]!]!,b=values.POSITION![values.indices![at+1]![0]!]!,c=values.POSITION![values.indices![at+2]![0]!]!;
+          const u=b.map((n,i)=>n-a[i]!),v=c.map((n,i)=>n-a[i]!);
+          if(Math.hypot(u[1]!*v[2]!-u[2]!*v[1]!,u[2]!*v[0]!-u[0]!*v[2]!,u[0]!*v[1]!-u[1]!*v[0]!)<=1e-10)
+            fail('EXPORT','Degenerate triangle; doubled area must exceed 1e-10.');
+        }
         objectTriangles=bound(objectTriangles+indices.count/3,STUDIO_IMPORT_LIMITS.meshTriangles,'Per-object triangles');
         slots.add(p.material??null); geometry.push({attributes:Object.fromEntries(Object.entries(values).filter(([k])=>k!=='indices')),indices:values.indices!.flat(),mode:4});
         primitives.push({mode:4,vertexCount:pos.count,triangleCount:indices.count/3,attributes:attrs,indices,source:p});

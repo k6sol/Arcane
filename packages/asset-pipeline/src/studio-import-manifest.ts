@@ -40,7 +40,10 @@ const cframe = z.array(number).length(12).refine(m => {
     [[0, 1], [0, 2], [1, 2]].every(([a, b]) => Math.abs(row(a!).reduce((s, n, i) => s + n * row(b!)[i]!, 0)) < 1e-6) &&
     Math.abs(r[0]! * (r[4]! * r[8]! - r[5]! * r[7]!) - r[1]! * (r[3]! * r[8]! - r[5]! * r[6]!) + r[2]! * (r[3]! * r[7]! - r[4]! * r[6]!) - 1) < 1e-6;
 }, 'Expected a rigid, right-handed CFrame');
-const bounds = z.strictObject({ min: vec3, max: vec3 }).refine(b => b.min.every((n, i) => n < b.max[i]!), 'Expected nonzero volume');
+// Measured surface AABBs may be planar. Triangle area is checked from actual
+// indexed positions below; an AABB alone cannot distinguish a diagonal line.
+const bounds = z.strictObject({ min: vec3, max: vec3 }).refine(b =>
+  b.min.every((n, i) => n <= b.max[i]!) && b.min.filter((n, i) => n < b.max[i]!).length >= 2, 'Expected ordered surface bounds');
 const creator = z.strictObject({ kind: z.enum(['user', 'group']), id: decimalId });
 const target = z.strictObject({ sessionId: id, placeId: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   universeId: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), root: z.literal('Workspace'), parentRef: id, creator });
@@ -71,7 +74,8 @@ const materialManifest = materialContent.extend({ sha256: hash });
 const objectManifest = z.strictObject({ sourceObjectId: id, name: z.string().min(1).max(256), role: z.enum(['render', 'collision']), parentSourceObjectId: id.nullable(),
   exportFileId: id, nodeIndex: z.number().int().nonnegative(), meshExportSha256: hash, triangles: z.number().int().positive(),
   materialSha256: hash.nullable(), textureSha256s: z.array(hash).max(4), exportTransform: matrix, scale: vec3, pivot: vec3,
-  bounds, worldBounds: bounds, collisionFor: z.array(id).max(128) });
+  bounds, worldBounds: bounds, collisionFor: z.array(id).max(128) }).refine(o => o.role !== 'collision' ||
+    [o.bounds, o.worldBounds].every(b => b.min.every((n, i) => n < b.max[i]!)), 'Collision proxies require nonzero volume bounds');
 const manifestContent = z.strictObject({ schemaVersion: z.literal(1), status: z.literal('prepared'), engineVerification: z.literal('pending'),
   projectId: hash, assetId: id, revisionId: jobId, sourceSha256: hash,
   producer: z.strictObject({ blenderVersion: z.string().regex(/^[A-Za-z0-9 .+_-]{1,128}(?![\s\S])/), exporterVersion: z.string().regex(/^[A-Za-z0-9 .+_-]{1,128}(?![\s\S])/) }),
@@ -385,6 +389,14 @@ function compile(input: z.infer<typeof inputSchema>, limits: Limits): z.infer<ty
         bound(count, limits.meshTriangles, 'Per-mesh triangles');
         const attrs = Object.fromEntries(Object.keys(p.attributes).sort().map(k => [k, accessor(doc, bin, p.attributes[k])])), pts = attrs.POSITION!;
         const indices = p.indices === undefined ? pts.map((_, i) => [i]) : accessor(doc, bin, p.indices);
+        // Existing Arcane generated-GLB policy: doubled triangle area in square
+        // meters must exceed 1e-10. Seam duplicates are allowed across faces.
+        for (let at = 0; at < indices.length; at += 3) {
+          const a = pts[indices[at]![0]!]!, b = pts[indices[at + 1]![0]!]!, c = pts[indices[at + 2]![0]!]!;
+          const u = b.map((n, i) => n - a[i]!), v = c.map((n, i) => n - a[i]!);
+          if (Math.hypot(u[1]! * v[2]! - u[2]! * v[1]!, u[2]! * v[0]! - u[0]! * v[2]!, u[0]! * v[1]! - u[1]! * v[0]!) <= 1e-10)
+            fail('EXPORT', 'Degenerate triangle; doubled area must exceed 1e-10.');
+        }
         for (const point of pts) positions.push(point);
         geometry.push({ attributes: attrs, indices: indices.flat(), mode: 4 });
         slots.add(p.material === undefined ? null : p.material);
