@@ -24,7 +24,7 @@ test('conversion failures retain the exact bounded stage and reason through jour
 });
 
 test('all fixed worker reason tokens and conversion stages round-trip without invented exception types', () => {
-  const reasons = ['INPUT', 'SOURCE', 'MAP', 'FEATURE', 'GEOMETRY', 'MATERIAL', 'COLLISION', 'EXPORT', 'REOPEN', 'RENDER', 'IO', 'NATIVE', 'IO_PATH', 'IO_LINK', 'IO_TYPE', 'IO_SIZE', 'IO_IDENTITY', 'IO_READ', 'IO_CHANGED', 'IO_EXISTS', 'IO_ACCESS', 'GEOMETRY_COUNTS', 'GEOMETRY_TRANSFORM', 'GEOMETRY_DIRECTION', 'GEOMETRY_TOPOLOGY', 'GEOMETRY_AREA', 'GEOMETRY_UV', 'GEOMETRY_TRIANGLES', 'GEOMETRY_HASH'];
+  const reasons = ['INPUT', 'SOURCE', 'MAP', 'FEATURE', 'GEOMETRY', 'MATERIAL', 'COLLISION', 'EXPORT', 'REOPEN', 'RENDER', 'IO', 'NATIVE', 'IO_PATH', 'IO_LINK', 'IO_TYPE', 'IO_SIZE', 'IO_IDENTITY', 'IO_READ', 'IO_CHANGED', 'IO_EXISTS', 'IO_ACCESS', 'GEOMETRY_COUNTS', 'GEOMETRY_TRANSFORM', 'GEOMETRY_DIRECTION', 'GEOMETRY_TOPOLOGY', 'GEOMETRY_AREA', 'GEOMETRY_UV', 'GEOMETRY_TRIANGLES', 'GEOMETRY_HASH', 'GEOMETRY_HASH_POSITION', 'GEOMETRY_HASH_NORMAL', 'GEOMETRY_HASH_TANGENT', 'GEOMETRY_HASH_UV', 'GEOMETRY_HASH_COLOR', 'GEOMETRY_HASH_CORNER_ASSOCIATION'];
   const stages = ['input', 'source-import', 'source-map', 'collision', 'scene-save', 'export', 'scene-reopen', 'export-roundtrip', 'review-render', 'audit-write'];
   for (const reason of reasons) for (const stage of stages) {
     const error = conversionWorkerFailure(command(report(stage, reason)), 'generate');
@@ -115,5 +115,26 @@ test('conversion geometry details identify the refused check without model coord
     assert.equal(error.diagnostic?.reasonCode, 'CONVERSION_' + reason); assert.match(error.message, explanation);
     assert.doesNotMatch(error.message, /private native traceback/);
     assert.deepEqual(decodeAssetJobError({ code: error.code, message: error.message, diagnostic: error.diagnostic }).diagnostic, error.diagnostic);
+  }
+});
+
+test('conversion semantic hints retain full-comparison refusal without claiming numerical drift or approval', () => {
+  const hints: Record<string, RegExp> = {
+    POSITION: /world-position projection/, NORMAL: /surface-normal projection/,
+    TANGENT: /surface-tangent projection/, UV: /texture-coordinate projections/,
+    COLOR: /vertex-color projections/, CORNER_ASSOCIATION: /corner association remains unverified/,
+  };
+  for (const [group, explanation] of Object.entries(hints)) {
+    const error = conversionWorkerFailure(command(report('source-map', 'GEOMETRY_HASH_' + group)), 'source-import');
+    assert.equal(error.code, 'BLENDER_FAILED');
+    assert.equal(error.diagnostic?.reasonCode, 'CONVERSION_GEOMETRY_HASH_' + group);
+    assert.match(error.message, explanation);
+    assert.doesNotMatch(error.message, /harmless|tolerance|approved|private native traceback/);
+    assert.deepEqual(Object.keys(error.diagnostic!).sort(), ['exceptionType', 'reason', 'reasonCode', 'schemaVersion', 'stage']);
+    assert.deepEqual(decodeAssetJobError({ code: error.code, message: error.message, diagnostic: error.diagnostic }).diagnostic, error.diagnostic);
+    for (const extra of [{ coordinates: [0, 0, 0] }, { expectedHash: 'a'.repeat(64) }, { closed: true }]) {
+      const forged = 'ARCANE_FAILURE ' + JSON.stringify({ stage: 'source-map', reason: 'GEOMETRY_HASH_' + group, type: 'conversion-refused', ...extra });
+      assert.equal(conversionWorkerFailure(command(forged), 'source-import').diagnostic?.reasonCode, 'WORKER_EXIT');
+    }
   }
 });

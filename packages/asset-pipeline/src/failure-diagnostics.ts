@@ -7,7 +7,7 @@ const STAGES = new Set(['prepare-output', 'probe', 'generate', 'request-validati
 const CONVERSION_STAGES = new Set(['input', 'source-import', 'source-map', 'collision', 'scene-save', 'export',
   'scene-reopen', 'export-roundtrip', 'review-render', 'audit-write']);
 for (const stage of CONVERSION_STAGES) STAGES.add(stage);
-const CONVERSION_REASONS = new Set(['INPUT', 'SOURCE', 'MAP', 'FEATURE', 'GEOMETRY', 'MATERIAL', 'COLLISION', 'EXPORT', 'REOPEN', 'RENDER', 'IO', 'NATIVE', 'IO_PATH', 'IO_LINK', 'IO_TYPE', 'IO_SIZE', 'IO_IDENTITY', 'IO_READ', 'IO_CHANGED', 'IO_EXISTS', 'IO_ACCESS', 'GEOMETRY_COUNTS', 'GEOMETRY_TRANSFORM', 'GEOMETRY_DIRECTION', 'GEOMETRY_TOPOLOGY', 'GEOMETRY_AREA', 'GEOMETRY_UV', 'GEOMETRY_TRIANGLES', 'GEOMETRY_HASH']);
+const CONVERSION_REASONS = new Set(['INPUT', 'SOURCE', 'MAP', 'FEATURE', 'GEOMETRY', 'MATERIAL', 'COLLISION', 'EXPORT', 'REOPEN', 'RENDER', 'IO', 'NATIVE', 'IO_PATH', 'IO_LINK', 'IO_TYPE', 'IO_SIZE', 'IO_IDENTITY', 'IO_READ', 'IO_CHANGED', 'IO_EXISTS', 'IO_ACCESS', 'GEOMETRY_COUNTS', 'GEOMETRY_TRANSFORM', 'GEOMETRY_DIRECTION', 'GEOMETRY_TOPOLOGY', 'GEOMETRY_AREA', 'GEOMETRY_UV', 'GEOMETRY_TRIANGLES', 'GEOMETRY_HASH', 'GEOMETRY_HASH_POSITION', 'GEOMETRY_HASH_NORMAL', 'GEOMETRY_HASH_TANGENT', 'GEOMETRY_HASH_UV', 'GEOMETRY_HASH_COLOR', 'GEOMETRY_HASH_CORNER_ASSOCIATION']);
 const TYPES = new Set(['ValueError', 'RuntimeError', 'TypeError', 'AttributeError', 'KeyError', 'IndexError', 'FileNotFoundError',
   'PermissionError', 'OSError', 'MemoryError', 'ImportError', 'ModuleNotFoundError', 'ZeroDivisionError', 'NotImplementedError', 'Exception']);
 const REASONS: Record<string, string> = {
@@ -25,6 +25,12 @@ const REASONS: Record<string, string> = {
   CONVERSION_GEOMETRY_UV: 'A converted UV coordinate is nonfinite or outside the permitted range.',
   CONVERSION_GEOMETRY_TRIANGLES: 'The converted mesh triangle count differs from its retained source primitive.',
   CONVERSION_GEOMETRY_HASH: 'The converted geometry comparison digest does not match its retained source digest.',
+  CONVERSION_GEOMETRY_HASH_POSITION: 'The refused full geometry comparison also differs in its world-position projection.',
+  CONVERSION_GEOMETRY_HASH_NORMAL: 'The refused full geometry comparison also differs in its surface-normal projection.',
+  CONVERSION_GEOMETRY_HASH_TANGENT: 'The refused full geometry comparison also differs in its surface-tangent projection.',
+  CONVERSION_GEOMETRY_HASH_UV: 'The refused full geometry comparison also differs in its texture-coordinate projections.',
+  CONVERSION_GEOMETRY_HASH_COLOR: 'The refused full geometry comparison also differs in its vertex-color projections.',
+  CONVERSION_GEOMETRY_HASH_CORNER_ASSOCIATION: 'The full geometry comparison differs despite matching attribute projections; their corner association remains unverified.',
   CONVERSION_MATERIAL: 'Source material or image data could not be preserved through conversion.',
   CONVERSION_COLLISION: 'The requested collision hull failed its geometry or closed-volume checks.',
   CONVERSION_EXPORT: 'The exported model failed its measured geometry, identity or hierarchy checks.',

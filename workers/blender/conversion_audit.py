@@ -38,7 +38,7 @@ ORIGIN = "arcane_conversion_origin_v1"
 IDENTITY = "arcane-converted-v1"
 HASH = re.compile(r"[a-f0-9]{64}\Z")
 UUID = re.compile(r"[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}\Z")
-REASONS = {"INPUT", "SOURCE", "MAP", "FEATURE", "GEOMETRY", "MATERIAL", "COLLISION", "EXPORT", "REOPEN", "RENDER", "IO", "NATIVE", "IO_PATH", "IO_LINK", "IO_TYPE", "IO_SIZE", "IO_IDENTITY", "IO_READ", "IO_CHANGED", "IO_EXISTS", "IO_ACCESS", "GEOMETRY_COUNTS", "GEOMETRY_TRANSFORM", "GEOMETRY_DIRECTION", "GEOMETRY_TOPOLOGY", "GEOMETRY_AREA", "GEOMETRY_UV", "GEOMETRY_TRIANGLES", "GEOMETRY_HASH"}
+REASONS = {"INPUT", "SOURCE", "MAP", "FEATURE", "GEOMETRY", "MATERIAL", "COLLISION", "EXPORT", "REOPEN", "RENDER", "IO", "NATIVE", "IO_PATH", "IO_LINK", "IO_TYPE", "IO_SIZE", "IO_IDENTITY", "IO_READ", "IO_CHANGED", "IO_EXISTS", "IO_ACCESS", "GEOMETRY_COUNTS", "GEOMETRY_TRANSFORM", "GEOMETRY_DIRECTION", "GEOMETRY_TOPOLOGY", "GEOMETRY_AREA", "GEOMETRY_UV", "GEOMETRY_TRIANGLES", "GEOMETRY_HASH", "GEOMETRY_HASH_POSITION", "GEOMETRY_HASH_NORMAL", "GEOMETRY_HASH_TANGENT", "GEOMETRY_HASH_UV", "GEOMETRY_HASH_COLOR", "GEOMETRY_HASH_CORNER_ASSOCIATION"}
 
 
 class ConversionFailure(Exception):
@@ -352,7 +352,44 @@ def geometry_hash(rows):
     return sha(canonical(sorted(rows)))
 
 
-def primitive_geometry(doc, binary, node_index, primitive_index, semantics=None, scene_index=None):
+GEOMETRY_GROUPS = ("POSITION", "NORMAL", "TANGENT", "UV", "COLOR")
+
+
+def geometry_projection_hashes(rows):
+    """Diagnostic marginals of actual canonical corners; never acceptance proof."""
+    result = {}
+    for group in GEOMETRY_GROUPS:
+        projected = []
+        for row in rows:
+            corners = json.loads(row)
+            values = []
+            for corner in corners:
+                values.append({key: value for key, value in corner.items() if
+                    key == group or (group == "UV" and key.startswith("TEXCOORD_")) or
+                    (group == "COLOR" and key.startswith("COLOR_"))})
+            projected.append(triangle_key(values))
+        result[group] = geometry_hash(projected)
+    return result
+
+
+def require_geometry_match(expected, actual, expected_projections=None, actual_projections=None):
+    # The original full-corner digest remains the sole acceptance predicate.
+    if expected == actual:
+        return
+    reason = "GEOMETRY_HASH"
+    if (type(expected_projections) is dict and type(actual_projections) is dict and
+            set(expected_projections) == set(actual_projections) == set(GEOMETRY_GROUPS) and
+            all(type(values[key]) is str and HASH.fullmatch(values[key]) for
+                values in (expected_projections, actual_projections) for key in GEOMETRY_GROUPS)):
+        reason = "GEOMETRY_HASH_CORNER_ASSOCIATION"
+        for group in GEOMETRY_GROUPS:
+            if expected_projections[group] != actual_projections[group]:
+                reason = "GEOMETRY_HASH_" + group
+                break
+    raise ConversionFailure(reason)
+
+
+def primitive_geometry(doc, binary, node_index, primitive_index, semantics=None, scene_index=None, diagnostic_hashes=None):
     matrices = worlds(doc, scene_index); require(node_index in matrices, "MAP")
     node = ref(doc.get("nodes", []), node_index); primitive = ref(ref(doc.get("meshes", []), node.get("mesh"))["primitives"], primitive_index)
     attributes = primitive.get("attributes", {}); require("POSITION" in attributes, "SOURCE")
@@ -392,6 +429,8 @@ def primitive_geometry(doc, binary, node_index, primitive_index, semantics=None,
         u=[b[k]-a[k] for k in range(3)]; v=[c[k]-a[k] for k in range(3)]
         require(math.hypot(u[1]*v[2]-u[2]*v[1],u[2]*v[0]-u[0]*v[2],u[0]*v[1]-u[1]*v[0]) > 1e-10, "GEOMETRY")
         rows.append(triangle_key(corners))
+    if diagnostic_hashes is not None:
+        diagnostic_hashes.update(geometry_projection_hashes(rows))
     return geometry_hash(rows), tuple(sorted(selected)), len(faces), m
 
 
@@ -560,7 +599,7 @@ def material_graph(material):
     return {"flags": flags, "graph": graph(material.node_tree, set())}
 
 
-def measure(obj, part, source_hash, semantics, bpy):
+def measure(obj, part, source_hash, semantics, bpy, diagnostic_rows=None, expected_geometry=None):
     require(obj.type == "MESH" and not obj.modifiers and not obj.constraints and obj.data.shape_keys is None and obj.animation_data is None, "FEATURE")
     dg = bpy.context.evaluated_depsgraph_get(); evaluated = obj.evaluated_get(dg)
     mesh = evaluated.to_mesh(preserve_all_data_layers=True, depsgraph=dg)
@@ -615,11 +654,14 @@ def measure(obj, part, source_hash, semantics, bpy):
         slots = {mesh.polygons[t.polygon_index].material_index for t in mesh.loop_triangles}
         require(len(slots) == 1, "MATERIAL")
         index = next(iter(slots)); material = obj.material_slots[index].material if index < len(obj.material_slots) else None
+        digest = geometry_hash(rows)
+        if diagnostic_rows is not None and digest != expected_geometry:
+            diagnostic_rows.extend(rows)
         return {"sourceKey": part["sourceKey"], "originMarker": part["originMarker"],
                 "sourceObjectId": object_id(source_hash, "render", part["sourceKey"]), "vertices": len(mesh.vertices), "triangles": len(mesh.loop_triangles),
                 "boundaryEdges": sum(edge_uses[edge] == 1 for edge in edges), "nonManifoldEdges": sum(edge_uses[edge] != 2 for edge in edges),
                 "looseVertices": loose_vertices, "looseEdges": loose_edges, "degenerateFaces": degenerate, "invalidUVs": invalid_uvs,
-                "uvLayers": len(mesh.uv_layers), "finitePositions": True, "geometrySha256": geometry_hash(rows), "materialSha256": sha(canonical(material_graph(material)))}
+                "uvLayers": len(mesh.uv_layers), "finitePositions": True, "geometrySha256": digest, "materialSha256": sha(canonical(material_graph(material)))}
     finally:
         evaluated.to_mesh_clear()
 

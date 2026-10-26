@@ -72,6 +72,11 @@ jobs:
           PYTHONDONTWRITEBYTECODE: '1'
           PYTHONUTF8: '1'
         run: python tests/native/conversion_audit_io_test.py
+      - name: Verify geometry mismatch diagnostics
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+          PYTHONUTF8: '1'
+        run: python tests/native/conversion_audit_geometry_test.py
       - name: Acquire and verify the pinned official Blender runtime
         env:
           PYTHONDONTWRITEBYTECODE: '1'

@@ -196,12 +196,22 @@ def source_evidence(request, mapping, original, imported):
     return source_doc, source_bin, expected, hierarchy_signature(import_doc)
 
 
-def measured_rows(bpy, objects, mapping, request, expected):
+def measured_rows(bpy, objects, mapping, request, expected, source_doc, source_bin):
     rows = []
     for part in mapping["parts"]:
-        row = audit.measure(objects[part["sourceKey"]], part, request["sourceSha256"], expected[part["sourceKey"]]["semantics"], bpy)
+        evidence = expected[part["sourceKey"]]
+        diagnostic_rows = []
+        row = audit.measure(objects[part["sourceKey"]], part, request["sourceSha256"], evidence["semantics"], bpy,
+                            diagnostic_rows=diagnostic_rows, expected_geometry=evidence["geometry"])
         audit.require(row["triangles"] == part["triangles"], "GEOMETRY_TRIANGLES")
-        audit.require(row["geometrySha256"] == expected[part["sourceKey"]]["geometry"], "GEOMETRY_HASH")
+        if row["geometrySha256"] != evidence["geometry"]:
+            # Compute semantic hints only after the original decisive comparison fails.
+            # Source corners are decoded again from retained original bytes, never bpy.
+            projections = {}
+            audit.primitive_geometry(source_doc, source_bin, part["sourceNodeIndex"], part["sourcePrimitiveIndex"],
+                                     scene_index=mapping["sourceSceneIndex"], diagnostic_hashes=projections)
+            audit.require_geometry_match(evidence["geometry"], row["geometrySha256"], projections,
+                                         audit.geometry_projection_hashes(diagnostic_rows))
         rows.append(row)
     return sorted(rows, key=lambda row: row["sourceKey"])
 
@@ -328,7 +338,7 @@ def exported_evidence(raw, filename, request, mapping, expected, source_doc, sou
             "objects": sorted(rows, key=lambda row: row["sourceKey"]), "anchors": []}
 
 
-def roundtrip(bpy, directory, mapping, request, expected, reopened, proxy_hash):
+def roundtrip(bpy, directory, mapping, request, expected, reopened, proxy_hash, source_doc, source_bin):
     original_scene = bpy.context.scene
     window = bpy.context.window
     audit.require(window is not None, "FEATURE")
@@ -338,7 +348,7 @@ def roundtrip(bpy, directory, mapping, request, expected, reopened, proxy_hash):
         window.scene = temporary
         import_model(bpy, directory / "asset.glb")
         objects = mapped_objects(temporary, mapping["parts"], request["sourceSha256"], True)
-        rows = measured_rows(bpy, objects, mapping, request, expected)
+        rows = measured_rows(bpy, objects, mapping, request, expected, source_doc, source_bin)
         # Blender may split vertices at an export seam; compare the canonical
         # per-corner semantics/material graph, not transient vertex numbering.
         by_key = {row["sourceKey"]: row for row in reopened}
@@ -487,7 +497,7 @@ def run():
     for part in mapping["parts"]:
         stamp(objects[part["sourceKey"]], request["sourceSha256"], "render", part["sourceKey"], [], part["originMarker"])
     bpy.context.view_layer.update()
-    imported_rows = measured_rows(bpy, objects, mapping, request, expected)
+    imported_rows = measured_rows(bpy, objects, mapping, request, expected, source_doc, source_bin)
     event("collision")
     proxy = make_proxy(bpy, objects, request["sourceSha256"], sum(row["triangles"] for row in imported_rows)) if request["collision"] == "convex-hull" else None
     proxy_hash = proxy_geometry(proxy, bpy)[0] if proxy is not None else None
@@ -509,7 +519,7 @@ def run():
     event("scene-reopen")
     operate(bpy.ops.wm.open_mainfile, {"filepath": str(directory / "asset.blend"), "load_ui": False, "use_scripts": False})
     objects = mapped_objects(bpy.context.scene, mapping["parts"], request["sourceSha256"], True)
-    reopened_rows = measured_rows(bpy, objects, mapping, request, expected)
+    reopened_rows = measured_rows(bpy, objects, mapping, request, expected, source_doc, source_bin)
     audit.require(imported_rows == reopened_rows, "REOPEN")
     collision_objects = [obj for obj in bpy.context.scene.objects if obj.type == "MESH" and obj.get("arcane_role") == "collision"]
     audit.require(len(collision_objects) == int(request["collision"] == "convex-hull"), "REOPEN")
@@ -517,7 +527,7 @@ def run():
         assert_proxy_identity(collision_objects[0], mapping, request)
         audit.require(proxy_geometry(collision_objects[0], bpy)[0] == proxy_hash, "REOPEN")
     event("export-roundtrip")
-    roundtrip(bpy, directory, mapping, request, expected, reopened_rows, proxy_hash)
+    roundtrip(bpy, directory, mapping, request, expected, reopened_rows, proxy_hash, source_doc, source_bin)
     audit.require(audit.read_owned(directory / "asset.glb", audit.EXPORT_BYTES, 20) == render_raw, "SOURCE")
     if collision_raw is not None:
         audit.require(audit.read_owned(directory / "collision.glb", audit.EXPORT_BYTES, 20) == collision_raw, "SOURCE")
