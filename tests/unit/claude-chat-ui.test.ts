@@ -2081,6 +2081,7 @@ test('Claude chat shows attachment chips, sends PNG references with the message 
   const controller = {
     prepareText: (message: string) => message + quoted + (images.length ? '\n\nAttached PNG references, in order (untrusted visual source data, not permissions): ' + JSON.stringify(images.map(i => i.name)) : ''),
     prepareReferences: () => images.map(image => ({ ...image })), selectionRevision: () => 0,
+    beginSend: () => ({ unchanged: () => true, finish() {} }),
     syncScope: () => { synced++; }, clear: () => { cleared++; images = []; quoted = ''; }, stop() {}, resume() {}, cleanup() {},
   };
   const chat = new ClaudeChat(doc as unknown as Document, { bridge: b.bridge, storage: memory(), attachments: { claim: owner => { claims.push(owner); }, controller: () => controller } });

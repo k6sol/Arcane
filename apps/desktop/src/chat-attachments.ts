@@ -116,6 +116,8 @@ export interface ChatAttachmentsController {
   /** Human selection/edit revision; scope invalidation still fences all reads.
    * Only the caller's exact owned setup transition may carry an immutable Send. */
   selectionRevision():number;
+  /** Keeps validated selected objects in composer custody until this explicit send settles. No serialized restore input. */
+  beginSend(): ChatAttachmentSend;
   /** Call on EVERY authoritative context update, including away/back transitions. */
   syncScope(): void;
   /** Also invalidates an outstanding picker/read even when the scope is unchanged. */
@@ -123,6 +125,13 @@ export interface ChatAttachmentsController {
   stop(): void;
   resume(): void;
   cleanup(): void;
+}
+
+export interface ChatAttachmentSend {
+  /** Exact original selection and scope still own the composer; only then may a rejected send restore its caption. */
+  unchanged(): boolean;
+  /** Rejection retains the selection. Accepted or ambiguous delivery consumes only this send's still-selected objects. */
+  finish(outcome: 'retain' | 'consume'): void;
 }
 
 function safeName(name: string,allowImage=false): boolean {
@@ -172,7 +181,7 @@ export function startChatAttachments(doc: Document, options: ChatAttachmentsOpti
   const available = !!(button && input && chips && status);
   let scope: string | null = null, epoch = 0, stopped = false, disposed = false, busy = false;
   let attachments: ChatTextAttachment[] = [], notice = '';
-  let images:{name:string;dataUrl:string;bytes:number;pixels:number;preview:string;resized:boolean}[]=[],revision=0;
+  let images:{name:string;dataUrl:string;bytes:number;pixels:number;preview:string;resized:boolean}[]=[],revision=0,custodyEpoch=0;
   let picker: { scope: string; epoch: number } | null = null;
   const removers: (() => void)[] = [];
 
@@ -187,7 +196,7 @@ export function startChatAttachments(doc: Document, options: ChatAttachmentsOpti
     try { owners.get(doc)?.onChange?.(); } catch { /* Presentation cannot interrupt invalidation. */ }
   };
   const reset = (): void => {
-    epoch++; attachments = [];for(const image of images)URL.revokeObjectURL(image.preview);images=[];picker = null; busy = false; notice = '';
+    epoch++;custodyEpoch++; attachments = [];for(const image of images)URL.revokeObjectURL(image.preview);images=[];picker = null; busy = false; notice = '';
     if (input) input.value = '';
   };
   const render = (): void => {
@@ -364,6 +373,31 @@ export function startChatAttachments(doc: Document, options: ChatAttachmentsOpti
   const controller: ChatAttachmentsController = {
     syncScope, clear,
     selectionRevision:()=>revision,
+    beginSend(){
+      syncScope();
+      // An empty controller with attaching disabled must not block an otherwise valid plain-text send.
+      if(stopped||disposed||busy||scope===null&&(attachments.length>0||images.length>0))throw new Error('Attachments are not ready. Your draft is retained.');
+      const own=scope,mine=custodyEpoch,selectedRevision=revision;
+      let files=attachments.slice(),references=images.slice(),finished=false;
+      const current=()=>{syncScope();return !finished&&!stopped&&!disposed&&scope===own&&custodyEpoch===mine;};
+      return Object.freeze({
+        unchanged:()=>current()&&!busy&&!picker&&revision===selectedRevision&&attachments.length===files.length&&images.length===references.length&&
+          attachments.every((file,index)=>file===files[index])&&images.every((image,index)=>image===references[index]),
+        finish(outcome:'retain'|'consume'){
+          if(finished)return;
+          const consume=outcome==='consume'&&current(),sentFiles=files,sentReferences=references;
+          finished=true;files=[];references=[];
+          if(!consume)return;
+          const removed=images.filter(image=>sentReferences.includes(image));
+          const remainingFiles=attachments.filter(file=>!sentFiles.includes(file)),remainingImages=images.filter(image=>!sentReferences.includes(image));
+          if(remainingFiles.length===attachments.length&&remainingImages.length===images.length)return;
+          attachments=remainingFiles;images=remainingImages;revision++;
+          for(const image of removed)URL.revokeObjectURL(image.preview);
+          // Do not reset the picker/epoch: a newer same-scope selection or in-flight read belongs to the next draft.
+          render();notify();
+        },
+      });
+    },
     prepareReferences(){syncScope();if(busy)throw new Error('Wait for attachments to finish reading.');
       if(images.length&&imageInputAvailable()===false)throw new Error('The selected model does not advertise image input. Remove references or choose a supported model.');
       return Object.freeze(images.map(({name,dataUrl})=>Object.freeze({name,dataUrl})));},

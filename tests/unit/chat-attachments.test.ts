@@ -319,3 +319,53 @@ test('image intake refuses oversized files and colliding names before reading, a
   assert.equal(svg.reads(), 1); assert.match(f.status.textContent, /PNG, JPEG or WebP/); assert.equal(f.chips.hidden, true);
   assert.deepEqual(f.controller.prepareReferences(), []); f.controller.cleanup();
 });
+
+test('send custody retains exact validated text on rejection and consumes only original objects once', async () => {
+  const f=fixture();f.choose([file('original.txt','Exact original source\n')]);await tick();
+  const original=f.controller.prepareText('caption'),receipt=f.controller.beginSend();
+  assert.equal(receipt.unchanged(),true);
+  receipt.finish('retain');
+  assert.equal(f.controller.prepareText('caption'),original,'a rejection did not clear or recreate validated content');
+  assert.equal(receipt.unchanged(),false,'a released receipt cannot acquire later content');
+  receipt.finish('consume');assert.equal(f.controller.prepareText('caption'),original,'finish is idempotent');
+  const sent=f.controller.beginSend();
+  f.choose([file('next.txt','Newer draft source')]);await tick();
+  assert.equal(sent.unchanged(),false,'a newer selection must block restoring an old caption');
+  sent.finish('consume');
+  assert.deepEqual(payload(f.controller.prepareText('new caption')).files,[{name:'next.txt',content:'Newer draft source'}]);
+  const revision=f.controller.selectionRevision();sent.finish('consume');
+  assert.equal(f.controller.selectionRevision(),revision,'a duplicate completion does not remove/revoke anything else');
+  f.controller.cleanup();
+});
+
+for(const transition of ['clear','scope','scope-back','stop','cleanup'] as const)test('send custody cannot mutate a new selection after '+transition,async()=>{
+  const f=fixture();f.choose([file('same.txt','Original')]);await tick();
+  const receipt=f.controller.beginSend();
+  if(transition==='clear')f.controller.clear();
+  else if(transition==='scope'||transition==='scope-back'){
+    f.setScope('project-b/tab-b');f.controller.syncScope();
+    if(transition==='scope-back'){f.setScope('project-a/tab-a/thread-a/session-a');f.controller.syncScope();}
+  }else if(transition==='stop'){f.controller.stop();f.controller.resume();}
+  else {f.controller.cleanup();assert.equal(receipt.unchanged(),false);receipt.finish('consume');return;}
+  f.choose([file('same.txt','New validated selection')]);await tick();
+  const current=f.controller.prepareText('new');
+  assert.equal(receipt.unchanged(),false);
+  receipt.finish('consume');receipt.finish('retain');
+  assert.equal(f.controller.prepareText('new'),current,'an old receipt cannot re-add, delete or adopt the new selection');
+  f.controller.cleanup();
+});
+
+test('send completion does not cancel a newer same-scope asynchronous file read',async()=>{
+  const f=fixture();f.choose([file('sent.txt','sent')]);await tick();
+  const receipt=f.controller.beginSend(),next=deferred('next.txt');f.choose([next.value]);
+  assert.equal(receipt.unchanged(),false,'an in-flight read blocks old-caption restoration');
+  receipt.finish('consume');next.finish();await tick();
+  assert.deepEqual(payload(f.controller.prepareText('new caption')).files,[{name:'next.txt',content:'SECRET'}]);
+  f.controller.cleanup();
+});
+
+test('an empty attachment controller does not reject a plain-text send when attaching is unavailable',()=>{
+  const f=fixture(null),receipt=f.controller.beginSend();
+  assert.equal(f.controller.prepareText('plain caption'),'plain caption');assert.equal(receipt.unchanged(),true);
+  receipt.finish('consume');assert.equal(f.controller.prepareText('plain caption'),'plain caption');f.controller.cleanup();
+});

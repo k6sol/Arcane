@@ -4,15 +4,33 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { CodexChat, CodexChatApi, type ChatAction, type ChatState,type ChatQueueRow } from '../../apps/desktop/src/codex-chat.js';
+import { startChatAttachments, claimChatAttachments } from '../../apps/desktop/src/chat-attachments.js';
+import { referenceInput, referencePng } from '../../packages/codex-client/testing/reference-fixture.js';
+import { referenceImageMetadata } from '../../packages/codex-client/src/reference-images.js';
 
 class Element extends EventTarget {
   tagName=''; value=''; checked=false; disabled=false; hidden=false; open=false; type=''; className='';
   dataset:Record<string,string>={}; children:Element[]=[]; scrollHeight=0;scrollTop=0;clientHeight=0;
+  files:File[]=[];multiple=false;accept='';src='';width=0;height=0;naturalWidth=128;naturalHeight=128;style:Record<string,string>={};
+  private trustedListeners=new Map<string,Set<EventListenerOrEventListenerObject>>();
   private content='';private attributes=new Map<string,string>();
   get textContent():string{return this.content+this.children.map(child=>child.textContent).join('');}
   set textContent(value:string){this.content=value;this.children=[];}
   setAttribute(name:string,value:string){this.attributes.set(name,value);}
   getAttribute(name:string){return this.attributes.get(name)??null;}
+  removeAttribute(name:string){this.attributes.delete(name);}
+  override addEventListener(type:string,callback:EventListenerOrEventListenerObject|null,options?:AddEventListenerOptions|boolean):void{
+    super.addEventListener(type,callback,options);if(!callback)return;
+    const set=this.trustedListeners.get(type)??new Set<EventListenerOrEventListenerObject>();set.add(callback);this.trustedListeners.set(type,set);
+  }
+  override removeEventListener(type:string,callback:EventListenerOrEventListenerObject|null,options?:EventListenerOptions|boolean):void{
+    super.removeEventListener(type,callback,options);if(callback)this.trustedListeners.get(type)?.delete(callback);
+  }
+  emitTrusted(type:string):void{
+    const event={type,isTrusted:true,preventDefault(){},stopImmediatePropagation(){}} as unknown as Event;
+    for(const listener of this.trustedListeners.get(type)??[])if(typeof listener==='function')listener(event);else listener.handleEvent(event);
+  }
+  click(){} async decode(){}
   append(...children:Element[]){this.children.push(...children);}
   replaceChildren(...children:Element[]){this.content='';this.children=children;}
   querySelectorAll(){return [];}
@@ -53,7 +71,8 @@ async function fixture(t:test.TestContext,mode:'acknowledged'|'rejected'|'unknow
     const stamp=new Date().toISOString();
     const record={requestId:input.requestId,connectionId:input.connectionId,action:input.action,state:mode,
       errorCode:mode==='acknowledged'?null:'TIMEOUT',threadId:state.snapshot!.thread?.threadId??null,
-      turnId:state.snapshot!.thread?.turnId??null,model:'latency-fixture',effort:'low',createdAt:stamp,finishedAt:stamp};
+      turnId:state.snapshot!.thread?.turnId??null,model:'latency-fixture',effort:'low',createdAt:stamp,finishedAt:stamp,
+      ...(input.action==='turn-start'&&input.references?{references:referenceImageMetadata(input.references)}:{})};
     state.actions.push(record as ChatState['actions'][number]);
     return Response.json({record,replayed:false,state},{status:mode==='rejected'?409:mode==='unknown'?202:200});
   }));
@@ -199,7 +218,7 @@ for(const change of ['edit','edit-back','model','provider','files','finished'] a
   const f=await fixture(t);let release!:()=>void;const gate=new Promise<void>(done=>release=done);t.after(()=>release());let revision=0,cleared=0;
   await f.chat.setQueuePersistence({...queueStore(),save:async()=>{await gate;return{saved:true as const};}});
   const input=f.doc.getElementById('codex-composer');input.value='First';await f.controller.submitMessage();
-  if(change==='files')f.chat.enableTextAttachments({prepareText:(message:string)=>message,prepareReferences:()=>[],selectionRevision:()=>revision,syncScope(){},clear(){cleared++;},stop(){},resume(){},cleanup(){}});
+  if(change==='files')f.chat.enableTextAttachments({prepareText:(message:string)=>message,prepareReferences:()=>[],selectionRevision:()=>revision,beginSend:()=>({unchanged:()=>true,finish(){}}),syncScope(){},clear(){cleared++;},stop(){},resume(){},cleanup(){}});
   input.value='Queued original';enter(input);await settle();
   if(change==='edit')input.value='Edited while saving';
   if(change==='edit-back'){input.value='Temporary edit';input.dispatchEvent(new Event('input'));input.value='Queued original';input.dispatchEvent(new Event('input'));}
@@ -210,4 +229,124 @@ for(const change of ['edit','edit-back','model','provider','files','finished'] a
   release();await settle();await settle();
   assert.equal(input.value,change==='edit'?'Edited while saving':change==='provider'?'Other provider draft':'Queued original');
   assert.equal(queueController(f).queue[0]!.state,'paused');assert.equal(f.posts.length,2);assert.equal(cleared,0);
+});
+
+/** Real attachment/controller + CodexChat path; only DOM image decoding is a synthetic 128x128 witness. */
+async function referenceFixture(t:test.TestContext,mode:'acknowledged'|'unknown'|'transport'='acknowledged'){
+  const f=await fixture(t,mode);
+  f.state.snapshot!.thread={threadId:'latency-thread',sessionId:null,configured:true,writeGranted:false,
+    selection:{model:'latency-fixture',effort:'low'},turnId:null,turnStatus:'idle'};
+  await f.chat.refresh();
+  const controller=startChatAttachments(f.doc.asDocument(),{getScope:()=>f.chat.textAttachmentScope(),imageInputAvailable:()=>true,
+    onChange:()=>f.chat.attachmentPresentationChanged()});
+  f.chat.enableTextAttachments(controller);t.after(()=>controller.cleanup());
+  const choose=async(name:string)=>{
+    f.doc.getElementById('workspace-add-context').emitTrusted('click');
+    const picker=f.doc.getElementById('codex-attachment-input');
+    picker.files=[new File([Uint8Array.from(referencePng()).buffer],name,{type:'image/png'})];picker.emitTrusted('change');
+    for(let i=0;i<20;i++){
+      await settle();try{if(controller.prepareReferences().some(image=>image.name===name))return;}catch{/* The actual controller still owns its read. */}
+    }
+    assert.fail('The synthetic reference did not finish the real attachment controller intake.');
+  };
+  await choose('original.png');
+  return {...f,attachments:controller,choose};
+}
+function holdReferenceDigest(t:test.TestContext,reject=false){
+  let entered!:()=>void,release!:()=>void;
+  const started=new Promise<void>(done=>entered=done),gate=new Promise<void>(done=>release=done),digest=crypto.subtle.digest.bind(crypto.subtle);
+  t.mock.method(crypto.subtle,'digest',async(...args:Parameters<typeof digest>)=>{entered();await gate;if(reject)throw new Error('Synthetic digest refusal');return digest(...args);});
+  t.after(()=>release());return{started,release};
+}
+
+test('local PNG verification rejection retains exact caption and original reference, then one explicit retry sends once',{timeout:10_000},async t=>{
+  const f=await referenceFixture(t),caption='Exact reference caption\nwith trailing spaces.  ',original=f.attachments.prepareReferences();
+  const input=f.doc.getElementById('codex-composer');input.value=caption;
+  const prepared=f.attachments.prepareText(caption),digest=crypto.subtle.digest.bind(crypto.subtle);let first=true;
+  t.mock.method(crypto.subtle,'digest',async(...args:Parameters<typeof digest>)=>{if(first){first=false;throw new Error('Synthetic digest refusal');}return digest(...args);});
+  await f.controller.submitMessage();
+  assert.equal(f.posts.length,0,'verification refused before any POST');
+  assert.equal(input.value,caption);assert.deepEqual(f.attachments.prepareReferences(),original);
+  assert.ok(f.doc.getElementById('codex-attachments').textContent.includes('original.png'),'the original reference chip stays available');
+  await settle();assert.equal(f.posts.length,0,'recovery never resends automatically');
+  await f.controller.submitMessage();
+  assert.equal(f.posts.length,1);const posted=f.posts[0]!;assert.equal(posted.action,'turn-start');
+  if(posted.action!=='turn-start')assert.fail('Expected explicit turn start');
+  assert.equal(posted.text,prepared);assert.deepEqual(posted.references,original);
+  assert.deepEqual(f.attachments.prepareReferences(),[],'accepted delivery consumes the original selection');
+});
+
+test('cancelling held PNG verification before POST preserves caption and validated references',{timeout:10_000},async t=>{
+  const f=await referenceFixture(t),held=holdReferenceDigest(t),caption='Cancel preparation, keep my files',original=f.attachments.prepareReferences();
+  f.doc.getElementById('codex-composer').value=caption;
+  const sending=f.controller.submitMessage();await held.started;
+  const image=(f.chat as unknown as {imageRequest:AbortController|null}).imageRequest;assert.ok(image);image.abort();held.release();await sending;
+  assert.equal(f.posts.length,0);assert.equal(f.doc.getElementById('codex-composer').value,caption);
+  assert.deepEqual(f.attachments.prepareReferences(),original);assert.ok(f.doc.getElementById('codex-attachments').textContent.includes('original.png'));
+});
+
+for(const newerCaption of ['', 'Newer caption, keep it'])test('failed PNG send does not associate its old caption with newer references: '+(newerCaption?'nonempty':'empty'),{timeout:10_000},async t=>{
+  const f=await referenceFixture(t),held=holdReferenceDigest(t,true),input=f.doc.getElementById('codex-composer');
+  input.value='Old caption';const sending=f.controller.submitMessage();await held.started;
+  f.attachments.clear();await f.choose('newer.png');input.value=newerCaption;
+  const newer=f.attachments.prepareReferences();held.release();await sending;
+  assert.equal(f.posts.length,0);assert.equal(input.value,newerCaption,'even an empty new draft must not inherit the old caption');
+  assert.deepEqual(f.attachments.prepareReferences(),newer);assert.deepEqual(newer.map(image=>image.name),['newer.png']);
+});
+
+for(const change of ['project','chat','provider','provider-back'] as const)test('late local PNG refusal cannot recover into a changed '+change+' scope',{timeout:10_000},async t=>{
+  const f=await referenceFixture(t),held=holdReferenceDigest(t,true),input=f.doc.getElementById('codex-composer');
+  input.value='Original scoped caption';const sending=f.controller.submitMessage();await held.started;
+  if(change==='project'){f.state.projectPath=resolve('synthetic-other-project');await f.chat.refresh();}
+  else if(change==='chat'){f.state.snapshot!.thread!.threadId='other-thread';await f.chat.refresh();}
+  else {
+    f.chat.yieldSurface(true);
+    claimChatAttachments(f.doc.asDocument(),{getScope:()=> 'synthetic-claude-tab',imageInputAvailable:()=>true});
+    if(change==='provider-back'){claimChatAttachments(f.doc.asDocument(),null);f.chat.yieldSurface(false);}
+  }
+  f.attachments.syncScope();await f.choose('same-name-new-scope.png');input.value='';
+  const newer=f.attachments.prepareReferences();held.release();await sending;
+  assert.equal(f.posts.length,0);assert.equal(input.value,'');assert.deepEqual(f.attachments.prepareReferences(),newer);
+  assert.deepEqual(newer.map(image=>image.name),['same-name-new-scope.png']);
+  claimChatAttachments(f.doc.asDocument(),null);
+});
+
+test('accepted reference send consumes only its original objects and retains newer same-scope files and caption',{timeout:10_000},async t=>{
+  const f=await referenceFixture(t),input=f.doc.getElementById('codex-composer'),revoked:string[]=[],revoke=URL.revokeObjectURL.bind(URL);
+  t.mock.method(URL,'revokeObjectURL',(url:string)=>{revoked.push(url);revoke(url);});
+  const previews=():string[]=>{
+    const walk=(node:Element):Element[]=>[node,...node.children.flatMap(walk)];
+    return walk(f.doc.getElementById('codex-attachments')).map(node=>node.src).filter(src=>src.startsWith('blob:'));
+  };
+  const originalPreview=previews()[0];assert.ok(originalPreview);input.value='Sent caption';f.holdAction();
+  const sending=f.controller.submitMessage();for(let i=0;i<20&&!f.posts.length;i++)await settle();
+  assert.equal(f.posts.length,1);await f.choose('next.png');input.value='Next caption';
+  const nextPreview=previews().find(value=>value!==originalPreview);assert.ok(nextPreview);
+  f.releaseAction();await sending;
+  assert.equal(input.value,'Next caption');assert.deepEqual(f.attachments.prepareReferences(),[referenceInput(referencePng(),'next.png')]);
+  assert.equal(revoked.filter(value=>value===originalPreview).length,1,'the sent preview is released exactly once');
+  assert.equal(revoked.includes(nextPreview),false,'the next draft still owns its preview');
+  f.attachments.cleanup();assert.equal(revoked.filter(value=>value===nextPreview).length,1,'final cleanup releases the remaining preview once');
+});
+
+for(const mode of ['unknown','transport'] as const)test('ambiguous reference delivery consumes its original selection and never replays: '+mode,{timeout:10_000},async t=>{
+  const f=await referenceFixture(t,mode);f.doc.getElementById('codex-composer').value='Unconfirmed caption';
+  await f.controller.submitMessage();assert.equal(f.posts.length,1);
+  assert.equal(f.doc.getElementById('codex-composer').value,'');assert.deepEqual(f.attachments.prepareReferences(),[]);
+  await settle();await f.controller.submitMessage();assert.equal(f.posts.length,1,'unconfirmed delivery remains fenced without automatic or blind retry');
+});
+
+for(const mode of ['bound','draft','attaching-disabled'] as const)test('plain text keeps its existing send path with the real attachment controller: '+mode,async t=>{
+  const f=await fixture(t);
+  if(mode!=='draft'){
+    f.state.snapshot!.thread={threadId:'latency-thread',sessionId:null,configured:true,writeGranted:false,
+      selection:{model:'latency-fixture',effort:'low'},turnId:null,turnStatus:'idle'};
+    await f.chat.refresh();
+  }
+  const attachments=startChatAttachments(f.doc.asDocument(),{getScope:()=>mode==='attaching-disabled'?null:f.chat.textAttachmentScope()});
+  f.chat.enableTextAttachments(attachments);t.after(()=>attachments.cleanup());
+  const caption='Plain text with its exact whitespace.  ';f.doc.getElementById('codex-composer').value=caption;
+  await f.controller.submitMessage();
+  assert.deepEqual(f.posts.map(post=>post.action),mode==='draft'?['thread-start','turn-start']:['turn-start']);
+  const posted=f.posts.at(-1);assert.ok(posted&&posted.action==='turn-start');assert.equal(posted.text,caption);assert.equal(posted.references,undefined);
 });

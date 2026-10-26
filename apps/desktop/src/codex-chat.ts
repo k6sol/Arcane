@@ -4,7 +4,7 @@ import type { RequestedModel } from '../../../packages/core/src/workflow-recipes
 import type { NativeWorkflowConversation, WorkflowDraftProvenance } from './workflow-panel.js';
 import type { Approval, McpToolCallArgs, Model, SessionEvent, Snapshot } from '../../../packages/codex-client/src/types.js';
 import type { ChatTabs, ChatTabsOptions, ChatTabView, ChatSelection, ChatTabsController } from './chat-tabs.js';
-import type { ChatAttachmentsController } from './chat-attachments.js';
+import type { ChatAttachmentsController, ChatAttachmentSend } from './chat-attachments.js';
 import type { ChatFeedbackHooks, ChatFeedbackTool } from './learned-preferences.js';
 import type { SubmittedChatMessage, SubmittedChatTranscript } from '../../../packages/storage/src/submitted-chat-store.js';
 import type {ChatQueueBridge,ChatQueueProvider,ChatQueueSnapshot,StoredChatQueueRow} from '../../../packages/protocol/src/chat-queue.js';
@@ -4086,12 +4086,17 @@ export class CodexChat {
     if(action==='disconnect')this.fresh=false;
     const epoch=this.generation, assetScope=this.assetScope();
     const imageRequest=input.action==='turn-start'&&input.references?new AbortController():null;
+    let attachmentSend:ChatAttachmentSend|null=null,attachmentOutcome:'retain'|'consume'='consume';
+    if(input.action==='turn-start'&&!queued&&this.attachments){
+      try{attachmentSend=this.attachments.beginSend();}
+      catch(error){this.text('codex-notice',error instanceof Error?error.message:'Attachments are not ready. Your draft is retained.');return;}
+    }
     if(imageRequest)this.imageRequest=imageRequest;
     this.pending.set(input.requestId,input);this.text('codex-notice','Waiting for confirmation…');
     // Only a definitive rejection may hand the cleared text back; pending/unknown sends never do (no duplicate sends).
     const sentDraft=input.action==='turn-start'&&!queued?{text:this.value('codex-composer'),origins:structuredClone(this.workflowDraftOrigins),reviewed:this.reviewedDraftTarget,restored:this.restoredWorkflowDraft,tab:this.tabs?.active()?.key??null}:null;
     const restoreRejectedDraft=()=>{
-      if(!sentDraft||!sentDraft.text||this.stopped||this.value('codex-composer')!==''||(this.tabs?.active()?.key??null)!==sentDraft.tab)return;
+      if(!sentDraft||!sentDraft.text||this.stopped||this.value('codex-composer')!==''||(this.tabs?.active()?.key??null)!==sentDraft.tab||attachmentSend&&!attachmentSend.unchanged())return;
       this.setComposer(sentDraft.text);
       this.workflowDraftOrigins=sentDraft.origins;this.reviewedDraftTarget=sentDraft.reviewed;this.restoredWorkflowDraft=sentDraft.restored;this.stashTabDraft();
       this.appendNotice(' Your message text was restored to the composer.');
@@ -4099,7 +4104,7 @@ export class CodexChat {
     if(input.action==='turn-start'){
       try { this.feedbackHooks?.userMessage({key:this.feedbackKey(input.threadId),text:input.displayText??input.text,box:this.el('codex-messages'),anchor:null}); } catch { /* Learning is optional. */ }
       this.transcript.messages.push({key:input.requestId,role:'human',threadId:input.threadId,scope:input.threadId,text:input.displayText??input.text,acknowledgement:'Awaiting native acknowledgement'});
-      if(!queued){this.setComposer('');this.attachments?.clear();this.clearDraftOrigins();this.stashTabDraft();}
+      if(!queued){this.setComposer('');this.clearDraftOrigins();this.stashTabDraft();}
     }
     if(input.action==='turn-steer')this.transcript.messages.push({key:input.requestId,role:'human',threadId:input.threadId,scope:input.threadId,text:input.text,steered:true,acknowledgement:'Awaiting native acknowledgement'});
     this.render();this.publishState();
@@ -4119,7 +4124,7 @@ export class CodexChat {
         else if(outcome.record.state==='rejected')this.requestNotice(codexRequestNotice(input.action,outcome.record.state,input.requestId,outcome.record.errorCode??null));
         else this.text('codex-notice','');} // Unconfirmed: the recovery card says it once.
       if(['pending','unknown'].includes(outcome.record.state))this.uncertain.set(input.requestId,{input,read:false});
-      else if(outcome.record.state==='rejected')restoreRejectedDraft();
+      else if(outcome.record.state==='rejected'){attachmentOutcome='retain';restoreRejectedDraft();}
       const message=this.transcript.messages.find(m=>m.key===input.requestId);if(message)message.acknowledgement='Native acknowledgement: '+outcome.record.state;
       return fenced?undefined:outcome.record;
     } catch(error) {
@@ -4128,8 +4133,9 @@ export class CodexChat {
         if(error instanceof CodexHttpError&&!error.unknown)this.requestNotice(codexRequestNotice(input.action,'rejected',input.requestId,null,error.message));
         else this.text('codex-notice',''); // Unconfirmed: the recovery card says it once, with the recorded details.
       }
-      if(error instanceof CodexHttpError&&!error.unknown)restoreRejectedDraft();
+      if(error instanceof CodexHttpError&&!error.unknown){attachmentOutcome='retain';restoreRejectedDraft();}
     } finally {
+      attachmentSend?.finish(attachmentOutcome);
         if(this.imageRequest===imageRequest)this.imageRequest=null;
       this.pending.delete(input.requestId);
       if(!this.stopped){
