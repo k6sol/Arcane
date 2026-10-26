@@ -6,7 +6,7 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { isDeepStrictEqual } from 'node:util';
 import { discoverExecutables } from './discovery.js';
-import { runtimeProbeFailure } from './probe-diagnostics.js';
+import { runtimeProbeFailure, runtimeProbeDiagnostic, missingRuntimeCapability, runtimeProbeException } from './probe-diagnostics.js';
 import { artifactPath, noLinks, prepareOutputRoot, regularFile, readRegularFile, within } from './paths.js';
 import { runBounded, workerEnvironment, type CommandOptions, type CommandResult, type CommandSpec } from './process.js';
 import { workerLaunchDirectory, workerFileArgument, workerDirectoryArgument } from './launch-paths.js';
@@ -171,6 +171,7 @@ export class AssetPipeline {
       if (!supervision || supervision.hasRoom(1)) return false;
       evidence.attempts.push({ executable, code: 'SUPERVISION_BOUND' }); return true;
     };
+    if (installed.blender.length === 0) onBlenderFailure?.(runtimeProbeDiagnostic('RUNTIME_NOT_FOUND'));
     for (const executable of installed.blender) {
       if (bounded(executable)) break;
       try {
@@ -179,11 +180,12 @@ export class AssetPipeline {
         if (process.exitCode !== 0 || process.signal) throw runtimeProbeFailure(process);
         const result = resultLine(process.stdout), capabilities = record(result.capabilities, 'Blender capabilities');
         if (typeof result.version !== 'string' || !/^\d+\.\d+/.test(result.version) || typeof result.pythonVersion !== 'string' || result.background !== true) throw new AssetError('BLENDER_PROBE', 'Invalid native runtime evidence.');
-        if (['glbExport', 'glbImport', 'fbxExport', 'fbxImport', 'cycles'].some(key => capabilities[key] !== true)) throw new AssetError('BLENDER_CAPABILITY', 'Installed Blender is missing required template capabilities.');
+        const missing = missingRuntimeCapability(capabilities);
+        if (missing) throw new AssetError('BLENDER_CAPABILITY', missing.reason, missing);
         evidence.blender = { ...result, executable } as unknown as RuntimeEvidence; evidence.available = true; break;
       } catch (error) {
         if (error instanceof AssetError && SUPERVISION_FATAL.has(error.code)) throw error;
-        if (error instanceof AssetError && error.diagnostic) onBlenderFailure?.(error.diagnostic);
+        onBlenderFailure?.(runtimeProbeException(error));
         evidence.attempts.push({ executable, code: error instanceof AssetError ? error.code : 'BLENDER_PROBE' });
       }
     }
@@ -394,7 +396,7 @@ export class AssetPipeline {
       let probeDiagnostic: AssetFailureDiagnostic | undefined;
       const evidence = await this.probeIn(operation, environmentDirectory, end, signal, supervision, artifactPath(directory, 'probe.py'),
         diagnostic => { probeDiagnostic ??= diagnostic; });
-      if (!evidence.blender || !evidence.available) throw new AssetError('BLENDER_UNAVAILABLE', 'No installed Blender passed the required runtime probe.', probeDiagnostic);
+      if (!evidence.blender || !evidence.available) throw new AssetError('BLENDER_UNAVAILABLE', probeDiagnostic?.reason ?? 'No installed Blender passed the required runtime probe.', probeDiagnostic);
       progress('source-import');
       const process = await this.supervisedRun(operation, supervision, 'generate', { executable: evidence.blender.executable,
         args: ['--background', '--factory-startup', '--disable-autoexec', '--threads', '2', '--python-exit-code', '1', '--python',

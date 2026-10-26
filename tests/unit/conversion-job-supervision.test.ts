@@ -38,7 +38,7 @@ const output = (): CommandResult => ({ exitCode: 1, signal: null, stderr: secret
 const probe: CommandResult = { exitCode: 0, signal: null, stderr: '', stdout: 'ARCANE_RESULT ' + JSON.stringify({
   version: '5.2.3', pythonVersion: '3.11.0', background: true,
   capabilities: { glbExport: true, glbImport: true, fbxExport: true, fbxImport: true, cycles: true } }) + '\n' };
-async function fixture(t: test.TestContext, convert: (spec: CommandSpec, options: CommandOptions) => Promise<CommandResult> = async () => output(), close = true, probeResult: CommandResult = probe) {
+async function fixture(t: test.TestContext, convert: (spec: CommandSpec, options: CommandOptions) => Promise<CommandResult> = async () => output(), close = true, probeResult: CommandResult = probe, blenderCandidates: string[] = [process.execPath]) {
   const base = await realpath(tmpdir()), root = await mkdtemp(join(base, 'arcane-conversion-supervision-'));
   const workers = join(root, 'workers'), outputRoot = join(root, 'assets'); await mkdir(workers);
   for (const name of ['probe.py', 'convert_glb.py', 'conversion_audit.py']) await writeFile(join(workers, name), '# synthetic fixed worker: never executed\n');
@@ -51,7 +51,7 @@ async function fixture(t: test.TestContext, convert: (spec: CommandSpec, options
     await rm(actual, { recursive: true, force: true });
   });
   const pipeline = new AssetPipeline({ workspaceRoot: root, outputRoot, workerRoot: workers }, {
-    discover: async () => ({ blender: [process.execPath], python: [] }),
+    discover: async () => ({ blender: blenderCandidates, python: [] }),
     queryHost: { platform: 'linux', systemRoot: undefined, execFile: () => { throw Error('Synthetic fixture cannot query native processes.'); } },
     run: async (spec, options = {}) => {
       calls.push(spec); await options.supervise?.spawned({ pid: 12345, exited: () => true });
@@ -173,10 +173,32 @@ test('conversion retains the actual failed runtime probe reason without starting
   assert.equal(f.calls.length, 1); assert.equal(result.state, 'failed'); assert.equal(result.error?.code, 'BLENDER_UNAVAILABLE');
   assert.equal(result.error?.diagnostic?.stage, 'probe'); assert.equal(result.error?.diagnostic?.reasonCode, 'RUNTIME_LIB_XXF86VM');
   assert.match(result.error!.diagnostic!.reason, /libXxf86vm\.so\.1/);
+  assert.match(result.error!.message, /libXxf86vm\.so\.1/);
   assert.equal(result.manifestPath, null);
   const journal = JSON.parse(await readFile(join(job.directory, 'job.json'), 'utf8'));
   assert.equal(journal.workers.length, 1); assert.equal(journal.workers[0].role, 'probe'); assert.equal(journal.workers[0].state, 'closed');
   const failure = await readFile(join(job.directory, 'failure.json'), 'utf8');
   for (const value of [JSON.stringify(result), JSON.stringify(journal), failure]) assert.ok(!value.includes(privatePath));
+  assert.deepEqual((await f.pipeline.recover(job.directory)).result.error, result.error);
+});
+
+test('conversion reports the actual missing capability and retains a closed failed probe', async t => {
+  const body = JSON.parse(probe.stdout.slice('ARCANE_RESULT '.length)); body.capabilities.glbImport = false;
+  const f = await fixture(t, async () => { throw Error('Generation must not start.'); }, true,
+    { ...probe, stdout: 'ARCANE_RESULT ' + JSON.stringify(body) + '\n' });
+  const job = f.pipeline.startConversion(input()), result = await job.completion;
+  assert.equal(result.error?.code, 'BLENDER_UNAVAILABLE'); assert.equal(result.error?.diagnostic?.reasonCode, 'RUNTIME_CAPABILITY_GLB_IMPORT');
+  assert.match(result.error!.message, /GLB import operator/); assert.equal(f.calls.length, 1); assert.equal(result.manifestPath, null);
+  const journal = JSON.parse(await readFile(join(job.directory, 'job.json'), 'utf8'));
+  assert.equal(journal.workers.length, 1); assert.equal(journal.workers[0].state, 'closed');
+  assert.deepEqual((await f.pipeline.recover(job.directory)).result.error, result.error);
+});
+
+test('conversion reports empty runtime discovery without starting a child or claiming loader failure', async t => {
+  const f = await fixture(t, async () => { throw Error('Generation must not start.'); }, true, probe, []);
+  const job = f.pipeline.startConversion(input()), result = await job.completion;
+  assert.equal(result.error?.code, 'BLENDER_UNAVAILABLE'); assert.equal(result.error?.diagnostic?.reasonCode, 'RUNTIME_NOT_FOUND');
+  assert.match(result.error!.message, /No eligible installed Blender/); assert.equal(f.calls.length, 0); assert.equal(result.manifestPath, null);
+  const journal = JSON.parse(await readFile(join(job.directory, 'job.json'), 'utf8')); assert.deepEqual(journal.workers, []);
   assert.deepEqual((await f.pipeline.recover(job.directory)).result.error, result.error);
 });
