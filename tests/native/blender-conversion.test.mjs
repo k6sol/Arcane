@@ -41,7 +41,10 @@ async function runtimeAcquisitionEvidence(executable) {
     win32: ['blender-5.2.3-windows-x64.zip', 405839452, '723f08a4401502561eb763cdeacf8745b31e5f3f154d287d3830d97cf75dc2fb'],
   };
   const pin = pins[process.platform]; assert.ok(pin);
-  assert.deepEqual(receipt.archive, { url: 'https://download.blender.org/release/Blender5.2/' + pin[0], bytes: pin[1], sha256: pin[2] });
+  assert.deepEqual(Object.keys(receipt.archive).sort(), ['bytes', 'sha256', 'url']);
+  assert.equal(receipt.archive.url, 'https://download.blender.org/release/Blender5.2/' + pin[0]);
+  assert.equal(receipt.archive.bytes, pin[1]);
+  assert.equal(receipt.archive.sha256, pin[2]);
   assert.deepEqual(Object.keys(receipt.extracted).sort(), ['bytes', 'files']);
   assert.ok(Number.isSafeInteger(receipt.extracted.files) && receipt.extracted.files >= 1 && receipt.extracted.files <= 100000);
   assert.ok(Number.isSafeInteger(receipt.extracted.bytes) && receipt.extracted.bytes >= 1 && receipt.extracted.bytes <= 4 * 1024 * 1024 * 1024);
