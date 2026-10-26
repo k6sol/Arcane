@@ -101,7 +101,7 @@ test('collision reservation and source-map uniqueness are checked before any wor
   const f=fixture(),map=structuredClone(f.map);
   map.parts[1]!.originMarker=map.parts[0]!.originMarker;assert.throws(()=>parseConvertedGlbSourceMap(map,f.request),schemaError);
   const request={...f.request,collision:'convex-hull'} as ConvertedGlbRequest;
-  const many=Array.from({length:128},(_,i)=>({...f.map.parts[0]!,sourceNodeIndex:i,sourceKey:`node${i}_primitive0`,importNodeIndex:i,originMarker:`${f.request.sourceSha256}:${i}:0`}));
+  const many=Array.from({length:128},(_,i)=>({...f.map.parts[0]!,sourceNodeIndex:i,sourceKey:`node${i}_primitive0`,importNodeIndex:i,originMarker:`glb_${f.request.sourceSha256}:${i}:0`}));
   assert.throws(()=>parseConvertedGlbSourceMap({...f.map,parts:many},request),schemaError);
   assert.equal(parseConvertedGlbSourceMap({...f.map,parts:many},f.request).parts.length,128);
 });
