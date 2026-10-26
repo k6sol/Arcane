@@ -1,5 +1,6 @@
 import { AssetError, type AssetFailureDiagnostic, type AssetJobError } from './types.js';
 import type { CommandResult } from './process.js';
+import { RUNTIME_PROBE_REASONS } from './probe-diagnostics.js';
 
 const STAGES = new Set(['prepare-output', 'probe', 'generate', 'request-validation', 'blockout', 'identity', 'checkpoint-save',
   'mesh-validation', 'texture-authoring', 'review-render', 'scene-save', 'export', 'export-identity', 'export-roundtrip', 'scene-reopen', 'audit-write', 'host-validation']);
@@ -10,6 +11,7 @@ const CONVERSION_REASONS = new Set(['INPUT', 'SOURCE', 'MAP', 'FEATURE', 'GEOMET
 const TYPES = new Set(['ValueError', 'RuntimeError', 'TypeError', 'AttributeError', 'KeyError', 'IndexError', 'FileNotFoundError',
   'PermissionError', 'OSError', 'MemoryError', 'ImportError', 'ModuleNotFoundError', 'ZeroDivisionError', 'NotImplementedError', 'Exception']);
 const REASONS: Record<string, string> = {
+  ...RUNTIME_PROBE_REASONS,
   CONVERSION_INPUT: 'Conversion input bytes or request fields failed validation.',
   CONVERSION_SOURCE: 'The original source or marked import copy failed its integrity or fidelity check.',
   CONVERSION_MAP: 'Imported objects could not be matched to the source primitive map.',
@@ -79,6 +81,11 @@ function wireDiagnostic(value: unknown): AssetFailureDiagnostic {
       (!CONVERSION_REASONS.has(v.reasonCode.slice(11)) || !CONVERSION_STAGES.has(v.stage) || v.exceptionType !== null ||
        Object.keys(v).sort().join(',') !== 'exceptionType,reasonCode,schemaVersion,stage')) {
     throw new AssetError('RECOVERY', 'Invalid conversion failure diagnostic.');
+  }
+  if (v.reasonCode.startsWith('RUNTIME_') &&
+      (v.stage !== 'probe' || v.exceptionType !== null ||
+       Object.keys(v).sort().join(',') !== 'exceptionType,reasonCode,schemaVersion,stage')) {
+    throw new AssetError('RECOVERY', 'Invalid runtime probe diagnostic.');
   }
   let metrics: Record<string, number> | undefined;
   if (v.metrics !== undefined) {

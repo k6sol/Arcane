@@ -6,6 +6,7 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { isDeepStrictEqual } from 'node:util';
 import { discoverExecutables } from './discovery.js';
+import { runtimeProbeFailure } from './probe-diagnostics.js';
 import { artifactPath, noLinks, prepareOutputRoot, regularFile, readRegularFile, within } from './paths.js';
 import { runBounded, workerEnvironment, type CommandOptions, type CommandResult, type CommandSpec } from './process.js';
 import { workerLaunchDirectory, workerFileArgument, workerDirectoryArgument } from './launch-paths.js';
@@ -16,7 +17,7 @@ import { MODEL_WORKER_SCRIPTS } from './model-spec.js';
 import { AssetError } from './types.js';
 import { atomicAssetJson, AtomicJsonFailure } from './atomic-json.js';
 import { decodeAssetJobError, failureMessage, failureStage, hostFailure, workerFailure, conversionWorkerFailure } from './failure-diagnostics.js';
-import type { Artifact, AssetInput, AssetJob, AssetJobEvent, AssetJobResult, AssetManifest, AssetProbe, AssetRequest, JobOptions, OperationOptions, PipelineOptions, RuntimeEvidence } from './types.js';
+import type { AssetFailureDiagnostic, Artifact, AssetInput, AssetJob, AssetJobEvent, AssetJobResult, AssetManifest, AssetProbe, AssetRequest, JobOptions, OperationOptions, PipelineOptions, RuntimeEvidence } from './types.js';
 import { snapshotGlbConversionInput, prepareRetainedGlbConversionInput, type GlbConversionInput } from './conversion-input.js';
 import { GLB_CONVERSION_LIMITS, GLB_CONVERSION_WORKERS, parseConvertedGlbRequest, parseConvertedGlbSourceMap, parseConvertedGlbAudit, type ConvertedGlbRequest } from './converted-glb.js';
 import { CONVERTED_GLB_ARTIFACT_LIMITS, parseConvertedGlbJson, validateConvertedGlbManifestFiles, type ConvertedGlbManifest } from './converted-glb-manifest.js';
@@ -162,7 +163,7 @@ export class AssetPipeline {
       ...(this.config.pythonExecutable ? { pythonExecutable: this.config.pythonExecutable } : {}) };
   }
   /** With `supervision`, every attempt is reserved before spawn and one record stays free for generation. */
-  private async probeIn(operation: OperationClaim, directory: string, end: number, signal?: AbortSignal, supervision?: WorkerSupervision, ownedProbe?: string): Promise<AssetProbe> {
+  private async probeIn(operation: OperationClaim, directory: string, end: number, signal?: AbortSignal, supervision?: WorkerSupervision, ownedProbe?: string, onBlenderFailure?: (diagnostic: AssetFailureDiagnostic) => void): Promise<AssetProbe> {
     const installed = await this.discover(this.discoveryOptions());
     const evidence: AssetProbe = { observedAt: new Date().toISOString(), available: false, blender: null, python: null, attempts: [] };
     const probeScript = ownedProbe ?? await this.script('probe.py');
@@ -175,13 +176,14 @@ export class AssetPipeline {
       try {
         const process = await this.supervisedRun(operation, supervision, 'probe', { executable, args: ['--background', '--factory-startup', '--disable-autoexec', '--threads', '2', '--python-exit-code', '1', '--python', workerFileArgument(probeScript)], cwd: workerLaunchDirectory(executable, directory), env: workerEnvironment(directory) },
           { ...(signal ? { signal } : {}), deadlineMs: Math.min(15000, remaining(end, signal)) });
-        if (process.exitCode !== 0) throw new AssetError('BLENDER_PROBE', 'Installed Blender failed its runtime probe.');
+        if (process.exitCode !== 0 || process.signal) throw runtimeProbeFailure(process);
         const result = resultLine(process.stdout), capabilities = record(result.capabilities, 'Blender capabilities');
         if (typeof result.version !== 'string' || !/^\d+\.\d+/.test(result.version) || typeof result.pythonVersion !== 'string' || result.background !== true) throw new AssetError('BLENDER_PROBE', 'Invalid native runtime evidence.');
         if (['glbExport', 'glbImport', 'fbxExport', 'fbxImport', 'cycles'].some(key => capabilities[key] !== true)) throw new AssetError('BLENDER_CAPABILITY', 'Installed Blender is missing required template capabilities.');
         evidence.blender = { ...result, executable } as unknown as RuntimeEvidence; evidence.available = true; break;
       } catch (error) {
         if (error instanceof AssetError && SUPERVISION_FATAL.has(error.code)) throw error;
+        if (error instanceof AssetError && error.diagnostic) onBlenderFailure?.(error.diagnostic);
         evidence.attempts.push({ executable, code: error instanceof AssetError ? error.code : 'BLENDER_PROBE' });
       }
     }
@@ -389,8 +391,10 @@ export class AssetPipeline {
         });
       }
       remaining(end, signal); progress('probe');
-      const evidence = await this.probeIn(operation, environmentDirectory, end, signal, supervision, artifactPath(directory, 'probe.py'));
-      if (!evidence.blender || !evidence.available) throw new AssetError('BLENDER_UNAVAILABLE', 'No installed Blender passed the required runtime probe.');
+      let probeDiagnostic: AssetFailureDiagnostic | undefined;
+      const evidence = await this.probeIn(operation, environmentDirectory, end, signal, supervision, artifactPath(directory, 'probe.py'),
+        diagnostic => { probeDiagnostic ??= diagnostic; });
+      if (!evidence.blender || !evidence.available) throw new AssetError('BLENDER_UNAVAILABLE', 'No installed Blender passed the required runtime probe.', probeDiagnostic);
       progress('source-import');
       const process = await this.supervisedRun(operation, supervision, 'generate', { executable: evidence.blender.executable,
         args: ['--background', '--factory-startup', '--disable-autoexec', '--threads', '2', '--python-exit-code', '1', '--python',

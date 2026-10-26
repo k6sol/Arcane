@@ -38,7 +38,7 @@ const output = (): CommandResult => ({ exitCode: 1, signal: null, stderr: secret
 const probe: CommandResult = { exitCode: 0, signal: null, stderr: '', stdout: 'ARCANE_RESULT ' + JSON.stringify({
   version: '5.2.3', pythonVersion: '3.11.0', background: true,
   capabilities: { glbExport: true, glbImport: true, fbxExport: true, fbxImport: true, cycles: true } }) + '\n' };
-async function fixture(t: test.TestContext, convert: (spec: CommandSpec, options: CommandOptions) => Promise<CommandResult> = async () => output(), close = true) {
+async function fixture(t: test.TestContext, convert: (spec: CommandSpec, options: CommandOptions) => Promise<CommandResult> = async () => output(), close = true, probeResult: CommandResult = probe) {
   const base = await realpath(tmpdir()), root = await mkdtemp(join(base, 'arcane-conversion-supervision-'));
   const workers = join(root, 'workers'), outputRoot = join(root, 'assets'); await mkdir(workers);
   for (const name of ['probe.py', 'convert_glb.py', 'conversion_audit.py']) await writeFile(join(workers, name), '# synthetic fixed worker: never executed\n');
@@ -55,7 +55,7 @@ async function fixture(t: test.TestContext, convert: (spec: CommandSpec, options
     queryHost: { platform: 'linux', systemRoot: undefined, execFile: () => { throw Error('Synthetic fixture cannot query native processes.'); } },
     run: async (spec, options = {}) => {
       calls.push(spec); await options.supervise?.spawned({ pid: 12345, exited: () => true });
-      if (!spec.args.some(argument => argument.endsWith('convert_glb.py'))) { options.supervise?.closed(); return probe; }
+      if (!spec.args.some(argument => argument.endsWith('convert_glb.py'))) { options.supervise?.closed(); return probeResult; }
       try {
         const result = await convert(spec, options);
         for (const line of result.stdout.split('\n')) options.onLine?.(line);
@@ -162,4 +162,21 @@ test('conversion with unobserved child closure stays interrupted and holds its o
   await assert.rejects(f.pipeline.recover(first.directory), { code: 'BUSY' });
   const second = f.pipeline.startConversion({ ...input(), name: 'second' }); await second.completion;
   assert.throws(() => f.pipeline.startConversion({ ...input(), name: 'third' }), { code: 'BUSY' });
+});
+
+test('conversion retains the actual failed runtime probe reason without starting generation or leaking loader paths', async t => {
+  const privatePath = '/private-native-runtime-directory/blender';
+  const loader: CommandResult = { exitCode: 127, signal: null, stdout: '', stderr:
+    privatePath + ': error while loading shared libraries: libXxf86vm.so.1: cannot open shared object file: No such file or directory\n' };
+  const f = await fixture(t, async () => { throw Error('Generation must not start after a failed runtime probe.'); }, true, loader);
+  const job = f.pipeline.startConversion(input()), result = await job.completion;
+  assert.equal(f.calls.length, 1); assert.equal(result.state, 'failed'); assert.equal(result.error?.code, 'BLENDER_UNAVAILABLE');
+  assert.equal(result.error?.diagnostic?.stage, 'probe'); assert.equal(result.error?.diagnostic?.reasonCode, 'RUNTIME_LIB_XXF86VM');
+  assert.match(result.error!.diagnostic!.reason, /libXxf86vm\.so\.1/);
+  assert.equal(result.manifestPath, null);
+  const journal = JSON.parse(await readFile(join(job.directory, 'job.json'), 'utf8'));
+  assert.equal(journal.workers.length, 1); assert.equal(journal.workers[0].role, 'probe'); assert.equal(journal.workers[0].state, 'closed');
+  const failure = await readFile(join(job.directory, 'failure.json'), 'utf8');
+  for (const value of [JSON.stringify(result), JSON.stringify(journal), failure]) assert.ok(!value.includes(privatePath));
+  assert.deepEqual((await f.pipeline.recover(job.directory)).result.error, result.error);
 });
