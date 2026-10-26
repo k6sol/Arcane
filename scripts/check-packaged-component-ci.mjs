@@ -39,6 +39,10 @@ const object = value => !!value && typeof value === 'object' && !Array.isArray(v
 const hash = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 
 // Pure preflight helpers are exported for refusal/metadata tests, never native-proof injection.
+export function packagedNodeVersionMatches(version, runtimeVersion) {
+  return typeof runtimeVersion === 'string' && /^24\.\d+\.\d+$/.test(runtimeVersion) && version === 'v' + runtimeVersion;
+}
+
 export function assertHostedEnvironment({ platform, arch, nodeVersion, electronVersion, env }) {
   requireThat(platform === 'win32' && arch === 'x64' && /^24\.\d+\.\d+$/.test(nodeVersion) && !electronVersion, 'HOST_TOOLCHAIN_REQUIRED');
   requireThat(env.CI === 'true' && env.GITHUB_ACTIONS === 'true' && env.RUNNER_ENVIRONMENT === 'github-hosted' &&
@@ -297,10 +301,10 @@ export async function checkPackagedComponentCi() {
     await receipt('package-proof.json', bundle);
     const manifestRaw = await bytes(join(bundle.directory, 'windows-manifest.json'), 16 * MiB), manifest = JSON.parse(manifestRaw);
     requireThat(bundle.integrityOnly === true && bundle.signed === false && bundle.installer === false && bundle.installedNodeRequired === false &&
-      bundle.applicationLaunchVerified === false && bundle.electronVersion === ELECTRON.version && bundle.nodeVersion === process.versions.node &&
+      bundle.applicationLaunchVerified === false && bundle.electronVersion === ELECTRON.version && packagedNodeVersionMatches(bundle.nodeVersion, process.versions.node) &&
       hash(bundle.manifestSha256) && bundle.manifestSha256 === sha(manifestRaw) && manifest.schemaVersion === 1 && manifest.kind === 'arcane-windows-directory' &&
       manifest.platform === 'win32' && manifest.arch === 'x64' && manifest.signed === false && manifest.installer === false &&
-      manifest.electron?.version === ELECTRON.version && manifest.node?.version === process.versions.node &&
+      manifest.electron?.version === ELECTRON.version && packagedNodeVersionMatches(manifest.node?.version, process.versions.node) &&
       manifest.runtime?.installedNodeRequired === false && manifest.runtime.dependenciesIncluded === true &&
       manifest.runtime.applicationLaunchVerified === false && manifest.runtime.inferenceStarted === false &&
       manifest.fileCount === bundle.files && manifest.totalBytes === bundle.bytes && manifest.files?.length === bundle.files &&

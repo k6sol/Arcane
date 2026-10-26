@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
-import { ELECTRON, ARTIFACT_FILES, assertHostedEnvironment, assertSourceIdentity,
+import { ELECTRON, ARTIFACT_FILES, packagedNodeVersionMatches, assertHostedEnvironment, assertSourceIdentity,
   acquisitionEnvironment, validateElectronMetadata, selectElectronArchive } from '../../scripts/check-packaged-component-ci.mjs';
 
 const hosted = () => ({ platform: 'win32', arch: 'x64', nodeVersion: '24.19.0', electronVersion: undefined,
@@ -115,4 +115,12 @@ test('packaged component upload inventory is fixed metadata and screenshot only'
     'windows-manifest.json', 'verification.json', 'process-outcome.json', 'mcp-runtime.json', 'app-checks.json', 'workspace.png', 'app-error.json']);
   assert.equal(new Set(ARTIFACT_FILES).size, 12);
   for (const path of ARTIFACT_FILES) assert.match(path, /^(?:[a-z-]+\.json|workspace\.png)$/);
+});
+
+test('packaged Node version matches the canonical v-prefixed package receipt exactly', () => {
+  assert.equal(packagedNodeVersionMatches('v24.22.1', '24.22.1'), true);
+  for (const value of ['24.22.1', 'vv24.22.1', 'v24.22.0', 'v24.22.1-rc.1', 'v24.22.1\n', null, undefined, 24])
+    assert.equal(packagedNodeVersionMatches(value, '24.22.1'), false);
+  for (const value of ['v24.22.1', '22.22.1', '24.22.1-rc.1', null])
+    assert.equal(packagedNodeVersionMatches('v24.22.1', value), false);
 });
