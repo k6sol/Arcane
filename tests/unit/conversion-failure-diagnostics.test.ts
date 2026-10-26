@@ -24,7 +24,7 @@ test('conversion failures retain the exact bounded stage and reason through jour
 });
 
 test('all fixed worker reason tokens and conversion stages round-trip without invented exception types', () => {
-  const reasons = ['INPUT', 'SOURCE', 'MAP', 'FEATURE', 'GEOMETRY', 'MATERIAL', 'COLLISION', 'EXPORT', 'REOPEN', 'RENDER', 'IO', 'NATIVE', 'IO_PATH', 'IO_LINK', 'IO_TYPE', 'IO_SIZE', 'IO_IDENTITY', 'IO_READ', 'IO_CHANGED', 'IO_EXISTS', 'IO_ACCESS'];
+  const reasons = ['INPUT', 'SOURCE', 'MAP', 'FEATURE', 'GEOMETRY', 'MATERIAL', 'COLLISION', 'EXPORT', 'REOPEN', 'RENDER', 'IO', 'NATIVE', 'IO_PATH', 'IO_LINK', 'IO_TYPE', 'IO_SIZE', 'IO_IDENTITY', 'IO_READ', 'IO_CHANGED', 'IO_EXISTS', 'IO_ACCESS', 'GEOMETRY_COUNTS', 'GEOMETRY_TRANSFORM', 'GEOMETRY_DIRECTION', 'GEOMETRY_TOPOLOGY', 'GEOMETRY_AREA', 'GEOMETRY_UV', 'GEOMETRY_TRIANGLES', 'GEOMETRY_HASH'];
   const stages = ['input', 'source-import', 'source-map', 'collision', 'scene-save', 'export', 'scene-reopen', 'export-roundtrip', 'review-render', 'audit-write'];
   for (const reason of reasons) for (const stage of stages) {
     const error = conversionWorkerFailure(command(report(stage, reason)), 'generate');
@@ -99,6 +99,21 @@ test('conversion file failures explain the refused check without paths or native
   for (const [reason, explanation] of Object.entries(explanations)) {
     const error = conversionWorkerFailure(command(report('input', reason)), 'source-import');
     assert.match(error.message, explanation); assert.doesNotMatch(error.message, /private|traceback/);
+    assert.deepEqual(decodeAssetJobError({ code: error.code, message: error.message, diagnostic: error.diagnostic }).diagnostic, error.diagnostic);
+  }
+});
+
+test('conversion geometry details identify the refused check without model coordinates or names', () => {
+  const explanations: Record<string, RegExp> = {
+    GEOMETRY_COUNTS: /count is outside/, GEOMETRY_TRANSFORM: /cannot be inverted/,
+    GEOMETRY_DIRECTION: /cannot be normalized/, GEOMETRY_TOPOLOGY: /not used by its faces/,
+    GEOMETRY_AREA: /world-space face area/, GEOMETRY_UV: /UV coordinate is nonfinite/,
+    GEOMETRY_TRIANGLES: /triangle count differs/, GEOMETRY_HASH: /digest does not match/,
+  };
+  for (const [reason, explanation] of Object.entries(explanations)) {
+    const error = conversionWorkerFailure(command(report('source-map', reason)), 'source-import');
+    assert.equal(error.diagnostic?.reasonCode, 'CONVERSION_' + reason); assert.match(error.message, explanation);
+    assert.doesNotMatch(error.message, /private native traceback/);
     assert.deepEqual(decodeAssetJobError({ code: error.code, message: error.message, diagnostic: error.diagnostic }).diagnostic, error.diagnostic);
   }
 });

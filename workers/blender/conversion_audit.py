@@ -38,7 +38,7 @@ ORIGIN = "arcane_conversion_origin_v1"
 IDENTITY = "arcane-converted-v1"
 HASH = re.compile(r"[a-f0-9]{64}\Z")
 UUID = re.compile(r"[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}\Z")
-REASONS = {"INPUT", "SOURCE", "MAP", "FEATURE", "GEOMETRY", "MATERIAL", "COLLISION", "EXPORT", "REOPEN", "RENDER", "IO", "NATIVE", "IO_PATH", "IO_LINK", "IO_TYPE", "IO_SIZE", "IO_IDENTITY", "IO_READ", "IO_CHANGED", "IO_EXISTS", "IO_ACCESS"}
+REASONS = {"INPUT", "SOURCE", "MAP", "FEATURE", "GEOMETRY", "MATERIAL", "COLLISION", "EXPORT", "REOPEN", "RENDER", "IO", "NATIVE", "IO_PATH", "IO_LINK", "IO_TYPE", "IO_SIZE", "IO_IDENTITY", "IO_READ", "IO_CHANGED", "IO_EXISTS", "IO_ACCESS", "GEOMETRY_COUNTS", "GEOMETRY_TRANSFORM", "GEOMETRY_DIRECTION", "GEOMETRY_TOPOLOGY", "GEOMETRY_AREA", "GEOMETRY_UV", "GEOMETRY_TRIANGLES", "GEOMETRY_HASH"}
 
 
 class ConversionFailure(Exception):
@@ -566,7 +566,7 @@ def measure(obj, part, source_hash, semantics, bpy):
     mesh = evaluated.to_mesh(preserve_all_data_layers=True, depsgraph=dg)
     try:
         mesh.calc_loop_triangles()
-        require(3 <= len(mesh.vertices) <= 60000 and 1 <= len(mesh.loop_triangles) <= 20000 and len(mesh.uv_layers) <= 8, "GEOMETRY")
+        require(3 <= len(mesh.vertices) <= 60000 and 1 <= len(mesh.loop_triangles) <= 20000 and len(mesh.uv_layers) <= 8, "GEOMETRY_COUNTS")
         uv_keys = sorted((key for key in semantics if key.startswith("TEXCOORD_")), key=lambda key: int(key.split("_")[1]))
         color_keys = sorted((key for key in semantics if key.startswith("COLOR_")), key=lambda key: int(key.split("_")[1]))
         require(uv_keys == ["TEXCOORD_%d" % i for i in range(len(uv_keys))] and len(mesh.uv_layers) == len(uv_keys), "FEATURE")
@@ -574,7 +574,7 @@ def measure(obj, part, source_hash, semantics, bpy):
         if "TANGENT" in semantics:
             require(bool(uv_keys), "FEATURE"); mesh.calc_tangents(uvmap=mesh.uv_layers[0].name)
         world = obj.matrix_world.copy()
-        determinant = world.to_3x3().determinant(); require(abs(determinant) > 1e-20, "GEOMETRY")
+        determinant = world.to_3x3().determinant(); require(abs(determinant) > 1e-20, "GEOMETRY_TRANSFORM")
         normal_matrix = world.to_3x3().inverted().transposed()
         def y_up(v): return [float(v[0]), float(v[2]), -float(v[1])]
         used = set(); edge_uses = Counter(); invalid_uvs = 0; degenerate = 0; rows = []
@@ -592,7 +592,7 @@ def measure(obj, part, source_hash, semantics, bpy):
                 if "NORMAL" in semantics:
                     require(len(mesh.corner_normals) == len(mesh.loops), "FEATURE")
                     n = normal_matrix @ mesh.corner_normals[loop_index].vector
-                    require(n.length > 0, "GEOMETRY"); n.normalize(); corner["NORMAL"] = [quantize(v) for v in y_up(n)]
+                    require(n.length > 0, "GEOMETRY_DIRECTION"); n.normalize(); corner["NORMAL"] = [quantize(v) for v in y_up(n)]
                 if "TANGENT" in semantics:
                     tangent = world.to_3x3() @ loop.tangent
                     require(tangent.length > 0, "FEATURE"); tangent.normalize()
@@ -609,7 +609,9 @@ def measure(obj, part, source_hash, semantics, bpy):
             rows.append(triangle_key(corners))
         edges = [tuple(sorted(edge.vertices)) for edge in mesh.edges]
         loose_vertices = len(mesh.vertices) - len(used); loose_edges = sum(edge_uses[edge] == 0 for edge in edges)
-        require(not (loose_vertices or loose_edges or degenerate or invalid_uvs), "GEOMETRY")
+        require(not (loose_vertices or loose_edges), "GEOMETRY_TOPOLOGY")
+        require(not degenerate, "GEOMETRY_AREA")
+        require(not invalid_uvs, "GEOMETRY_UV")
         slots = {mesh.polygons[t.polygon_index].material_index for t in mesh.loop_triangles}
         require(len(slots) == 1, "MATERIAL")
         index = next(iter(slots)); material = obj.material_slots[index].material if index < len(obj.material_slots) else None

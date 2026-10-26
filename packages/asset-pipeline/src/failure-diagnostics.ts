@@ -7,7 +7,7 @@ const STAGES = new Set(['prepare-output', 'probe', 'generate', 'request-validati
 const CONVERSION_STAGES = new Set(['input', 'source-import', 'source-map', 'collision', 'scene-save', 'export',
   'scene-reopen', 'export-roundtrip', 'review-render', 'audit-write']);
 for (const stage of CONVERSION_STAGES) STAGES.add(stage);
-const CONVERSION_REASONS = new Set(['INPUT', 'SOURCE', 'MAP', 'FEATURE', 'GEOMETRY', 'MATERIAL', 'COLLISION', 'EXPORT', 'REOPEN', 'RENDER', 'IO', 'NATIVE', 'IO_PATH', 'IO_LINK', 'IO_TYPE', 'IO_SIZE', 'IO_IDENTITY', 'IO_READ', 'IO_CHANGED', 'IO_EXISTS', 'IO_ACCESS']);
+const CONVERSION_REASONS = new Set(['INPUT', 'SOURCE', 'MAP', 'FEATURE', 'GEOMETRY', 'MATERIAL', 'COLLISION', 'EXPORT', 'REOPEN', 'RENDER', 'IO', 'NATIVE', 'IO_PATH', 'IO_LINK', 'IO_TYPE', 'IO_SIZE', 'IO_IDENTITY', 'IO_READ', 'IO_CHANGED', 'IO_EXISTS', 'IO_ACCESS', 'GEOMETRY_COUNTS', 'GEOMETRY_TRANSFORM', 'GEOMETRY_DIRECTION', 'GEOMETRY_TOPOLOGY', 'GEOMETRY_AREA', 'GEOMETRY_UV', 'GEOMETRY_TRIANGLES', 'GEOMETRY_HASH']);
 const TYPES = new Set(['ValueError', 'RuntimeError', 'TypeError', 'AttributeError', 'KeyError', 'IndexError', 'FileNotFoundError',
   'PermissionError', 'OSError', 'MemoryError', 'ImportError', 'ModuleNotFoundError', 'ZeroDivisionError', 'NotImplementedError', 'Exception']);
 const REASONS: Record<string, string> = {
@@ -17,6 +17,14 @@ const REASONS: Record<string, string> = {
   CONVERSION_MAP: 'Imported objects could not be matched to the source primitive map.',
   CONVERSION_FEATURE: 'The source contains a feature this fixed conversion worker cannot preserve.',
   CONVERSION_GEOMETRY: 'Measured conversion geometry failed its finite-position, face-area, attribute or UV checks.',
+  CONVERSION_GEOMETRY_COUNTS: 'The converted mesh vertex, triangle or UV-layer count is outside the supported bounds.',
+  CONVERSION_GEOMETRY_TRANSFORM: 'The converted mesh transform cannot be inverted safely for geometry verification.',
+  CONVERSION_GEOMETRY_DIRECTION: 'A converted surface direction cannot be normalized for comparison.',
+  CONVERSION_GEOMETRY_TOPOLOGY: 'The converted mesh contains vertices or edges that are not used by its faces.',
+  CONVERSION_GEOMETRY_AREA: 'The converted mesh contains a triangle below the permitted world-space face area.',
+  CONVERSION_GEOMETRY_UV: 'A converted UV coordinate is nonfinite or outside the permitted range.',
+  CONVERSION_GEOMETRY_TRIANGLES: 'The converted mesh triangle count differs from its retained source primitive.',
+  CONVERSION_GEOMETRY_HASH: 'The converted geometry comparison digest does not match its retained source digest.',
   CONVERSION_MATERIAL: 'Source material or image data could not be preserved through conversion.',
   CONVERSION_COLLISION: 'The requested collision hull failed its geometry or closed-volume checks.',
   CONVERSION_EXPORT: 'The exported model failed its measured geometry, identity or hierarchy checks.',

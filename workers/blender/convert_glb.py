@@ -200,7 +200,8 @@ def measured_rows(bpy, objects, mapping, request, expected):
     rows = []
     for part in mapping["parts"]:
         row = audit.measure(objects[part["sourceKey"]], part, request["sourceSha256"], expected[part["sourceKey"]]["semantics"], bpy)
-        audit.require(row["geometrySha256"] == expected[part["sourceKey"]]["geometry"] and row["triangles"] == part["triangles"], "GEOMETRY")
+        audit.require(row["triangles"] == part["triangles"], "GEOMETRY_TRIANGLES")
+        audit.require(row["geometrySha256"] == expected[part["sourceKey"]]["geometry"], "GEOMETRY_HASH")
         rows.append(row)
     return sorted(rows, key=lambda row: row["sourceKey"])
 
