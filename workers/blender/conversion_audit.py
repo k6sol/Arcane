@@ -189,7 +189,7 @@ def validate_inputs(directory, request_hash):
         if part["sourceMaterialIndex"] is not None:
             natural(part["sourceMaterialIndex"], 4095)
         natural(part["triangles"], 20_000, 1)
-        require(part["sourceKey"] == "node%d_primitive%d" % (part["sourceNodeIndex"], part["sourcePrimitiveIndex"]) and part["originMarker"] == "%s:%d:%d" % (r["sourceSha256"], part["sourceNodeIndex"], part["sourcePrimitiveIndex"]))
+        require(part["sourceKey"] == "node%d_primitive%d" % (part["sourceNodeIndex"], part["sourcePrimitiveIndex"]) and part["originMarker"] == "glb_%s:%d:%d" % (r["sourceSha256"], part["sourceNodeIndex"], part["sourcePrimitiveIndex"]))
         require(type(part["worldMatrix"]) is list and len(part["worldMatrix"]) == 16)
         for n in part["worldMatrix"]: finite(n)
         require([part["worldMatrix"][i] for i in (3, 7, 11, 15)] == [0, 0, 0, 1])

@@ -18,7 +18,7 @@ const finite = z.number().finite().min(-1000000).max(1000000);
 const index = natural(4095);
 const key = z.string().regex(/^node[0-9]{1,4}_primitive[0-9]{1,4}(?![\s\S])/);
 const id = z.string().regex(/^arcane_[a-f0-9]{64}(?![\s\S])/);
-const marker = z.string().regex(/^[a-f0-9]{64}:[0-9]{1,4}:[0-9]{1,4}(?![\s\S])/);
+const marker = z.string().regex(/^glb_[a-f0-9]{64}:[0-9]{1,4}:[0-9]{1,4}(?![\s\S])/);
 function failed(message: string): never { throw new AssetError('ASSET_CONVERSION_SCHEMA', message); }
 
 /** Reject proxy/accessor input before inspecting a value; copy plain data only. */
@@ -88,7 +88,7 @@ export function parseConvertedGlbSourceMap(value: unknown, request: ConvertedGlb
     if (new Set(map.parts.map(part => part[field])).size !== map.parts.length) failed('Conversion source mappings must be unique.');
   for (const part of map.parts) {
     if (part.sourceKey !== `node${part.sourceNodeIndex}_primitive${part.sourcePrimitiveIndex}` ||
-        part.originMarker !== `${r.sourceSha256}:${part.sourceNodeIndex}:${part.sourcePrimitiveIndex}` ||
+        part.originMarker !== `glb_${r.sourceSha256}:${part.sourceNodeIndex}:${part.sourcePrimitiveIndex}` ||
         part.worldMatrix[3] !== 0 || part.worldMatrix[7] !== 0 || part.worldMatrix[11] !== 0 || part.worldMatrix[15] !== 1)
       failed('Conversion lineage must identify the actual source primitive and affine transform.');
   }

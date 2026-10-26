@@ -112,7 +112,7 @@ export function prepareGlbConversionSource(bytes: Buffer, expectedSha256: string
       if (parts.length >= STUDIO_IMPORT_LIMITS.objects || triangles > STUDIO_IMPORT_LIMITS.meshTriangles || totalTriangles > STUDIO_IMPORT_LIMITS.triangles)
         refused('ASSET_CONVERSION_BUDGET', 'The selected model exceeds the current import object or triangle budget. No geometry was simplified.');
       const sourceKey = `node${index}_primitive${primitiveIndex}`;
-      const originMarker = `${expectedSha256}:${index}:${primitiveIndex}`;
+      const originMarker = `glb_${expectedSha256}:${index}:${primitiveIndex}`;
       const importNodeIndex = nodes.length;
       const split = { ...mesh, primitives: [primitive] };
       meshes.push(split);

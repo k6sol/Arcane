@@ -316,3 +316,18 @@ test('conversion source accounts for added correspondence nodes in the bounded i
     {mesh:0},...Array.from({length:GLB_PREFLIGHT_LIMITS.nodes-2},()=>({}))];
   assert.equal(f.doc.nodes.length,4096);refused(f,'ASSET_CONVERSION_BUDGET');
 });
+
+
+test('conversion lineage remains valid embedded data for every leading SHA-256 hex digit',()=>{
+  const f=fixture(),seen=new Set<string>();
+  for(let attempt=0;attempt<4096&&seen.size<16;attempt++){
+    f.doc.asset.generator=`marker-custody-${attempt}`;
+    const source=f.finish(),hash=digest(source),leading=hash[0]!;
+    if(seen.has(leading))continue;
+    const result=prepareGlbConversionSource(source,hash);
+    validateGlb(Uint8Array.from(result.importBytes).buffer);
+    for(const part of result.parts)assert.equal(part.originMarker,`glb_${hash}:${part.sourceNodeIndex}:${part.sourcePrimitiveIndex}`);
+    seen.add(leading);
+  }
+  assert.equal(seen.size,16);
+});
