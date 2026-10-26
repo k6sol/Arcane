@@ -38,7 +38,7 @@ ORIGIN = "arcane_conversion_origin_v1"
 IDENTITY = "arcane-converted-v1"
 HASH = re.compile(r"[a-f0-9]{64}\Z")
 UUID = re.compile(r"[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}\Z")
-REASONS = {"INPUT", "SOURCE", "MAP", "FEATURE", "GEOMETRY", "MATERIAL", "COLLISION", "EXPORT", "REOPEN", "RENDER", "IO", "NATIVE"}
+REASONS = {"INPUT", "SOURCE", "MAP", "FEATURE", "GEOMETRY", "MATERIAL", "COLLISION", "EXPORT", "REOPEN", "RENDER", "IO", "NATIVE", "IO_PATH", "IO_LINK", "IO_TYPE", "IO_SIZE", "IO_IDENTITY", "IO_READ", "IO_CHANGED", "IO_EXISTS", "IO_ACCESS"}
 
 
 class ConversionFailure(Exception):
@@ -115,32 +115,36 @@ def parse_json(raw, maximum=JSON_BYTES):
 
 def no_links(path, directory=False):
     path = Path(path)
-    require(path.is_absolute(), "IO")
+    require(path.is_absolute(), "IO_PATH")
     for item in [path, *path.parents]:
         info = item.lstat()
-        require(not stat.S_ISLNK(info.st_mode) and not (getattr(info, "st_file_attributes", 0) & 0x400), "IO")
+        require(not stat.S_ISLNK(info.st_mode) and not (getattr(info, "st_file_attributes", 0) & 0x400), "IO_LINK")
     info = path.lstat()
-    require(stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode) and info.st_nlink == 1, "IO")
+    require(stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode), "IO_TYPE")
+    if not directory:
+        require(info.st_nlink == 1, "IO_LINK")
     return info
 
 
 def read_owned(path, maximum, minimum=1):
     before = no_links(path)
-    require(minimum <= before.st_size <= maximum, "IO")
+    require(minimum <= before.st_size <= maximum, "IO_SIZE")
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     handle = os.open(path, flags)
     try:
         opened = os.fstat(handle)
         signature = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns, s.st_nlink)
-        require(signature(opened) == signature(before) and stat.S_ISREG(opened.st_mode), "IO")
+        require(signature(opened) == signature(before), "IO_IDENTITY")
+        require(stat.S_ISREG(opened.st_mode), "IO_TYPE")
         chunks, remaining = [], before.st_size
         while remaining:
             chunk = os.read(handle, min(remaining, 64 * 1024))
-            require(bool(chunk), "IO")
+            require(bool(chunk), "IO_READ")
             chunks.append(chunk)
             remaining -= len(chunk)
-        require(not os.read(handle, 1) and signature(os.fstat(handle)) == signature(before), "IO")
-        require(signature(no_links(path)) == signature(before), "IO")
+        require(not os.read(handle, 1), "IO_READ")
+        require(signature(os.fstat(handle)) == signature(before), "IO_CHANGED")
+        require(signature(no_links(path)) == signature(before), "IO_CHANGED")
         return b"".join(chunks)
     finally:
         os.close(handle)

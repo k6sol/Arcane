@@ -70,7 +70,7 @@ def select_objects(bpy, objects):
 
 def export_model(bpy, directory, filename, objects, materials):
     path = directory / filename
-    audit.require(not path.exists() and not path.is_symlink(), "IO")
+    audit.require(not path.exists() and not path.is_symlink(), "IO_EXISTS")
     select_objects(bpy, objects)
     operate(bpy.ops.export_scene.gltf, {"filepath": str(path), "check_existing": False,
         "export_format": "GLB", "use_selection": True, "export_extras": True,
@@ -419,7 +419,7 @@ def review_renders(bpy, directory, objects, request):
     rows = []
     for filename, direction in (("preview-hero.png", (2.6,-3.5,2.3)), ("preview-side.png", (-4,0,0.7))):
         path = directory / filename
-        audit.require(not path.exists() and not path.is_symlink(), "IO")
+        audit.require(not path.exists() and not path.is_symlink(), "IO_EXISTS")
         camera.location = center + Vector(direction).normalized() * distance
         camera.rotation_euler = (center - camera.location).to_track_quat("-Z", "Y").to_euler()
         scene.render.filepath = str(path)
@@ -456,7 +456,7 @@ def run():
     audit.no_links(directory, directory=True)
     audit.no_links(SCRIPT_DIRECTORY, directory=True)
     for filename in ("asset.blend", "asset.glb", "collision.glb", "preview-hero.png", "preview-side.png", "conversion-audit.json"):
-        audit.require(not (directory / filename).exists() and not (directory / filename).is_symlink(), "IO")
+        audit.require(not (directory / filename).exists() and not (directory / filename).is_symlink(), "IO_EXISTS")
     request, mapping, original, marked = audit.validate_inputs(directory, options.request_sha256)
     source_doc, source_bin, expected, source_hierarchy = source_evidence(request, mapping, original, marked)
 
@@ -548,7 +548,7 @@ if __name__ == "__main__":
     try:
         run()
     except (Exception, SystemExit) as failure:
-        reason = failure.reason if isinstance(failure, audit.ConversionFailure) else "NATIVE"
+        reason = failure.reason if isinstance(failure, audit.ConversionFailure) else "IO_ACCESS" if isinstance(failure, OSError) else "NATIVE"
         print("ARCANE_FAILURE " + json.dumps({"stage": stage, "reason": reason,
             "type": "conversion-refused"}, separators=(",", ":")), flush=True)
         raise SystemExit(1) from None

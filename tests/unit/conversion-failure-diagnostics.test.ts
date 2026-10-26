@@ -24,7 +24,7 @@ test('conversion failures retain the exact bounded stage and reason through jour
 });
 
 test('all fixed worker reason tokens and conversion stages round-trip without invented exception types', () => {
-  const reasons = ['INPUT', 'SOURCE', 'MAP', 'FEATURE', 'GEOMETRY', 'MATERIAL', 'COLLISION', 'EXPORT', 'REOPEN', 'RENDER', 'IO', 'NATIVE'];
+  const reasons = ['INPUT', 'SOURCE', 'MAP', 'FEATURE', 'GEOMETRY', 'MATERIAL', 'COLLISION', 'EXPORT', 'REOPEN', 'RENDER', 'IO', 'NATIVE', 'IO_PATH', 'IO_LINK', 'IO_TYPE', 'IO_SIZE', 'IO_IDENTITY', 'IO_READ', 'IO_CHANGED', 'IO_EXISTS', 'IO_ACCESS'];
   const stages = ['input', 'source-import', 'source-map', 'collision', 'scene-save', 'export', 'scene-reopen', 'export-roundtrip', 'review-render', 'audit-write'];
   for (const reason of reasons) for (const stage of stages) {
     const error = conversionWorkerFailure(command(report(stage, reason)), 'generate');
@@ -88,4 +88,17 @@ test('legacy worker failures retain their existing wire protocol', () => {
   assert.match(old.message, /outside 1\.\.20000/);
   assert.equal(conversionWorkerFailure(result, 'source-map').diagnostic?.reasonCode, 'WORKER_EXIT');
   assert.equal(workerFailure(command(report('source-map', 'MAP')), 'generate').diagnostic?.reasonCode, 'WORKER_EXIT');
+});
+
+test('conversion file failures explain the refused check without paths or native exception text', () => {
+  const explanations: Record<string, RegExp> = {
+    IO_PATH: /absolute owned path/, IO_LINK: /multiple hard links/, IO_TYPE: /ordinary file or directory/,
+    IO_SIZE: /allowed byte range/, IO_IDENTITY: /opened conversion file metadata/, IO_READ: /ended early/,
+    IO_CHANGED: /changed while/, IO_EXISTS: /will not be overwritten/, IO_ACCESS: /operating system refused/,
+  };
+  for (const [reason, explanation] of Object.entries(explanations)) {
+    const error = conversionWorkerFailure(command(report('input', reason)), 'source-import');
+    assert.match(error.message, explanation); assert.doesNotMatch(error.message, /private|traceback/);
+    assert.deepEqual(decodeAssetJobError({ code: error.code, message: error.message, diagnostic: error.diagnostic }).diagnostic, error.diagnostic);
+  }
 });

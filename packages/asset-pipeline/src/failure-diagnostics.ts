@@ -6,7 +6,7 @@ const STAGES = new Set(['prepare-output', 'probe', 'generate', 'request-validati
 const CONVERSION_STAGES = new Set(['input', 'source-import', 'source-map', 'collision', 'scene-save', 'export',
   'scene-reopen', 'export-roundtrip', 'review-render', 'audit-write']);
 for (const stage of CONVERSION_STAGES) STAGES.add(stage);
-const CONVERSION_REASONS = new Set(['INPUT', 'SOURCE', 'MAP', 'FEATURE', 'GEOMETRY', 'MATERIAL', 'COLLISION', 'EXPORT', 'REOPEN', 'RENDER', 'IO', 'NATIVE']);
+const CONVERSION_REASONS = new Set(['INPUT', 'SOURCE', 'MAP', 'FEATURE', 'GEOMETRY', 'MATERIAL', 'COLLISION', 'EXPORT', 'REOPEN', 'RENDER', 'IO', 'NATIVE', 'IO_PATH', 'IO_LINK', 'IO_TYPE', 'IO_SIZE', 'IO_IDENTITY', 'IO_READ', 'IO_CHANGED', 'IO_EXISTS', 'IO_ACCESS']);
 const TYPES = new Set(['ValueError', 'RuntimeError', 'TypeError', 'AttributeError', 'KeyError', 'IndexError', 'FileNotFoundError',
   'PermissionError', 'OSError', 'MemoryError', 'ImportError', 'ModuleNotFoundError', 'ZeroDivisionError', 'NotImplementedError', 'Exception']);
 const REASONS: Record<string, string> = {
@@ -21,6 +21,15 @@ const REASONS: Record<string, string> = {
   CONVERSION_REOPEN: 'The saved Blender scene changed when reopened for verification.',
   CONVERSION_RENDER: 'The conversion preview failed its content or image checks.',
   CONVERSION_IO: 'A required conversion input or artifact could not be read or written safely.',
+  CONVERSION_IO_PATH: 'A conversion file check requires an absolute owned path.',
+  CONVERSION_IO_LINK: 'A conversion file or ancestor is linked, reparsed or has multiple hard links.',
+  CONVERSION_IO_TYPE: 'A conversion path is not the required ordinary file or directory.',
+  CONVERSION_IO_SIZE: 'A conversion input or artifact is outside its allowed byte range.',
+  CONVERSION_IO_IDENTITY: 'The opened conversion file metadata differs from the checked path metadata.',
+  CONVERSION_IO_READ: 'A conversion file ended early or contained unexpected extra bytes.',
+  CONVERSION_IO_CHANGED: 'A conversion file changed while its bytes were being read or rechecked.',
+  CONVERSION_IO_EXISTS: 'A new conversion artifact already exists and will not be overwritten.',
+  CONVERSION_IO_ACCESS: 'The operating system refused a conversion file or directory operation.',
   CONVERSION_NATIVE: 'Blender stopped unexpectedly during this conversion stage.',
   REQUEST_PROVENANCE: 'Request bytes failed their size or SHA-256 provenance check.',
   WINDOWS_PATH_LIMIT: 'The installed Blender cannot use this long Windows asset path because no verified short directory alias is available; choose a shorter asset output directory.',
