@@ -16,6 +16,8 @@ import { MAX_WORKER_RECORDS, WorkerSupervision, attestJobWorkers, parseWorkerRec
 // The runBounded contract tests at the end spawn only tiny owned `node -e` children, as assets.test.ts does.
 const BLENDER = 'C:\\Program Files\\Blender Foundation\\Blender 4.2\\blender.exe';
 const PYTHON = 'C:\\Program Files\\Blender Foundation\\Blender 4.2\\4.2\\python\\bin\\python.exe';
+const POSIX_BLENDER = '/opt/blender-5.2.3/blender';
+const POSIX_PYTHON = '/usr/bin/python3';
 const T = (n: number) => '2026-10-16T' + String(Math.floor(n / 3600) % 24).padStart(2, '0') + ':' + String(Math.floor(n / 60) % 60).padStart(2, '0') + ':' + String(n % 60).padStart(2, '0') + '.0000000Z';
 const id = (n: number) => '00000000-0000-4000-8000-' + String(n).padStart(12, '0');
 type Proc = { created: string; executable: string; alive: boolean };
@@ -201,7 +203,7 @@ test('pipeline: Windows incomplete metadata stops the live worker and records cl
 
 test('pipeline: unsupported OS keeps the stage reserved while it runs; only observed close resolves it', async t => {
   const world = new World('linux'); let during: string[] = [];
-  const f = await pipelineFixture(t, world, [blenderOk, pythonOk, { exitCode: 1 }], {}, async () => {
+  const f = await pipelineFixture(t, world, [blenderOk, pythonOk, { exitCode: 1 }], { blender: [POSIX_BLENDER], python: [POSIX_PYTHON] }, async () => {
     const dir = (await readdir(f.output)).find(name => name.startsWith('crate-'))!; during = roles((await job(join(f.output, dir))).workers);
   });
   const handle = f.pipeline.start(request); await handle.completion;
@@ -212,6 +214,68 @@ test('pipeline: unsupported OS keeps the stage reserved while it runs; only obse
   // A restart before observation: the reserved generation stays unknown/fenced.
   assert.deepEqual(await attestJobWorkers([...saved.slice(0, 2), { ...reserveWorker([], 'generate', id(77), T(1))[0]! }], world.host()),
     { verdict: 'unknown', reason: 'reservation-unresolved' });
+});
+
+test('POSIX executable stages remain reserved after spawned admission and close only through the owned close hook', async () => {
+  for (const platform of ['linux', 'darwin']) {
+    let queries = 0, journal: unknown = [];
+    const host: ProcessQueryHost = { platform, systemRoot: undefined, execFile: () => { queries++; throw Error('Unsupported platforms must not query Windows process metadata.'); } };
+    const supervision = new WorkerSupervision({ host, persist: async records => { journal = structuredClone(records); } });
+    for (const [role, executable] of [['probe', POSIX_BLENDER], ['python-probe', POSIX_PYTHON], ['generate', POSIX_BLENDER]] as const) {
+      const launch = await supervision.begin(role, executable);
+      const reserved = structuredClone(journal);
+      assert.deepEqual(await attestJobWorkers(journal, host), { verdict: 'unknown', reason: 'reservation-unresolved' });
+      assert.equal(await launch.hooks.spawned({ pid: 31337, exited: () => false }), 'continue', platform + ':' + role);
+      assert.equal(launch.stopRequested, false);
+      assert.deepEqual(journal, reserved, 'unsupported capture cannot invent an identity or close its reservation');
+      assert.equal(supervision.records.at(-1)!.state, 'reserved');
+      assert.equal(Object.hasOwn(supervision.records.at(-1)!, 'identity'), false);
+      assert.deepEqual(await attestJobWorkers(journal, host), { verdict: 'unknown', reason: 'reservation-unresolved' });
+      assert.equal(queries, 0);
+      launch.hooks.closed();
+      assert.deepEqual(journal, reserved, 'a close callback is persisted only by finishing the exact stage');
+      await launch.finish();
+      const closed = supervision.records.at(-1)!;
+      assert.ok(closed.state === 'closed'); assert.equal(closed.closure, 'exit-observed'); assert.equal(closed.identity, null);
+      assert.deepEqual(await attestJobWorkers(journal, host), { verdict: 'recorded-worker-gone', reason: 'pid-absent' });
+      assert.equal(queries, 0);
+    }
+  }
+});
+
+test('Windows still refuses a POSIX executable identity and waits for owned closure after requesting stop', async () => {
+  const world = new World('win32'); let journal: unknown;
+  const supervision = new WorkerSupervision({ host: world.host(), persist: async records => { journal = structuredClone(records); } });
+  const launch = await supervision.begin('probe', POSIX_BLENDER);
+  assert.equal(await launch.hooks.spawned({ pid: 31337, exited: () => false }), 'stop');
+  assert.equal(launch.stopRequested, true); assert.equal(world.queries, 0);
+  assert.deepEqual(roles(journal), ['probe:reserved']);
+  assert.deepEqual(await attestJobWorkers(journal, world.host()), { verdict: 'unknown', reason: 'reservation-unresolved' });
+  launch.hooks.closed(); await launch.finish();
+  const closed = supervision.records[0]!;
+  assert.ok(closed.state === 'closed'); assert.equal(closed.closure, 'exit-observed'); assert.equal(closed.identity, null);
+});
+
+test('pipeline: POSIX result without observed close stays reserved, interrupted and fenced on recovery', async t => {
+  const world = new World('linux'); let closeUnresolved!: () => void; let closeObserved = false;
+  const f = await pipelineFixture(t, world, [blenderOk, pythonOk, { noClose: true, onUnresolved: close => { closeUnresolved = close; } }],
+    { blender: [POSIX_BLENDER], python: [POSIX_PYTHON] });
+  try {
+    const handle = f.pipeline.start(request), result = await handle.completion;
+    assert.equal(result.state, 'interrupted'); assert.equal(result.error?.code, 'SUPERVISION_UNRESOLVED');
+    const saved = await job(handle.directory);
+    assert.deepEqual(roles(saved.workers), ['probe:closed:exit-observed', 'python-probe:closed:exit-observed', 'generate:reserved']);
+    assert.equal(world.alive(), true); assert.equal(world.queries, 0);
+    assert.deepEqual(await attestJobWorkers(saved.workers, world.host()), { verdict: 'unknown', reason: 'reservation-unresolved' });
+    await assert.rejects(f.pipeline.recover(handle.directory), code('BUSY'));
+    assert.equal(typeof closeUnresolved, 'function');
+    closeObserved = true; closeUnresolved();
+    const recovered = await f.pipeline.recover(handle.directory);
+    assert.equal(recovered.result.state, 'interrupted');
+    assert.deepEqual(roles((await job(handle.directory)).workers), roles(saved.workers));
+    assert.deepEqual(await attestJobWorkers(saved.workers, world.host()), { verdict: 'unknown', reason: 'reservation-unresolved' });
+    assert.equal(world.queries, 0, 'even a later closed process table cannot resolve a saved unsupported reservation');
+  } finally { if (!closeObserved && typeof closeUnresolved === 'function') closeUnresolved(); }
 });
 
 test('pipeline: a captured-identity write failure stops and confirms the worker and blocks further launches', async t => {

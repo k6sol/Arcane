@@ -161,7 +161,11 @@ export class WorkerSupervision {
     });
   }
   /** @internal */ async captureFor(launch: StageLaunch, pid: number): Promise<'captured' | 'unsupported' | 'uncertain'> {
-    if (!this.#options.capture) return 'unsupported';
+    // Durable PID+creation-time capture is Windows-specific. POSIX workers
+    // retain their reservation until this supervisor observes their own close;
+    // feeding a POSIX executable into the Windows identity parser would instead
+    // stop an otherwise valid owned child as an invalid Windows identity.
+    if (!this.#options.capture || this.#options.host.platform !== 'win32') return 'unsupported';
     const result = await captureWorkerIdentity({ pid, role: launch.role, executable: launch.executable }, this.#options.host);
     if (result.status !== 'captured') return result.reason === 'platform-unsupported' ? 'unsupported' : 'uncertain';
     return this.#exclusive(async () => {
