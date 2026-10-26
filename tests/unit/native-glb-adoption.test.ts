@@ -389,7 +389,7 @@ for(const provider of ['claude-code','arcane'] as const){
   const retained=f.service.jobs().find(row=>row.jobId===ack.jobId);assert.ok(retained);
   assert.equal(retained.state,'failed');assert.equal(retained.manifestAvailable,false);assert.equal(retained.error?.code,'HISTORY_INTEGRITY');
   assert.deepEqual(f.store.binding('asset-job',ack.jobId),binding);assert.deepEqual(f.host.listNative(f.actor()).items.map(item=>item.id),[ack.jobId]);
-  await assert.rejects(f.service.manifest(ack.jobId),{code:'JOB_STATE'});assert.equal(f.selectedTargetCalls,0);
+  await assert.rejects(f.service.manifest(ack.jobId),{code:'HISTORY_INTEGRITY'});assert.equal(f.selectedTargetCalls,0);
  });
 }
 

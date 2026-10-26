@@ -116,7 +116,7 @@ export async function renderToolDocs() {
     '',
     '# Arcane MCP tools',
     '',
-    `Arcane's MCP server (\`arcane-studio\`) exposes ${generic.length} tools to every connected client. Arcane's in-app ChatGPT chat also gets ${nativeOnly.length} asset-delivery tools (${native.length} in total). This reference is generated from the tool definitions in \`apps/mcp/src\`; descriptions are the exact text the model receives.`,
+    `Arcane's MCP server (\`arcane-studio\`) exposes ${generic.length} tools to every connected client. Conversation-bound Codex, Claude and Arcane clients also list ${nativeOnly.length} asset-delivery tools (${native.length} in total). Asset operations are scoped to the host's exact project and conversation; starting or cancelling work needs explicit host asset permission and an open admission window. Listing tools grants no authority. This reference is generated from the tool definitions in \`apps/mcp/src\`; descriptions are the exact text the model receives.`,
     '',
     'Regenerate after changing any tool:',
     '',
@@ -149,7 +149,7 @@ export async function renderToolDocs() {
     for (const name of names) out.push(renderTool(byName.get(name)));
   }
   if (nativeOnly.length) {
-    out.push('## In-app asset delivery', '', "These tools exist only in Arcane's in-app ChatGPT chat. They are scoped to that exact project and conversation and need explicit asset permission. Meshes placed this way live only in the current Studio Edit session.", '');
+    out.push('## In-app asset delivery', '', "These tools are listed for conversation-bound Codex, Claude and Arcane clients. The daemon enforces the exact host-bound project and conversation scope, with explicit host asset permission and an open admission window required for starting or cancelling work. Listing tools or selecting native-session client routing grants no authority or originating-turn provenance. Meshes placed this way live only in the current Studio Edit session.", '');
     for (const tool of nativeOnly) out.push(renderTool(tool));
   }
   return out.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd() + '\n';

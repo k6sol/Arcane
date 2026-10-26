@@ -356,7 +356,7 @@ test('native MCP: fixed descriptions/annotations explain scope, host permission 
   ].sort());
   for (const tool of tools) {
     assert.equal(tool.inputSchema.additionalProperties, false); assert.equal(tool.annotations?.openWorldHint, false);
-    assert.match(tool.description!, /exact project and Codex conversation scope/);
+    assert.match(tool.description!, /exact project and host-bound conversation scope/);
     assert.match(tool.description!, /explicit host asset permission.*open admission window/);
     assert.match(tool.description!, /routing mode grants no authority/);
     assert.match(tool.description!, /no originating-turn provenance/);
