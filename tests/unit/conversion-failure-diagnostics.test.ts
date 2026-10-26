@@ -14,7 +14,7 @@ test('conversion failures retain the exact bounded stage and reason through jour
   assert.equal(error.diagnostic?.stage, 'source-map');
   assert.equal(error.diagnostic?.reasonCode, 'CONVERSION_MAP');
   assert.equal(error.diagnostic?.exceptionType, null);
-  const diagnostic = { ...error.diagnostic!, logPath: 'failure.json' };
+  const diagnostic = { ...error.diagnostic!, logPath: 'failure.json' as const };
   const saved = { code: error.code, message: failureMessage(error.message, diagnostic), diagnostic };
   assert.deepEqual(decodeAssetJobError(JSON.parse(JSON.stringify(saved))), saved);
   assert.match(saved.message, /source-map/);
