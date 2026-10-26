@@ -3,9 +3,25 @@ import type { CommandResult } from './process.js';
 
 const STAGES = new Set(['prepare-output', 'probe', 'generate', 'request-validation', 'blockout', 'identity', 'checkpoint-save',
   'mesh-validation', 'texture-authoring', 'review-render', 'scene-save', 'export', 'export-identity', 'export-roundtrip', 'scene-reopen', 'audit-write', 'host-validation']);
+const CONVERSION_STAGES = new Set(['input', 'source-import', 'source-map', 'collision', 'scene-save', 'export',
+  'scene-reopen', 'export-roundtrip', 'review-render', 'audit-write']);
+for (const stage of CONVERSION_STAGES) STAGES.add(stage);
+const CONVERSION_REASONS = new Set(['INPUT', 'SOURCE', 'MAP', 'FEATURE', 'GEOMETRY', 'MATERIAL', 'COLLISION', 'EXPORT', 'REOPEN', 'RENDER', 'IO', 'NATIVE']);
 const TYPES = new Set(['ValueError', 'RuntimeError', 'TypeError', 'AttributeError', 'KeyError', 'IndexError', 'FileNotFoundError',
   'PermissionError', 'OSError', 'MemoryError', 'ImportError', 'ModuleNotFoundError', 'ZeroDivisionError', 'NotImplementedError', 'Exception']);
 const REASONS: Record<string, string> = {
+  CONVERSION_INPUT: 'Conversion input bytes or request fields failed validation.',
+  CONVERSION_SOURCE: 'The original source or marked import copy failed its integrity or fidelity check.',
+  CONVERSION_MAP: 'Imported objects could not be matched to the source primitive map.',
+  CONVERSION_FEATURE: 'The source contains a feature this fixed conversion worker cannot preserve.',
+  CONVERSION_GEOMETRY: 'Measured conversion geometry failed its finite-position, face-area, attribute or UV checks.',
+  CONVERSION_MATERIAL: 'Source material or image data could not be preserved through conversion.',
+  CONVERSION_COLLISION: 'The requested collision hull failed its geometry or closed-volume checks.',
+  CONVERSION_EXPORT: 'The exported model failed its measured geometry, identity or hierarchy checks.',
+  CONVERSION_REOPEN: 'The saved Blender scene changed when reopened for verification.',
+  CONVERSION_RENDER: 'The conversion preview failed its content or image checks.',
+  CONVERSION_IO: 'A required conversion input or artifact could not be read or written safely.',
+  CONVERSION_NATIVE: 'Blender stopped unexpectedly during this conversion stage.',
   REQUEST_PROVENANCE: 'Request bytes failed their size or SHA-256 provenance check.',
   WINDOWS_PATH_LIMIT: 'The installed Blender cannot use this long Windows asset path because no verified short directory alias is available; choose a shorter asset output directory.',
   MESH_REPAIR: 'Generated mesh required structural repair and was rejected.',
@@ -50,6 +66,11 @@ function wireDiagnostic(value: unknown): AssetFailureDiagnostic {
       (v.exceptionType !== null && (typeof v.exceptionType !== 'string' || !TYPES.has(v.exceptionType))) ||
       (v.auditPath !== undefined && v.auditPath !== 'audit.json') ||
       (v.artifactPath !== undefined && (typeof v.artifactPath !== 'string' || !ARTIFACTS.has(v.artifactPath)))) throw new AssetError('RECOVERY', 'Invalid failure diagnostic.');
+  if (v.reasonCode.startsWith('CONVERSION_') &&
+      (!CONVERSION_REASONS.has(v.reasonCode.slice(11)) || !CONVERSION_STAGES.has(v.stage) || v.exceptionType !== null ||
+       Object.keys(v).sort().join(',') !== 'exceptionType,reasonCode,schemaVersion,stage')) {
+    throw new AssetError('RECOVERY', 'Invalid conversion failure diagnostic.');
+  }
   let metrics: Record<string, number> | undefined;
   if (v.metrics !== undefined) {
     const values = object(v.metrics); metrics = {};
@@ -70,6 +91,25 @@ export function workerFailure(result: CommandResult, stage: string): AssetError 
   const exit = result.signal ? ` Signal: ${result.signal}.` : ` Exit code: ${result.exitCode ?? 'unknown'}.`;
   const classification = diagnostic.exceptionType ? ` (${diagnostic.exceptionType}; ${diagnostic.reasonCode}).` : '';
   return new AssetError('BLENDER_FAILED', `${diagnostic.reason}${classification}${exit}`, diagnostic);
+}
+/** Conversion workers emit a separate closed enum-only protocol. This is a failure
+ * description, never evidence that a native process closed or that retry is safe. */
+export function conversionWorkerFailure(result: CommandResult, stage: string): AssetError {
+  let diagnostic: AssetFailureDiagnostic = { schemaVersion: 1, stage: failureStage(stage),
+    reasonCode: 'WORKER_EXIT', reason: REASONS.WORKER_EXIT!, exceptionType: null };
+  const lines = result.stdout.split(/\r?\n/).filter(line => line.startsWith('ARCANE_FAILURE '));
+  if (lines.length === 1 && lines[0]!.length <= 512) {
+    try {
+      const value = object(JSON.parse(lines[0]!.slice(15)));
+      if (Object.keys(value).sort().join(',') !== 'reason,stage,type' || value.type !== 'conversion-refused' ||
+          typeof value.stage !== 'string' || !CONVERSION_STAGES.has(value.stage) ||
+          typeof value.reason !== 'string' || !CONVERSION_REASONS.has(value.reason)) throw new Error('Invalid conversion report.');
+      diagnostic = wireDiagnostic({ schemaVersion: 1, stage: value.stage,
+        reasonCode: 'CONVERSION_' + value.reason, exceptionType: null });
+    } catch { /* untrusted output remains a host-observed exit without a claimed cause */ }
+  }
+  const exit = result.signal ? ` Signal: ${result.signal}.` : ` Exit code: ${result.exitCode ?? 'unknown'}.`;
+  return new AssetError('BLENDER_FAILED', `${diagnostic.reason}${exit}`, diagnostic);
 }
 export function hostFailure(stage: string): AssetFailureDiagnostic {
   return { schemaVersion: 1, stage: failureStage(stage), reasonCode: 'HOST_FAILURE', reason: REASONS.HOST_FAILURE!, exceptionType: null };
