@@ -5,6 +5,7 @@ import {validateGlb, GLB_PREFLIGHT_LIMITS, type GlbMetadata} from '../../../apps
 import {AssetError, type Artifact} from './types.js';
 import {assetName, artifactPath, noLinks, readRegularFile, within} from './paths.js';
 import {sha256} from './validation.js';
+import type {AssetConversation} from '../../protocol/src/asset-conversation.js';
 
 export interface AdoptGlbInput {name:string;path:string}
 export interface AdoptedGlbRequest extends AdoptGlbInput {
@@ -15,12 +16,13 @@ export interface AdoptedGlbRequest extends AdoptGlbInput {
 }
 export interface AdoptedGlbManifest {
  schemaVersion:1;jobId:string;createdAt:string;request:AdoptedGlbRequest;
- provenance:{kind:'native-project-glb';projectId:string;conversation:{provider:'codex';threadId:string;sessionId:string|null};sourceSha256:string;sourceBytes:number};
+ provenance:{kind:'native-project-glb';projectId:string;conversation:AssetConversation;sourceSha256:string;sourceBytes:number};
  validation:{kind:'glb-preview-preflight';metadata:GlbMetadata;imageDecode:'not-run';engineVerification:'pending'};
  engineImport:{status:'unavailable';reason:'adopted-origin-requires-safe-conversion'};
  artifacts:Artifact[];limitations:string[];
 }
 export const ADOPTED_GLB_LIMITS=Object.freeze({bytes:GLB_PREFLIGHT_LIMITS.bytes,pathBytes:4096,segments:64,deadlineMs:30_000});
+const APP_THREAD=/^app:[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}(?![\s\S])/;
 function fail(code='ASSET_ADOPT_INPUT'):never {throw new AssetError(code,'Owned project GLB adoption refused; no import or upload was accepted.');}
 function fields(value:unknown,keys:readonly string[]):Record<string,unknown> {
  if(!value||typeof value!=='object'||Array.isArray(value)||types.isProxy(value))fail();
@@ -29,6 +31,17 @@ function fields(value:unknown,keys:readonly string[]):Record<string,unknown> {
  const descriptors=Object.getOwnPropertyDescriptors(value),out:Record<string,unknown>=Object.create(null) as Record<string,unknown>;
  for(const key of keys){const d=descriptors[key];if(!d||!Object.hasOwn(d,'value')||!d.enumerable)fail();out[key]=d.value as unknown;}
  return out;
+}
+/** Attribution data only. App conversations retain their durable host anchor;
+ * provider runtime session IDs and shared chat IDs are not substitutes. */
+export function snapshotAdoptedGlbConversation(value:unknown):AssetConversation {
+ const c=fields(value,['provider','threadId','sessionId']);
+ const id=(v:unknown):v is string=>typeof v==='string'&&/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}(?![\s\S])/.test(v);
+ if(c.provider==='codex'&&id(c.threadId)&&(c.sessionId===null||id(c.sessionId)))
+  return {provider:c.provider,threadId:c.threadId,sessionId:c.sessionId};
+ if((c.provider==='claude-code'||c.provider==='arcane')&&typeof c.threadId==='string'&&APP_THREAD.test(c.threadId)&&c.sessionId===null)
+  return {provider:c.provider,threadId:c.threadId,sessionId:null};
+ fail('ASSET_ADOPT_MANIFEST');
 }
 export function parseAdoptGlbInput(value:unknown):AdoptGlbInput {
  const a=fields(value,['name','path']);const name=assetName(a.name),p=a.path;
@@ -73,13 +86,12 @@ const digest=(v:unknown):v is string=>typeof v==='string'&&/^[a-f0-9]{64}$/.test
 export function parseAdoptedGlbManifest(value:unknown):AdoptedGlbManifest {
  const m=fields(value,['schemaVersion','jobId','createdAt','request','provenance','validation','engineImport','artifacts','limitations']);
  const request=parseAdoptedGlbRequest(m.request),p=fields(m.provenance,['kind','projectId','conversation','sourceSha256','sourceBytes']);
- const c=fields(p.conversation,['provider','threadId','sessionId']),v=fields(m.validation,['kind','metadata','imageDecode','engineVerification']);
+ const c=snapshotAdoptedGlbConversation(p.conversation),v=fields(m.validation,['kind','metadata','imageDecode','engineVerification']);
  const meta=fields(v.metadata,['nodeCount','meshCount','triangleEstimate','imagePixels','animations']);
  const engine=fields(m.engineImport,['status','reason']);
- const id=(x:unknown)=>typeof x==='string'&&/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(x);
  if(m.schemaVersion!==1||typeof m.jobId!=='string'||!/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(m.jobId)
   ||typeof m.createdAt!=='string'||!Number.isFinite(Date.parse(m.createdAt))||p.kind!=='native-project-glb'||!digest(p.projectId)||!digest(p.sourceSha256)
-  ||!natural(p.sourceBytes,ADOPTED_GLB_LIMITS.bytes)||!p.sourceBytes||c.provider!=='codex'||!id(c.threadId)||(c.sessionId!==null&&!id(c.sessionId))
+  ||!natural(p.sourceBytes,ADOPTED_GLB_LIMITS.bytes)||!p.sourceBytes
   ||v.kind!=='glb-preview-preflight'||v.imageDecode!=='not-run'||v.engineVerification!=='pending'
   ||engine.status!=='unavailable'||engine.reason!=='adopted-origin-requires-safe-conversion'
   ||p.sourceSha256!==request.sourceSha256||p.sourceBytes!==request.sourceBytes)fail('ASSET_ADOPT_MANIFEST');
@@ -92,7 +104,7 @@ export function parseAdoptedGlbManifest(value:unknown):AdoptedGlbManifest {
    ||!natural(a.bytes,ADOPTED_GLB_LIMITS.bytes)||!a.bytes||!digest(a.sha256))fail('ASSET_ADOPT_MANIFEST');seen.add(a.path);
   if(a.path==='asset.glb'&&(a.sha256!==p.sourceSha256||a.bytes!==p.sourceBytes))fail('ASSET_ADOPT_MANIFEST');
  }
- return structuredClone({...m,request}) as unknown as AdoptedGlbManifest;
+ return structuredClone({...m,request,provenance:{...p,conversation:c}}) as unknown as AdoptedGlbManifest;
 }
 /** Revalidates the MANAGED snapshot, never the mutable original source file. */
 export async function validateAdoptedGlbManifest(directory:string,value:unknown):Promise<AdoptedGlbManifest> {

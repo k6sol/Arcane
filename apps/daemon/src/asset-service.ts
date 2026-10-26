@@ -4,7 +4,7 @@ import {lstatSync,realpathSync} from 'node:fs';
 import { lstat, opendir, mkdir, writeFile, rename } from 'node:fs/promises';
 import {randomUUID} from 'node:crypto';
 import {isDeepStrictEqual} from 'node:util';
-import {parseAdoptGlbInput, parseAdoptedGlbRequest, isAdoptedGlbRequest, isAdoptedGlbManifest, readOwnedProjectGlb, validateAdoptedGlbManifest, ADOPTED_GLB_LIMITS, type AdoptedGlbRequest, type AdoptedGlbManifest} from '../../../packages/asset-pipeline/src/adopted-glb.js';
+import {parseAdoptGlbInput, parseAdoptedGlbRequest, snapshotAdoptedGlbConversation, isAdoptedGlbRequest, isAdoptedGlbManifest, readOwnedProjectGlb, validateAdoptedGlbManifest, ADOPTED_GLB_LIMITS, type AdoptedGlbRequest, type AdoptedGlbManifest} from '../../../packages/asset-pipeline/src/adopted-glb.js';
 export type AssetPreviewManifest = AssetManifest | AdoptedGlbManifest;
 import { atomicAssetJson, AtomicJsonFailure } from '../../../packages/asset-pipeline/src/atomic-json.js';
 import { isAbsolute, join, resolve } from 'node:path';
@@ -769,8 +769,9 @@ export async function createAssetService(options: AssetServiceOptions) {
       assertNativeAssetActor(actor,'mutate');
       const original = nativeAssetActorScope(actor);
       if (!(associations instanceof ConversationWorkStore) || associations.projectPath !== projectPath
-        || original.projectPath !== projectPath || original.projectId !== associations.projectId || original.conversation.provider !== 'codex'
+        || original.projectPath !== projectPath || original.projectId !== associations.projectId
         || typeof admission?.beforeCreate !== 'function' || typeof admission.created !== 'function') throw new ArcaneError('ASSET_ADOPT_SCOPE','Exact native project/store admission is required.');
+      const conversation=snapshotAdoptedGlbConversation(original.conversation);
       if (adoption || probeActive || active.size || resolution || admitting || retentionOperation) throw new AssetError('BUSY','An asset operation or retained-history change is already running.');
       const end = Date.now() + ADOPTED_GLB_LIMITS.deadlineMs;
       const guard = () => {
@@ -810,7 +811,7 @@ export async function createAssetService(options: AssetServiceOptions) {
           guard();await wait(writeFile(artifactPath(directory,'asset.glb'),owned.bytes,{flag:'wx'}));
           guard();await wait(writeFile(artifactPath(directory,'request.json'),requestBytes,{flag:'wx'}));
           const manifest:AdoptedGlbManifest={schemaVersion:1,jobId,createdAt:now,request,
-            provenance:{kind:'native-project-glb',projectId:original.projectId,conversation:{provider:'codex',threadId:original.conversation.threadId,sessionId:original.conversation.sessionId},sourceSha256:sha256(owned.bytes),sourceBytes:owned.bytes.length},
+            provenance:{kind:'native-project-glb',projectId:original.projectId,conversation,sourceSha256:sha256(owned.bytes),sourceBytes:owned.bytes.length},
             validation:{kind:'glb-preview-preflight',metadata:owned.metadata,imageDecode:'not-run',engineVerification:'pending'},
             engineImport:{status:'unavailable',reason:'adopted-origin-requires-safe-conversion'},
             artifacts:[{path:'asset.glb',role:'export',bytes:owned.bytes.length,sha256:sha256(owned.bytes)},

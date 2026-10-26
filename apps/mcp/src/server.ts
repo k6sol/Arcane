@@ -27,7 +27,7 @@ const skillId = z.string().regex(/^arcane-[a-z0-9]+(?:-[a-z0-9]+)*$/).max(64);
 export function createMcpServer(options: { client: DaemonClient; projectRoot: string; skillRegistry?: SkillRegistry; learnedDefaults?: boolean }): McpServer {
   const { client } = options;
   const assetScope = client.assetAudience === 'native-session'
-    ? ' Native-session: the bearer’s exact project and Codex conversation scope (daemon-enforced); start/cancel need explicit host asset permission and an open admission window; the client routing mode grants no authority and no originating-turn provenance.' : '';
+    ? ' Native-session: the bearer’s exact project and host-bound conversation scope (daemon-enforced); start/cancel need explicit host asset permission and an open admission window; the client routing mode grants no authority and no originating-turn provenance.' : '';
   const scopedAssetJobId = client.assetAudience === 'native-session' ? nativeAssetJobId : assetJobId;
   // Injection is for trusted code fixtures only; --project remains a workspace.
   const skills = options.skillRegistry ?? new SkillRegistry();

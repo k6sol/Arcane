@@ -1,6 +1,7 @@
 /// <reference lib="dom" />
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {randomUUID} from 'node:crypto';
 import {createServer} from 'node:http';
 import fs from 'node:fs/promises';
 import {syncBuiltinESMExports} from 'node:module';
@@ -13,7 +14,7 @@ import {createNativeAssetRegistry,type NativeAssetActor} from '../../apps/daemon
 import {nativeAssetRoutes} from '../../apps/daemon/src/native-asset-routes.js';
 import {assetRoutes} from '../../apps/daemon/src/asset-routes.js';
 import {ConversationWorkStore} from '../../packages/storage/src/conversation-work-store.js';
-import {parseAdoptGlbInput,isAdoptedGlbManifest,validateAdoptedGlbManifest} from '../../packages/asset-pipeline/src/adopted-glb.js';
+import {parseAdoptGlbInput,parseAdoptedGlbManifest,isAdoptedGlbManifest,validateAdoptedGlbManifest} from '../../packages/asset-pipeline/src/adopted-glb.js';
 import {sha256} from '../../packages/asset-pipeline/src/validation.js';
 import {GLB_PREFLIGHT_LIMITS,validateGlb} from '../../apps/desktop/src/glb-preflight.js';
 import {AssetViewerPanel} from '../../apps/desktop/src/asset-viewer.js';
@@ -187,22 +188,38 @@ function recordingRenderer(doc: DocumentFixture, host: HTMLElement) {
   return { renderer, calls, canvas, disposed: () => disposed, finishAnimation: () => { state.playing = false; state.time = state.duration; } };
 }
 
-async function nativeFixture(t:test.TestContext) {
+type AppProvider='claude-code'|'arcane';
+function appIncarnation(registry:ReturnType<typeof createNativeAssetRegistry>,provider:AppProvider,conversationId:string=randomUUID()) {
+ const incarnation=registry.issue(),connectionId=randomUUID(),threadId='app:'+conversationId,operationId=randomUUID();
+ if(provider==='claude-code')incarnation.bindAppConversation({kind:'app-conversation',connectionId,provider,conversationId,
+  transport:{kind:'claude-code-process',incarnationId:randomUUID(),nativeSessionId:null}});
+ else incarnation.bindAppConversation({kind:'app-conversation',connectionId,provider,conversationId,
+  transport:{kind:'arcane-gateway-loop',incarnationId:randomUUID()}});
+ const identity={connectionId,provider,threadId,sessionId:null},bound={connectionId,threadId};
+ incarnation.grantNextIntent({...bound,sessionId:null});incarnation.dispatched({...bound,operationId});
+ const credential=incarnation.credential();
+ return {incarnation,credential,identity,conversationId,operationId,actor:()=>registry.capture(credential,'mutate')};
+}
+
+async function nativeFixture(t:test.TestContext,provider:'codex'|AppProvider='codex') {
  const boundary=await realpath(tmpdir()),directory=await mkdtemp(join(boundary,'arcane-adopt-files-')),project=join(directory,'project');
  await mkdir(project);await mkdir(join(project,'exports'));
- const canonical=await realpath(project),store=new ConversationWorkStore({directory:join(directory,'bindings'),projectPath:canonical});
- const registry=createNativeAssetRegistry({projectPath:canonical}),incarnation=registry.issue(),credential=incarnation.credential();
- const identity={connectionId:'owned-connection',provider:'codex' as const,threadId:'owned-thread',sessionId:null};
- incarnation.seal(identity);const bound={connectionId:identity.connectionId,threadId:identity.threadId};incarnation.grant(bound);incarnation.dispatched({...bound,operationId:'owned-operation'});
+ const canonical=await realpath(project);let store=new ConversationWorkStore({directory:join(directory,'bindings'),projectPath:canonical});
+ const registry=createNativeAssetRegistry({projectPath:canonical}),app=provider==='codex'?null:appIncarnation(registry,provider);
+ const incarnation=app?.incarnation??registry.issue(),credential=app?.credential??incarnation.credential();
+ const codexIdentity={connectionId:'owned-connection',provider:'codex' as const,threadId:'owned-thread',sessionId:null},identity=app?.identity??codexIdentity;
+ if(!app){incarnation.seal(codexIdentity);const bound={connectionId:identity.connectionId,threadId:identity.threadId};incarnation.grant(bound);incarnation.dispatched({...bound,operationId:'owned-operation'});}
+ const conversation=()=>({provider:identity.provider,threadId:identity.threadId,sessionId:identity.sessionId});
  const actor=()=>registry.capture(credential,'mutate');
  let selectedTargetCalls=0;
  const options={cwd:directory,projectPath:canonical,outputRoot:join(directory,'managed'),studioImport:{workAssociations:store,
   selectTarget(){selectedTargetCalls++;throw Error('No native engine/context call permitted for adopted GLB');}}};
  let service=await createAssetService(options);
  const human='a'.repeat(64),generic='b'.repeat(64);
- const host=createAssetConversationHost({projectPath:canonical,workAssociations:store,conversation:()=>({provider:'codex',threadId:identity.threadId,sessionId:null}),
+ const createHost=()=>createAssetConversationHost({projectPath:canonical,workAssociations:store,conversation,
   start:async()=>{throw Error('No Blender generation allowed');},
   adoptNative:async(input,captured,admission)=>(await service.adoptProjectGlb(input,captured,admission)).jobId});
+ let host=createHost();
  let origin='';let native=nativeAssetRoutes(service,host,registry),assets=assetRoutes(service,host);
  const server=createServer(async(request,response)=>{try{const url=new URL(request.url??'/',origin);
   if(await native(request,response,url,origin))return;if(await assets(request,response,url,human,origin,generic))return;
@@ -212,14 +229,17 @@ async function nativeFixture(t:test.TestContext) {
   headers:{Authorization:'Bearer '+token,...(input===undefined?{}:{'Content-Type':'application/json'})},
   ...(input===undefined?{}:{body:JSON.stringify(input)}),signal:AbortSignal.timeout(5000)});
  const path=join(project,'exports','owned.glb');await writeFile(path,ownedGlb(true).bytes);
- const sdk=()=>new DaemonClient({url:origin,token:credential,assetAudience:'native-session'});
+ const sdkFor=(assetToken:string)=>new DaemonClient({url:origin,token:'c'.repeat(43),assetAudience:'native-session',assetToken});
+ const sdk=()=>app?sdkFor(credential):new DaemonClient({url:origin,token:credential,assetAudience:'native-session'});
  t.after(async()=>{registry.close();server.closeAllConnections();await new Promise<void>(done=>server.close(()=>done()));await service.close();store.close();
   const absolute=resolve(directory),part=relative(boundary,absolute);assert.ok(part&&!isAbsolute(part)&&part!=='..'&&!part.startsWith('..'+sep));assert.equal((await lstat(absolute)).isSymbolicLink(),false);
   await rm(absolute,{recursive:true,force:true});});
- return {directory,project:canonical,store,registry,incarnation,credential,identity,actor,host,call,sdk,path,human,generic,origin,
+ return {directory,project:canonical,get store(){return store;},registry,incarnation,credential,identity,conversation,conversationId:app?.conversationId??null,actor,get host(){return host;},call,sdk,sdkFor,path,human,generic,origin,
+   appContext:(nextProvider:AppProvider,conversationId?:string)=>appIncarnation(registry,nextProvider,conversationId),
   get service(){return service;},get selectedTargetCalls(){return selectedTargetCalls;},
   async adopt(){return host.adoptNative(actor(),{name:'owned-creation',path:'exports/owned.glb'});},
-  async restart(){await service.close();service=await createAssetService(options);native=nativeAssetRoutes(service,host,registry);assets=assetRoutes(service,host);return service;}};
+   async restart(reopenBindings=false){await service.close();if(reopenBindings){store.close();store=new ConversationWorkStore({directory:join(directory,'bindings'),projectPath:canonical});options.studioImport.workAssociations=store;}
+    service=await createAssetService(options);host=createHost();native=nativeAssetRoutes(service,host,registry);assets=assetRoutes(service,host);return service;}};
 }
 
 test('native HTTP/SDK adopts actual embedded-texture GLB, binds actual SQLite CWS, and drives chat automatic preview + existing viewer',async t=>{
@@ -272,6 +292,106 @@ test('adopted preview explicitly refuses engine preparation before any target/na
  const response=await f.call('/v1/assets/native/prepare-studio-import',f.credential,{jobId:ack.jobId});assert.equal(response.status,503);
  assert.equal(f.selectedTargetCalls,0);
 });
+
+for(const provider of ['claude-code','arcane'] as const){
+ test(provider+' native MCP adopts under its real app anchor and previews exact bytes without generated-model approval or engine import',async t=>{
+  const f=await nativeFixture(t,provider),original=await readFile(f.path),server=createMcpServer({client:f.sdk(),projectRoot:f.project});
+  const client=new Client({name:'app-adoption-test',version:'1'}),[a,b]=InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(a),client.connect(b)]);t.after(async()=>{await client.close();await server.close();});
+  const tool=(await client.listTools()).tools.find(row=>row.name==='assets_adopt_glb');assert.ok(tool);
+  const result=await client.callTool({name:'assets_adopt_glb',arguments:{name:'app-creation',path:'exports/owned.glb'}});
+  assert.notEqual(result.isError,true);const data=result.structuredContent;assert.ok(data&&typeof data==='object'&&'jobId'in data&&typeof data.jobId==='string');
+  const jobId=data.jobId;assert.ok('association'in data&&'creation'in data&&'retry'in data);
+  assert.equal(data.association,'bound');assert.equal(data.creation,'created');assert.equal(data.retry,false);
+  assert.match(f.identity.threadId,/^app:[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/);
+  assert.equal(f.identity.threadId,'app:'+f.conversationId);
+  const expected={provider,threadId:f.identity.threadId,sessionId:null};
+  assert.deepEqual(f.store.binding('asset-job',jobId)?.conversation,expected);
+  const pageResponse=await f.call('/v1/assets/conversation-jobs',f.human);assert.equal(pageResponse.status,200);
+  const page=readAssetConversationPage(await pageResponse.json());assert.deepEqual(page.conversation,expected);assert.equal(page.jobs[0]?.jobId,jobId);
+  const response=await f.call('/v1/assets/native/manifest?jobId='+jobId);assert.equal(response.status,200);
+  const manifest=manifestSchema.parse((await response.json() as {manifest:unknown}).manifest);assert.ok(isAdoptedGlbManifest(manifest));
+  assert.deepEqual(manifest.provenance.conversation,expected);assert.equal(manifest.provenance.projectId,f.store.projectId);
+  assert.equal(manifest.provenance.kind,'native-project-glb');assert.equal(manifest.provenance.sourceSha256,sha256(original));
+  assert.deepEqual(manifest.engineImport,{status:'unavailable',reason:'adopted-origin-requires-safe-conversion'});
+  assert.equal('runtime' in manifest,false);assert.equal('templateSha256' in manifest,false);
+  const doc=new DocumentFixture();let received:ArrayBuffer|undefined,renders=0;
+  const panel=new AssetViewerPanel(doc as unknown as Document,f.human,{transport:async(url,init)=>fetch(f.origin+String(url),init),
+   loadRuntime:async()=>({createAssetViewer:async input=>{renders++;received=input.bytes;const r=recordingRenderer(doc,input.host);r.renderer.hasAnimations=false;return r.renderer;}})});
+  t.after(()=>panel.clear());await panel.show(manifest,jobId,()=>true);
+  assert.equal(renders,1);assert.deepEqual(Buffer.from(received!),original);assert.equal(doc.host.querySelectorAll('canvas').length,1);
+  // This is the actual producer of human-review subjects; refusal creates no
+  // approvable generated subject, even though preview admission succeeded.
+  await assert.rejects(f.service.modelReviewSubject(jobId,{projectId:f.store.projectId,conversation:expected}),{code:'ASSET_REVIEW_JOB_STATE'});
+  await assert.rejects(f.service.prepareStudioImport(jobId,f.actor()),{code:'STUDIO_IMPORT_UNSUPPORTED'});
+  assert.equal((await f.call('/v1/assets/native/prepare-studio-import',f.credential,{jobId})).status,503);
+  assert.equal(f.selectedTargetCalls,0);assert.deepEqual(await readFile(f.path),original,'Borrowed project GLB is unchanged');
+ });
+
+ test(provider+' adopted app ownership and immutable bytes survive service hydration and an actual SQLite reopen',async t=>{
+  const f=await nativeFixture(t,provider),ack=await f.adopt();assert.ok(ack.jobId);
+  const original=await f.service.artifact(ack.jobId,'asset.glb'),binding=f.store.binding('asset-job',ack.jobId),oldStore=f.store;
+  assert.deepEqual(binding?.conversation,f.conversation());
+  await writeFile(f.path,Buffer.from('changed original source'));assert.deepEqual((await f.service.artifact(ack.jobId,'asset.glb')).bytes,original.bytes);
+  await unlink(f.path);await f.restart(true);assert.notEqual(f.store,oldStore);
+  assert.equal(f.service.jobs()[0]?.state,'succeeded');assert.deepEqual(f.store.binding('asset-job',ack.jobId),binding);
+  assert.deepEqual(f.host.listNative(f.actor()).items.map(item=>item.id),[ack.jobId]);
+  const response=await f.call('/v1/assets/native/manifest?jobId='+ack.jobId);assert.equal(response.status,200);
+  const manifest=manifestSchema.parse((await response.json() as {manifest:unknown}).manifest);assert.ok(isAdoptedGlbManifest(manifest));
+  assert.deepEqual(manifest.provenance.conversation,f.conversation());assert.equal(manifest.validation.engineVerification,'pending');
+  assert.equal(manifest.engineImport.status,'unavailable');assert.deepEqual((await f.service.artifact(ack.jobId,'asset.glb')).bytes,original.bytes);
+  assert.equal(f.selectedTargetCalls,0);
+ });
+
+ test(provider+' fresh incarnation can read its same app job while foreign chats, other providers and retired actors cannot',async t=>{
+  const f=await nativeFixture(t,provider),ack=await f.adopt();assert.ok(ack.jobId);assert.ok(f.conversationId);
+  const original=await readFile(f.path),old=f.actor();f.incarnation.retire();
+  assert.throws(()=>f.registry.capture(f.credential,'read'));assert.throws(()=>f.host.listNative(old));
+  await assert.rejects(f.host.adoptNative(old,{name:'retired-copy',path:'exports/owned.glb'}));
+  await assert.rejects(f.sdk().assetsManifest(ack.jobId));
+  const next=f.appContext(provider,f.conversationId);assert.notEqual(next.credential,f.credential);assert.notEqual(next.identity.connectionId,f.identity.connectionId);
+  assert.deepEqual(next.identity.threadId,f.identity.threadId);assert.equal(next.identity.sessionId,null);
+  assert.deepEqual(f.host.listNative(next.actor()).items.map(item=>item.id),[ack.jobId]);
+  const reread=await f.sdkFor(next.credential).assetsManifest(ack.jobId);assert.ok(isAdoptedGlbManifest(reread.manifest));
+  assert.deepEqual(reread.manifest.provenance.conversation,f.conversation());
+  const foreignChat=f.appContext(provider),foreignProvider=f.appContext(provider==='claude-code'?'arcane':'claude-code',f.conversationId);
+  for(const foreign of [foreignChat,foreignProvider]){
+   assert.deepEqual(f.host.listNative(foreign.actor()).items,[]);assert.equal(f.host.bindingNative(foreign.actor(),ack.jobId),null);
+   const response=await f.call('/v1/assets/native/manifest?jobId='+ack.jobId,foreign.credential);assert.equal(response.status,404);
+   await assert.rejects(f.sdkFor(foreign.credential).assetsManifest(ack.jobId));
+  }
+  assert.deepEqual(f.store.binding('asset-job',ack.jobId)?.conversation,f.conversation());
+  assert.equal(f.service.jobs().length,1);assert.equal(f.selectedTargetCalls,0);assert.deepEqual(await readFile(f.path),original);
+ });
+
+ test(provider+' malformed retained app anchors and runtime sessions fail parsing and hydration without rebinding',async t=>{
+  const f=await nativeFixture(t,provider),ack=await f.adopt();assert.ok(ack.jobId);assert.ok(f.conversationId);
+  const manifest=await f.service.manifest(ack.jobId);assert.ok(isAdoptedGlbManifest(manifest));
+  const job=f.service.jobs().find(row=>row.jobId===ack.jobId);assert.ok(job);
+  const binding=f.store.binding('asset-job',ack.jobId);
+  const invalidScopes=[
+   {provider,threadId:'runtime-session-instead-of-app-anchor',sessionId:null},
+   {provider,threadId:'app:'+f.conversationId,sessionId:'observed-provider-session'},
+   {provider,threadId:'app:ABCDEFAB-1234-4234-9234-ABCDEFABCDEF',sessionId:null},
+   {provider,threadId:'app:00000000-0000-0000-0000-000000000000',sessionId:null},
+   {provider,threadId:'app:'+f.conversationId+'\n',sessionId:null},
+   {provider:'unsupported-app',threadId:'app:'+f.conversationId,sessionId:null},
+   {provider,threadId:'app:'+f.conversationId,sessionId:null,connectionId:'not-provenance'},
+  ];
+  for(const conversation of invalidScopes){
+   const changed={...manifest,provenance:{...manifest.provenance,conversation}};
+   assert.throws(()=>parseAdoptedGlbManifest(changed));assert.equal(manifestSchema.safeParse(changed).success,false);
+   await assert.rejects(validateAdoptedGlbManifest(job.directory,changed));
+  }
+  const changed={...manifest,provenance:{...manifest.provenance,conversation:{...f.conversation(),sessionId:'provider-runtime-session'}}};
+  await writeFile(join(job.directory,'manifest.json'),JSON.stringify(changed));
+  await assert.rejects(f.service.manifest(ack.jobId),{code:'ASSET_ADOPT_MANIFEST'});await f.restart(true);
+  const retained=f.service.jobs().find(row=>row.jobId===ack.jobId);assert.ok(retained);
+  assert.equal(retained.state,'failed');assert.equal(retained.manifestAvailable,false);assert.equal(retained.error?.code,'HISTORY_INTEGRITY');
+  assert.deepEqual(f.store.binding('asset-job',ack.jobId),binding);assert.deepEqual(f.host.listNative(f.actor()).items.map(item=>item.id),[ack.jobId]);
+  await assert.rejects(f.service.manifest(ack.jobId),{code:'JOB_STATE'});assert.equal(f.selectedTargetCalls,0);
+ });
+}
 
 test('native-only ingress rejects human/global bearers, authority fields and URLs with zero managed jobs',async t=>{
  const f=await nativeFixture(t);
