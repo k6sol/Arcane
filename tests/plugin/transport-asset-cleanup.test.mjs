@@ -155,7 +155,9 @@ local old, operations, fence = client.pair, client.operations, client.identityFe
 local receivers = owned(client)
 local expected = {digest = string.rep("a", 64), payloadDigest = string.rep("b", 64), manifestDigest = string.rep("c", 64)}
 local packet = V.encode({formatVersion = 1, kind = "begin", payloadDigest = expected.payloadDigest,
-  manifestDigest = expected.manifestDigest, ordinal = 0, objectCount = 1}, http)
+  manifestDigest = expected.manifestDigest, ordinal = 0, objectCount = 1,
+  conversion = {sourceUnits = "meters", sourceUp = "Z", exportUnits = "meters", exportUp = "Y",
+    targetUnits = "studs", targetUp = "Y", studsPerMeter = 2}}, http)
 -- Receiving state is genuine production AssetTransfer state, not a mocked cancel.
 -- Temporarily remove the resource doubles to respect the production transfer limit.
 local doubles = operations.assetTransfers
