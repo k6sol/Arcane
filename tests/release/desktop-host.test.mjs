@@ -517,6 +517,7 @@ test('regression: post-idle shutdown fences fresh requests before awaiting child
   assert.ok(begin >= 0 && end > begin, 'Expected the connection lab lifecycle boundary.');
   const member = labSource.slice(begin, end + '\n    }'.length);
   let release, humanSelectionFenced = false, appAssetsFenced = false, nativeAssetsFenced = false, taskAdmissionFenced = false, handoffsFenced = false;
+  let testsClosed=false, reportCloses=0;
   const childCleanup = new Promise(resolve => { release = resolve; });
   const server = {
     accepting: true,
@@ -524,19 +525,23 @@ test('regression: post-idle shutdown fences fresh requests before awaiting child
     close(callback) { this.accepting = false; callback?.(); return this; },
     closeIdleConnections() {},
   };
-  const cleanup = vm.runInNewContext(stripTypeScriptTypes('let cleanup=null,shuttingDown=false; const fixture = { ' + member + ' }; fixture.close.bind(fixture);'), {
+  const cleanup = vm.runInNewContext(stripTypeScriptTypes('let cleanup=null,shuttingDown=false,testHistoryEpoch=0; const fixture = { ' + member + ' }; Object.assign(fixture.close.bind(fixture),{epoch:()=>testHistoryEpoch});'), {
     server, workflow: null, modelReviews: null, associations: null, ownsAssociations: false, ArcaneError: Error,
     humanAssetSelection: { close() { humanSelectionFenced = true; } },
     appAssets: { close() { assert.equal(humanSelectionFenced, true, 'human selection is fenced before private app admission'); appAssetsFenced = true; } },
     fenceTasks() { assert.equal(appAssetsFenced, true, 'Private app asset admission is fenced before task cleanup'); taskAdmissionFenced = true; return []; },
     handoffs: { close() { assert.equal(taskAdmissionFenced, true, 'Task admission is fenced before handoff retirement'); handoffsFenced = true; } },
-    ownedTests: { lifecycle: { close: async () => { assert.equal(taskAdmissionFenced, true, 'Task admission is fenced before test terminal publication'); assert.equal(nativeAssetsFenced, true, 'Native authority is fenced before test cleanup'); assert.equal(handoffsFenced,true,'Handoff authority is fenced before test cleanup'); } } },
+    ownedTests: { lifecycle: { close: async () => { assert.equal(taskAdmissionFenced, true, 'Task admission is fenced before test terminal publication'); assert.equal(nativeAssetsFenced, true, 'Native authority is fenced before test cleanup'); assert.equal(handoffsFenced,true,'Handoff authority is fenced before test cleanup'); testsClosed=true; } } },
+    testReports: { close() { assert.equal(testsClosed,true,'Terminal observation finishes before its archive closes'); reportCloses++; } },
     ownedSourceVerifier: { dispose() { assert.equal(taskAdmissionFenced, true, 'Task admission is fenced before compiler disposal'); assert.equal(nativeAssetsFenced, true, 'Native authority is fenced before compiler disposal'); assert.equal(handoffsFenced,true,'Handoff authority is fenced before compiler disposal'); } },
     nativeAssetRegistry: { close() { assert.equal(appAssetsFenced, true, 'Private app asset admission is fenced before registry retirement'); assert.equal(taskAdmissionFenced, true, 'Task admission is fenced before registry retirement'); nativeAssetsFenced = true; } },
     scriptSync: { close() { assert.equal(taskAdmissionFenced, true, 'Task admission is fenced before script sync stops watching'); } },
     codex: { close: () => { assert.equal(taskAdmissionFenced, true, 'Task admission must be fenced before child cleanup'); assert.equal(nativeAssetsFenced, true, 'Native authority must be fenced before child cleanup'); assert.equal(handoffsFenced,true,'Handoff authority must be fenced before child cleanup'); return childCleanup; } },
   });
   const closing = cleanup();
+  assert.equal(cleanup.epoch(),1,'Shutdown invalidates captured historical reads synchronously');
+  assert.equal(cleanup(),closing,'Repeated close reuses the original cleanup');
+  assert.equal(cleanup.epoch(),1,'Repeated close cannot create a new history incarnation');
   try {
     await Promise.resolve();
     assert.equal(server.accepting, false, 'A holder of the old agent bearer can currently open a fresh socket while shutdown waits.');
@@ -548,6 +553,7 @@ test('regression: post-idle shutdown fences fresh requests before awaiting child
   } finally {
     release();
     await closing;
+    assert.equal(reportCloses,1,'The owned report archive closes exactly once');
   }
 });
 

@@ -838,6 +838,9 @@ export class StudioWorkbench {
     return !this.stopped && this.canonicalProjectId
       ? Object.freeze({ projectId: this.canonicalProjectId, projectPath: this.canonicalProjectPath }) : null;
   }
+  getPlaytestReportContext():Readonly<{projectId:string;projectEpoch:number}>|null {
+    return !this.stopped&&this.canonicalProjectId?Object.freeze({projectId:this.canonicalProjectId,projectEpoch:this.productMetadataEpoch}):null;
+  }
   historyProjectPath(): string { return this.canonicalProjectPath; }
   private readonly sourceDraftContexts = new Set<() => void>();
   private readonly sourceDraftApplied = new Set<(value: AppliedScriptDraft) => void>();
@@ -2701,8 +2704,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   window.addEventListener('pagehide',()=>toolboxPolicy.stop());
   window.addEventListener('pageshow',event=>{if(event.persisted)toolboxPolicy.resume();});
   const playtestToggle=startPlaytestToggle(document,{projectKey:()=>workbench.getCurrentProduct()?.projectId??null});
-  const startTests=()=>playtestRoot?startPlaytestPanel({root:playtestRoot,token:()=>token,isSignedIn:()=>providerSetup.isSignedIn(),autoApprove:()=>playtestToggle.enabled()}):null;
-  let playtests=startTests();
+  let playtests:ReturnType<typeof startPlaytestPanel>|null=null,playtestAuthEpoch=0,removePlaytestAuth:(()=>void)|null=null;
   const workbench = new StudioWorkbench(document, new StudioApi(token), window.location.origin, token, {
     isSignedIn: () => providerSetup.isSignedIn(),
     subscribeSignInChange: listener => providerSetup.subscribeSignInChange(listener),
@@ -2712,6 +2714,13 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       assetScopeListeners.add(listener); return () => { assetScopeListeners.delete(listener); };
     },
   });
+  const startTests=()=>{
+    removePlaytestAuth?.();removePlaytestAuth=providerSetup.subscribeSignInChange(()=>{playtestAuthEpoch++;void playtests?.refresh();});
+    return playtestRoot?startPlaytestPanel({root:playtestRoot,token:()=>token,isSignedIn:()=>providerSetup.isSignedIn(),reports:true,
+      reportContext:()=>{const current=workbench.getPlaytestReportContext();return current?{...current,authEpoch:playtestAuthEpoch}:null;},autoApprove:()=>playtestToggle.enabled()}):null;
+  };
+  const stopTests=()=>{removePlaytestAuth?.();removePlaytestAuth=null;playtests?.stop();playtests=null;};
+  playtests=startTests();
   reviewProjectPath = () => workbench.historyProjectPath() || null;
   if (reviewSelection) workbench.subscribeProjectChange(syncReviewSelection);
   syncReviewSelection();
@@ -2826,7 +2835,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   // Build-done notifications: one native notification when a chat turn ends while Arcane is in the background.
   void import('./notifications.js').then(module=>{const start=()=>module.startBuildNotifications(document,{desktop:(window as unknown as {arcaneDesktop?:import('./notifications.js').BuildNotificationOptions['desktop']}).arcaneDesktop??null,storage:checklistStorage});let notices=start();window.addEventListener('pagehide',()=>notices.stop());window.addEventListener('pageshow',event=>{if(event.persisted){notices.stop();notices=start();}});}).catch(()=>{});
   void import('./studio-diagnostics.js').then(module=>{studioDiagnostics=module.startStudioDiagnostics(document,{token:()=>token,active:()=>workbench.hasStudioSessions(),showConversation:()=>workspaceShell.showConversation()});if(workflowsStopped)studioDiagnostics.stop();}).catch(()=>{});
-  window.addEventListener('pagehide', () => { workflowsStopped = true; claudeChatStopped = true; chatLink?.stop(); claudeChat?.stop(); arcaneChat?.stop(); taskPlanCard?.stop(); studioDiagnostics?.stop(); nativeHandoff.stop(); playtests?.stop();chatTabController?.stop(); taskUsageFooter.stop(); providerSetup.stop(); desktopVerification.stop(); workspaceShell.cleanup(); workbench.stop(); codexChat.stop(); learningPanel.stop(); historyPanel.stop();workflows?.stop(); });
+  window.addEventListener('pagehide', () => { workflowsStopped = true; claudeChatStopped = true; chatLink?.stop(); claudeChat?.stop(); arcaneChat?.stop(); taskPlanCard?.stop(); studioDiagnostics?.stop(); nativeHandoff.stop(); stopTests();chatTabController?.stop(); taskUsageFooter.stop(); providerSetup.stop(); desktopVerification.stop(); workspaceShell.cleanup(); workbench.stop(); codexChat.stop(); learningPanel.stop(); historyPanel.stop();workflows?.stop(); });
   window.addEventListener('pageshow', event => { if (event.persisted) { workflowsStopped = false; claudeChatStopped = false; showClaudeChat(); taskPlanCard?.resume(); studioDiagnostics?.resume(); providerSetup.resume(); nativeHandoff.resume(); playtests=startTests(); desktopVerification.resume(); workspaceShell = startWorkspaceShell(document, dismissConnectionSecrets); workbench.resume(); codexChat.resume(); chatTabController?.resume(); taskUsageFooter.resume(); learningPanel.resume(); historyPanel.resume();void workflows?.resume(); } });
   void codexChat.start().then(async () => {
     const module = await import('./chat-tabs.js');

@@ -414,3 +414,6 @@ export function studioTestRoutes(service: StudioTestRouteService, resolveActor: 
     return true;
   };
 }
+
+/** Shared exact loopback ingress fence; exporting it changes no live route behavior. */
+export {ingress as assertStudioTestHttpIngress};

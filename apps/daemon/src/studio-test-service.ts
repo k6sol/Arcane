@@ -16,6 +16,7 @@ import {scenarioSubjectDigest,scenarioSubjectProgram} from './studio-test-subjec
 import {captureEditViewport,viewportRequestSchema,VIEWPORT_LIMITS} from '../../../packages/studio-test-controller/src/viewport.js';
 import {createNativeAssetRequests} from './studio-native-assets.js';
 import type {StudioTestTaskPort,StudioTestTaskOrigin,StudioTestTaskSettled} from '../../../packages/protocol/src/chat-task-playtest.js';
+import {createStudioTestHistoricalReport,StudioTestReportError,STUDIO_TEST_REPORT_ARCHIVE_CODES,type StudioTestReportWriter,type StudioTestReportArchiveStatus} from './studio-test-report-store.js';
 
 const id=z.string().regex(/^[A-Za-z0-9_-]{1,128}$/), hash=z.string().regex(/^[a-f0-9]{64}$/);
 const request=z.strictObject({sessionId:id,nativeStudioId:id.optional(),durationMs:z.number().int().min(5000).max(60000).default(15000),observationIntervalMs:z.number().int().min(250).max(2000).default(1000),failOnRuntimeError:z.boolean().default(true),scenario:scenarioPlanSchema.optional()});
@@ -27,10 +28,12 @@ interface Options {directory:string;store:StudioStore;pluginArtifactHash:string;
   /** Trusted host proof that this process is the only possible journal writer (the project workspace lock). Never HTTP input. */
   exclusiveWriter?:()=>boolean;
   /** Trusted fixture clock only; never request data and never accepted for a native connection. */
-  fixtureScheduler?:Scheduler}
+  fixtureScheduler?:Scheduler;
+  /** Optional fixed-project historical writer; no live/native authority is recovered from its records. */
+  reports?:StudioTestReportWriter}
 export interface StudioTestView {id:string;targetName:string;actor:string;state:'needs_approval'|'running'|'complete'|'cancelled';display:Readonly<ConsentDisplay>;displayDigest:string;review:Readonly<TestReview>;evidence:'fixture'|'native';nativeAcceptance:false}
 type Job={view:StudioTestView;control:ReturnType<typeof createStudioTestControl>;connection:NativeTestConnection;proposalId:string;expiry:ReturnType<typeof setTimeout>;closing:Promise<void>|null;cancelled:boolean;reserved:boolean;reservation:StudioTestReservation|null;verifySubjects:((signal:AbortSignal)=>Promise<void>)|null;
-  origin:StudioTestTaskOrigin|null;terminalSent:boolean;reportDigest:string|null;subjects:'current'|'changed'|'unobserved';revalidate:((signal:AbortSignal)=>Promise<'current'|'changed'|'unobserved'>)|null};
+  origin:StudioTestTaskOrigin|null;terminalSent:boolean;reportDigest:string|null;historyCreatedAt:string;subjects:'current'|'changed'|'unobserved';revalidate:((signal:AbortSignal)=>Promise<'current'|'changed'|'unobserved'>)|null};
 /** At most 30 viewport captures per rolling ten minutes; one at a time. */
 export const VIEWPORT_RATE=Object.freeze({captures:30,deadlineMs:20_000});
 function rejected(code:'INVALID_REQUEST'|'BINDING_CHANGED'|'BUSY'|'PLACE_DENIED'|'STALE_PROOF'|'HUMAN_AUTH_REQUIRED'|'FENCED'|'BAD_NATIVE_RESPONSE'):never{throw new StudioTestError(code);}
@@ -78,10 +81,27 @@ export async function createStudioTestService(options:Options){
   const identity=(s:ReturnType<StudioStore['session']>)=>digest({sessionId:s.id,clientLifetimeId:s.clientSessionId,placeId:s.placeId,universeId:s.universeId,name:s.name,roots:s.allowedRoots,writes:s.allowWrites,revoked:s.revokedAt});
   const eligible=(sessionId:string)=>{const s=options.store.session(sessionId);if(s.placeId!==0||s.universeId!==0||!s.allowWrites)rejected('PLACE_DENIED');return s;};
   const view=(j:Job)=>structuredClone({...j.view,review:j.control.requests.status()});
+  let reportFault:StudioTestReportArchiveStatus=options.reports?Object.freeze({state:'ready',code:null}):Object.freeze({state:'unavailable',code:'ARCHIVE_UNAVAILABLE'});
+  const archiveFailure=(code:unknown)=>{
+    const fixed=STUDIO_TEST_REPORT_ARCHIVE_CODES.find(value=>value===code)??'ARCHIVE_WRITE';
+    reportFault=Object.freeze({state:'degraded',code:fixed});
+    try{options.reports?.noteFailure(fixed);}catch{/* A broken archive recorder cannot replace the original native/task error. */}
+  };
+  const archive=(j:Job,snapshot:'admission'|'terminal'):void=>{
+    if(!options.reports)return;
+    try{
+      if(j.origin&&j.origin.projectId!==options.reports.projectId)throw new StudioTestReportError('ARCHIVE_INPUT');
+      const report=view(j),historical=createStudioTestHistoricalReport({schemaVersion:1,kind:'studio-playtest-report',projectId:options.reports.projectId,
+        jobId:report.id,taskId:j.origin?.taskId??null,createdAt:j.historyCreatedAt,observedAt:new Date().toISOString(),snapshot,targetName:report.targetName,
+        observedState:report.state,display:report.display,displayDigest:report.displayDigest,review:report.review,evidence:report.evidence,nativeAcceptance:false});
+      const result=snapshot==='admission'?options.reports.recordAdmission(historical,[...jobs.keys()]):options.reports.recordTerminal(historical);
+      if(!result.stored)archiveFailure(result.code);
+    }catch(error){archiveFailure(error instanceof StudioTestReportError&&error.code!=='CURSOR_INVALID'?error.code:'ARCHIVE_WRITE');}
+  };
   const owned=(jobId:string,actor:string)=>{const j=jobs.get(jobId);if(!j||!(actor==='human'||j.view.actor===actor))rejected('HUMAN_AUTH_REQUIRED');return j;};
   const closeJob=(j:Job):Promise<void>=>{
     if(j.closing)return j.closing;clearTimeout(j.expiry);
-    j.closing=(async()=>{try{await j.control.lifecycle.shutdown();}finally{try{const review=j.control.requests.status();if(j.reserved&&review.cleanup==='complete'){if(j.reservation)options.store.releaseTestReservation(j.reservation);else options.store.releaseTest(j.view.display.proposal.binding.pairedSessionId,j.view.id);j.reserved=false;}}finally{await j.connection.close();}}
+    j.closing=(async()=>{try{try{await j.control.lifecycle.shutdown();}finally{try{const review=j.control.requests.status();if(j.reserved&&review.cleanup==='complete'){if(j.reservation)options.store.releaseTestReservation(j.reservation);else options.store.releaseTest(j.view.display.proposal.binding.pairedSessionId,j.view.id);j.reserved=false;}}finally{await j.connection.close();}}}finally{archive(j,'terminal');}
       if(j.origin&&options.taskPort&&!j.terminalSent){
         const report=view(j),review=report.review,scenario=review.scenario,plan=report.display.proposal.scenario;
         const packet:StudioTestTaskSettled={jobId:report.id,displayDigest:report.displayDigest,scenarioDigest:scenario?.scenarioDigest??null,subjectDigest:scenario?.subjectDigest??null,reportDigest:digest(report),review,
@@ -159,7 +179,7 @@ export async function createStudioTestService(options:Options){
       const prepared=await control.requests.prepare({binding,durationMs:a.durationMs,observationIntervalMs:a.observationIntervalMs,failOnRuntimeError:a.failOnRuntimeError,...(a.scenario?{scenario:a.scenario,subjectDigest}:{})});
       const jobId=randomUUID();
       j={view:{id:jobId,targetName:session.name,actor,state:'needs_approval',display:prepared.display,displayDigest:prepared.displayDigest,review:control.requests.status(),evidence:native.evidence,nativeAcceptance:false},control,connection:native,proposalId:prepared.proposalId,expiry:setTimeout(()=>{if(j.view.state==='needs_approval'){j.cancelled=true;j.view.state='cancelled';void closeJob(j).catch(()=>{});}},60000),closing:null,cancelled:false,reserved:false,reservation:null,verifySubjects:a.scenario?verifySubjects:null,
-        origin,terminalSent:false,reportDigest:null,subjects:'unobserved',revalidate:a.scenario?async(signal)=>{
+        origin,terminalSent:false,reportDigest:null,historyCreatedAt:new Date().toISOString(),subjects:'unobserved',revalidate:a.scenario?async(signal)=>{
           let fresh:NativeTestConnection|undefined;
           try{fresh=await(options.connect??connectNativeTest)();if(fresh.evidence!==native.evidence)return 'unobserved';
             const reader=fresh,proof=createProofReader(reader),check=new NativeTestAdapter({client:reader.client,evidence:reader.evidence,pairedProof:proof,requestTimeoutMs:5000,proofMaxAgeMs:6000,captureStore:captures,
@@ -169,6 +189,7 @@ export async function createStudioTestService(options:Options){
         }:null};
       // Internal preparation identity is deliberately not request-controlled.
       current=j;jobs.set(jobId,j);if(jobs.size>64)jobs.delete(jobs.keys().next().value!);connection=undefined;
+      archive(j,'admission');
       if(origin){try{options.taskPort!.assert(origin);options.taskPort!.prepared(origin,{jobId,displayDigest:j.view.displayDigest,scenarioDigest:j.view.review.scenario?.scenarioDigest??null,subjectDigest:subjectDigest??null});}catch(error){j.cancelled=true;j.view.state='cancelled';await closeJob(j);throw error;}}
       return view(j);
     }finally{preparing=false;if(connection)await connection.close();}
@@ -210,6 +231,7 @@ export async function createStudioTestService(options:Options){
   const nativeAssets=createNativeAssetRequests({store:options.store,pluginArtifactHash:options.pluginArtifactHash,connect:options.connect??(()=>connectNativeTest()),
     ...(options.fixtureScheduler?{fixtureScheduler:options.fixtureScheduler}:{}),eligible,identity,busy:()=>closed||preparing||viewing||current?.view.state==='running'||!!current?.reserved});
   return Object.freeze({
+    reportArchiveStatus:()=>reportFault,
     async cancelExact(jobId:string,origin:StudioTestTaskOrigin){const j=jobs.get(jobId);if(!j||j.origin!==origin)rejected('HUMAN_AUTH_REQUIRED');j.cancelled=true;if(j.view.state==='needs_approval')j.view.state='cancelled';const review=j.control.requests.status();if(review.runId&&review.phase!=='done')await j.control.requests.stop({runId:review.runId});await closeJob(j);const final=j.control.requests.status();if(j.reserved||final.runId!==null&&final.cleanup!=='complete'||final.scenario?.inputRelease==='unknown')rejected('FENCED');},
     async revalidateExact(jobId:string,origin:StudioTestTaskOrigin,reportDigest:string):Promise<'current'|'changed'|'unobserved'>{const j=jobs.get(jobId);if(!j||j.origin!==origin||j.reportDigest!==reportDigest||!j.revalidate)rejected('HUMAN_AUTH_REQUIRED');if(j.reserved||j.control.requests.status().cleanup!=='complete')return 'unobserved';return j.revalidate(AbortSignal.timeout(15000));},
     requests:Object.freeze({
@@ -253,4 +275,4 @@ export async function createStudioTestService(options:Options){
 }
 type CreatedStudioTestService=Awaited<ReturnType<typeof createStudioTestService>>;
 /** Capture is an optional extension for older trusted host/test integrations. */
-export type StudioTestService=Omit<CreatedStudioTestService,'requests'|'humanControl'|'cancelExact'|'revalidateExact'>&Partial<Pick<CreatedStudioTestService,'cancelExact'|'revalidateExact'>>&{humanControl:Omit<CreatedStudioTestService['humanControl'],'toolboxPolicy'>&Partial<Pick<CreatedStudioTestService['humanControl'],'toolboxPolicy'>>;requests:Omit<CreatedStudioTestService['requests'],'capture'|'viewport'|'nativeAssets'>&Partial<Pick<CreatedStudioTestService['requests'],'capture'|'viewport'|'nativeAssets'>>};
+export type StudioTestService=Omit<CreatedStudioTestService,'requests'|'humanControl'|'cancelExact'|'revalidateExact'|'reportArchiveStatus'>&Partial<Pick<CreatedStudioTestService,'cancelExact'|'revalidateExact'|'reportArchiveStatus'>>&{humanControl:Omit<CreatedStudioTestService['humanControl'],'toolboxPolicy'>&Partial<Pick<CreatedStudioTestService['humanControl'],'toolboxPolicy'>>;requests:Omit<CreatedStudioTestService['requests'],'capture'|'viewport'|'nativeAssets'>&Partial<Pick<CreatedStudioTestService['requests'],'capture'|'viewport'|'nativeAssets'>>};

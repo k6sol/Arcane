@@ -1,10 +1,15 @@
 /// <reference lib="dom" />
+import type {StudioTestReportSummary,StudioTestReportArchiveStatus} from '../../daemon/src/studio-test-report-store.js';
 
 export interface PlaytestPanelOptions {
   root: HTMLElement;
   token: () => string;
   isSignedIn: () => boolean;
   transport?: typeof fetch;
+  /** Explicit production opt-in; legacy facades make no history requests. */
+  reports?: boolean;
+  /** Actual project metadata and independent monotonic project/auth generations. */
+  reportContext?: () => Readonly<{projectId:string;projectEpoch:number;authEpoch:number}> | null;
   /** The composer's Playtest switch. When it returns true, a request from the managed chat that first appeared while the
    * switch was on is approved automatically through the same route and digest a click uses. Omitted or false: never. */
   autoApprove?: () => boolean;
@@ -188,7 +193,11 @@ function readJob(value: unknown): Job {
   if (!/^[A-Za-z0-9_-]+$/.test(id)) invalid();
   // Deliberately never displayed; only whether a managed chat (agent caller) asked is kept.
   const agent = /^agent-[a-f0-9]{64}$/.test(text(source.actor));
-  const targetName = text(source.targetName), displayDigest = text(source.displayDigest, 64);
+  return readPresentation(source,id,agent);
+}
+/** Actor-free display/review projection. Historical metadata never becomes a live job. */
+function readPresentation(source:Row,id:string,agent:boolean,targetLimit=256):Job {
+  const targetName = text(source.targetName,targetLimit), displayDigest = text(source.displayDigest, 64);
   if (!/^[a-f0-9]{64}$/.test(displayDigest) || source.nativeAcceptance !== false ||
       !['native', 'fixture'].includes(source.evidence as string) ||
       !['needs_approval', 'running', 'complete', 'cancelled'].includes(source.state as string)) invalid();
@@ -277,10 +286,10 @@ function readJobs(value: unknown): Job[] {
 }
 
 /** Count bytes while reading, before decoding or parsing even an error body. */
-async function readResponse(response: Response, signal: AbortSignal): Promise<unknown> {
+async function readResponse(response: Response, signal: AbortSignal, maximum=RESPONSE_BYTES): Promise<unknown> {
   const cancel = async () => { try { await response.body?.cancel(); } catch { /* Already closed. */ } };
   const length = response.headers.get('content-length');
-  if (response.redirected || (length !== null && (!/^\d+$/.test(length) || Number(length) > RESPONSE_BYTES)) ||
+  if (response.redirected || (length !== null && (!/^\d+$/.test(length) || Number(length) > maximum)) ||
       !/^application\/json(?:\s*;|$)/i.test(response.headers.get('content-type') ?? '') || !response.body) {
     await cancel(); invalid();
   }
@@ -295,7 +304,7 @@ async function readResponse(response: Response, signal: AbortSignal): Promise<un
       if (signal.aborted) invalid();
       if (part.done) break;
       size += part.value.byteLength;
-      if (size > RESPONSE_BYTES) { await reader.cancel(); invalid(); }
+      if (size > maximum) { await reader.cancel(); invalid(); }
       chunks.push(part.value);
     }
   } finally { signal.removeEventListener('abort', abort); reader.releaseLock(); }
@@ -308,12 +317,110 @@ async function readResponse(response: Response, signal: AbortSignal): Promise<un
     if (typeof code === 'string' && /^[A-Z_]{1,64}$/.test(code)) throw new PlaytestRefusal(code);
     invalid();
   }
-  return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(body)) as unknown;
+  const raw=new TextDecoder('utf-8', { fatal: true }).decode(body);
+  return maximum===RESPONSE_BYTES?JSON.parse(raw) as unknown:historyJson(raw);
 }
 function active(job: Job): boolean { return job.state === 'needs_approval' || job.state === 'running'; }
 function sameScope(left: Job, right: Job): boolean {
   return left.id === right.id && left.displayDigest === right.displayDigest && left.scope === right.scope &&
     left.targetName === right.targetName && left.evidence === right.evidence;
+}
+const HISTORY_PAGE_BYTES=32*1024,HISTORY_REPORT_BYTES=272*1024;
+function boundedHistory(value:unknown):void {
+  const pending:[unknown,number][]=[[value,0]];let count=0;
+  while(pending.length){const [item,depth]=pending.pop()!;if(++count>32768||depth>32)invalid();
+    if(typeof item==='string'){if(item.length>16384)invalid();continue;}
+    if(item===null||typeof item==='boolean'||typeof item==='number'&&Number.isFinite(item))continue;
+    if(!item||typeof item!=='object')invalid();const values=Object.values(item);
+    if(values.length>(Array.isArray(item)?256:128))invalid();for(const child of values)pending.push([child,depth+1]);}
+}
+function historyJson(raw:string):unknown {
+  const parsed:unknown=JSON.parse(raw);boundedHistory(parsed);let cursor=0,nodes=0;
+  const space=()=>{while(/[\x20\t\r\n]/.test(raw[cursor]??'!'))cursor++;};
+  const string=():string=>{const start=cursor++;while(cursor<raw.length){const c=raw[cursor++];if(c==='\\'){cursor++;continue;}if(c==='"')return JSON.parse(raw.slice(start,cursor)) as string;}return invalid();};
+  const walk=(depth:number):void=>{if(++nodes>32768||depth>32)invalid();space();const c=raw[cursor];
+    if(c==='"'){string();return;}if(c==='{'){cursor++;space();const names=new Set<string>();if(raw[cursor]==='}'){cursor++;return;}
+      for(;;){space();if(raw[cursor]!=='"')invalid();const key=string();if(names.has(key))invalid();names.add(key);space();if(raw[cursor++]!==':')invalid();walk(depth+1);space();const end=raw[cursor++];if(end==='}')return;if(end!==',')invalid();}}
+    if(c==='['){cursor++;space();if(raw[cursor]===']'){cursor++;return;}for(;;){walk(depth+1);space();const end=raw[cursor++];if(end===']')return;if(end!==',')invalid();}}
+    while(cursor<raw.length&&!/[\s,}\]]/.test(raw[cursor]!))cursor++;
+  };walk(0);space();if(cursor!==raw.length)invalid();return parsed;
+}
+const CODES=['OK','INVALID_REQUEST','BUSY','HUMAN_AUTH_REQUIRED','CONSENT_EXPIRED','BINDING_CHANGED','STALE_PROOF','PLACE_DENIED','MODE_MISMATCH','NOT_OWNED_PLAY','UNSUPPORTED_TOOL','BAD_NATIVE_RESPONSE','TIMEOUT','CANCELLED','DURATION_EXPIRED','DISCONNECTED','SHUTDOWN','EFFECT_UNKNOWN','RUNTIME_ERROR','ASSERTION_FAILED','JOURNAL_FAILED','FENCED'] as const;
+const OUTCOMES=['succeeded','failed','cancelled','timed_out','rejected'] as const,CLEANUPS=['not_started','running','complete','unknown'] as const;
+function choice<T extends string>(value:unknown,values:readonly T[]):T {if(typeof value!=='string'||!values.includes(value as T))invalid();return value as T;}
+function hash(value:unknown):string {const result=text(value,64);if(!/^[a-f0-9]{64}$/.test(result))invalid();return result;}
+function uuid(value:unknown):string {const result=text(value,36);if(!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(result))invalid();return result;}
+function timestamp(value:unknown):string {const result=text(value,64);if(!/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z$/.test(result)||!Number.isFinite(Date.parse(result)))invalid();return result;}
+function archiveStatus(value:unknown):StudioTestReportArchiveStatus {
+  const row=object(value);keys(row,['state','code']);
+  if(row.state==='ready'&&row.code===null)return{state:'ready',code:null};
+  return{state:choice(row.state,['degraded','unavailable']),code:choice(row.code,['ARCHIVE_UNAVAILABLE','ARCHIVE_WRITE','ARCHIVE_CORRUPT','ARCHIVE_LIMIT','ARCHIVE_INPUT','ARCHIVE_CONFLICT'])};
+}
+function reportSummary(value:unknown):StudioTestReportSummary {
+  const row=object(value);keys(row,['jobId','taskId','createdAt','observedAt','snapshot','targetName','observedState','outcome','code','cleanup','evidence','nativeAcceptance','historicalDigest']);
+  const createdAt=timestamp(row.createdAt),observedAt=timestamp(row.observedAt);if(Date.parse(observedAt)<Date.parse(createdAt)||row.nativeAcceptance!==false)invalid();
+  return{jobId:uuid(row.jobId),taskId:row.taskId===null?null:uuid(row.taskId),createdAt,observedAt,snapshot:choice(row.snapshot,['admission','terminal']),targetName:text(row.targetName,512),
+    observedState:choice(row.observedState,['needs_approval','running','complete','cancelled']),outcome:row.outcome===null?null:choice(row.outcome,OUTCOMES),code:choice(row.code,CODES),cleanup:choice(row.cleanup,CLEANUPS),
+    evidence:choice(row.evidence,['fixture','native']),nativeAcceptance:false,historicalDigest:hash(row.historicalDigest)};
+}
+function reportPage(value:unknown,projectId:string):{archive:StudioTestReportArchiveStatus;reports:StudioTestReportSummary[];nextCursor:string|null;omittedReports:number} {
+  boundedHistory(value);
+  const row=object(value);keys(row,['schemaVersion','projectId','archive','reports','nextCursor','omittedReports']);
+  if(row.schemaVersion!==1||row.projectId!==projectId||!Array.isArray(row.reports)||row.reports.length>8)invalid();
+  const reports=row.reports.map(reportSummary);if(new Set(reports.map(r=>r.jobId)).size!==reports.length)invalid();
+  let nextCursor:string|null=null;
+  if(row.nextCursor!==null){nextCursor=text(row.nextCursor,100);const match=/^1\.([a-f0-9]{64})\.([1-9][0-9]{0,15})$/.exec(nextCursor);
+    if(!match||match[1]!==projectId||!Number.isSafeInteger(Number(match[2])))invalid();}
+  return{archive:archiveStatus(row.archive),reports,nextCursor,omittedReports:integer(row.omittedReports)};
+}
+function canonical(value:unknown):string {
+  const copy=(v:unknown):unknown=>Array.isArray(v)?v.map(copy):v&&typeof v==='object'?Object.fromEntries(Object.entries(v).sort(([a],[b])=>a.localeCompare(b)).map(([key,child])=>[key,copy(child)])):v;
+  return JSON.stringify(copy(value));
+}
+async function digest(value:unknown):Promise<string> {
+  return [...new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(canonical(value))))].map(byte=>byte.toString(16).padStart(2,'0')).join('');
+}
+function historicalReview(value:unknown,display:Row):Row {
+  const review=object(value);keys(review,['runId','evidence','nativeAcceptance','binding','scopeDigest','phase','outcome','code','cleanup','startedAt','deadline','cleanupDeadline','watchdog','observations','logs','logsTruncated','requiresHumanReview','canStartAnotherOperation'],['scenario']);
+  if(review.runId!==null)text(review.runId,128);choice(review.evidence,['fixture','native']);if(review.nativeAcceptance!==false)invalid();
+  if(review.binding!==null&&canonical(review.binding)!==canonical(object(display.proposal).binding))invalid();if(review.scopeDigest!==null)hash(review.scopeDigest);
+  choice(review.phase,['idle','admitting','starting','observing','waiting','stopping','done']);if(review.outcome!==null)choice(review.outcome,OUTCOMES);choice(review.code,CODES);choice(review.cleanup,CLEANUPS);
+  for(const field of ['startedAt','deadline','cleanupDeadline'])if(review[field]!==null)integer(review[field]);
+  for(const field of ['logsTruncated','requiresHumanReview','canStartAnotherOperation'])if(typeof review[field]!=='boolean')invalid();
+  const proposal=object(display.proposal),duration=integer(proposal.durationMs,100,60_000),interval=integer(proposal.observationIntervalMs,25,2000),observationLimit=Math.ceil(duration/interval);
+  if(interval>duration||observationLimit>128)invalid();integer(review.observations,0,observationLimit);if(!Array.isArray(review.logs)||review.logs.length>128)invalid();
+  for(const value of review.logs){const log=object(value);keys(log,['idDigest','digest','level','bytes']);hash(log.idDigest);hash(log.digest);choice(log.level,['info','warning','error']);integer(log.bytes,0,8192);}
+  const watchdog=object(review.watchdog);keys(watchdog,['armed','fired','reason']);if(typeof watchdog.armed!=='boolean'||typeof watchdog.fired!=='boolean')invalid();if(watchdog.reason!==null)choice(watchdog.reason,CODES);
+  if(review.canStartAnotherOperation&&(review.phase!=='done'||review.requiresHumanReview||review.cleanup!=='complete')||review.outcome==='succeeded'&&review.code!=='OK')invalid();return review;
+}
+interface HistoricalView { summary:StudioTestReportSummary;job:Job;record:Row;archive:StudioTestReportArchiveStatus }
+async function historicalReport(value:unknown,projectId:string,selected:StudioTestReportSummary,check:()=>boolean):Promise<HistoricalView> {
+  boundedHistory(value);
+  const envelope=object(value);keys(envelope,['schemaVersion','projectId','archive','report','receiptScope','currentSource','readOnly']);
+  if(envelope.schemaVersion!==1||envelope.projectId!==projectId||envelope.receiptScope!=='historical-playtest'||envelope.currentSource!=='unobserved'||envelope.readOnly!==true)invalid();
+  const record=object(envelope.report);keys(record,['schemaVersion','kind','projectId','jobId','taskId','createdAt','observedAt','snapshot','targetName','observedState','display','displayDigest','review','evidence','nativeAcceptance','historicalDigest']);
+  if(record.schemaVersion!==1||record.kind!=='studio-playtest-report'||record.projectId!==projectId||new TextEncoder().encode(JSON.stringify(record)).length>256*1024)invalid();
+  const review=historicalReview(record.review,object(record.display));
+  const summary=reportSummary({jobId:record.jobId,taskId:record.taskId,createdAt:record.createdAt,observedAt:record.observedAt,snapshot:record.snapshot,targetName:record.targetName,
+    observedState:record.observedState,outcome:review.outcome,code:review.code,cleanup:review.cleanup,evidence:record.evidence,nativeAcceptance:record.nativeAcceptance,historicalDigest:record.historicalDigest});
+  if(canonical(summary)!==canonical(selected)||review.evidence!==record.evidence)invalid();
+  const display=object(record.display);keys(display,['proposal','cleanupGraceMs','requestTimeoutMs','proofMaxAgeMs','consentExpiresAt','guarantee','actions','raceDisclosure']);
+  const proposal=object(display.proposal);keys(proposal,['binding','durationMs','observationIntervalMs','failOnRuntimeError'],['scenario','subjectDigest']);
+  const binding=object(proposal.binding);keys(binding,['nativeStudioId','pairedSessionId','clientLifetimeId','pluginArtifactHash','scopeRevision','placeId']);
+  for(const key of ['nativeStudioId','pairedSessionId','clientLifetimeId'])if(!/^[A-Za-z0-9_-]{1,128}$/.test(text(binding[key],128)))invalid();
+  hash(binding.pluginArtifactHash);hash(binding.scopeRevision);integer(proposal.durationMs,100,60_000);integer(proposal.observationIntervalMs,25,2000);
+  for(const key of ['cleanupGraceMs','requestTimeoutMs','proofMaxAgeMs'])integer(display[key],1,15000);
+  if(display.raceDisclosure!=='Observed checks cannot atomically fence the native call.')invalid();
+  const job=readPresentation({targetName:record.targetName,state:record.observedState,displayDigest:record.displayDigest,display:record.display,review,evidence:record.evidence,nativeAcceptance:false},summary.jobId,false,512);
+  if(review.runId===null){if(['binding','scopeDigest','startedAt','deadline','cleanupDeadline'].some(key=>review[key]!==null))invalid();}
+  else if(review.binding===null||review.scopeDigest!==record.displayDigest||review.startedAt===null||review.deadline===null||review.cleanupDeadline===null||
+    review.deadline!==Number(review.startedAt)+Number(proposal.durationMs)||review.cleanupDeadline!==Number(review.deadline)+Number(display.cleanupGraceMs))invalid();
+  const displayDigest=hash(record.displayDigest);if(await digest(display)!==displayDigest||!check())invalid();
+  if(review.scopeDigest!==null&&review.scopeDigest!==displayDigest)invalid();
+  if(proposal.scenario!==undefined){const scenario=object(review.scenario);if(await digest(proposal.scenario)!==scenario.scenarioDigest||!check()||scenario.capture!==null&&object(scenario.capture).id!==review.runId)invalid();}
+  if(summary.snapshot==='admission'&&(summary.observedState!=='needs_approval'||review.runId!==null||review.phase!=='idle'||review.outcome!==null||review.cleanup!=='not_started'||review.observations!==0))invalid();
+  const {historicalDigest,...content}=record;if(await digest(content)!==historicalDigest||!check())invalid();
+  return{summary,job,record,archive:archiveStatus(envelope.archive)};
 }
 function status(job: Job): { label: string; danger: boolean } {
   if (job.review.cleanup === 'unknown' || job.review.requiresHumanReview) return { label: 'Needs review', danger: true };
@@ -332,6 +439,7 @@ export function startPlaytestPanel(options: PlaytestPanelOptions): PlaytestPanel
   const { root } = options, doc = root.ownerDocument, view = doc.defaultView;
   const transport = options.transport ?? globalThis.fetch;
   let stopped = false, pageHidden = false, epoch = 0, sessionToken: string | null = null;
+  let sessionReportContext:string|null=null,reportProject:string|null=null;
   let timer: ReturnType<typeof setTimeout> | undefined, nextPoll = 0, stale = false;
   let jobs: Job[] = [];
   let request: { controller: AbortController; epoch: number; promise: Promise<void> } | null = null;
@@ -356,6 +464,14 @@ export function startPlaytestPanel(options: PlaytestPanelOptions): PlaytestPanel
   repairButton.setAttribute('data-playtest-action', 'repair');
   let repairArmed = false, fenced = false;
   const feedback = node('div', undefined, 'playtest-feedback'); feedback.append(notice, repairButton, refreshButton); feedback.hidden = true;
+  const historySection=node('section',undefined,'playtest-history'),historyNotice=node('p','Saved reports are read-only. Current source is unobserved.','playtest-notice');
+  historySection.setAttribute('aria-label','Saved playtest reports');historyNotice.setAttribute('role','status');
+  const historyLoad=node('button','Load saved reports','playtest-refresh'),historyNext=node('button','Next reports','playtest-refresh');
+  historyLoad.type=historyNext.type='button';historyNext.hidden=true;
+  const historyList=node('div'),historyResult=node('div');historySection.append(node('h3','Saved playtest reports','playtest-title'),historyNotice,historyLoad,historyNext,historyList,historyResult);
+  let historyCursor:string|null=null,historyRow:JobView|null=null;
+  let removeHistoryListeners:(()=>void)[]=[];
+  const historyButtons:HTMLButtonElement[]=[];
   root.hidden = true; root.replaceChildren();
   root.setAttribute('role', 'region'); root.setAttribute('aria-label', 'Playtests'); root.setAttribute('aria-busy', 'false');
 
@@ -363,9 +479,12 @@ export function startPlaytestPanel(options: PlaytestPanelOptions): PlaytestPanel
     for (const row of rendered.values()) row.remove();
     rendered.clear(); jobs = []; root.replaceChildren(); root.hidden = true; showFence(false);
     root.setAttribute('aria-busy', 'false'); notice.textContent = ''; feedback.hidden = true; stale = false;
+    historyRow?.remove();historyRow=null;removeHistoryListeners.forEach(remove=>remove());removeHistoryListeners=[];historyButtons.length=0;
+    historyList.replaceChildren();historyResult.replaceChildren();historyCursor=null;historyNext.hidden=true;historyLoad.textContent='Load saved reports';
+    historyNotice.textContent='Saved reports are read-only. Current source is unobserved.';
   }
   function invalidate(): void {
-    epoch++; request?.controller.abort(); request = null; sessionToken = null; clearRows();
+    epoch++; request?.controller.abort(); request = null; sessionToken = null;sessionReportContext=null;reportProject=null; clearRows();
   }
   function context(): string | null {
     if (stopped || pageHidden || doc.visibilityState !== 'visible') return null;
@@ -376,8 +495,12 @@ export function startPlaytestPanel(options: PlaytestPanelOptions): PlaytestPanel
     } catch { return null; }
   }
   function syncContext(): string | null {
-    const token = context();
-    if (token !== sessionToken) { invalidate(); sessionToken = token; nextPoll = 0; }
+    let token = context(),identity:ReturnType<NonNullable<PlaytestPanelOptions['reportContext']>>=null;
+    if(options.reports===true&&token){try{identity=options.reportContext?.()??null;
+      if(!identity||!/^[a-f0-9]{64}$/.test(identity.projectId)||!Number.isSafeInteger(identity.projectEpoch)||identity.projectEpoch<0||!Number.isSafeInteger(identity.authEpoch)||identity.authEpoch<0)token=null;
+    }catch{token=null;identity=null;}}
+    const signature=token&&identity?JSON.stringify([identity.projectId,identity.projectEpoch,identity.authEpoch]):null;
+    if (token !== sessionToken||signature!==sessionReportContext) { invalidate(); sessionToken = token;sessionReportContext=signature;reportProject=token&&identity?identity.projectId:null; nextPoll = 0;if(token&&options.reports===true)render(); }
     return token;
   }
   function current(operation: NonNullable<typeof request>, token: string): boolean {
@@ -386,6 +509,7 @@ export function startPlaytestPanel(options: PlaytestPanelOptions): PlaytestPanel
   const attemptKey = (job: Job, action: string) => action + ':' + job.id + ':' + job.displayDigest;
   function busy(): void {
     root.setAttribute('aria-busy', String(request !== null)); refreshButton.disabled = request !== null; repairButton.disabled = request !== null || !fenced;
+    historyLoad.disabled=historyNext.disabled=request!==null;for(const button of historyButtons)button.disabled=request!==null;
     for (const row of rendered.values()) for (const button of row.controls) {
       const action = button.getAttribute('data-playtest-action')!;
       button.disabled = request !== null || stale || attempted.has(attemptKey(row.job, action)) ||
@@ -395,7 +519,7 @@ export function startPlaytestPanel(options: PlaytestPanelOptions): PlaytestPanel
   function message(content: string): void { notice.textContent = content; feedback.hidden = !content; }
   function showFence(on: boolean): void {
     fenced = on; repairArmed = false; repairButton.hidden = !on; repairButton.textContent = PLAYTEST_REPAIR_COPY.button;
-    if (on) { message(PLAYTEST_REPAIR_COPY.fenced); if (!root.contains(feedback)) root.replaceChildren(feedback); root.hidden = false; }
+    if (on) { message(PLAYTEST_REPAIR_COPY.fenced); if (!root.contains(feedback)) root.replaceChildren(feedback,...(reportProject?[historySection]:[])); root.hidden = false; }
   }
   function detailsFor(job: Job): HTMLDetailsElement {
     const details = node('details', undefined, 'playtest-details');
@@ -411,17 +535,18 @@ export function startPlaytestPanel(options: PlaytestPanelOptions): PlaytestPanel
     walk(job.display, 'display'); field('displayDigest', job.displayDigest);
     details.append(fields); return details;
   }
-  function makeRow(job: Job, signature: string): JobView {
+  function makeRow(job: Job, signature: string, historical?:HistoricalView): JobView {
     const element = node('article', undefined, 'playtest-row'), heading = node('h3', 'Playtest · ' + job.targetName, 'playtest-title');
     heading.tabIndex = -1;
     element.append(heading, node('p', (job.durationMs / 1000) + ' s · Local, unpublished place', 'playtest-subtitle'));
-    const state = status(job);
+    const state = historical&&historical.summary.snapshot==='admission'?{label:'Last observed · Outcome unavailable',danger:false}:status(job);
+    if(historical){heading.textContent='Saved playtest · '+job.targetName;element.append(node('p','Historical report · Read-only · Last observed '+historical.summary.observedAt+' · Current source unobserved.'));}
     if (state.label) {
       const label = node('p', state.label, state.danger ? 'playtest-status danger' : 'playtest-status');
       label.setAttribute('role', 'status'); label.setAttribute('aria-live', 'polite'); element.append(label);
     }
-    if(autoApproved.has(job.id)&&job.state!=='needs_approval')element.append(node('p','Approved automatically · Playtest is on','playtest-auto'));
-    else if(job.state==='needs_approval'&&job.agent&&firstSeenOn.get(job.id)===true&&autoOn())element.append(node('p','Playtest is on · approving automatically','playtest-auto'));
+    if(!historical&&autoApproved.has(job.id)&&job.state!=='needs_approval')element.append(node('p','Approved automatically · Playtest is on','playtest-auto'));
+    else if(!historical&&job.state==='needs_approval'&&job.agent&&firstSeenOn.get(job.id)===true&&autoOn())element.append(node('p','Playtest is on · approving automatically','playtest-auto'));
     if(job.review.outcome!==null)element.append(node('p','Result: '+job.review.outcome+' · Code: '+(job.review.code??'unavailable')+' · Cleanup: '+job.review.cleanup,'playtest-result'));
     if (job.evidence === 'fixture' || !active(job)) element.append(node('p',
       job.evidence === 'fixture' ? 'Fixture evidence · Native acceptance unverified' : 'Native evidence · Native acceptance unverified', 'playtest-evidence'));
@@ -429,7 +554,7 @@ export function startPlaytestPanel(options: PlaytestPanelOptions): PlaytestPanel
     let captureUrl:string|null=null,captureAbort:AbortController|null=null;
     if(job.review.scenario){
       const report=job.review.scenario,plan=job.scenarioPlan!;
-      if(job.state==='needs_approval'){
+      if(job.state==='needs_approval'&&!historical){
         element.append(node('p','Scenario plan · '+plan.steps.length+' '+(plan.steps.length===1?'step':'steps')+' · '+plan.runtimeBudgetMs+' ms Client execution limit.'));
         const list=node('ol');for(const step of plan.steps)list.append(node('li',step));element.append(list);
         if(plan.temporaryChanges.length){
@@ -443,6 +568,7 @@ export function startPlaytestPanel(options: PlaytestPanelOptions): PlaytestPanel
         (!active(job)?'Required Client capture: still unverified. ':'Required Client capture: unverified. ')+
         (report.capture?'The retained image has unverified context.':'Current capture support does not attest Client context.')));
       else element.append(node('p','Viewport capture: not requested.'));
+      const firstFailure=report.steps.find(step=>step.outcome==='failed');if(firstFailure)element.append(node('p','First failed step: '+String(firstFailure.id),'playtest-status danger'));
       if(report.steps.length){const list=node('ol');for(const step of report.steps){
         const expected=step.kind==='assert-gui-layout'?String(step.expected).replace(/^core-safe:(\d+)x(\d+)$/,'at least $1 x $2 GUI pixels'):
           step.kind==='assert-player-attribute'?JSON.stringify(step.expected):String(step.expected);
@@ -466,16 +592,20 @@ export function startPlaytestPanel(options: PlaytestPanelOptions): PlaytestPanel
       }element.append(list);}
       if(report.capture){
         const image=report.capture,button=node('button','View capture · Context unverified');button.type='button';
-        const click=(event:Event)=>{if(event.isTrusted!==true||button.disabled||!root.contains(element)||!sessionToken)return;button.disabled=true;const originalToken=sessionToken;captureAbort=new AbortController();const controller=captureAbort;const timeout=setTimeout(()=>controller.abort(),8000);
-          void(async()=>{try{const response=await transport('/v1/playtests/capture?id='+encodeURIComponent(job.id),{headers:{Authorization:'Bearer '+originalToken},signal:controller.signal,cache:'no-store'});
-            if(response.status!==200||response.redirected||response.headers.get('content-type')!=='image/png'||!response.body)invalid();
-            const reader=response.body.getReader(),chunks:Uint8Array[]=[];let total=0;
-            try{for(;;){const item=await reader.read();if(item.done)break;total+=item.value.byteLength;if(total>2*1024*1024)invalid();chunks.push(item.value);}}finally{await reader.cancel().catch(()=>{});reader.releaseLock();}
+        const click=(event:Event)=>{const originalToken=syncContext();if(event.isTrusted!==true||button.disabled||!root.contains(element)||!originalToken)return;button.disabled=true;const originalEpoch=epoch;captureAbort=new AbortController();const controller=captureAbort;const timeout=setTimeout(()=>controller.abort(),8000);
+          const sameContext=()=>syncContext()===originalToken&&epoch===originalEpoch&&root.contains(element);
+          const captured=()=>sameContext()&&!controller.signal.aborted;
+          void(async()=>{try{const response=await transport((historical?'/v1/playtests/history/capture?id=':'/v1/playtests/capture?id=')+encodeURIComponent(job.id),{method:'GET',headers:{Authorization:'Bearer '+originalToken},signal:controller.signal,credentials:'same-origin',redirect:'error',cache:'no-store'});
+            if(!captured()){await response.body?.cancel();invalid();}
+            const length=response.headers.get('content-length');
+            if(response.status!==200||response.redirected||response.headers.get('content-type')!=='image/png'||!response.body||length!==null&&(!/^\d+$/.test(length)||Number(length)>2*1024*1024)){try{await response.body?.cancel();}catch{/* Closed. */}invalid();}
+            const reader=response.body.getReader(),chunks:Uint8Array[]=[];let total=0;const abort=()=>{void reader.cancel().catch(()=>{});};controller.signal.addEventListener('abort',abort,{once:true});
+            try{for(;;){const item=await reader.read();if(!captured())invalid();if(item.done)break;total+=item.value.byteLength;if(total>2*1024*1024)invalid();chunks.push(item.value);}}finally{controller.signal.removeEventListener('abort',abort);await reader.cancel().catch(()=>{});reader.releaseLock();}
             const bytes=new Uint8Array(total);let offset=0;for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.length;}
             const hash=[...new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))].map(value=>value.toString(16).padStart(2,'0')).join('');
-            if(total!==image.bytes||hash!==image.sha256||stopped||pageHidden||sessionToken!==originalToken||!root.contains(element)||controller.signal.aborted)invalid();
+            if(total!==image.bytes||hash!==image.sha256||!captured())invalid();
             captureUrl=URL.createObjectURL(new Blob([bytes],{type:'image/png'}));const preview=node('img');preview.src=captureUrl;preview.alt='Gameplay scenario viewport capture';preview.style.maxWidth='100%';element.append(preview);
-          }catch{if(!stopped&&root.contains(element))message('Capture unavailable. Refresh this test’s status to inspect its retained evidence.');}finally{clearTimeout(timeout);captureAbort=null;}})();};
+          }catch{if(sameContext())message(historical?'Capture unavailable. Open this saved report again to inspect its retained evidence.':'Capture unavailable. Refresh this test’s status to inspect its retained evidence.');}finally{clearTimeout(timeout);captureAbort=null;}})();};
         button.addEventListener('click',click);listeners.push(()=>button.removeEventListener('click',click));element.append(button);
       }
     }
@@ -489,9 +619,9 @@ export function startPlaytestPanel(options: PlaytestPanelOptions): PlaytestPanel
       button.addEventListener('click', click); listeners.push(() => button.removeEventListener('click', click));
       controls.push(button); element.append(button);
     }
-    if (job.state === 'needs_approval') button('Run test', 'approve');
-    if (active(job)) button(job.state === 'running' ? 'Stop' : 'Cancel', 'cancel');
-    const details = detailsFor(job); element.append(details);
+    if (!historical&&job.state === 'needs_approval') button('Run test', 'approve');
+    if (!historical&&active(job)) button(job.state === 'running' ? 'Stop' : 'Cancel', 'cancel');
+    const details = detailsFor(job);if(historical){details.children[0]!.textContent='Report details';details.children[1]!.textContent='Recorded permission display and actual observed review. Read-only; this grants no current test permission.';details.append(node('pre',JSON.stringify(historical.record,null,2)));} element.append(details);
     return { job, signature, element, heading, details, controls, remove() { captureAbort?.abort();if(captureUrl)URL.revokeObjectURL(captureUrl);listeners.forEach(remove => remove()); } };
   }
   function render(): void {
@@ -499,7 +629,8 @@ export function startPlaytestPanel(options: PlaytestPanelOptions): PlaytestPanel
     const focused = doc.activeElement as HTMLElement | null;
     const focusedRow = [...rendered.values()].find(row => focused && row.element.contains(focused));
     const focusedAction = focused?.getAttribute('data-playtest-action');
-    let changed = root.children.length !== selected.length + 1;
+    const historyVisible=options.reports===true&&reportProject!==null;
+    let changed = root.children.length !== selected.length + 1+(historyVisible?1:0);
     const next = new Map<string, JobView>();
     for (const job of selected) {
       const signature = JSON.stringify([job.id, job.targetName, job.state, job.scope, job.displayDigest, job.evidence, status(job),job.review,autoApproved.has(job.id),autoOn()]);
@@ -516,7 +647,7 @@ export function startPlaytestPanel(options: PlaytestPanelOptions): PlaytestPanel
     if (order.some((id, index) => [...rendered.keys()][index] !== id)) changed = true;
     rendered.clear(); for (const [id, row] of next) rendered.set(id, row);
     if (changed) {
-      root.replaceChildren(feedback, ...[...rendered.values()].map(row => row.element));
+      root.replaceChildren(feedback, ...[...rendered.values()].map(row => row.element),...(historyVisible?[historySection]:[]));
       if (focusedRow && focused) {
         const replacement = rendered.get(focusedRow.job.id);
         if (root.contains(focused)) focused.focus();
@@ -526,11 +657,11 @@ export function startPlaytestPanel(options: PlaytestPanelOptions): PlaytestPanel
         }
       }
     }
-    root.hidden = selected.length === 0 && !fenced; busy();
+    root.hidden = selected.length === 0 && !fenced&&!historyVisible; busy();
   }
 
   function run(token: string, method: 'GET' | 'POST', path: string, body: Row | undefined,
-    accept: (value: unknown) => void, failure: (error?: unknown) => void, after?: () => void): Promise<void> {
+    accept: (value: unknown,current:()=>boolean) => void|Promise<void>, failure: (error?: unknown) => void, after?: () => void,maximum=RESPONSE_BYTES): Promise<void> {
     const controller = new AbortController();
     const operation = { controller, epoch, promise: Promise.resolve() };
     request = operation; nextPoll = Date.now() + POLL_MS; busy();
@@ -552,9 +683,9 @@ export function startPlaytestPanel(options: PlaytestPanelOptions): PlaytestPanel
           ...(body ? { body: JSON.stringify(body) } : {}),
         }).then(async response => {
           if (controller.signal.aborted) { try { await response.body?.cancel(); } catch { /* Closed. */ } invalid(); }
-          return readResponse(response, controller.signal);
+          return readResponse(response, controller.signal,maximum);
         }), aborted]);
-        if (current(operation, token)) accept(response);
+        if (current(operation, token)) await accept(response,()=>current(operation,token));
       } catch (error) {
         // A deadline is reportable; an invalidated generation has no UI authority.
         if (syncContext() === token && request === operation && epoch === operation.epoch) failure(error);
@@ -567,6 +698,35 @@ export function startPlaytestPanel(options: PlaytestPanelOptions): PlaytestPanel
     })();
     return operation.promise;
   }
+  function showHistorical(selected:StudioTestReportSummary):Promise<void> {
+    const token=syncContext(),project=reportProject,generation=epoch;
+    if(!token||!project||request||options.reports!==true)return Promise.resolve();
+    return run(token,'GET','/v1/playtests/history/report?id='+encodeURIComponent(selected.jobId),undefined,async(value,readCurrent)=>{
+      const valid=()=>readCurrent()&&syncContext()===token&&epoch===generation&&reportProject===project;
+      const report=await historicalReport(value,project,selected,valid);if(!valid())return;
+      historyRow?.remove();historyRow=makeRow(report.job,report.summary.historicalDigest,report);
+      historyResult.replaceChildren(historyRow.element);historyRow.heading.focus();
+    },()=>{historyNotice.textContent='Saved report unavailable. Load the latest reports to check again.';},undefined,HISTORY_REPORT_BYTES);
+  }
+  function loadHistory(cursor:string|null):Promise<void> {
+    const token=syncContext(),project=reportProject;
+    if(!token||!project||request||options.reports!==true)return Promise.resolve();
+    return run(token,'GET','/v1/playtests/history'+(cursor?'?cursor='+encodeURIComponent(cursor):''),undefined,value=>{
+      const page=reportPage(value,project);historyCursor=page.nextCursor;historyNext.hidden=historyCursor===null;historyLoad.textContent='Latest reports';
+      historyRow?.remove();historyRow=null;historyResult.replaceChildren();removeHistoryListeners.forEach(remove=>remove());removeHistoryListeners=[];historyButtons.length=0;historyList.replaceChildren();
+      historyNotice.textContent='Saved reports are read-only. Current source is unobserved. Archive '+page.archive.state+(page.archive.code?' · '+page.archive.code:'')+'.'+
+        (page.omittedReports?' '+page.omittedReports+' earlier reports omitted by retention.':'')+(!page.reports.length?' No saved reports on this page.':'');
+      for(const summary of page.reports){
+        const row=node('article',undefined,'playtest-row'),open=node('button','Open report · '+summary.targetName,'playtest-refresh');open.type='button';
+        row.append(open,node('p',summary.observedAt+' · '+(summary.snapshot==='admission'?'Last observed · Outcome unavailable':(summary.outcome??'Outcome unavailable')+' · '+summary.code+' · Cleanup '+summary.cleanup)));
+        const click=(event:Event)=>{if(event.isTrusted===true&&!open.disabled&&root.contains(open))void showHistorical(summary);};
+        open.addEventListener('click',click);removeHistoryListeners.push(()=>open.removeEventListener('click',click));historyButtons.push(open);historyList.append(row);
+      }
+    },()=>{historyNotice.textContent='Saved reports unavailable. Try loading the latest reports again.';},undefined,HISTORY_PAGE_BYTES);
+  }
+  const historyLoadClick=(event:Event)=>{if(event.isTrusted===true&&!historyLoad.disabled&&root.contains(historyLoad))void loadHistory(null);};
+  const historyNextClick=(event:Event)=>{if(event.isTrusted===true&&!historyNext.disabled&&root.contains(historyNext)&&historyCursor)void loadHistory(historyCursor);};
+  historyLoad.addEventListener('click',historyLoadClick);historyNext.addEventListener('click',historyNextClick);
   function refresh(): Promise<void> {
     const token = syncContext();
     if (!token) return Promise.resolve();
@@ -577,7 +737,7 @@ export function startPlaytestPanel(options: PlaytestPanelOptions): PlaytestPanel
       render();
     }, error => {
       if (error instanceof PlaytestRefusal && error.code === 'FENCED') { stale = false; showFence(true); busy(); return; }
-      stale = true; message('Couldn’t refresh test status. Refresh status to check again.'); busy();
+      stale = true; message('Couldn’t refresh test status. Refresh status to check again.'); render();
     });
   }
   /** The person's repair: moves the earlier journal aside (kept, never deleted) and restarts playtests. */
@@ -655,7 +815,7 @@ export function startPlaytestPanel(options: PlaytestPanelOptions): PlaytestPanel
       stopped = true; if (timer !== undefined) clearTimeout(timer); timer = undefined;
       doc.removeEventListener('visibilitychange', visibility);
       view?.removeEventListener('pagehide', hide); view?.removeEventListener('pageshow', show);
-      refreshButton.removeEventListener('click', refreshClick); repairButton.removeEventListener('click', repairClick); invalidate(); attempted.clear(); firstSeenOn.clear(); autoApproved.clear();
+      refreshButton.removeEventListener('click', refreshClick); repairButton.removeEventListener('click', repairClick);historyLoad.removeEventListener('click',historyLoadClick);historyNext.removeEventListener('click',historyNextClick); invalidate(); attempted.clear(); firstSeenOn.clear(); autoApproved.clear();
     },
   };
 }

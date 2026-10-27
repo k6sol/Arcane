@@ -18,6 +18,9 @@ import { createServer, type IncomingMessage, type OutgoingHttpHeaders, type Serv
 import { randomBytes, timingSafeEqual, createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { openStudioTestReportStore, StudioTestReportError, type StudioTestReportStore, type StudioTestReportArchiveStatus } from './studio-test-report-store.js';
+import { studioTestReportRoutes, type StudioTestReportRouteStore } from './studio-test-report-routes.js';
+import { readStudioTestCapture } from './studio-test-captures.js';
 import { TestLedger } from '../../../packages/studio-test-controller/src/ledger.js';
 import { ArcaneError, type Connection, type Selection } from '../../../packages/protocol/src/providers.js';
 import { validateSelection, SelectionStore } from '../../../packages/core/src/selection.js';
@@ -153,6 +156,11 @@ export async function createConnectionLab(options: Options) {
   let ownedSourceVerifier: ScriptSourceVerifier | null = null;
   let ownedTests = null as StudioTestService | null; // assigned inside openOwnedTests
   let testApi: ReturnType<typeof studioTestRoutes> | null = null;
+  let testHistoryApi: ReturnType<typeof studioTestReportRoutes> | null = null;
+  let testReports: StudioTestReportStore | null = null;
+  // A report read belongs to this daemon incarnation. Shutdown invalidates every
+  // captured read before any owned resource closes; the epoch is never reused.
+  let testHistoryEpoch = 0;
   // Playtest journal repair (human only): set when the owned service is fenced by retained records.
   let testsFenced = false, repairingTests = false;
   let openOwnedTests: (() => Promise<boolean>) | null = null, exclusiveTestWriter: (() => boolean) | null = null;
@@ -227,6 +235,44 @@ export async function createConnectionLab(options: Options) {
       // Only this daemon can write the journal when its StudioStore holds the project's exclusive
       // workspace lock and the playtest state lives inside that project directory.
       exclusiveTestWriter=()=>studioStore.holdsWorkspaceLock(dirname(options.stateDirectory));
+      const testProjectId=workflowProjectIdentity(options.projectPath??options.cwd).projectId;
+      const archiveUnavailable=Object.freeze({state:'unavailable',code:'ARCHIVE_UNAVAILABLE'} as const);
+      try {
+        testReports=await openStudioTestReportStore({directory:join(options.stateDirectory,'playtest-reports'),
+          projectId:testProjectId,exclusiveWriter:exclusiveTestWriter});
+      } catch {
+        stateWarnings.push('Saved playtest reports are unavailable; the original records have been retained.');
+      }
+      // Keep authenticated historical reads independent of the live safety
+      // ledger. An unavailable archive is explicit, never a fabricated report.
+      const historyStore:StudioTestReportRouteStore=testReports??Object.freeze({
+        projectId:testProjectId,status:()=>archiveUnavailable,
+        list:(input:unknown,guard:()=>void)=>{guard();
+          if(!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).length!==1||
+            !Object.hasOwn(input,'cursor')||(input as {cursor:unknown}).cursor!==null)throw new StudioTestReportError('ARCHIVE_UNAVAILABLE');
+          return Object.freeze({schemaVersion:1 as const,projectId:testProjectId,
+          archive:archiveUnavailable,reports:Object.freeze([]),nextCursor:null,omittedReports:0});},
+        get:(_jobId:string,guard:()=>void)=>{guard();throw new StudioTestReportError('ARCHIVE_UNAVAILABLE');},
+        captureDescriptor:(_jobId:string,guard:()=>void)=>{guard();throw new StudioTestReportError('ARCHIVE_UNAVAILABLE');},
+      });
+      const archiveStatus=():StudioTestReportArchiveStatus=>{
+        const retained=historyStore.status();
+        if(retained.state!=='ready')return retained;
+        const live=ownedTests??options.studioTestService;
+        // A fenced live ledger does not make previously retained reports
+        // unavailable. Any independently observed archive fault stays visible.
+        return live?.reportArchiveStatus?.()??retained;
+      };
+      testHistoryApi=studioTestReportRoutes(historyStore,resolveTestActor,{
+        captureScope:()=>{
+          const capturedEpoch=testHistoryEpoch;
+          return Object.freeze({projectId:testProjectId,assertCurrent:()=>{
+            if(shuttingDown||capturedEpoch!==testHistoryEpoch)throw new StudioTestReportError('ARCHIVE_UNAVAILABLE');
+          }});
+        },
+        readCapture:(image,guard)=>readStudioTestCapture(join(options.stateDirectory,'playtests'),image,guard),
+        archiveStatus,
+      });
       const attach=(tests:StudioTestService)=>{
         testApi=studioTestRoutes(tests,resolveTestActor);
         if(codex?.playtestTasks&&tests.cancelExact&&tests.revalidateExact)codex.attachPlaytestCancellation?.(Object.freeze({cancelExact:tests.cancelExact,revalidateExact:tests.revalidateExact}));
@@ -244,6 +290,7 @@ export async function createConnectionLab(options: Options) {
           unavailableCode='FENCED';
           ownedTests=await createStudioTestService({directory:join(options.stateDirectory,'playtests'),store:studioStore,pluginArtifactHash,
             exclusiveWriter:exclusiveTestWriter!,
+            ...(testReports?{reports:testReports}:{}),
             ...(options.studioTestConnect?{connect:options.studioTestConnect}:{}),
             ...(codex?.playtestTasks?{taskPort:codex.playtestTasks}:{})});
           testsFenced=false;attach(ownedTests);return true;
@@ -299,10 +346,12 @@ export async function createConnectionLab(options: Options) {
   } catch (error) {
     // Initialization failure must close every owned resource, without closing
     // the launcher's borrowed WorkStore or masking the original failure.
+    testHistoryEpoch++;
     fenceTasks();
     humanAssetSelection.close(); appAssets?.close(); handoffs?.close(); nativeAssetRegistry?.close(); scriptSync?.close();
     ownedSourceVerifier?.dispose();
     try { await ownedTests?.lifecycle.close(); } catch { /* Preserve original failure/fence. */ }
+    try { testReports?.close(); } catch { /* Preserve original failure. */ }
     try { modelReviews?.close(); } catch { /* Preserve original failure. */ }
     try { workflow?.close(); } catch { /* Preserve original failure. */ }
     try { if (ownsAssociations) associations?.close(); } catch { /* Preserve original failure. */ }
@@ -455,6 +504,7 @@ export async function createConnectionLab(options: Options) {
       if(meshKeep&&await meshKeep.handle(request,response,url,token,origin))return;
       if(imports&&await imports.handle(request,response,url,token,origin))return;
       if(url.pathname==='/v1/playtests/repair'&&await repairPlaytestRecords(request,response))return;
+      if(testHistoryApi&&await testHistoryApi(request,response,url,origin))return;
       if(testApi&&await testApi(request,response,url,origin))return;
       if(handoffs&&await handoffs.handle(request,response,url,token,origin))return;
       if(workflowApi&&await workflowApi(request,response,url,token,origin,agentToken))return;
@@ -499,10 +549,12 @@ export async function createConnectionLab(options: Options) {
   server.requestTimeout = 15000; server.headersTimeout = 10000; server.maxConnections = 32;
   try { await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(options.port ?? 0, '127.0.0.1', resolve); }); }
   catch (error) {
+    testHistoryEpoch++;
     fenceTasks();
     humanAssetSelection.close(); appAssets?.close(); handoffs?.close(); nativeAssetRegistry?.close(); scriptSync?.close();
     ownedSourceVerifier?.dispose();
     try { await ownedTests?.lifecycle.close(); } catch { /* Preserve listener failure/fence. */ }
+    try { testReports?.close(); } catch { /* Preserve listener failure. */ }
     try { modelReviews?.close(); } catch { /* Preserve listener failure. */ }
     try { workflow?.close(); } catch { /* Preserve listener failure. */ }
     try { if (ownsAssociations) associations?.close(); } catch { /* Preserve listener failure. */ }
@@ -517,7 +569,7 @@ export async function createConnectionLab(options: Options) {
     server, origin, token, agentToken, url: origin + (bridge ? '/studio#' : '/#') + token, meshKeep, imports, appAssets,
     close(): Promise<void> {
       if (cleanup) return cleanup;
-      shuttingDown = true; humanAssetSelection.close(); appAssets?.close(); const fenceErrors = fenceTasks(); handoffs?.close(); nativeAssetRegistry?.close(); ownedSourceVerifier?.dispose(); scriptSync?.close();
+      shuttingDown = true; testHistoryEpoch++; humanAssetSelection.close(); appAssets?.close(); const fenceErrors = fenceTasks(); handoffs?.close(); nativeAssetRegistry?.close(); ownedSourceVerifier?.dispose(); scriptSync?.close();
       cleanup = (async () => {
         // Quiesce the listener first; all cleanup paths still run on failure.
         const listenerClosed = new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
@@ -525,6 +577,7 @@ export async function createConnectionLab(options: Options) {
         server.closeAllConnections();
         const errors: unknown[] = [...fenceErrors];
         try { await ownedTests?.lifecycle.close(); } catch (error) { errors.push(error); }
+        try { testReports?.close(); } catch (error) { errors.push(error); }
         try { modelReviews?.close(); } catch (error) { errors.push(error); }
         try { await workflow?.closeAsync(); } catch (error) { errors.push(error); }
         try { if (ownsAssociations) associations?.close(); } catch (error) { errors.push(error); }
