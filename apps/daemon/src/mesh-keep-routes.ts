@@ -25,7 +25,7 @@ import { z } from 'zod';
 import { atomicAssetJson } from '../../../packages/asset-pipeline/src/atomic-json.js';
 import { noLinks, readRegularFile } from '../../../packages/asset-pipeline/src/paths.js';
 import { ArcaneError } from '../../../packages/protocol/src/providers.js';
-import { studioUploadContextObservation, type StudioCommand, type StudioSession, type Json } from '../../../packages/protocol/src/studio.js';
+import { object, studioUploadContextObservation, type StudioCommand, type StudioSession, type Json } from '../../../packages/protocol/src/studio.js';
 import { meshKeepName, validateMeshKeepReceipt, snapshotConvertedMeshKeepObservation, type ConvertedMeshKeepObservation, type ConvertedMeshKeepExpected, type MeshKeepReceipt } from '../../../packages/core/src/mesh-keep-policy.js';
 import {inspectConvertedStudioImportTransfer} from '../../../packages/asset-pipeline/src/studio-import-transfer.js';
 import type { StudioStore } from '../../../packages/storage/src/studio-store.js';

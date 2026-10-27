@@ -29,7 +29,7 @@ function sessionStamp(session:StudioSession):string {
     artifact:session.proof?.pluginArtifactHash,lifetime:session.proof?.clientLifetimeId,marker:session.proof?.markerName,epoch:session.proof?.playEpoch,mode:session.proof?.mode});
 }
 function admitted(entry:Entry):ConvertedStudioImportBaselineV2 {if(!entry.baseline)fail('STUDIO_IMPORT_OBSERVATION');return entry.baseline;}
-function withoutObservationId(value:StudioImportObservationReceipt):unknown {const {observationId,...state}=value;return state;}
+function withoutObservationId(value:ConvertedStudioImportBaselineV2['receipt']['observation']):unknown {const {observationId,...state}=value;return state;}
 
 /** Private, process-local custody. Durable journals discover historical source;
  * only a new authenticated queue read observes current private plugin resources. */

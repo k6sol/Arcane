@@ -165,12 +165,12 @@ test('complete observed v2 node mappings support exact reuse and preserve author
 });
 
 test('live converted session baselines retain actual nullable mesh IDs without inventing a cloud Model ID',async()=>{
-  const first=await converted(hostFixture().host()),next=hostFixture().host(NEXT);next.baseline=baseline(first,true);const p=await converted(next);
+  const first=await converted(hostFixture().host()),next=hostFixture().host(NEXT);const observed=baseline(first,true);next.baseline=observed;const p=await converted(next);
   assert.equal(p.delta.modelAssetId,null);assert.equal(p.delta.modelRef,'model-root');assert.ok(p.delta.objects.every(object=>object.action==='reuse'&&object.meshAssetId===null));
-  assert.deepEqual(p.delta.observation,next.baseline.receipt);assert.deepEqual(snapshotConvertedStudioImportBaseline(next.baseline),next.baseline);
+  assert.deepEqual(p.delta.observation,observed.receipt);assert.deepEqual(snapshotConvertedStudioImportBaseline(next.baseline),next.baseline);
   assert.deepEqual(parseNativeStudioImportResponse({prepared:p},NEXT,next.projectId).prepared,p);
-  const bad={...next.baseline,receipt:{...next.baseline.receipt,receiptSha256:sha('forged receipt checksum')}};assert.throws(()=>snapshotConvertedStudioImportBaseline(bad),refused);
-  assert.throws(()=>snapshotConvertedStudioImportBaseline({...next.baseline,receipt:{...next.baseline.receipt,modelAssetId:'999'}}),refused,'A mesh upload cannot acquire a fictitious Model asset ID through baseline metadata.');
+  const bad={...observed,receipt:{...observed.receipt,receiptSha256:sha('forged receipt checksum')}};assert.throws(()=>snapshotConvertedStudioImportBaseline(bad),refused);
+  assert.throws(()=>snapshotConvertedStudioImportBaseline({...observed,receipt:{...observed.receipt,modelAssetId:'999'}}),refused,'A mesh upload cannot acquire a fictitious Model asset ID through baseline metadata.');
 });
 
 test('actual EMPTY name and inherited tiny transform edits update affected nodes and cannot reuse the prior sealed graph',async()=>{
