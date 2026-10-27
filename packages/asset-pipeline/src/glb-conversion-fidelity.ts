@@ -6,6 +6,8 @@ import { parseConvertedGlbRequest, parseConvertedGlbSourceMap, parseConvertedGlb
   type ConvertedGlbRequest, type ConvertedGlbSourceMap, type ConvertedGlbAudit, GLB_CONVERSION_LIMITS } from './converted-glb.js';
 import { AssetError } from './types.js';
 import { prepareGlbConversionSource } from './glb-conversion-source.js';
+import { CONVERSION_NODE_KEY, CONVERSION_VERTEX_ID, compareConversionTransforms, compareConversionPrimitive } from './conversion-fidelity-policy.js';
+import { decodeMaterialPng } from './material-png.js';
 
 type Doc = Record<string, any>;
 const sha = (value: string | Uint8Array) => createHash('sha256').update(value).digest('hex');
@@ -71,17 +73,18 @@ function worldMatrices(doc: Doc): Map<number, number[]> {
   }
   return world;
 }
-function hierarchy(doc: Doc): string {
-  const roots:number[]=doc.scenes[doc.scene??0].nodes??[],hashes=new Map<number,string>();
-  const stack=roots.map(index=>({index,finish:false}));
-  while(stack.length){
-    const {index,finish}=stack.pop()!,node=doc.nodes[index];
-    if(!finish){stack.push({index,finish:true});for(const child of node.children??[])stack.push({index:child,finish:false});continue;}
-    const local=node.matrix??matrixFromTrs(node.translation,node.rotation,node.scale);
-    hashes.set(index,sha(canonical({matrix:local.map(conversionMillionths),originMarker:node.extras?.arcane_conversion_origin_v1??null,
-      children:(node.children??[]).map((child:number)=>hashes.get(child)!).sort()})));
-  }
-  return sha(canonical(roots.map(index=>hashes.get(index)!).sort()));
+function verifyHierarchy(doc: Doc, map: ConvertedGlbSourceMap): void {
+  if (doc.nodes.length !== map.nodes.length || worldMatrices(doc).size !== map.nodes.length) refused('Conversion lost or introduced a selected hierarchy node.');
+  const expected = new Map(map.nodes.map(node => [node.nodeKey, node])), parents = new Map<number, number>(), found = new Set<string>();
+  doc.nodes.forEach((node: Doc, index: number) => { for (const child of node.children ?? []) parents.set(child, index); });
+  doc.nodes.forEach((node: Doc, index: number) => {
+    const key = node.extras?.[CONVERSION_NODE_KEY], binding = expected.get(key);
+    if (typeof key !== 'string' || !binding || found.has(key)) refused('Conversion lost unique host-owned hierarchy correspondence.');
+    found.add(key);
+    const parent = parents.has(index) ? doc.nodes[parents.get(index)!].extras?.[CONVERSION_NODE_KEY] : null;
+    if (parent !== binding.parentKey || (node.mesh !== undefined) !== map.parts.some(part => part.sourceKey === key)) refused('Conversion changed a selected parent or mesh-node relationship.');
+    compareConversionTransforms(binding.localMatrix, node.matrix ?? matrixFromTrs(node.translation, node.rotation, node.scale));
+  });
 }
 function triangles(primitive: Doc, read: (index:number)=>number[][]): number[][] {
   const values=primitive.indices===undefined?Array.from({length:read(primitive.attributes.POSITION).length},(_,i)=>i):read(primitive.indices).map(row=>row[0]!);
@@ -95,7 +98,7 @@ function triangles(primitive: Doc, read: (index:number)=>number[][]): number[][]
 }
 const semantic = /^(POSITION|NORMAL|TANGENT|TEXCOORD_[0-7]|COLOR_[0-7])$/;
 function geometry(primitive: Doc, world: number[], read: (index:number)=>number[][], required?: string[]): {hash:string;semantics:string[];triangles:number} {
-  const names=Object.keys(primitive.attributes).sort();
+  const names=Object.keys(primitive.attributes).filter(name => name !== CONVERSION_VERTEX_ID).sort();
   if(names.some(name=>!semantic.test(name)))refused('Source contains a semantic requiring an explicit faithful converter.');
   if(required && (required.some(name=>!names.includes(name)) || names.some(name=>!required.includes(name)&&name!=='NORMAL'&&name!=='TANGENT')))
     refused('Conversion lost or substituted a source attribute.');
@@ -125,7 +128,7 @@ function geometry(primitive: Doc, world: number[], read: (index:number)=>number[
   }).sort();
   return {hash:sha(canonical(rows)),semantics:selected,triangles:rows.length};
 }
-function materialFingerprint(doc: Doc, bin: Buffer, materialIndex: number | undefined): string {
+function materialFingerprint(doc: Doc, bin: Buffer, materialIndex: number | undefined, images: Map<string, unknown>): string {
   const material=structuredClone(materialIndex===undefined?{}:doc.materials[materialIndex]),pbr=material.pbrMetallicRoughness??{};
   material.alphaMode??='OPAQUE';material.doubleSided??=false;material.emissiveFactor??=[0,0,0];
   if(material.alphaMode==='MASK')material.alphaCutoff??=0.5;else delete material.alphaCutoff;
@@ -138,12 +141,23 @@ function materialFingerprint(doc: Doc, bin: Buffer, materialIndex: number | unde
       const texture=doc.textures[value.index],image=doc.images[texture.source],view=doc.bufferViews[image?.bufferView];
       if(!view||image.uri!==undefined||texture.extensions)refused('Image preservation needs an explicit bounded decoder for this source representation.');
       const sampler=doc.samplers?.[texture.sampler]??{};
-      // Exact embedded bytes preserve JPEG/PNG pixels without pretending a new
-      // codec/re-encode has been verified. A changed encoding is refused below.
-      const imageHash=sha(bin.subarray(view.byteOffset??0,(view.byteOffset??0)+view.byteLength));
+      const encoded=bin.subarray(view.byteOffset??0,(view.byteOffset??0)+view.byteLength);
+      const encodedSha256=sha(encoded),cacheKey=image.mimeType+':'+encodedSha256;
+      let imageIdentity: unknown=images.get(cacheKey);
+      // Independent bounded decoding proves lossless PNG re-encoding from the
+      // actual source/export files. JPEG and unsupported PNG retain byte equality.
+      if(imageIdentity===undefined){
+        if(images.size>=512)refused('Conversion image comparison exceeds its bounded inventory.');
+        imageIdentity={encodedSha256,mimeType:image.mimeType};
+        if(image.mimeType==='image/png')try{
+          const decoded=decodeMaterialPng(encoded);
+          imageIdentity={width:decoded.width,height:decoded.height,rgbaSha256:decoded.rgbaSha256};
+        }catch{ /* Unsupported encodings still require their original exact bytes. */ }
+        images.set(cacheKey,imageIdentity);
+      }
       const {index:_index,...rest}=value;rest.texCoord??=0;
       if(field==='normalTexture')rest.scale??=1;if(field==='occlusionTexture')rest.strength??=1;
-      return {imageSha256:imageHash,mimeType:image.mimeType,sampler:{wrapS:sampler.wrapS??10497,wrapT:sampler.wrapT??10497,
+      return {image:imageIdentity,sampler:{wrapS:sampler.wrapS??10497,wrapT:sampler.wrapT??10497,
         magFilter:sampler.magFilter??null,minFilter:sampler.minFilter??null},info:clean(rest,'')};
     }
     return Object.fromEntries(Object.keys(value).filter(key=>key!=='name'&&key!=='extras').sort().map(key=>[key,clean(value[key],key)]));
@@ -163,9 +177,10 @@ export function verifyGlbConversionFidelity(sourceBytes: Buffer, renderedBytes: 
   if((source.doc.scene??0)!==map.sourceSceneIndex||source.doc.scenes.length!==map.declaredSceneCount)refused('Conversion source scene lineage changed.');
   const marked=prepareGlbConversionSource(sourceBytes,r.sourceSha256);
   if(marked.importSha256!==r.importSha256||marked.importBytes.length!==r.importBytes||!isDeepStrictEqual(marked.parts,map.parts))refused('Conversion marked input or primitive map differs from the actual original source.');
-  const markedJsonBytes=marked.importBytes.readUInt32LE(12),markedDoc=JSON.parse(marked.importBytes.subarray(20,20+markedJsonBytes).toString('utf8')) as Doc;
-  if(hierarchy(markedDoc)!==hierarchy(exported.doc))refused('Conversion flattened or changed the selected source hierarchy.');
+  if(!isDeepStrictEqual(marked.nodes,map.nodes))refused('Conversion hierarchy map differs from independently regenerated original nodes.');
+  verifyHierarchy(exported.doc,map);
   const sourceWorld=worldMatrices(source.doc),exportWorld=worldMatrices(exported.doc),readSource=reader(source.doc,source.bin),readExport=reader(exported.doc,exported.bin);
+  const imageComparisons=new Map<string,unknown>();
   if(exported.doc.nodes.filter((node:Doc)=>node.mesh!==undefined).length!==map.parts.length)refused('Export includes unmapped mesh nodes.');
   return Object.freeze(map.parts.map(part=>{
     const node=source.doc.nodes[part.sourceNodeIndex],primitive=source.doc.meshes[part.sourceMeshIndex]?.primitives[part.sourcePrimitiveIndex];
@@ -173,14 +188,20 @@ export function verifyGlbConversionFidelity(sourceBytes: Buffer, renderedBytes: 
     const object=model.objects.find(object=>object.sourceKey===part.sourceKey)!,out=exported.doc.nodes[object.nodeIndex],extra=out?.extras;
     if(!extra||out.mesh===undefined||extra.arcane_identity_scheme!==audit.identityScheme||extra.arcane_source_object_id!==object.sourceObjectId||
       extra.arcane_source_key!==part.sourceKey||extra.arcane_conversion_origin_v1!==part.originMarker||extra.arcane_role!=='render'||
-      !isDeepStrictEqual(extra.arcane_pivot,[0,0,0])||extra.arcane_collision_for!=='[]')refused('Actual export lost mapped producer lineage.');
+      extra[CONVERSION_NODE_KEY]!==part.sourceKey||!isDeepStrictEqual(extra.arcane_pivot,[0,0,0])||extra.arcane_collision_for!=='[]')refused('Actual export lost mapped producer lineage.');
     const meshes=exported.doc.meshes[out.mesh].primitives;if(meshes.length!==1)refused('Actual export has ambiguous material primitive correspondence.');
     const before=geometry(primitive,part.worldMatrix,readSource),world=exportWorld.get(object.nodeIndex);
     if(!world)refused('Mapped export is outside the selected scene.');
     const after=geometry(meshes[0],world,readExport,before.semantics);
-    if(before.triangles!==part.triangles||before.hash!==after.hash)refused('Conversion changed actual source triangle corners, winding, transforms or attributes.');
-    const sourceMaterial=materialFingerprint(source.doc,source.bin,primitive.material),outputMaterial=materialFingerprint(exported.doc,exported.bin,meshes[0].material);
-    if(sourceMaterial!==outputMaterial)refused('Conversion changed a material, texture binding, image encoding or sampler without independent pixel-preservation evidence.');
-    return Object.freeze({sourceKey:part.sourceKey,geometrySha256:before.hash,materialSha256:sourceMaterial});
+    if(before.triangles!==part.triangles||readSource(primitive.attributes.POSITION).length!==part.vertexCount)refused('Conversion changed source part vertex or face inventory.');
+    const idIndex=meshes[0].attributes[CONVERSION_VERTEX_ID], idAccessor=exported.doc.accessors[idIndex];
+    if(!idAccessor||idAccessor.type!=='SCALAR'||idAccessor.componentType!==5126||idAccessor.normalized)refused('Conversion lost its exact host-owned vertex correspondence accessor.');
+    const attributes=(p:Doc,read:(index:number)=>number[][])=>Object.fromEntries(Object.keys(p.attributes).filter(name=>name!==CONVERSION_VERTEX_ID).map(name=>[name,read(p.attributes[name])]));
+    const correspondence=compareConversionPrimitive({attributes:attributes(primitive,readSource),triangles:triangles(primitive,readSource),world:part.worldMatrix},
+      {attributes:attributes(meshes[0],readExport),triangles:triangles(meshes[0],readExport),world,vertexIds:readExport(idIndex).map(row=>row[0]!)});
+    if(audit.importedParts.find(row=>row.sourceKey===part.sourceKey)?.correspondenceSha256!==correspondence)refused('Actual export topology differs from the retained imported correspondence.');
+    const sourceMaterial=materialFingerprint(source.doc,source.bin,primitive.material,imageComparisons),outputMaterial=materialFingerprint(exported.doc,exported.bin,meshes[0].material,imageComparisons);
+    if(sourceMaterial!==outputMaterial)refused('Conversion changed material values, texture bindings, image pixels, unsupported encodings or sampler state.');
+    return Object.freeze({sourceKey:part.sourceKey,geometrySha256:after.hash,materialSha256:sourceMaterial});
   }));
 }

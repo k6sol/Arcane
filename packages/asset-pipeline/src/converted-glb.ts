@@ -3,13 +3,14 @@ import { types, isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import { assetName } from './paths.js';
 import { AssetError } from './types.js';
+import { CONVERSION_FIDELITY_POLICY, checkConversionMatrix } from './conversion-fidelity-policy.js';
 
 /** Closed data contracts for a derived conversion, not native execution evidence
  * or review authority. The supervised host must verify retained files separately. */
 export const GLB_CONVERSION_LIMITS = Object.freeze({ jsonBytes: 512 * 1024, sourceBytes: 64 * 1024 * 1024,
   parts: 128, meshTriangles: 20000, triangles: 100000, exportedBytes: 20 * 1000 * 1000 });
 export const GLB_CONVERSION_WORKERS = Object.freeze(['convert_glb.py', 'conversion_audit.py', 'probe.py'] as const);
-export const GLB_CONVERSION_IDENTITY = 'arcane-converted-v1';
+export const GLB_CONVERSION_IDENTITY = 'arcane-converted-v2';
 const sha = (value: string | Uint8Array) => createHash('sha256').update(value).digest('hex');
 const hash = z.string().regex(/^[a-f0-9]{64}(?![\s\S])/);
 const uuid = z.string().regex(/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}(?![\s\S])/);
@@ -64,7 +65,7 @@ function frozen<T>(value: T): T {
   if (value && typeof value === 'object') { for (const child of Object.values(value)) frozen(child); Object.freeze(value); }
   return value;
 }
-const requestSchema = z.strictObject({ schemaVersion: z.literal(1), kind: z.literal('converted-glb'), jobId: uuid, parentJobId: uuid,
+const requestSchema = z.strictObject({ schemaVersion: z.literal(2), fidelityPolicy: z.literal(CONVERSION_FIDELITY_POLICY), kind: z.literal('converted-glb'), jobId: uuid, parentJobId: uuid,
   parentManifestSha256: hash, name: z.string().min(1).max(48), sourceSha256: hash, sourceBytes: natural(GLB_CONVERSION_LIMITS.sourceBytes, 20),
   importSha256: hash, importBytes: natural(GLB_CONVERSION_LIMITS.sourceBytes, 20), sourceMapSha256: hash,
   collision: z.enum(['none', 'convex-hull']), renderResolution: natural(1024, 128), renderSamples: natural(64, 1) });
@@ -75,9 +76,11 @@ export function parseConvertedGlbRequest(value: unknown): ConvertedGlbRequest {
   return frozen(request);
 }
 const partSchema = z.strictObject({ sourceNodeIndex: index, sourceMeshIndex: index, sourcePrimitiveIndex: index, sourceMaterialIndex: index.nullable(),
-  sourceKey: key, importNodeIndex: index, originMarker: marker, worldMatrix: z.array(finite).length(16), triangles: natural(20000, 1) });
-const mapSchema = z.strictObject({ schemaVersion: z.literal(1), sourceSha256: hash, importSha256: hash, sourceSceneIndex: index,
-  declaredSceneCount: natural(4096, 1), parts: z.array(partSchema).min(1).max(128) });
+  sourceKey: key, importNodeIndex: index, originMarker: marker, worldMatrix: z.array(finite).length(16), triangles: natural(20000, 1), vertexCount: natural(60000, 3) });
+const nodeKey = z.string().regex(/^node[0-9]{1,4}(?:_primitive[0-9]{1,4})?(?![\s\S])/);
+const nodeSchema = z.strictObject({ nodeKey, importNodeIndex: index, parentKey: nodeKey.nullable(), localMatrix: z.array(finite).length(16) });
+const mapSchema = z.strictObject({ schemaVersion: z.literal(2), fidelityPolicy: z.literal(CONVERSION_FIDELITY_POLICY), sourceSha256: hash, importSha256: hash, sourceSceneIndex: index,
+  declaredSceneCount: natural(4096, 1), parts: z.array(partSchema).min(1).max(128), nodes: z.array(nodeSchema).min(1).max(4096) });
 export type ConvertedGlbSourceMap = z.infer<typeof mapSchema>;
 export function parseConvertedGlbSourceMap(value: unknown, request: ConvertedGlbRequest): ConvertedGlbSourceMap {
   const r = parseConvertedGlbRequest(request), map = parsed(mapSchema, value);
@@ -86,11 +89,26 @@ export function parseConvertedGlbSourceMap(value: unknown, request: ConvertedGlb
       map.parts.reduce((sum, p) => sum + p.triangles, 0) > GLB_CONVERSION_LIMITS.triangles) failed('Conversion map disagrees with retained inputs or budgets.');
   for (const field of ['sourceKey', 'originMarker', 'importNodeIndex'] as const)
     if (new Set(map.parts.map(part => part[field])).size !== map.parts.length) failed('Conversion source mappings must be unique.');
+  if (new Set(map.nodes.map(node => node.nodeKey)).size !== map.nodes.length || new Set(map.nodes.map(node => node.importNodeIndex)).size !== map.nodes.length)
+    failed('Conversion hierarchy correspondence must be unique.');
+  const nodes = new Map(map.nodes.map(node => [node.nodeKey, node]));
+  for (const node of map.nodes) {
+    try { checkConversionMatrix(node.localMatrix); } catch { failed('Conversion hierarchy has an unsupported affine transform.'); }
+    const seen = new Set<string>([node.nodeKey]); let parent = node.parentKey;
+    while (parent !== null) {
+      if (seen.has(parent) || !nodes.has(parent)) failed('Conversion hierarchy must have complete acyclic parent correspondence.');
+      seen.add(parent); if (seen.size > 128) failed('Conversion hierarchy exceeds its admitted depth.'); parent = nodes.get(parent)!.parentKey;
+    }
+  }
   for (const part of map.parts) {
     if (part.sourceKey !== `node${part.sourceNodeIndex}_primitive${part.sourcePrimitiveIndex}` ||
         part.originMarker !== `glb_${r.sourceSha256}:${part.sourceNodeIndex}:${part.sourcePrimitiveIndex}` ||
         part.worldMatrix[3] !== 0 || part.worldMatrix[7] !== 0 || part.worldMatrix[11] !== 0 || part.worldMatrix[15] !== 1)
       failed('Conversion lineage must identify the actual source primitive and affine transform.');
+    try { checkConversionMatrix(part.worldMatrix); } catch { failed('Conversion part has an unsupported world transform.'); }
+    const node = nodes.get(part.sourceKey);
+    if (!node || node.importNodeIndex !== part.importNodeIndex || node.parentKey !== `node${part.sourceNodeIndex}`)
+      failed('Conversion primitive must retain its exact selected source parent.');
   }
   return frozen(map);
 }
@@ -106,7 +124,7 @@ export function convertedGlbObjectId(sourceSha256: string, role: 'render' | 'col
 const measuredPart = z.strictObject({ sourceKey: key, originMarker: marker, sourceObjectId: id,
   vertices: natural(60000, 3), triangles: natural(20000, 1), boundaryEdges: natural(180000), nonManifoldEdges: natural(180000),
   looseVertices: z.literal(0), looseEdges: z.literal(0), degenerateFaces: z.literal(0), invalidUVs: z.literal(0), uvLayers: natural(8),
-  finitePositions: z.literal(true), geometrySha256: hash, materialSha256: hash });
+  finitePositions: z.literal(true), geometrySha256: hash, correspondenceSha256: hash, materialSha256: hash });
 const exportObject = z.strictObject({ sourceObjectId: id, sourceKey: z.union([key, z.literal('proxy')]), nodeIndex: index,
   role: z.enum(['render', 'collision']), pivot: z.tuple([z.literal(0), z.literal(0), z.literal(0)]),
   collisionFor: z.array(id).max(128), originMarker: marker.nullable() });
@@ -116,7 +134,7 @@ const exportModel = z.strictObject({ path: z.enum(['asset.glb', 'collision.glb']
 const render = z.strictObject({ path: z.enum(['preview-hero.png', 'preview-side.png']), width: natural(1024, 128), height: natural(1024, 128),
   finitePixels: z.literal(true), minLuminance: z.number().finite().min(0).max(1000000), maxLuminance: z.number().finite().min(0).max(1000000),
   meanLuminance: z.number().finite().min(0).max(1000000), standardDeviation: z.number().finite().positive().max(1000000) });
-const auditSchema = z.strictObject({ schemaVersion: z.literal(1), kind: z.literal('arcane-glb-conversion-audit'), jobId: uuid, parentJobId: uuid,
+const auditSchema = z.strictObject({ schemaVersion: z.literal(2), fidelityPolicy: z.literal(CONVERSION_FIDELITY_POLICY), kind: z.literal('arcane-glb-conversion-audit'), jobId: uuid, parentJobId: uuid,
   parentManifestSha256: hash, requestSha256: hash, sourceSha256: hash, importSha256: hash, sourceMapSha256: hash,
   identityScheme: z.literal(GLB_CONVERSION_IDENTITY), assetId: id, blenderVersion: z.string().min(1).max(128).regex(/^[\x20-\x7e]+(?![\s\S])/),
   collision: z.enum(['none', 'convex-hull']), importedParts: z.array(measuredPart).min(1).max(128), reopenedParts: z.array(measuredPart).min(1).max(128),

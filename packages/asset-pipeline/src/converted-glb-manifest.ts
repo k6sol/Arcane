@@ -15,7 +15,7 @@ import { verifyGlbConversionFidelity } from './glb-conversion-fidelity.js';
 import { validateConvertedGlbCollision } from './converted-glb-collision.js';
 
 export interface ConvertedGlbManifest {
-  schemaVersion: 1; origin: 'converted-glb'; jobId: string; createdAt: string;
+  schemaVersion: 2; origin: 'converted-glb'; jobId: string; createdAt: string;
   request: ConvertedGlbRequest; runtime: RuntimeEvidence; workerBundleSha256: string;
   coordinateSystem: { units: 'meters'; sceneUp: 'Z'; glbUp: 'Y'; pivot: 'source'; robloxScaleVerified: false };
   sourceMap: ConvertedGlbSourceMap; validation: ConvertedGlbAudit; artifacts: Artifact[]; limitations: string[];
@@ -117,7 +117,7 @@ const runtimeSchema = z.strictObject({ executable: text(4096), version: text(128
   capabilities: z.strictObject({ glbExport: z.literal(true), glbImport: z.literal(true), fbxExport: z.literal(true), fbxImport: z.literal(true), cycles: z.literal(true) }) });
 const artifactSchema = z.strictObject({ path: z.string().min(1).max(96), role: z.enum(['scene', 'checkpoint', 'export', 'preview', 'audit', 'request', 'worker']),
   bytes: z.number().int().min(1).max(CONVERTED_GLB_ARTIFACT_LIMITS.blendBytes), sha256: hash });
-const manifestSchema = z.strictObject({ schemaVersion: z.literal(1), origin: z.literal('converted-glb'), jobId: uuid,
+const manifestSchema = z.strictObject({ schemaVersion: z.literal(2), origin: z.literal('converted-glb'), jobId: uuid,
   createdAt: text(64).refine(value => Number.isFinite(Date.parse(value))), request: z.unknown(), runtime: runtimeSchema, workerBundleSha256: hash,
   coordinateSystem: z.strictObject({ units: z.literal('meters'), sceneUp: z.literal('Z'), glbUp: z.literal('Y'), pivot: z.literal('source'), robloxScaleVerified: z.literal(false) }),
   sourceMap: z.unknown(), validation: z.unknown(), artifacts: z.array(artifactSchema).min(13).max(14), limitations: z.array(text(2048)).max(32) });
@@ -188,7 +188,7 @@ export async function validateConvertedGlbManifestFiles(directory: string, value
   if (!isDeepStrictEqual(metadata, parent.validation.metadata)) fail();
   const prepared = prepareGlbConversionSource(bytes('source.glb'), request.sourceSha256);
   if (prepared.importSha256 !== request.importSha256 || prepared.importBytes.length !== request.importBytes || !prepared.importBytes.equals(bytes('import-source.glb')) ||
-      prepared.sourceSceneIndex !== map.sourceSceneIndex || prepared.declaredSceneCount !== map.declaredSceneCount || !isDeepStrictEqual(prepared.parts, map.parts)) fail();
+      prepared.sourceSceneIndex !== map.sourceSceneIndex || prepared.declaredSceneCount !== map.declaredSceneCount || !isDeepStrictEqual(prepared.parts, map.parts) || !isDeepStrictEqual(prepared.nodes, map.nodes)) fail();
   verifyGlbConversionFidelity(bytes('source.glb'), bytes('asset.glb'), request, map, audit, requestHash);
   for (const name of ['preview-hero.png', 'preview-side.png']) {
     const png = bytes(name); inspectPng(png, request.renderResolution);

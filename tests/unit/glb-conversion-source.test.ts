@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {validateGlb,GLB_PREFLIGHT_LIMITS} from '../../apps/desktop/src/glb-preflight.js';
 import {prepareGlbConversionSource,GLB_CONVERSION_ORIGIN} from '../../packages/asset-pipeline/src/glb-conversion-source.js';
+import {CONVERSION_NODE_KEY,CONVERSION_VERTEX_ID} from '../../packages/asset-pipeline/src/conversion-fidelity-policy.js';
 import {AssetError} from '../../packages/asset-pipeline/src/types.js';
 import {STUDIO_IMPORT_LIMITS} from '../../packages/asset-pipeline/src/studio-import-manifest.js';
 
@@ -116,6 +117,11 @@ function withoutExtras(value:unknown):unknown {
   if(value&&typeof value==='object')return Object.fromEntries(Object.entries(value).filter(([key])=>key!=='extras').map(([key,item])=>[key,withoutExtras(item)]));
   return value;
 }
+function originalBinPrefix(original:ReturnType<typeof read>,prepared:ReturnType<typeof read>):void {
+  assert.deepEqual(prepared.bin.subarray(0,original.bin.length),original.bin,'Original BIN bytes, including original padding, remain an exact prefix.');
+  assert.deepEqual(prepared.doc.accessors.slice(0,original.doc.accessors.length),withoutExtras(original.doc.accessors));
+  assert.deepEqual(prepared.doc.bufferViews.slice(0,original.doc.bufferViews.length),withoutExtras(original.doc.bufferViews));
+}
 
 test('conversion source preserves real multimesh/material/instance data, open foliage and seam vertices',()=>{
   const f=rich(),source=f.finish(),before=Buffer.from(source),original=read(source),result=prepareGlbConversionSource(source,digest(source)),prepared=read(result.importBytes);
@@ -123,19 +129,33 @@ test('conversion source preserves real multimesh/material/instance data, open fo
   assert.equal(result.importSha256,digest(result.importBytes));assert.equal(result.sourceSceneIndex,0);assert.equal(result.declaredSceneCount,1);
   assert.equal(result.parts.length,5);assert.deepEqual(result.parts.map(part=>[part.sourceNodeIndex,part.sourceMeshIndex,part.sourcePrimitiveIndex,part.sourceMaterialIndex,part.triangles]),
     [[2,0,0,0,1],[2,0,1,1,1],[3,1,0,1,2],[4,0,0,0,1],[4,0,1,1,1]]);
-  assert.deepEqual(prepared.tail,original.tail,'Every BIN byte, including UV seams, colors, tangents and embedded JPEG/PNG, remains unchanged.');
-  for(const field of ['accessors','bufferViews','materials','images','textures','samplers','buffers'] as const)assert.deepEqual(prepared.doc[field],original.doc[field]);
+  originalBinPrefix(original,prepared);
+  for(const field of ['materials','images','textures','samplers'] as const)assert.deepEqual(prepared.doc[field],original.doc[field]);
+  assert.equal(prepared.doc.accessors.length,original.doc.accessors.length+result.parts.length);
+  assert.equal(prepared.doc.bufferViews.length,original.doc.bufferViews.length+result.parts.length);
+  assert.equal(prepared.bin.length,original.bin.length+result.parts.reduce((sum,part)=>sum+4*part.vertexCount,0));
+  assert.deepEqual(prepared.doc.buffers,[{byteLength:prepared.bin.length}]);
   assert.equal(prepared.doc.asset.generator,original.doc.asset.generator,'Source preparation does not replace the source generator with invented Blender evidence.');
   assert.equal(prepared.doc.materials[1]!.doubleSided,true);assert.equal(prepared.doc.materials[1]!.alphaMode,'MASK');
-  const distinctNodes=new Set<number>(),markers=new Set<string>(),keys=new Set<string>();
+  const distinctNodes=new Set<number>(),markers=new Set<string>(),keys=new Set<string>();let appendedOffset=original.bin.length;
   for(const part of result.parts){const node=prepared.doc.nodes[part.importNodeIndex]!;assert.ok(node);assert.notEqual(node.mesh,undefined);
     const mesh=prepared.doc.meshes[node.mesh!]!;assert.equal(mesh.primitives.length,1);
-    assert.deepEqual(mesh.primitives[0],original.doc.meshes[part.sourceMeshIndex]!.primitives[part.sourcePrimitiveIndex]);
-    assert.deepEqual(node.extras,{[GLB_CONVERSION_ORIGIN]:part.originMarker});
+    const primitive=mesh.primitives[0]!,{[CONVERSION_VERTEX_ID]:idIndex,...sourceAttributes}=primitive.attributes;
+    assert.deepEqual({...primitive,attributes:sourceAttributes},original.doc.meshes[part.sourceMeshIndex]!.primitives[part.sourcePrimitiveIndex]);
+    assert.equal(part.vertexCount,6);assert.ok(idIndex!==undefined);
+    const accessor=prepared.doc.accessors[idIndex]!,view=prepared.doc.bufferViews[accessor.bufferView]!;
+    assert.deepEqual(accessor,{bufferView:accessor.bufferView,componentType:5126,type:'SCALAR',count:part.vertexCount,min:[0],max:[part.vertexCount-1]});
+    assert.equal(view.buffer,0);assert.equal(view.byteLength,part.vertexCount*4);assert.ok(view.byteOffset>=original.bin.length);
+    assert.equal(view.byteOffset,appendedOffset);appendedOffset+=view.byteLength;
+    assert.deepEqual(Array.from({length:part.vertexCount},(_,index)=>prepared.bin.readFloatLE(view.byteOffset+index*4)),[0,1,2,3,4,5]);
+    assert.deepEqual(node.extras,{[GLB_CONVERSION_ORIGIN]:part.originMarker,[CONVERSION_NODE_KEY]:part.sourceKey});
     distinctNodes.add(part.importNodeIndex);markers.add(part.originMarker);keys.add(part.sourceKey);
   }
+  assert.equal(appendedOffset,prepared.bin.length);
   assert.equal(distinctNodes.size,5);assert.equal(markers.size,5);assert.equal(keys.size,5);
   assert.equal(prepared.doc.nodes.length,original.doc.nodes.length+5);assert.deepEqual(prepared.doc.scenes,[{nodes:[0]}]);
+  assert.equal(result.nodes.length,prepared.doc.nodes.length);
+  assert.deepEqual(result.nodes.map(node=>node.nodeKey),['node0','node1','node2','node3','node4',...result.parts.map(part=>part.sourceKey)]);
   assert.equal(Object.hasOwn(result,'producer'),false);assert.equal(Object.hasOwn(result,'approved'),false);assert.equal(Object.hasOwn(result,'engineVerification'),false);
 });
 
@@ -152,10 +172,15 @@ test('conversion source retains ancestry and literal measured world corresponden
     for(const field of ['matrix','translation','rotation','scale'] as const)assert.deepEqual(node[field],original[field]);
     const children=[...(original.children??[]),...result.parts.filter(part=>part.sourceNodeIndex===index).map(part=>part.importNodeIndex)];
     assert.deepEqual(node.children??[],children);
+    const binding=result.nodes[index]!;assert.equal(binding.nodeKey,`node${index}`);assert.equal(binding.importNodeIndex,index);
+    assert.equal(binding.parentKey,index===0?null:index===2?'node1':'node0');
+    assert.deepEqual(node.extras,{[CONVERSION_NODE_KEY]:binding.nodeKey});
   }
   for(const part of result.parts){close(part.worldMatrix,expected[part.sourceNodeIndex]!);
     const child=prepared.nodes[part.importNodeIndex]!;assert.equal(child.matrix,undefined);assert.equal(child.translation,undefined);
-    assert.equal(child.rotation,undefined);assert.equal(child.scale,undefined,'Split parts inherit, rather than apply the source transform a second time.');}
+    assert.equal(child.rotation,undefined);assert.equal(child.scale,undefined,'Split parts inherit, rather than apply the source transform a second time.');
+    const binding=result.nodes[part.importNodeIndex]!;assert.equal(binding.nodeKey,part.sourceKey);assert.equal(binding.parentKey,`node${part.sourceNodeIndex}`);
+    close(binding.localMatrix,[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]);}
 });
 
 test('conversion source selects the declared scene and preserves original indices while remapping only selected hierarchy',()=>{
@@ -166,14 +191,15 @@ test('conversion source selects the declared scene and preserves original indice
   const part=result.parts[0]!;assert.equal(part.sourceNodeIndex,2);assert.equal(part.sourceMeshIndex,0);assert.equal(part.importNodeIndex,2);
   assert.equal(prepared.doc.scene,0);assert.deepEqual(prepared.doc.scenes,[{nodes:[0]}]);assert.equal(prepared.doc.nodes[0]!.name,'selected root');
   assert.deepEqual(prepared.doc.nodes[0]!.children,[1]);assert.deepEqual(prepared.doc.nodes[1]!.children,[2]);
-  close(part.worldMatrix,[1,0,0,0,0,1,0,0,0,0,1,0,5,7,9,1]);assert.deepEqual(prepared.tail,read(source).tail);
+  close(part.worldMatrix,[1,0,0,0,0,1,0,0,0,0,1,0,5,7,9,1]);originalBinPrefix(read(source),prepared);
+  assert.deepEqual(result.nodes.map(node=>[node.nodeKey,node.parentKey]),[['node1',null],['node2','node1'],['node2_primitive0','node2']]);
   delete f.doc.scene;const fallback=f.finish(),selected=prepareGlbConversionSource(fallback,digest(fallback));
   assert.equal(selected.sourceSceneIndex,0);assert.equal(selected.declaredSceneCount,2);assert.equal(selected.parts[0]!.sourceNodeIndex,0);
 });
 
-test('conversion source strips nested spoofed extras and installs only unique host origin markers',()=>{
+test('conversion source strips nested spoofed extras and installs only fixed host node and origin markers',()=>{
   const f=rich(),spoof={ [GLB_CONVERSION_ORIGIN]:'forged origin',arcane_source_object_id:'arcane_'+'a'.repeat(64),arcane_role:'collision',
-    arcane_identity_scheme:'arcane-semantic-v1',approval:'approved',nested:{extras:{permission:'granted'}}};
+    [CONVERSION_NODE_KEY]:'node9999',arcane_identity_scheme:'arcane-semantic-v1',approval:'approved',nested:{extras:{permission:'granted'}}};
   f.doc.extras=structuredClone(spoof);f.doc.asset.extras=structuredClone(spoof);f.doc.scenes[0]!.extras=structuredClone(spoof);
   for(const node of f.doc.nodes)node.extras=structuredClone(spoof);
   for(const mesh of f.doc.meshes){mesh.extras=structuredClone(spoof);for(const primitive of mesh.primitives)primitive.extras=structuredClone(spoof);}
@@ -181,17 +207,19 @@ test('conversion source strips nested spoofed extras and installs only unique ho
   for(const image of f.doc.images)image.extras=structuredClone(spoof);
   for(const accessor of f.doc.accessors)accessor.extras=structuredClone(spoof);
   const source=f.finish(),before=Buffer.from(source),result=prepareGlbConversionSource(source,digest(source)),prepared=read(result.importBytes);
-  const allowed=new Set<unknown>(result.parts.map(part=>prepared.doc.nodes[part.importNodeIndex]));let extrasCount=0;
+  const allowed=new Map<unknown,Record<string,unknown>>(result.nodes.map(binding=>[prepared.doc.nodes[binding.importNodeIndex],{
+    ...Object.fromEntries(result.parts.filter(part=>part.importNodeIndex===binding.importNodeIndex).map(part=>[GLB_CONVERSION_ORIGIN,part.originMarker])),
+    [CONVERSION_NODE_KEY]:binding.nodeKey}]));let extrasCount=0;
   function inspect(value:unknown):void {
     if(Array.isArray(value)){value.forEach(inspect);return;}
     if(!value||typeof value!=='object')return;
     for(const [key,item] of Object.entries(value))if(key==='extras'){
-      assert.ok(allowed.has(value),'Only the actual split mesh nodes may have prepared extras.');
-      assert.deepEqual(Object.keys(item as Record<string,unknown>),[GLB_CONVERSION_ORIGIN]);extrasCount++;
+      assert.ok(allowed.has(value),'Only selected host-marked hierarchy and split mesh nodes may have prepared extras.');
+      assert.deepEqual(item,allowed.get(value));extrasCount++;
     }else inspect(item);
   }
-  inspect(prepared.doc);assert.equal(extrasCount,result.parts.length);assert.deepEqual(source,before);
-  assert.deepEqual(prepared.doc.materials,withoutExtras(f.doc.materials));assert.deepEqual(prepared.tail,read(source).tail);
+  inspect(prepared.doc);assert.equal(extrasCount,result.nodes.length);assert.deepEqual(source,before);
+  assert.deepEqual(prepared.doc.materials,withoutExtras(f.doc.materials));originalBinPrefix(read(source),prepared);
   assert.ok(result.parts.every(part=>part.originMarker!=='forged origin'));
 });
 
@@ -200,8 +228,10 @@ test('conversion source returns detached caller-owned import copies and frozen l
   assert.notEqual(first.importBytes,second.importBytes);assert.deepEqual(first.importBytes,second.importBytes);
   assert.equal(Object.isFrozen(first),true);assert.equal(Object.isFrozen(first.parts),true);
   assert.equal(Object.isFrozen(first.parts[0]),true);assert.equal(Object.isFrozen(first.parts[0]!.worldMatrix),true);
+  assert.equal(Object.isFrozen(first.nodes),true);assert.equal(Object.isFrozen(first.nodes[0]),true);assert.equal(Object.isFrozen(first.nodes[0]!.localMatrix),true);
   assert.equal(Reflect.set(first,'sourceSha256','changed'),false);assert.equal(Reflect.set(first.parts[0]!,'originMarker','changed'),false);
   assert.equal(Reflect.set(first.parts[0]!.worldMatrix,'0',999),false);
+  assert.equal(Reflect.set(first.nodes[0]!.localMatrix,'0',999),false);
   first.importBytes.fill(0);assert.deepEqual(source,retained);assert.equal(digest(second.importBytes),second.importSha256);
   source.fill(0);assert.equal(second.sourceSha256,digest(retained));assert.equal(digest(second.importBytes),second.importSha256);
 });
@@ -218,7 +248,7 @@ test('conversion origins remain bound to exact retained bytes even when only str
 
 test('conversion source preserves BLEND, additional PBR channels and absent material slots without claiming engine support',()=>{
   const f=rich();f.doc.materials[1]!.alphaMode='BLEND';const source=f.finish(),result=prepareGlbConversionSource(source,digest(source));
-  assert.deepEqual(read(result.importBytes).doc.materials,f.doc.materials);assert.deepEqual(read(result.importBytes).tail,read(source).tail);
+  assert.deepEqual(read(result.importBytes).doc.materials,f.doc.materials);originalBinPrefix(read(source),read(result.importBytes));
   const plain=fixture();delete plain.doc.meshes[0]!.primitives[0]!.material;
   const noMaterial=plain.finish(),prepared=prepareGlbConversionSource(noMaterial,digest(noMaterial));
   assert.equal(prepared.parts[0]!.sourceMaterialIndex,null);
@@ -231,7 +261,14 @@ for(const mode of [4,5,6])test('conversion source retains topology mode '+mode+'
     indices=f.accessor(mode===4?[0,1,2,2,1,3]:[0,1,2,3],'SCALAR',5123);
   f.doc.meshes[0]!.primitives=[{attributes:{POSITION:position,NORMAL:normal,TEXCOORD_0:uv},indices,material:0,mode}];
   const source=f.finish(),result=prepareGlbConversionSource(source,digest(source));assert.equal(result.parts[0]!.triangles,2);
-  assert.deepEqual(read(result.importBytes).doc.meshes[0]!.primitives[0],f.doc.meshes[0]!.primitives[0]);
+  const prepared=read(result.importBytes),primitive=prepared.doc.meshes[0]!.primitives[0]!,{[CONVERSION_VERTEX_ID]:ids,...attributes}=primitive.attributes;
+  assert.deepEqual({...primitive,attributes},f.doc.meshes[0]!.primitives[0]);assert.equal(result.parts[0]!.vertexCount,4);
+  assert.ok(ids!==undefined);assert.equal(prepared.doc.accessors[ids]!.count,4);originalBinPrefix(read(source),prepared);
+});
+
+test('conversion source refuses producer-supplied correspondence IDs instead of trusting reserved source attributes',()=>{
+  const f=fixture();f.doc.meshes[0]!.primitives[0]!.attributes[CONVERSION_VERTEX_ID]=f.accessor([0,1,2],'SCALAR');
+  refused(f,'ASSET_CONVERSION_SOURCE');
 });
 
 for(const mode of [0,1,2,3])test('conversion source explicitly refuses point/line topology mode '+mode+' without losing the source',()=>{

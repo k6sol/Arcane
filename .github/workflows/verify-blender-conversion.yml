@@ -77,6 +77,11 @@ jobs:
           PYTHONDONTWRITEBYTECODE: '1'
           PYTHONUTF8: '1'
         run: python tests/native/conversion_audit_geometry_test.py
+      - name: Verify exact correspondence and physical precision limits
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+          PYTHONUTF8: '1'
+        run: python tests/native/conversion_fidelity_policy_test.py
       - name: Acquire and verify the pinned official Blender runtime
         env:
           PYTHONDONTWRITEBYTECODE: '1'

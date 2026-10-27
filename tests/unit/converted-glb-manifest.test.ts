@@ -8,6 +8,7 @@ import { deflateSync } from 'node:zlib';
 import { validateGlb } from '../../apps/desktop/src/glb-preflight.js';
 import { prepareGlbConversionSource } from '../../packages/asset-pipeline/src/glb-conversion-source.js';
 import { convertedGlbObjectId, convertedGlbAssetId, GLB_CONVERSION_WORKERS } from '../../packages/asset-pipeline/src/converted-glb.js';
+import { CONVERSION_FIDELITY_POLICY, CONVERSION_NODE_KEY, CONVERSION_VERTEX_ID, conversionCorrespondenceSha256 } from '../../packages/asset-pipeline/src/conversion-fidelity-policy.js';
 import { parseConvertedGlbManifest, parseConvertedGlbJson, validateConvertedGlbManifestFiles, CONVERTED_GLB_ARTIFACT_LIMITS } from '../../packages/asset-pipeline/src/converted-glb-manifest.js';
 import { AssetError, type Artifact } from '../../packages/asset-pipeline/src/types.js';
 
@@ -70,21 +71,21 @@ async function fixture(t: TestContext, collision = false) {
     validation: { kind: 'glb-preview-preflight', metadata: validateGlb(Uint8Array.from(source).buffer), imageDecode: 'not-run', engineVerification: 'pending' },
     engineImport: { status: 'unavailable', reason: 'adopted-origin-requires-safe-conversion' }, artifacts: [
       { path: 'asset.glb', role: 'export', bytes: source.length, sha256: sha(source) }, { path: 'request.json', role: 'request', bytes: json(adopted).length, sha256: sha(json(adopted)) }], limitations: ['Original adopted source remains preview-only.'] };
-  const map: Doc = { schemaVersion: 1, sourceSha256: sha(source), importSha256: prepared.importSha256, sourceSceneIndex: prepared.sourceSceneIndex,
-    declaredSceneCount: prepared.declaredSceneCount, parts: prepared.parts };
-  const request: Doc = { schemaVersion: 1, kind: 'converted-glb', jobId: JOB, parentJobId: PARENT, parentManifestSha256: '', name: 'converted-tree',
+  const map: Doc = { schemaVersion: 2, fidelityPolicy: CONVERSION_FIDELITY_POLICY, sourceSha256: sha(source), importSha256: prepared.importSha256, sourceSceneIndex: prepared.sourceSceneIndex,
+    declaredSceneCount: prepared.declaredSceneCount, parts: prepared.parts, nodes: prepared.nodes };
+  const request: Doc = { schemaVersion: 2, fidelityPolicy: CONVERSION_FIDELITY_POLICY, kind: 'converted-glb', jobId: JOB, parentJobId: PARENT, parentManifestSha256: '', name: 'converted-tree',
     sourceSha256: sha(source), sourceBytes: source.length, importSha256: prepared.importSha256, importBytes: prepared.importBytes.length, sourceMapSha256: '', collision: collision ? 'convex-hull' : 'none', renderResolution: 128, renderSamples: 8 };
   const j = prepared.importBytes.readUInt32LE(12), outputDoc: Doc = JSON.parse(prepared.importBytes.subarray(20, 20 + j).toString('utf8')) as Doc;
   const outputBin = Buffer.from(prepared.importBytes.subarray(28 + j)); outputDoc.asset.generator = 'synthetic GLB byte fixture, not native proof';
-  for (const part of prepared.parts) Object.assign(outputDoc.nodes[part.importNodeIndex].extras, { arcane_identity_scheme: 'arcane-converted-v1',
+  for (const part of prepared.parts) Object.assign(outputDoc.nodes[part.importNodeIndex].extras, { arcane_identity_scheme: 'arcane-converted-v2',
     arcane_source_object_id: convertedGlbObjectId(request.sourceSha256, 'render', part.sourceKey), arcane_source_key: part.sourceKey,
     arcane_role: 'render', arcane_pivot: [0, 0, 0], arcane_collision_for: '[]' });
   files.set('asset.glb', pack(outputDoc, outputBin));
   const measured = prepared.parts.map(part => ({ sourceKey: part.sourceKey, originMarker: part.originMarker, sourceObjectId: convertedGlbObjectId(request.sourceSha256, 'render', part.sourceKey),
     vertices: 6, triangles: 2, boundaryEdges: 6, nonManifoldEdges: 6, looseVertices: 0, looseEdges: 0, degenerateFaces: 0, invalidUVs: 0, uvLayers: 0, finitePositions: true,
-    geometrySha256: sha('synthetic observed geometry, not native proof'), materialSha256: sha('synthetic observed material, not native proof') }));
-  const audit: Doc = { schemaVersion: 1, kind: 'arcane-glb-conversion-audit', jobId: JOB, parentJobId: PARENT, parentManifestSha256: '', requestSha256: '',
-    sourceSha256: request.sourceSha256, importSha256: request.importSha256, sourceMapSha256: '', identityScheme: 'arcane-converted-v1', assetId: convertedGlbAssetId(request.sourceSha256),
+    geometrySha256: sha('synthetic observed geometry, not native proof'), correspondenceSha256: conversionCorrespondenceSha256([[0, 1, 2], [3, 4, 5]]), materialSha256: sha('synthetic observed material, not native proof') }));
+  const audit: Doc = { schemaVersion: 2, fidelityPolicy: CONVERSION_FIDELITY_POLICY, kind: 'arcane-glb-conversion-audit', jobId: JOB, parentJobId: PARENT, parentManifestSha256: '', requestSha256: '',
+    sourceSha256: request.sourceSha256, importSha256: request.importSha256, sourceMapSha256: '', identityScheme: 'arcane-converted-v2', assetId: convertedGlbAssetId(request.sourceSha256),
     blenderVersion: 'synthetic observed version', collision: request.collision, importedParts: measured, reopenedParts: structuredClone(measured),
     models: [{ path: 'asset.glb', sha256: '', byteLength: 1, generator: outputDoc.asset.generator, objects: prepared.parts.map(part => ({ sourceObjectId: convertedGlbObjectId(request.sourceSha256, 'render', part.sourceKey),
       sourceKey: part.sourceKey, nodeIndex: part.importNodeIndex, role: 'render', pivot: [0, 0, 0], collisionFor: [], originMarker: part.originMarker })), anchors: [] }],
@@ -99,7 +100,7 @@ async function fixture(t: TestContext, collision = false) {
     if (kind === 'disconnected') { positions.push(...positions.map(row => [row[0]! + 10, row[1]!, row[2]!])); indices.push(...indices.map(value => value + 4)); }
     if (kind === 'seams' || kind === 'cracked') { positions = indices.map(value => [...positions[value]!]); indices = positions.map((_, at) => at); if (kind === 'cracked') positions[0]![0] = .0000001; }
     const { doc, bin } = geometry(positions, indices);
-    doc.nodes[0].extras = { arcane_identity_scheme: 'arcane-converted-v1', arcane_source_object_id: convertedGlbObjectId(request.sourceSha256, 'collision', 'proxy'), arcane_source_key: 'proxy',
+    doc.nodes[0].extras = { arcane_identity_scheme: 'arcane-converted-v2', arcane_source_object_id: convertedGlbObjectId(request.sourceSha256, 'collision', 'proxy'), arcane_source_key: 'proxy',
       arcane_role: 'collision', arcane_pivot: [0, 0, 0], arcane_collision_for: JSON.stringify(prepared.parts.map(part => convertedGlbObjectId(request.sourceSha256, 'render', part.sourceKey)).sort()) };
     return pack(doc, bin);
   }
@@ -118,7 +119,7 @@ async function fixture(t: TestContext, collision = false) {
       sourceMapSha256: request.sourceMapSha256, requestSha256: sha(files.get('request.json')!) });
     for (const model of audit.models) { model.sha256 = sha(files.get(model.path)!); model.byteLength = files.get(model.path)!.length; }
     files.set('conversion-audit.json', overrides.auditRaw ?? json(audit));
-    value = { schemaVersion: 1, origin: 'converted-glb', jobId: JOB, createdAt: '2026-10-26T00:00:01.000Z', request,
+    value = { schemaVersion: 2, origin: 'converted-glb', jobId: JOB, createdAt: '2026-10-26T00:00:01.000Z', request,
       runtime: { executable: join(directory, 'never-launched-fixture.exe'), version: audit.blenderVersion, pythonVersion: 'synthetic', background: true,
         capabilities: { glbExport: true, glbImport: true, fbxExport: true, fbxImport: true, cycles: true } },
       workerBundleSha256: sha(GLB_CONVERSION_WORKERS.map(name => sha(files.get(name)!)).join('\n')),
@@ -145,6 +146,11 @@ test('conversion raw JSON parser preserves valid escaped data and rejects duplic
 test('conversion retained files validate actual multimesh/material/seam/open surfaces without inventing native closure or authority', async t => {
   const f = await fixture(t), manifest = await validateConvertedGlbManifestFiles(f.directory, f.value);
   assert.equal(manifest.artifacts.length, 13); assert.equal(manifest.sourceMap.parts.length, 4); assert.ok(Object.isFrozen(manifest.sourceMap.parts[0]!.worldMatrix));
+  assert.equal(manifest.schemaVersion, 2); assert.equal(manifest.request.fidelityPolicy, CONVERSION_FIDELITY_POLICY);
+  assert.equal(manifest.sourceMap.nodes.length, f.outputDoc.nodes.length); assert.ok(Object.isFrozen(manifest.sourceMap.nodes[0]!.localMatrix));
+  assert.equal(f.parent.schemaVersion, 1); assert.equal(f.parent.request.schemaVersion, 1);
+  assert.equal(manifest.validation.importedParts[0]!.correspondenceSha256, conversionCorrespondenceSha256([[0, 1, 2], [3, 4, 5]]));
+  assert.notEqual(manifest.validation.importedParts[0]!.geometrySha256, manifest.validation.importedParts[0]!.correspondenceSha256);
   assert.equal(manifest.coordinateSystem.robloxScaleVerified, false); assert.equal('ownedProcessClosed' in manifest, false); assert.equal('approved' in manifest, false);
   assert.equal('engineImport' in manifest, false); assert.equal(manifest.runtime.executable.endsWith('never-launched-fixture.exe'), true);
   await assert.rejects(readFile(manifest.runtime.executable), { code: 'ENOENT' });
@@ -157,6 +163,17 @@ test('conversion manifest refuses proxies/getters/unknown fields and escaped byt
   const proxy = new Proxy({}, { ownKeys() { invoked++; throw Error('must not inspect'); } }); assert.throws(() => parseConvertedGlbManifest(proxy), manifestError); assert.equal(invoked, 0);
   assert.throws(() => parseConvertedGlbManifest({ ...f.value, ownedProcessClosed: true }), manifestError);
   assert.throws(() => parseConvertedGlbManifest({ ...f.value, amplification: Array.from({ length: 100 }, () => '\u0000'.repeat(1024)) }), manifestError);
+});
+test('conversion v2 manifest rejects legacy derived schemas and caller-selected policies while retaining version-one parent data', async t => {
+  const f = await fixture(t);
+  for (const change of [(v: Doc) => v.schemaVersion = 1, (v: Doc) => v.request.schemaVersion = 1,
+    (v: Doc) => v.sourceMap.schemaVersion = 1, (v: Doc) => v.validation.schemaVersion = 1,
+    (v: Doc) => v.request.fidelityPolicy = 'caller-selected-policy', (v: Doc) => v.sourceMap.fidelityPolicy = 'caller-selected-policy',
+    (v: Doc) => v.validation.fidelityPolicy = 'caller-selected-policy', (v: Doc) => v.validation.identityScheme = 'arcane-converted-v1']) {
+    const value = structuredClone(f.value); change(value); assert.throws(() => parseConvertedGlbManifest(value), AssetError);
+  }
+  assert.equal(f.parent.schemaVersion, 1); assert.equal(f.parent.request.schemaVersion, 1);
+  assert.equal('fidelityPolicy' in f.parent, false); assert.equal('fidelityPolicy' in f.parent.request, false);
 });
 test('conversion artifact inventory is exact, fixed-role, unique and bounded before any file authority', async t => {
   const f = await fixture(t);
@@ -195,7 +212,7 @@ test('conversion import copy must equal exact C31 regeneration even when new byt
 });
 test('conversion fixed raw JSON files require unique keys and exact structural agreement, not hash-only acceptance', async t => {
   const duplicate = await fixture(t), ordinary = json(duplicate.request).toString('utf8');
-  await duplicate.seal({ requestRaw: Buffer.from('{"schemaVersion":1,' + ordinary.slice(1)) });
+  await duplicate.seal({ requestRaw: Buffer.from('{"schemaVersion":2,' + ordinary.slice(1)) });
   await assert.rejects(validateConvertedGlbManifestFiles(duplicate.directory, duplicate.value), manifestError);
   const changed = await fixture(t), observed = structuredClone(changed.audit); observed.renders[0].meanLuminance = .6;
   await changed.seal({ auditRaw: json(observed) }); await assert.rejects(validateConvertedGlbManifestFiles(changed.directory, changed.value), manifestError);
@@ -206,6 +223,24 @@ test('conversion rejects resealed actual output material/geometry loss independe
     const f = await fixture(t); change(f.outputDoc); f.files.set('asset.glb', pack(f.outputDoc, f.outputBin)); await f.seal();
     await assert.rejects(validateConvertedGlbManifestFiles(f.directory, f.value), AssetError);
   }
+});
+test('conversion retained files reject lost empty-node ancestry and host correspondence markers after resealing', async t => {
+  for (const change of [(doc: Doc) => delete doc.nodes[3].extras[CONVERSION_NODE_KEY],
+    (doc: Doc) => doc.nodes[3].translation[1] += .001,
+    (doc: Doc) => doc.nodes[1].extras[CONVERSION_NODE_KEY] = doc.nodes[2].extras[CONVERSION_NODE_KEY],
+    (doc: Doc) => delete doc.meshes[0].primitives[0].attributes[CONVERSION_VERTEX_ID]]) {
+    const f = await fixture(t); change(f.outputDoc); f.files.set('asset.glb', pack(f.outputDoc, f.outputBin)); await f.seal();
+    await assert.rejects(validateConvertedGlbManifestFiles(f.directory, f.value), AssetError);
+  }
+});
+test('conversion retained files compare actual exact source-face correspondence despite matching forged observed hashes', async t => {
+  const claimed = await fixture(t);
+  for (const row of [...claimed.audit.importedParts, ...claimed.audit.reopenedParts]) row.correspondenceSha256 = sha('forged observed topology');
+  await claimed.seal(); await assert.rejects(validateConvertedGlbManifestFiles(claimed.directory, claimed.value), AssetError);
+  const changed = await fixture(t), primitive = changed.outputDoc.meshes[0].primitives[0], accessor = changed.outputDoc.accessors[primitive.attributes[CONVERSION_VERTEX_ID]],
+    view = changed.outputDoc.bufferViews[accessor.bufferView];
+  changed.outputBin.writeFloatLE(.5, view.byteOffset ?? 0); changed.files.set('asset.glb', pack(changed.outputDoc, changed.outputBin)); await changed.seal();
+  await assert.rejects(validateConvertedGlbManifestFiles(changed.directory, changed.value), AssetError);
 });
 test('conversion decodes real preview dimensions and rejects actual uniform pixels despite positive audit statistics', async t => {
   for (const image of [png(256), png(128, true)]) { const f = await fixture(t); f.files.set('preview-hero.png', image); await f.seal(); await assert.rejects(validateConvertedGlbManifestFiles(f.directory, f.value), AssetError); }

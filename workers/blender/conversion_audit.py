@@ -8,6 +8,10 @@ choose the lexicographically smallest of three cyclic rotations, then sort.
 UV V is converted back from Blender. Missing source attributes never disappear
 from the comparison. Names, vertex numbering and object order are not identity.
 
+These hashes retain exact snapshot comparison semantics. V2 source fidelity
+instead uses actual host-owned vertex/node correspondence and the fixed product
+precision policy; a measured digest is never replaced with its source digest.
+
 Material hashes describe actual Blender material flags and the complete shader
 graph: sorted recursive node signatures, socket identifiers, linked signatures,
 fixed semantic node properties/defaults and actual decoded image samples. Node,
@@ -35,10 +39,21 @@ EXPORT_BYTES = 20_000_000
 BLEND_BYTES = 128 * 1024 * 1024
 IMAGE_PIXELS = 16_777_216
 ORIGIN = "arcane_conversion_origin_v1"
-IDENTITY = "arcane-converted-v1"
+IDENTITY = "arcane-converted-v2"
+FIDELITY_POLICY = "arcane-static-fidelity-v1"
+VERTEX_ID = "_ARCANE_SOURCE_VERTEX_ID"
+NODE_KEY = "arcane_conversion_node_v2"
+POSITION_LIMIT = 0.0001
+TRANSLATION_LIMIT = 0.00001
+DIRECTION_LIMIT = 0.02 * math.pi / 180
+UV_LIMIT = 2 ** -20
+COLOR_LIMIT = 1 / 65535
+LINEAR_LIMIT = 2 ** -20
+CONDITION_LIMIT = 10000
 HASH = re.compile(r"[a-f0-9]{64}\Z")
 UUID = re.compile(r"[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}\Z")
 REASONS = {"INPUT", "SOURCE", "MAP", "FEATURE", "GEOMETRY", "MATERIAL", "COLLISION", "EXPORT", "REOPEN", "RENDER", "IO", "NATIVE", "IO_PATH", "IO_LINK", "IO_TYPE", "IO_SIZE", "IO_IDENTITY", "IO_READ", "IO_CHANGED", "IO_EXISTS", "IO_ACCESS", "GEOMETRY_COUNTS", "GEOMETRY_TRANSFORM", "GEOMETRY_DIRECTION", "GEOMETRY_TOPOLOGY", "GEOMETRY_AREA", "GEOMETRY_UV", "GEOMETRY_TRIANGLES", "GEOMETRY_HASH", "GEOMETRY_HASH_POSITION", "GEOMETRY_HASH_NORMAL", "GEOMETRY_HASH_TANGENT", "GEOMETRY_HASH_UV", "GEOMETRY_HASH_COLOR", "GEOMETRY_HASH_CORNER_ASSOCIATION"}
+REASONS.update("FIDELITY_" + group for group in ("POSITION", "NORMAL", "TANGENT", "UV", "COLOR", "TRANSFORM", "CONDITION", "CORRESPONDENCE", "HIERARCHY"))
 
 
 class ConversionFailure(Exception):
@@ -184,9 +199,9 @@ def validate_inputs(directory, request_hash):
     no_links(directory, directory=True)
     request_raw = read_owned(directory / "request.json", JSON_BYTES)
     require(sha(request_raw) == request_hash, "SOURCE")
-    r = fields(parse_json(request_raw), ("schemaVersion", "kind", "jobId", "parentJobId", "parentManifestSha256", "name", "sourceSha256", "sourceBytes", "importSha256", "importBytes", "sourceMapSha256", "collision", "renderResolution", "renderSamples"))
-    natural(r["schemaVersion"], 1, 1)
-    require(r["kind"] == "converted-glb" and r["collision"] in ("none", "convex-hull"))
+    r = fields(parse_json(request_raw), ("schemaVersion", "fidelityPolicy", "kind", "jobId", "parentJobId", "parentManifestSha256", "name", "sourceSha256", "sourceBytes", "importSha256", "importBytes", "sourceMapSha256", "collision", "renderResolution", "renderSamples"))
+    natural(r["schemaVersion"], 2, 2)
+    require(r["fidelityPolicy"] == FIDELITY_POLICY and r["kind"] == "converted-glb" and r["collision"] in ("none", "convex-hull"))
     require(all(type(r[k]) is str and HASH.fullmatch(r[k]) for k in ("parentManifestSha256", "sourceSha256", "importSha256", "sourceMapSha256")))
     require(all(type(r[k]) is str and UUID.fullmatch(r[k]) for k in ("jobId", "parentJobId")) and r["jobId"] != r["parentJobId"])
     require(type(r["name"]) is str and re.fullmatch(r"[a-z][a-z0-9-]{0,47}", r["name"]) and not re.match(r"(?:con|prn|aux|nul|com[0-9]|lpt[0-9])(?:-|$)", r["name"], re.I))
@@ -196,26 +211,29 @@ def validate_inputs(directory, request_hash):
     imported = read_owned(directory / "import-source.glb", GLB_BYTES, 20)
     map_raw = read_owned(directory / "source-map.json", JSON_BYTES)
     require(len(source) == r["sourceBytes"] and sha(source) == r["sourceSha256"] and len(imported) == r["importBytes"] and sha(imported) == r["importSha256"] and sha(map_raw) == r["sourceMapSha256"], "SOURCE")
-    m = fields(parse_json(map_raw), ("schemaVersion", "sourceSha256", "importSha256", "sourceSceneIndex", "declaredSceneCount", "parts"))
-    natural(m["schemaVersion"], 1, 1)
-    require(m["sourceSha256"] == r["sourceSha256"] and m["importSha256"] == r["importSha256"])
+    m = fields(parse_json(map_raw), ("schemaVersion", "fidelityPolicy", "sourceSha256", "importSha256", "sourceSceneIndex", "declaredSceneCount", "parts", "nodes"))
+    natural(m["schemaVersion"], 2, 2)
+    require(m["fidelityPolicy"] == FIDELITY_POLICY and m["sourceSha256"] == r["sourceSha256"] and m["importSha256"] == r["importSha256"])
     natural(m["declaredSceneCount"], 4096, 1); natural(m["sourceSceneIndex"], m["declaredSceneCount"] - 1)
     require(type(m["parts"]) is list and 1 <= len(m["parts"]) <= 128 and len(m["parts"]) + int(r["collision"] == "convex-hull") <= 128)
     seen = {key: set() for key in ("sourceKey", "originMarker", "importNodeIndex")}
     for part in m["parts"]:
-        fields(part, ("sourceNodeIndex", "sourceMeshIndex", "sourcePrimitiveIndex", "sourceMaterialIndex", "sourceKey", "importNodeIndex", "originMarker", "worldMatrix", "triangles"))
+        fields(part, ("sourceNodeIndex", "sourceMeshIndex", "sourcePrimitiveIndex", "sourceMaterialIndex", "sourceKey", "importNodeIndex", "originMarker", "worldMatrix", "triangles", "vertexCount"))
         for key in ("sourceNodeIndex", "sourceMeshIndex", "sourcePrimitiveIndex", "importNodeIndex"):
             natural(part[key], 4095)
         if part["sourceMaterialIndex"] is not None:
             natural(part["sourceMaterialIndex"], 4095)
         natural(part["triangles"], 20_000, 1)
+        natural(part["vertexCount"], 60000, 3)
         require(part["sourceKey"] == "node%d_primitive%d" % (part["sourceNodeIndex"], part["sourcePrimitiveIndex"]) and part["originMarker"] == "glb_%s:%d:%d" % (r["sourceSha256"], part["sourceNodeIndex"], part["sourcePrimitiveIndex"]))
         require(type(part["worldMatrix"]) is list and len(part["worldMatrix"]) == 16)
         for n in part["worldMatrix"]: finite(n)
         require([part["worldMatrix"][i] for i in (3, 7, 11, 15)] == [0, 0, 0, 1])
+        check_fidelity_matrix(part["worldMatrix"])
         for key in seen:
             require(part[key] not in seen[key]); seen[key].add(part[key])
     require(sum(p["triangles"] for p in m["parts"]) <= 100_000)
+    hierarchy_map(m)
     return r, m, source, imported
 
 
@@ -373,7 +391,7 @@ def geometry_projection_hashes(rows):
 
 
 def require_geometry_match(expected, actual, expected_projections=None, actual_projections=None):
-    # The original full-corner digest remains the sole acceptance predicate.
+    # Exact snapshot comparison, not v2 source semantic acceptance.
     if expected == actual:
         return
     reason = "GEOMETRY_HASH"
@@ -389,7 +407,284 @@ def require_geometry_match(expected, actual, expected_projections=None, actual_p
     raise ConversionFailure(reason)
 
 
-def primitive_geometry(doc, binary, node_index, primitive_index, semantics=None, scene_index=None, diagnostic_hashes=None):
+def policy_values(values, size, reason):
+    require(type(values) in (list, tuple) and len(values) == size and
+            all(type(v) in (int, float) and math.isfinite(v) for v in values), reason)
+    return values
+
+
+def policy_normalize(values, reason):
+    policy_values(values, 3, reason)
+    length = math.hypot(*values)
+    require(math.isfinite(length) and length > 0, reason)
+    return [v / length for v in values]
+
+
+def policy_cross(a, b):
+    return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]
+
+
+def policy_dot(a, b):
+    return sum(x*y for x, y in zip(a, b))
+
+
+def policy_distance(a, b, limit, reason):
+    policy_values(a, 3, reason); policy_values(b, 3, reason)
+    distance = math.hypot(*(x-y for x, y in zip(a, b)))
+    require(math.isfinite(distance) and distance <= limit, reason)
+
+
+def policy_direction(expected, actual, reason):
+    a = policy_normalize(expected, reason); b = policy_normalize(actual, reason)
+    angle = math.atan2(math.hypot(*policy_cross(a, b)), policy_dot(a, b))
+    require(math.isfinite(angle) and angle <= DIRECTION_LIMIT, reason)
+
+
+def policy_components(expected, actual, size, limit, reason):
+    policy_values(expected, size, reason); policy_values(actual, size, reason)
+    require(all(abs(a-b) <= limit for a, b in zip(expected, actual)), reason)
+
+
+def policy_inverse(matrix):
+    policy_values(matrix, 16, "FIDELITY_TRANSFORM")
+    require([matrix[i] for i in (3, 7, 11, 15)] == [0, 0, 0, 1], "FIDELITY_TRANSFORM")
+    lengths = [math.hypot(*matrix[at:at+3]) for at in (0, 4, 8)]
+    require(all(math.isfinite(n) and n > 0 for n in lengths), "FIDELITY_CONDITION")
+    columns = [[v/lengths[i] for v in matrix[4*i:4*i+3]] for i in range(3)]
+    rows = [policy_cross(columns[1], columns[2]), policy_cross(columns[2], columns[0]), policy_cross(columns[0], columns[1])]
+    det = policy_dot(columns[0], rows[0])
+    require(math.isfinite(det) and abs(det) > 1e-12, "FIDELITY_CONDITION")
+    inverse_rows = [[v / det / lengths[i] for v in row] for i, row in enumerate(rows)]
+    result = [inverse_rows[0][0], inverse_rows[1][0], inverse_rows[2][0], 0,
+              inverse_rows[0][1], inverse_rows[1][1], inverse_rows[2][1], 0,
+              inverse_rows[0][2], inverse_rows[1][2], inverse_rows[2][2], 0,
+              *[-sum(row[i]*matrix[12+i] for i in range(3)) for row in inverse_rows], 1]
+    require(all(math.isfinite(v) for v in result), "FIDELITY_CONDITION")
+    return result
+
+
+def matrix_sign(matrix):
+    columns = [policy_normalize(matrix[at:at+3], "FIDELITY_CONDITION") for at in (0, 4, 8)]
+    value = policy_dot(columns[0], policy_cross(columns[1], columns[2]))
+    require(math.isfinite(value) and value != 0, "FIDELITY_CONDITION")
+    return 1 if value > 0 else -1
+
+
+def check_fidelity_matrix(matrix):
+    inverse = policy_inverse(matrix)
+    def norm(m): return max(sum(abs(m[row+4*col]) for col in range(3)) for row in range(3))
+    condition = norm(matrix) * norm(inverse)
+    require(math.isfinite(condition) and condition <= CONDITION_LIMIT, "FIDELITY_CONDITION")
+    return inverse
+
+
+def compare_fidelity_transform(expected, actual):
+    check_fidelity_matrix(expected); check_fidelity_matrix(actual)
+    require(matrix_sign(expected) == matrix_sign(actual), "FIDELITY_TRANSFORM")
+    policy_distance(expected[12:15], actual[12:15], TRANSLATION_LIMIT, "FIDELITY_TRANSFORM")
+    for col in range(3):
+        a, b = expected[4*col:4*col+3], actual[4*col:4*col+3]
+        policy_distance(a, b, math.hypot(*a)*LINEAR_LIMIT, "FIDELITY_TRANSFORM")
+
+
+def policy_vector(matrix, vector):
+    return [sum(matrix[axis+col*4]*vector[col] for col in range(3)) for axis in range(3)]
+
+
+def policy_normal(matrix, vector):
+    inverse = policy_inverse(matrix)
+    result = [sum(inverse[axis*4+col]*vector[col] for col in range(3)) for axis in range(3)]
+    return policy_normalize(result, "FIDELITY_NORMAL")
+
+
+def multiply_matrix(a, b):
+    return [sum(a[k*4+i%4]*b[(i//4)*4+k] for k in range(4)) for i in range(16)]
+
+
+def hierarchy_map(mapping):
+    entries = mapping["nodes"]
+    require(type(entries) is list and 1 <= len(entries) <= 4096, "FIDELITY_HIERARCHY")
+    nodes, indices = {}, set()
+    for entry in entries:
+        fields(entry, ("nodeKey", "importNodeIndex", "parentKey", "localMatrix"))
+        key = entry["nodeKey"]
+        require(type(key) is str and re.fullmatch(r"node[0-9]{1,4}(?:_primitive[0-9]{1,4})?", key) and key not in nodes, "FIDELITY_HIERARCHY")
+        natural(entry["importNodeIndex"], 4095)
+        require(entry["importNodeIndex"] not in indices, "FIDELITY_HIERARCHY")
+        require(entry["parentKey"] is None or type(entry["parentKey"]) is str, "FIDELITY_HIERARCHY")
+        check_fidelity_matrix(entry["localMatrix"])
+        nodes[key] = entry; indices.add(entry["importNodeIndex"])
+    for key, entry in nodes.items():
+        seen, parent = {key}, entry["parentKey"]
+        while parent is not None:
+            require(parent in nodes and parent not in seen and len(seen) < 128, "FIDELITY_HIERARCHY")
+            seen.add(parent); parent = nodes[parent]["parentKey"]
+    for part in mapping["parts"]:
+        entry = nodes.get(part["sourceKey"])
+        require(entry is not None and entry["importNodeIndex"] == part["importNodeIndex"] and
+                entry["parentKey"] == "node%d" % part["sourceNodeIndex"], "FIDELITY_HIERARCHY")
+    return nodes
+
+
+def hierarchy_worlds(mapping):
+    nodes = hierarchy_map(mapping); result = {}
+    for key in nodes:
+        chain, at = [], key
+        while at is not None and at not in result:
+            chain.append(at); at = nodes[at]["parentKey"]
+        parent = result[at] if at is not None else matrix_local({})
+        for current in reversed(chain):
+            parent = multiply_matrix(parent, nodes[current]["localMatrix"])
+            check_fidelity_matrix(parent); result[current] = parent
+    return result
+
+
+def check_node_bindings(mapping, observed):
+    expected = hierarchy_map(mapping); expected_world = hierarchy_worlds(mapping)
+    require(type(observed) is dict and set(observed) == set(expected), "FIDELITY_HIERARCHY")
+    for key, row in observed.items():
+        require(row["parentKey"] == expected[key]["parentKey"], "FIDELITY_HIERARCHY")
+        compare_fidelity_transform(expected[key]["localMatrix"], row["localMatrix"])
+        check_fidelity_matrix(row["worldMatrix"])
+        require(matrix_sign(expected_world[key]) == matrix_sign(row["worldMatrix"]), "FIDELITY_TRANSFORM")
+    return [{"nodeKey": key, "parentKey": observed[key]["parentKey"], "localMatrix": observed[key]["localMatrix"],
+             "worldMatrix": observed[key]["worldMatrix"]} for key in sorted(observed)]
+
+
+def glb_node_bindings(doc, mapping, input_indices=False):
+    actual_world = worlds(doc); nodes = doc.get("nodes", []); expected = hierarchy_map(mapping)
+    require(len(actual_world) == len(nodes) == len(expected), "FIDELITY_HIERARCHY")
+    parents = {}
+    for index, node in enumerate(nodes):
+        for child in node.get("children", []):
+            require(child not in parents, "FIDELITY_HIERARCHY"); parents[child] = index
+    keys = [node.get("extras", {}).get(NODE_KEY) for node in nodes]
+    require(all(type(key) is str and key in expected for key in keys) and len(set(keys)) == len(keys), "FIDELITY_HIERARCHY")
+    part_keys = {part["sourceKey"] for part in mapping["parts"]}; observed = {}
+    for index, node in enumerate(nodes):
+        key = keys[index]
+        require(("mesh" in node) == (key in part_keys), "FIDELITY_HIERARCHY")
+        if input_indices: require(expected[key]["importNodeIndex"] == index, "FIDELITY_HIERARCHY")
+        observed[key] = {"parentKey": keys[parents[index]] if index in parents else None,
+                         "localMatrix": matrix_local(node), "worldMatrix": actual_world[index]}
+    return check_node_bindings(mapping, observed)
+
+
+def bpy_matrix_y_up(matrix):
+    # Exact signed-axis permutation of actual components, without another
+    # float32 matrix multiplication: C * actual * inverse(C).
+    axes, signs = (0, 2, 1, 3), (1, 1, -1, 1)
+    result = [float(matrix[axes[row]][axes[col]])*signs[row]*signs[col] for col in range(4) for row in range(4)]
+    check_fidelity_matrix(result)
+    return result
+
+
+def correspondence_hash(faces):
+    require(type(faces) is list and 1 <= len(faces) <= 20000, "FIDELITY_CORRESPONDENCE")
+    ordered = []
+    for face in faces:
+        require(type(face) in (list, tuple) and len(face) == 3 and
+                all(type(v) is int and 0 <= v < 60000 for v in face), "FIDELITY_CORRESPONDENCE")
+        row = tuple(face)
+        ordered.append(min(row, row[1:]+row[:1], row[2:]+row[:2]))
+    return sha(canonical([list(row) for row in sorted(ordered)]))
+
+
+def checked_vertex_ids(values, count, expected_used_ids=None):
+    natural(count, 60000, 3)
+    require(type(values) is list and 3 <= len(values) <= 60000, "FIDELITY_CORRESPONDENCE")
+    result = []
+    for value in values:
+        require(type(value) in (int, float) and math.isfinite(value) and value == math.floor(value) and 0 <= value < count,
+                "FIDELITY_CORRESPONDENCE")
+        result.append(int(value))
+    if expected_used_ids is not None:
+        require(set(result) == set(expected_used_ids), "FIDELITY_CORRESPONDENCE")
+    return result
+
+
+def source_fidelity(doc, binary, part, scene_index, accessor_cache=None):
+    require(ref(doc.get("nodes", []), part["sourceNodeIndex"]).get("mesh") == part["sourceMeshIndex"], "MAP")
+    digest, semantics, triangle_count, world = primitive_geometry(doc, binary, part["sourceNodeIndex"], part["sourcePrimitiveIndex"], scene_index=scene_index, allow_unused_storage=True)
+    primitive = doc["meshes"][part["sourceMeshIndex"]]["primitives"][part["sourcePrimitiveIndex"]]
+    cache = {} if accessor_cache is None else accessor_cache
+    attributes = {}
+    for key in semantics:
+        index = primitive["attributes"][key]
+        if index not in cache: cache[index] = accessor(doc, binary, index)
+        attributes[key] = cache[index]
+    count = len(attributes["POSITION"])
+    require(count == part["vertexCount"] and triangle_count == part["triangles"], "FIDELITY_CORRESPONDENCE")
+    indices = [row[0] for row in accessor(doc, binary, primitive["indices"])] if "indices" in primitive else list(range(count))
+    faces = triangles(indices, primitive.get("mode", 4))
+    return {"geometry": digest, "semantics": semantics, "attributes": attributes, "world": world,
+            "inverse": check_fidelity_matrix(world), "vertexCount": count,
+            "usedIds": set(indices), "triangles": triangle_count, "correspondenceSha256": correspondence_hash(faces)}
+
+
+def compare_fidelity_corner(source, source_id, local, world):
+    require(type(source_id) is int and 0 <= source_id < source["vertexCount"], "FIDELITY_CORRESPONDENCE")
+    for key in source["semantics"]:
+        require(key in local and key in world, "FIDELITY_CORRESPONDENCE")
+        expected = list(source["attributes"][key][source_id])
+        if key == "POSITION":
+            policy_distance(expected, local[key], POSITION_LIMIT, "FIDELITY_POSITION")
+            policy_distance(expected, position(source["inverse"], world[key]), POSITION_LIMIT, "FIDELITY_POSITION")
+            policy_distance(position(source["world"], expected), world[key], POSITION_LIMIT, "FIDELITY_POSITION")
+        elif key == "NORMAL":
+            policy_direction(expected, local[key], "FIDELITY_NORMAL")
+            policy_direction(expected, policy_normal(source["inverse"], world[key]), "FIDELITY_NORMAL")
+            policy_direction(policy_normal(source["world"], expected), world[key], "FIDELITY_NORMAL")
+        elif key == "TANGENT":
+            policy_values(local[key], 4, "FIDELITY_TANGENT"); policy_values(world[key], 4, "FIDELITY_TANGENT")
+            require(expected[3] in (-1, 1) and local[key][3] == expected[3] and
+                    world[key][3] == expected[3]*matrix_sign(source["world"]), "FIDELITY_TANGENT")
+            policy_direction(expected[:3], local[key][:3], "FIDELITY_TANGENT")
+            policy_direction(expected[:3], policy_vector(source["inverse"], world[key][:3]), "FIDELITY_TANGENT")
+            policy_direction(policy_vector(source["world"], expected[:3]), world[key][:3], "FIDELITY_TANGENT")
+        elif key.startswith("TEXCOORD_"):
+            policy_components(expected, local[key], 2, UV_LIMIT, "FIDELITY_UV")
+        else:
+            if len(expected) == 3: expected.append(1)
+            policy_components(expected, local[key], 4, COLOR_LIMIT, "FIDELITY_COLOR")
+
+
+def glb_fidelity(doc, binary, node_index, part, source):
+    node = ref(doc.get("nodes", []), node_index)
+    mesh = ref(doc.get("meshes", []), node.get("mesh"))
+    require(len(mesh["primitives"]) == 1, "FIDELITY_CORRESPONDENCE")
+    primitive = mesh["primitives"][0]; names = set(primitive.get("attributes", {}))
+    require(VERTEX_ID in names, "FIDELITY_CORRESPONDENCE")
+    require(set(source["semantics"]) <= names and names - set(source["semantics"]) <= {VERTEX_ID, "NORMAL", "TANGENT"}, "FEATURE")
+    declared = ref(doc.get("accessors", []), primitive["attributes"].get(VERTEX_ID))
+    require(declared.get("type") == "SCALAR" and declared.get("componentType") == 5126 and not declared.get("normalized", False), "FIDELITY_CORRESPONDENCE")
+    ids = checked_vertex_ids([row[0] for row in accessor(doc, binary, primitive["attributes"][VERTEX_ID])], part["vertexCount"])
+    attributes = {key: accessor(doc, binary, primitive["attributes"][key]) for key in source["semantics"]}
+    require(all(len(values) == len(ids) for values in attributes.values()), "FIDELITY_CORRESPONDENCE")
+    indices = [row[0] for row in accessor(doc, binary, primitive["indices"])] if "indices" in primitive else list(range(len(ids)))
+    require(all(type(i) is int and 0 <= i < len(ids) for i in indices), "FIDELITY_CORRESPONDENCE")
+    require({ids[i] for i in indices} == source["usedIds"], "FIDELITY_CORRESPONDENCE")
+    faces = triangles(indices, primitive.get("mode", 4)); world_matrix = worlds(doc)[node_index]
+    check_fidelity_matrix(world_matrix)
+    correspondence = []
+    for face in faces:
+        correspondence.append([ids[index] for index in face])
+        for index in face:
+            local = {key: list(values[index]) for key, values in attributes.items()}; observed = {}
+            for key, value in local.items():
+                if key == "POSITION": observed[key] = position(world_matrix, value)
+                elif key == "NORMAL": observed[key] = policy_normal(world_matrix, value)
+                elif key == "TANGENT": observed[key] = policy_normalize(policy_vector(world_matrix, value[:3]), "FIDELITY_TANGENT") + [value[3]*matrix_sign(world_matrix)]
+                else:
+                    if key.startswith("COLOR_") and len(value) == 3: value.append(1)
+                    observed[key] = value
+            compare_fidelity_corner(source, ids[index], local, observed)
+    digest = correspondence_hash(correspondence)
+    require(len(faces) == source["triangles"] and digest == source["correspondenceSha256"], "FIDELITY_CORRESPONDENCE")
+    return digest
+
+
+def primitive_geometry(doc, binary, node_index, primitive_index, semantics=None, scene_index=None, diagnostic_hashes=None, allow_unused_storage=False):
     matrices = worlds(doc, scene_index); require(node_index in matrices, "MAP")
     node = ref(doc.get("nodes", []), node_index); primitive = ref(ref(doc.get("meshes", []), node.get("mesh"))["primitives"], primitive_index)
     attributes = primitive.get("attributes", {}); require("POSITION" in attributes, "SOURCE")
@@ -407,7 +702,10 @@ def primitive_geometry(doc, binary, node_index, primitive_index, semantics=None,
     indices = [row[0] for row in accessor(doc, binary, primitive["indices"])] if "indices" in primitive else list(range(count))
     for index in indices: natural(index, count - 1)
     faces = triangles(indices, primitive.get("mode", 4)); require(1 <= len(faces) <= 20000, "GEOMETRY")
-    require(len(set(indices)) == count, "GEOMETRY")  # Loose source vertices are not silently trimmed.
+    # glTF material primitives may share accessor storage without referencing
+    # every slot. Their rendered faces remain exact; physical bpy loose meshes
+    # are still audited independently and never repaired or trimmed here.
+    if not allow_unused_storage: require(len(set(indices)) == count, "GEOMETRY")
     m = matrices[node_index]; rows = []
     determinant = m[0]*(m[5]*m[10]-m[6]*m[9])-m[4]*(m[1]*m[10]-m[2]*m[9])+m[8]*(m[1]*m[6]-m[2]*m[5])
     for face in faces:
@@ -599,7 +897,7 @@ def material_graph(material):
     return {"flags": flags, "graph": graph(material.node_tree, set())}
 
 
-def measure(obj, part, source_hash, semantics, bpy, diagnostic_rows=None, expected_geometry=None):
+def measure(obj, part, source_hash, semantics, bpy, diagnostic_rows=None, expected_geometry=None, fidelity_source=None):
     require(obj.type == "MESH" and not obj.modifiers and not obj.constraints and obj.data.shape_keys is None and obj.animation_data is None, "FEATURE")
     dg = bpy.context.evaluated_depsgraph_get(); evaluated = obj.evaluated_get(dg)
     mesh = evaluated.to_mesh(preserve_all_data_layers=True, depsgraph=dg)
@@ -612,11 +910,18 @@ def measure(obj, part, source_hash, semantics, bpy, diagnostic_rows=None, expect
         require(color_keys == ["COLOR_%d" % i for i in range(len(color_keys))] and len(mesh.color_attributes) == len(color_keys), "FEATURE")
         if "TANGENT" in semantics:
             require(bool(uv_keys), "FEATURE"); mesh.calc_tangents(uvmap=mesh.uv_layers[0].name)
+        vertex_ids = None
+        if fidelity_source is not None:
+            attribute = mesh.attributes.get(VERTEX_ID)
+            require(attribute is not None and attribute.domain == "POINT" and attribute.data_type == "FLOAT" and
+                    len(attribute.data) == len(mesh.vertices), "FIDELITY_CORRESPONDENCE")
+            vertex_ids = checked_vertex_ids([float(item.value) for item in attribute.data], part["vertexCount"], fidelity_source["usedIds"])
         world = obj.matrix_world.copy()
+        if fidelity_source is not None: check_fidelity_matrix(bpy_matrix_y_up(world))
         determinant = world.to_3x3().determinant(); require(abs(determinant) > 1e-20, "GEOMETRY_TRANSFORM")
         normal_matrix = world.to_3x3().inverted().transposed()
         def y_up(v): return [float(v[0]), float(v[2]), -float(v[1])]
-        used = set(); edge_uses = Counter(); invalid_uvs = 0; degenerate = 0; rows = []
+        used = set(); edge_uses = Counter(); invalid_uvs = 0; degenerate = 0; rows = []; correspondence = []
         for polygon in mesh.polygons:
             for edge in polygon.edge_keys: edge_uses[tuple(sorted(edge))] += 1
         for layer in mesh.uv_layers:
@@ -624,24 +929,36 @@ def measure(obj, part, source_hash, semantics, bpy, diagnostic_rows=None, expect
                 if any(not math.isfinite(n) or abs(n) > 1_000_000 for n in item.uv): invalid_uvs += 1
         for triangle in mesh.loop_triangles:
             corners, points = [], []
+            if vertex_ids is not None:
+                correspondence.append([vertex_ids[mesh.loops[loop_index].vertex_index] for loop_index in triangle.loops])
             for loop_index in triangle.loops:
                 loop = mesh.loops[loop_index]; vertex = loop.vertex_index; used.add(vertex)
                 p = y_up(world @ mesh.vertices[vertex].co); points.append(p)
                 corner = {"POSITION": [quantize(n) for n in p]}
+                local_values = {"POSITION": y_up(mesh.vertices[vertex].co)}
+                world_values = {"POSITION": p}
                 if "NORMAL" in semantics:
                     require(len(mesh.corner_normals) == len(mesh.loops), "FEATURE")
                     n = normal_matrix @ mesh.corner_normals[loop_index].vector
                     require(n.length > 0, "GEOMETRY_DIRECTION"); n.normalize(); corner["NORMAL"] = [quantize(v) for v in y_up(n)]
+                    local_values["NORMAL"] = y_up(mesh.corner_normals[loop_index].vector)
+                    world_values["NORMAL"] = y_up(n)
                 if "TANGENT" in semantics:
                     tangent = world.to_3x3() @ loop.tangent
                     require(tangent.length > 0, "FEATURE"); tangent.normalize()
                     corner["TANGENT"] = [quantize(v) for v in y_up(tangent)] + [quantize(-loop.bitangent_sign * (1 if determinant >= 0 else -1))]
+                    local_values["TANGENT"] = y_up(loop.tangent) + [-float(loop.bitangent_sign)]
+                    world_values["TANGENT"] = y_up(tangent) + [-float(loop.bitangent_sign)*(1 if determinant >= 0 else -1)]
                 for index, key in enumerate(uv_keys):
                     uv = mesh.uv_layers[index].data[loop_index].uv
                     corner[key] = [quantize(uv.x), quantize(1 - uv.y)]
+                    local_values[key] = world_values[key] = [float(uv.x), 1-float(uv.y)]
                 for index, key in enumerate(color_keys):
                     layer = mesh.color_attributes[index]; require(layer.domain in ("POINT", "CORNER"), "FEATURE")
                     corner[key] = [quantize(n) for n in layer.data[vertex if layer.domain == "POINT" else loop_index].color]
+                    local_values[key] = world_values[key] = [float(n) for n in layer.data[vertex if layer.domain == "POINT" else loop_index].color]
+                if fidelity_source is not None:
+                    compare_fidelity_corner(fidelity_source, vertex_ids[vertex], local_values, world_values)
                 corners.append(corner)
             a,b,c = points; u=[b[k]-a[k] for k in range(3)]; v=[c[k]-a[k] for k in range(3)]
             if math.hypot(u[1]*v[2]-u[2]*v[1],u[2]*v[0]-u[0]*v[2],u[0]*v[1]-u[1]*v[0]) <= 1e-10: degenerate += 1
@@ -655,13 +972,19 @@ def measure(obj, part, source_hash, semantics, bpy, diagnostic_rows=None, expect
         require(len(slots) == 1, "MATERIAL")
         index = next(iter(slots)); material = obj.material_slots[index].material if index < len(obj.material_slots) else None
         digest = geometry_hash(rows)
+        correspondence_digest = None
+        if fidelity_source is not None:
+            correspondence_digest = correspondence_hash(correspondence)
+            require(correspondence_digest == fidelity_source["correspondenceSha256"], "FIDELITY_CORRESPONDENCE")
         if diagnostic_rows is not None and digest != expected_geometry:
             diagnostic_rows.extend(rows)
         return {"sourceKey": part["sourceKey"], "originMarker": part["originMarker"],
                 "sourceObjectId": object_id(source_hash, "render", part["sourceKey"]), "vertices": len(mesh.vertices), "triangles": len(mesh.loop_triangles),
                 "boundaryEdges": sum(edge_uses[edge] == 1 for edge in edges), "nonManifoldEdges": sum(edge_uses[edge] != 2 for edge in edges),
                 "looseVertices": loose_vertices, "looseEdges": loose_edges, "degenerateFaces": degenerate, "invalidUVs": invalid_uvs,
-                "uvLayers": len(mesh.uv_layers), "finitePositions": True, "geometrySha256": digest, "materialSha256": sha(canonical(material_graph(material)))}
+                "uvLayers": len(mesh.uv_layers), "finitePositions": True, "geometrySha256": digest,
+                **({"correspondenceSha256": correspondence_digest} if fidelity_source is not None else {}),
+                "materialSha256": sha(canonical(material_graph(material)))}
     finally:
         evaluated.to_mesh_clear()
 

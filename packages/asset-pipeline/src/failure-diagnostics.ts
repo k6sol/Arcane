@@ -7,7 +7,7 @@ const STAGES = new Set(['prepare-output', 'probe', 'generate', 'request-validati
 const CONVERSION_STAGES = new Set(['input', 'source-import', 'source-map', 'collision', 'scene-save', 'export',
   'scene-reopen', 'export-roundtrip', 'review-render', 'audit-write']);
 for (const stage of CONVERSION_STAGES) STAGES.add(stage);
-const CONVERSION_REASONS = new Set(['INPUT', 'SOURCE', 'MAP', 'FEATURE', 'GEOMETRY', 'MATERIAL', 'COLLISION', 'EXPORT', 'REOPEN', 'RENDER', 'IO', 'NATIVE', 'IO_PATH', 'IO_LINK', 'IO_TYPE', 'IO_SIZE', 'IO_IDENTITY', 'IO_READ', 'IO_CHANGED', 'IO_EXISTS', 'IO_ACCESS', 'GEOMETRY_COUNTS', 'GEOMETRY_TRANSFORM', 'GEOMETRY_DIRECTION', 'GEOMETRY_TOPOLOGY', 'GEOMETRY_AREA', 'GEOMETRY_UV', 'GEOMETRY_TRIANGLES', 'GEOMETRY_HASH', 'GEOMETRY_HASH_POSITION', 'GEOMETRY_HASH_NORMAL', 'GEOMETRY_HASH_TANGENT', 'GEOMETRY_HASH_UV', 'GEOMETRY_HASH_COLOR', 'GEOMETRY_HASH_CORNER_ASSOCIATION']);
+const CONVERSION_REASONS = new Set(['INPUT', 'SOURCE', 'MAP', 'FEATURE', 'GEOMETRY', 'MATERIAL', 'COLLISION', 'EXPORT', 'REOPEN', 'RENDER', 'IO', 'NATIVE', 'IO_PATH', 'IO_LINK', 'IO_TYPE', 'IO_SIZE', 'IO_IDENTITY', 'IO_READ', 'IO_CHANGED', 'IO_EXISTS', 'IO_ACCESS', 'GEOMETRY_COUNTS', 'GEOMETRY_TRANSFORM', 'GEOMETRY_DIRECTION', 'GEOMETRY_TOPOLOGY', 'GEOMETRY_AREA', 'GEOMETRY_UV', 'GEOMETRY_TRIANGLES', 'GEOMETRY_HASH', 'GEOMETRY_HASH_POSITION', 'GEOMETRY_HASH_NORMAL', 'GEOMETRY_HASH_TANGENT', 'GEOMETRY_HASH_UV', 'GEOMETRY_HASH_COLOR', 'GEOMETRY_HASH_CORNER_ASSOCIATION', 'FIDELITY_POSITION', 'FIDELITY_NORMAL', 'FIDELITY_TANGENT', 'FIDELITY_UV', 'FIDELITY_COLOR', 'FIDELITY_TRANSFORM', 'FIDELITY_CONDITION', 'FIDELITY_CORRESPONDENCE', 'FIDELITY_HIERARCHY']);
 const TYPES = new Set(['ValueError', 'RuntimeError', 'TypeError', 'AttributeError', 'KeyError', 'IndexError', 'FileNotFoundError',
   'PermissionError', 'OSError', 'MemoryError', 'ImportError', 'ModuleNotFoundError', 'ZeroDivisionError', 'NotImplementedError', 'Exception']);
 const REASONS: Record<string, string> = {
@@ -31,6 +31,15 @@ const REASONS: Record<string, string> = {
   CONVERSION_GEOMETRY_HASH_UV: 'The refused full geometry comparison also differs in its texture-coordinate projections.',
   CONVERSION_GEOMETRY_HASH_COLOR: 'The refused full geometry comparison also differs in its vertex-color projections.',
   CONVERSION_GEOMETRY_HASH_CORNER_ASSOCIATION: 'The full geometry comparison differs despite matching attribute projections; their corner association remains unverified.',
+  CONVERSION_FIDELITY_POSITION: 'A measured vertex exceeded the fixed physical precision limit in local, source or world space.',
+  CONVERSION_FIDELITY_NORMAL: 'A measured surface normal exceeded the fixed angular precision limit.',
+  CONVERSION_FIDELITY_TANGENT: 'A measured tangent exceeded the fixed angular limit or changed handedness.',
+  CONVERSION_FIDELITY_UV: 'A measured UV component exceeded the fixed texture-coordinate precision limit.',
+  CONVERSION_FIDELITY_COLOR: 'A measured color or alpha component exceeded the fixed linear color precision limit.',
+  CONVERSION_FIDELITY_TRANSFORM: 'A measured local transform exceeded its fixed precision limit or changed handedness.',
+  CONVERSION_FIDELITY_CONDITION: 'The model transform exceeds the supported numerical conditioning limit.',
+  CONVERSION_FIDELITY_CORRESPONDENCE: 'The model lost exact source vertex correspondence, oriented face coverage or multiplicity.',
+  CONVERSION_FIDELITY_HIERARCHY: 'The model changed its exact selected node or parent correspondence.',
   CONVERSION_MATERIAL: 'Source material or image data could not be preserved through conversion.',
   CONVERSION_COLLISION: 'The requested collision hull failed its geometry or closed-volume checks.',
   CONVERSION_EXPORT: 'The exported model failed its measured geometry, identity or hierarchy checks.',

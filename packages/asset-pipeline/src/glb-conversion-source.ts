@@ -4,6 +4,7 @@ import { validateGlb, GLB_PREFLIGHT_LIMITS } from '../../../apps/desktop/src/glb
 import { matrixFromTrs, multiplyMatrix4 } from '../../core/src/spatial-math.js';
 import { STUDIO_IMPORT_LIMITS } from './studio-import-manifest.js';
 import { AssetError } from './types.js';
+import { CONVERSION_NODE_KEY, CONVERSION_VERTEX_ID, checkConversionMatrix } from './conversion-fidelity-policy.js';
 
 /** Host-authored lineage marker, never an exported producer identity or approval. */
 export const GLB_CONVERSION_ORIGIN = 'arcane_conversion_origin_v1';
@@ -17,6 +18,13 @@ export interface GlbConversionPart {
   readonly originMarker: string;
   readonly worldMatrix: readonly number[];
   readonly triangles: number;
+  readonly vertexCount: number;
+}
+export interface GlbConversionNode {
+  readonly nodeKey: string;
+  readonly importNodeIndex: number;
+  readonly parentKey: string | null;
+  readonly localMatrix: readonly number[];
 }
 export interface GlbConversionSource {
   readonly sourceSha256: string;
@@ -27,6 +35,7 @@ export interface GlbConversionSource {
   /** New disposable import copy. Original managed bytes are never modified. */
   readonly importBytes: Buffer;
   readonly parts: readonly GlbConversionPart[];
+  readonly nodes: readonly GlbConversionNode[];
 }
 type Data = Record<string, unknown>;
 interface Node extends Data { mesh?: number; children?: number[]; skin?: number; weights?: number[]; camera?: number;
@@ -34,7 +43,8 @@ interface Node extends Data { mesh?: number; children?: number[]; skin?: number;
 interface Primitive extends Data { attributes: Record<string, number>; indices?: number; material?: number; mode?: number; targets?: unknown[] }
 interface Mesh extends Data { primitives: Primitive[]; weights?: number[] }
 interface Document extends Data { scene?: number; scenes?: { nodes?: number[] }[]; nodes?: Node[]; meshes: Mesh[];
-  accessors: { count: number }[]; skins?: unknown[]; animations?: unknown[]; cameras?: unknown[] }
+  accessors: ({ count: number } & Data)[]; buffers: { byteLength: number }[]; bufferViews: Data[];
+  skins?: unknown[]; animations?: unknown[]; cameras?: unknown[] }
 const digest = (bytes: Uint8Array | string) => createHash('sha256').update(bytes).digest('hex');
 function refused(code: string, message: string): never { throw new AssetError(code, message); }
 function removeExtras(root: unknown): void {
@@ -65,6 +75,8 @@ export function prepareGlbConversionSource(bytes: Buffer, expectedSha256: string
   catch { refused('ASSET_CONVERSION_GLB', 'The retained GLB failed preview admission before conversion.'); }
   const oldJsonBytes = source.readUInt32LE(12);
   const doc = JSON.parse(source.subarray(20, 20 + oldJsonBytes).toString('utf8')) as Document;
+  const originalBin = source.subarray(28 + oldJsonBytes), streams: Buffer[] = [originalBin];
+  let binLength = originalBin.length;
   const originalNodes = doc.nodes ?? [], scenes = doc.scenes ?? [];
   if ((doc.skins?.length ?? 0) || (doc.animations?.length ?? 0) ||
       originalNodes.some(node => node.skin !== undefined || node.weights !== undefined) ||
@@ -83,7 +95,9 @@ export function prepareGlbConversionSource(bytes: Buffer, expectedSha256: string
     const node = originalNodes[index]!;
     if (world.has(index)) refused('ASSET_CONVERSION_SCENE', 'The selected model hierarchy has repeated nodes.');
     const local = node.matrix ?? matrixFromTrs(node.translation, node.rotation, node.scale);
+    checkConversionMatrix(local);
     world.set(index, multiplyMatrix4(parent < 0 ? identity : world.get(parent)!, local));
+    checkConversionMatrix(world.get(index)!);
     reachable.push(index);
     for (const child of [...(node.children ?? [])].reverse()) pending.push({ index: child, parent: index });
   }
@@ -97,6 +111,7 @@ export function prepareGlbConversionSource(bytes: Buffer, expectedSha256: string
     return node;
   });
   const meshes: Mesh[] = [], parts: GlbConversionPart[] = [];
+  const nodeKeys = reachable.map(index => `node${index}`);
   let totalTriangles = 0;
   for (const index of reachable) {
     const original = originalNodes[index]!;
@@ -104,6 +119,9 @@ export function prepareGlbConversionSource(bytes: Buffer, expectedSha256: string
     const mesh = doc.meshes[original.mesh]!;
     for (let primitiveIndex = 0; primitiveIndex < mesh.primitives.length; primitiveIndex++) {
       const primitive = mesh.primitives[primitiveIndex]!;
+      if (Object.hasOwn(primitive.attributes, CONVERSION_VERTEX_ID)) refused('ASSET_CONVERSION_SOURCE', 'Source uses the reserved conversion correspondence attribute.');
+      const vertexCount = doc.accessors[primitive.attributes.POSITION!]!.count;
+      if (!Number.isInteger(vertexCount) || vertexCount < 3 || vertexCount > 60000) refused('ASSET_CONVERSION_BUDGET', 'Conversion exceeds its per-part vertex correspondence budget.');
       const count = doc.accessors[primitive.indices ?? primitive.attributes.POSITION!]!.count;
       const mode = primitive.mode ?? 4;
       if (![4, 5, 6].includes(mode)) refused('ASSET_CONVERSION_TOPOLOGY', 'Line and point primitives need an explicit geometric conversion; none were discarded.');
@@ -114,14 +132,21 @@ export function prepareGlbConversionSource(bytes: Buffer, expectedSha256: string
       const sourceKey = `node${index}_primitive${primitiveIndex}`;
       const originMarker = `glb_${expectedSha256}:${index}:${primitiveIndex}`;
       const importNodeIndex = nodes.length;
-      const split = { ...mesh, primitives: [primitive] };
+      const ids = Buffer.alloc(vertexCount * 4);
+      for (let vertex = 0; vertex < vertexCount; vertex++) ids.writeFloatLE(vertex, vertex * 4);
+      const view = doc.bufferViews.length, accessor = doc.accessors.length;
+      doc.bufferViews.push({ buffer: 0, byteOffset: binLength, byteLength: ids.length, target: 34962 });
+      doc.accessors.push({ bufferView: view, componentType: 5126, type: 'SCALAR', count: vertexCount, min: [0], max: [vertexCount - 1] });
+      binLength += ids.length; streams.push(ids);
+      const split = { ...mesh, primitives: [{ ...primitive, attributes: { ...primitive.attributes, [CONVERSION_VERTEX_ID]: accessor } }] };
       meshes.push(split);
       nodes.push({ mesh: meshes.length - 1, name: sourceKey, extras: { [GLB_CONVERSION_ORIGIN]: originMarker } });
+      nodeKeys.push(sourceKey);
       const parent = nodes[remap.get(index)!]!;
       parent.children = [...(parent.children ?? []), importNodeIndex];
       parts.push(Object.freeze({ sourceNodeIndex: index, sourceMeshIndex: original.mesh, sourcePrimitiveIndex: primitiveIndex,
         sourceMaterialIndex: primitive.material ?? null, sourceKey, importNodeIndex, originMarker,
-        worldMatrix: Object.freeze([...world.get(index)!]), triangles }));
+        worldMatrix: Object.freeze([...world.get(index)!]), triangles, vertexCount }));
     }
   }
   if (!parts.length) refused('ASSET_CONVERSION_EMPTY', 'The selected scene contains no mesh primitives to convert.');
@@ -132,16 +157,28 @@ export function prepareGlbConversionSource(bytes: Buffer, expectedSha256: string
   removeExtras(nodes);
   removeExtras(meshes);
   for (const part of parts) nodes[part.importNodeIndex]!.extras = { [GLB_CONVERSION_ORIGIN]: part.originMarker };
+  const parents = new Map<number, number>();
+  nodes.forEach((node, index) => { for (const child of node.children ?? []) parents.set(child, index); });
+  const bindings = nodes.map((node, index) => {
+    node.extras = { ...((node.extras as Data | undefined) ?? {}), [CONVERSION_NODE_KEY]: nodeKeys[index]! };
+    return Object.freeze({ nodeKey: nodeKeys[index]!, importNodeIndex: index,
+      parentKey: parents.has(index) ? nodeKeys[parents.get(index)!]! : null,
+      localMatrix: Object.freeze([...(node.matrix ?? matrixFromTrs(node.translation, node.rotation, node.scale))]) });
+  });
   doc.nodes = nodes; doc.meshes = meshes;
   doc.scenes = [{ nodes: (selected.nodes ?? []).map(index => remap.get(index)!) }]; doc.scene = 0;
+  doc.buffers[0]!.byteLength = binLength;
   const encoded = Buffer.from(JSON.stringify(doc)), padding = (4 - encoded.length % 4) % 4;
-  const json = Buffer.concat([encoded, Buffer.alloc(padding, 32)]), tail = source.subarray(20 + oldJsonBytes);
-  const output = Buffer.alloc(20 + json.length + tail.length);
+  const json = Buffer.concat([encoded, Buffer.alloc(padding, 32)]);
+  if (28 + json.length + binLength > GLB_PREFLIGHT_LIMITS.bytes) refused('ASSET_CONVERSION_BUDGET', 'The marked correspondence copy exceeds the retained import byte budget.');
+  const output = Buffer.alloc(28 + json.length + binLength);
   source.copy(output, 0, 0, 12); output.writeUInt32LE(output.length, 8);
   output.writeUInt32LE(json.length, 12); output.writeUInt32LE(0x4e4f534a, 16);
-  json.copy(output, 20); tail.copy(output, 20 + json.length);
+  json.copy(output, 20); output.writeUInt32LE(binLength, 20 + json.length); output.writeUInt32LE(0x004e4942, 24 + json.length);
+  let writeAt = 28 + json.length;
+  for (const stream of streams) { stream.copy(output, writeAt); writeAt += stream.length; }
   try { validateGlb(Uint8Array.from(output).buffer); }
   catch { refused('ASSET_CONVERSION_PREPARED', 'The marked import copy failed bounded GLB validation; no converter was started.'); }
   return Object.freeze({ sourceSha256: expectedSha256, sourceBytes: source.length, sourceSceneIndex: sceneIndex,
-    declaredSceneCount: scenes.length, importSha256: digest(output), importBytes: output, parts: Object.freeze(parts) });
+    declaredSceneCount: scenes.length, importSha256: digest(output), importBytes: output, parts: Object.freeze(parts), nodes: Object.freeze(bindings) });
 }

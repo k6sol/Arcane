@@ -367,11 +367,11 @@ export class AssetPipeline {
       await atomicJson(directory, 'job.json', { ...journal(), workers: supervision.records });
       progress('input'); remaining(end, signal);
       const prepared = prepareRetainedGlbConversionInput(captured), source = prepared.source;
-      const sourceMap = { schemaVersion: 1 as const, sourceSha256: source.sourceSha256, importSha256: source.importSha256,
-        sourceSceneIndex: source.sourceSceneIndex, declaredSceneCount: source.declaredSceneCount, parts: source.parts };
+      const sourceMap = { schemaVersion: 2 as const, fidelityPolicy: 'arcane-static-fidelity-v1' as const, sourceSha256: source.sourceSha256, importSha256: source.importSha256,
+        sourceSceneIndex: source.sourceSceneIndex, declaredSceneCount: source.declaredSceneCount, parts: source.parts, nodes: source.nodes };
       const mapBytes = Buffer.from(JSON.stringify(sourceMap) + '\n');
       if (mapBytes.length > GLB_CONVERSION_LIMITS.jsonBytes) throw new AssetError('ASSET_CONVERSION_INPUT', 'Conversion source map exceeds its bound.');
-      request = parseConvertedGlbRequest({ schemaVersion: 1, kind: 'converted-glb', jobId: id, parentJobId: prepared.parent.jobId,
+      request = parseConvertedGlbRequest({ schemaVersion: 2, fidelityPolicy: 'arcane-static-fidelity-v1', kind: 'converted-glb', jobId: id, parentJobId: prepared.parent.jobId,
         parentManifestSha256: prepared.parentManifestSha256, name: prepared.name, sourceSha256: source.sourceSha256,
         sourceBytes: captured.sourceGlb.length, importSha256: source.importSha256, importBytes: source.importBytes.length,
         sourceMapSha256: sha256(mapBytes), collision: prepared.collision, renderResolution: prepared.renderResolution, renderSamples: prepared.renderSamples });
@@ -440,7 +440,7 @@ export class AssetPipeline {
         if (artifacts.find(artifact => artifact.path === name)?.sha256 !== workerHashes.get(name))
           throw new AssetError('HASH', 'A fixed conversion worker changed after its supervised launch.');
       }
-      const manifest: ConvertedGlbManifest = { schemaVersion: 1, origin: 'converted-glb', jobId: id, createdAt: new Date().toISOString(),
+      const manifest: ConvertedGlbManifest = { schemaVersion: 2, origin: 'converted-glb', jobId: id, createdAt: new Date().toISOString(),
         request, runtime: evidence.blender, workerBundleSha256: sha256(Buffer.from(GLB_CONVERSION_WORKERS.map(name => artifacts.find(a => a.path === name)!.sha256).join('\n'))),
         coordinateSystem: { units: 'meters', sceneUp: 'Z', glbUp: 'Y', pivot: 'source', robloxScaleVerified: false }, sourceMap: checkedMap, validation: audit, artifacts,
         limitations: ['Original source and parent snapshots retained; conversion is a distinct job and does not grant review or import authority.',

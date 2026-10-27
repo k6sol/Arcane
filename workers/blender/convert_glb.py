@@ -106,6 +106,29 @@ def mapped_objects(scene, parts, source_hash, stamped):
     return {p["sourceKey"]: found[p["originMarker"]] for p in parts}
 
 
+def mapped_scene_nodes(scene, mapping, request, stamped):
+    expected = audit.hierarchy_map(mapping); found = {}
+    part_keys = {part["sourceKey"] for part in mapping["parts"]}
+    for obj in scene.objects:
+        if stamped and obj.get("arcane_role") == "collision":
+            audit.require(request["collision"] == "convex-hull" and obj.get(audit.NODE_KEY) is None, "FIDELITY_HIERARCHY")
+            assert_proxy_identity(obj, mapping, request)
+            continue
+        key = obj.get(audit.NODE_KEY)
+        audit.require(type(key) is str and key in expected and key not in found, "FIDELITY_HIERARCHY")
+        audit.require(obj.type == ("MESH" if key in part_keys else "EMPTY") and
+                      not obj.modifiers and not obj.constraints and obj.animation_data is None, "FEATURE")
+        found[key] = obj
+    audit.require(set(found) == set(expected), "FIDELITY_HIERARCHY")
+    observed = {}
+    for key, obj in found.items():
+        parent = expected[key]["parentKey"]
+        audit.require(obj.parent == found[parent] if parent is not None else obj.parent is None, "FIDELITY_HIERARCHY")
+        observed[key] = {"parentKey": parent, "localMatrix": audit.bpy_matrix_y_up(obj.matrix_local),
+                         "worldMatrix": audit.bpy_matrix_y_up(obj.matrix_world)}
+    return found, audit.check_node_bindings(mapping, observed)
+
+
 def clear_properties(block):
     for key in list(block.keys()):
         del block[key]
@@ -163,10 +186,23 @@ def hierarchy_signature(doc):
 def source_evidence(request, mapping, original, imported):
     source_doc, source_bin = audit.glb(original)
     import_doc, import_bin = audit.glb(imported)
-    audit.require(source_bin == import_bin, "SOURCE")
+    audit.require(import_bin[:len(source_bin)] == source_bin, "SOURCE")
     audit.require(len(source_doc.get("scenes", [])) == mapping["declaredSceneCount"] and
         source_doc.get("scene", 0) == mapping["sourceSceneIndex"], "MAP")
     source_world = audit.worlds(source_doc, mapping["sourceSceneIndex"])
+    nodes = audit.hierarchy_map(mapping)
+    parent_indices = {}
+    for index in source_world:
+        for child in source_doc["nodes"][index].get("children", []): parent_indices[child] = index
+    want_keys = {"node%d" % index for index in source_world} | {part["sourceKey"] for part in mapping["parts"]}
+    audit.require(set(nodes) == want_keys, "FIDELITY_HIERARCHY")
+    for index in source_world:
+        row = nodes["node%d" % index]
+        parent = "node%d" % parent_indices[index] if index in parent_indices else None
+        local = audit.matrix_local(source_doc["nodes"][index])
+        marked_node = audit.ref(import_doc["nodes"], row["importNodeIndex"])
+        audit.require(row["parentKey"] == parent and all(abs(a-b) <= 1e-9 for a,b in zip(local, row["localMatrix"])) and
+                      audit.matrix_local(marked_node) == local and marked_node.get("extras") == {audit.NODE_KEY: row["nodeKey"]}, "SOURCE")
     actual_parts = set()
     for index in source_world:
         node = source_doc["nodes"][index]
@@ -174,7 +210,7 @@ def source_evidence(request, mapping, original, imported):
             mesh = audit.ref(source_doc.get("meshes", []), node["mesh"])
             actual_parts.update((index, primitive) for primitive in range(len(mesh["primitives"])))
     audit.require(actual_parts == {(p["sourceNodeIndex"], p["sourcePrimitiveIndex"]) for p in mapping["parts"]}, "MAP")
-    expected = {}
+    expected = {}; source_accessor_cache = {}
     marked = {index: node for index, node in enumerate(import_doc.get("nodes", [])) if audit.ORIGIN in node.get("extras", {})}
     audit.require(set(marked) == {p["importNodeIndex"] for p in mapping["parts"]}, "MAP")
     for part in mapping["parts"]:
@@ -182,36 +218,36 @@ def source_evidence(request, mapping, original, imported):
         audit.require(node.get("mesh") == part["sourceMeshIndex"], "MAP")
         primitive = audit.ref(audit.ref(source_doc["meshes"], node["mesh"])["primitives"], part["sourcePrimitiveIndex"])
         audit.require(primitive.get("material") == part["sourceMaterialIndex"], "MAP")
-        digest, semantics, triangles, world = audit.primitive_geometry(source_doc, source_bin, part["sourceNodeIndex"], part["sourcePrimitiveIndex"], scene_index=mapping["sourceSceneIndex"])
+        digest, semantics, triangles, world = audit.primitive_geometry(source_doc, source_bin, part["sourceNodeIndex"], part["sourcePrimitiveIndex"], scene_index=mapping["sourceSceneIndex"], allow_unused_storage=True)
         audit.require(triangles == part["triangles"] and all(abs(a-b) <= 1e-9 for a,b in zip(world, part["worldMatrix"])), "MAP")
         imported_node = marked[part["importNodeIndex"]]
-        audit.require(imported_node.get("extras") == {audit.ORIGIN: part["originMarker"]}, "MAP")
+        audit.require(imported_node.get("extras") == {audit.ORIGIN: part["originMarker"], audit.NODE_KEY: part["sourceKey"]} and
+                      audit.matrix_local(imported_node) == audit.matrix_local({}) and
+                      nodes[part["sourceKey"]]["localMatrix"] == audit.matrix_local({}), "MAP")
         imported_mesh = audit.ref(import_doc.get("meshes", []), imported_node.get("mesh"))
         audit.require(len(imported_mesh.get("primitives", [])) == 1, "MAP")
-        comparison, copied_semantics, copied_triangles, copied_world = audit.primitive_geometry(import_doc, import_bin, part["importNodeIndex"], 0)
+        comparison, copied_semantics, copied_triangles, copied_world = audit.primitive_geometry(import_doc, import_bin, part["importNodeIndex"], 0, semantics, allow_unused_storage=True)
         audit.require((comparison, copied_semantics, copied_triangles) == (digest, semantics, triangles) and
             all(abs(a-b) <= 1e-9 for a,b in zip(world, copied_world)), "SOURCE")
         audit.require(imported_mesh["primitives"][0].get("material") == part["sourceMaterialIndex"], "MAP")
-        expected[part["sourceKey"]] = {"geometry": digest, "semantics": semantics, "material": part["sourceMaterialIndex"]}
-    return source_doc, source_bin, expected, hierarchy_signature(import_doc)
+        evidence = audit.source_fidelity(source_doc, source_bin, part, mapping["sourceSceneIndex"], accessor_cache=source_accessor_cache)
+        evidence["material"] = part["sourceMaterialIndex"]
+        audit.glb_fidelity(import_doc, import_bin, part["importNodeIndex"], part, evidence)
+        imported_primitive = imported_mesh["primitives"][0]
+        input_ids = audit.accessor(import_doc, import_bin, imported_primitive["attributes"][audit.VERTEX_ID])
+        audit.require(input_ids == [[i] for i in range(part["vertexCount"])], "FIDELITY_CORRESPONDENCE")
+        expected[part["sourceKey"]] = evidence
+    return source_doc, source_bin, expected, audit.glb_node_bindings(import_doc, mapping, input_indices=True)
 
 
 def measured_rows(bpy, objects, mapping, request, expected, source_doc, source_bin):
     rows = []
     for part in mapping["parts"]:
         evidence = expected[part["sourceKey"]]
-        diagnostic_rows = []
         row = audit.measure(objects[part["sourceKey"]], part, request["sourceSha256"], evidence["semantics"], bpy,
-                            diagnostic_rows=diagnostic_rows, expected_geometry=evidence["geometry"])
+                            fidelity_source=evidence)
         audit.require(row["triangles"] == part["triangles"], "GEOMETRY_TRIANGLES")
-        if row["geometrySha256"] != evidence["geometry"]:
-            # Compute semantic hints only after the original decisive comparison fails.
-            # Source corners are decoded again from retained original bytes, never bpy.
-            projections = {}
-            audit.primitive_geometry(source_doc, source_bin, part["sourceNodeIndex"], part["sourcePrimitiveIndex"],
-                                     scene_index=mapping["sourceSceneIndex"], diagnostic_hashes=projections)
-            audit.require_geometry_match(evidence["geometry"], row["geometrySha256"], projections,
-                                         audit.geometry_projection_hashes(diagnostic_rows))
+        audit.require(row["correspondenceSha256"] == evidence["correspondenceSha256"], "FIDELITY_CORRESPONDENCE")
         rows.append(row)
     return sorted(rows, key=lambda row: row["sourceKey"])
 
@@ -300,7 +336,7 @@ def exported_evidence(raw, filename, request, mapping, expected, source_doc, sou
     audit.require(type(generator) is str and 1 <= len(generator) <= 256 and all(32 <= ord(c) <= 126 for c in generator), "EXPORT")
     world = audit.worlds(doc)
     if filename == "asset.glb":
-        audit.require(hierarchy_signature(doc) == source_hierarchy, "EXPORT")
+        audit.glb_node_bindings(doc, mapping)
     meshes = [(index, node) for index, node in enumerate(doc.get("nodes", [])) if "mesh" in node]
     audit.require(all(index in world for index, _node in meshes), "EXPORT")
     parts = {p["sourceKey"]: p for p in mapping["parts"]}
@@ -322,8 +358,9 @@ def exported_evidence(raw, filename, request, mapping, expected, source_doc, sou
         primitive = mesh["primitives"][0]
         if role == "render":
             part = parts[key]; evidence = expected[key]
-            digest, _semantics, triangles, _matrix = audit.primitive_geometry(doc, binary, index, 0, evidence["semantics"])
-            audit.require(digest == evidence["geometry"] and triangles == part["triangles"], "GEOMETRY")
+            digest, _semantics, triangles, _matrix = audit.primitive_geometry(doc, binary, index, 0, evidence["semantics"], allow_unused_storage=True)
+            audit.require(triangles == part["triangles"], "GEOMETRY_TRIANGLES")
+            audit.glb_fidelity(doc, binary, index, part, evidence)
             before = audit.material_semantics(source_doc, source_bin, evidence["material"], decoder)
             after = audit.material_semantics(doc, binary, primitive.get("material"), decoder)
             audit.require(before == after, "MATERIAL")
@@ -348,13 +385,14 @@ def roundtrip(bpy, directory, mapping, request, expected, reopened, proxy_hash, 
         window.scene = temporary
         import_model(bpy, directory / "asset.glb")
         objects = mapped_objects(temporary, mapping["parts"], request["sourceSha256"], True)
+        mapped_scene_nodes(temporary, mapping, request, True)
         rows = measured_rows(bpy, objects, mapping, request, expected, source_doc, source_bin)
         # Blender may split vertices at an export seam; compare the canonical
         # per-corner semantics/material graph, not transient vertex numbering.
         by_key = {row["sourceKey"]: row for row in reopened}
         for row in rows:
             prior = by_key[row["sourceKey"]]
-            audit.require(row["geometrySha256"] == prior["geometrySha256"] and row["materialSha256"] == prior["materialSha256"] and
+            audit.require(row["correspondenceSha256"] == prior["correspondenceSha256"] and row["materialSha256"] == prior["materialSha256"] and
                 row["triangles"] == prior["triangles"] and row["uvLayers"] == prior["uvLayers"], "REOPEN")
         if request["collision"] == "convex-hull":
             for obj in list(temporary.objects):
@@ -489,6 +527,7 @@ def run():
     import_model(bpy, directory / "import-source.glb")
     event("source-map")
     objects = mapped_objects(bpy.context.scene, mapping["parts"], request["sourceSha256"], False)
+    scene_nodes, _initial_hierarchy = mapped_scene_nodes(bpy.context.scene, mapping, request, False)
     # C31 strips metadata in JSON. Also clear actual ID properties before stamping
     # trusted correspondence, without touching UV/color/mesh attribute data.
     for collection in (bpy.data.scenes, bpy.data.collections, bpy.data.objects, bpy.data.meshes, bpy.data.materials, bpy.data.images):
@@ -496,7 +535,11 @@ def run():
             clear_properties(block)
     for part in mapping["parts"]:
         stamp(objects[part["sourceKey"]], request["sourceSha256"], "render", part["sourceKey"], [], part["originMarker"])
+    # stamp() clears ID properties. Restore only the nodes already validated
+    # against the exact host import map; never fabricate a missing marker.
+    for key, obj in scene_nodes.items(): obj[audit.NODE_KEY] = key
     bpy.context.view_layer.update()
+    _scene_nodes, imported_hierarchy = mapped_scene_nodes(bpy.context.scene, mapping, request, True)
     imported_rows = measured_rows(bpy, objects, mapping, request, expected, source_doc, source_bin)
     event("collision")
     proxy = make_proxy(bpy, objects, request["sourceSha256"], sum(row["triangles"] for row in imported_rows)) if request["collision"] == "convex-hull" else None
@@ -519,6 +562,8 @@ def run():
     event("scene-reopen")
     operate(bpy.ops.wm.open_mainfile, {"filepath": str(directory / "asset.blend"), "load_ui": False, "use_scripts": False})
     objects = mapped_objects(bpy.context.scene, mapping["parts"], request["sourceSha256"], True)
+    _scene_nodes, reopened_hierarchy = mapped_scene_nodes(bpy.context.scene, mapping, request, True)
+    audit.require(imported_hierarchy == reopened_hierarchy, "REOPEN")
     reopened_rows = measured_rows(bpy, objects, mapping, request, expected, source_doc, source_bin)
     audit.require(imported_rows == reopened_rows, "REOPEN")
     collision_objects = [obj for obj in bpy.context.scene.objects if obj.type == "MESH" and obj.get("arcane_role") == "collision"]
@@ -542,7 +587,7 @@ def run():
     warnings = ["delivery-support-pending"]
     if any(row["boundaryEdges"] for row in imported_rows): warnings.append("open-render-surfaces")
     if request["collision"] == "none": warnings.append("no-collision-proxy")
-    result = {"schemaVersion": 1, "kind": "arcane-glb-conversion-audit", "jobId": request["jobId"],
+    result = {"schemaVersion": 2, "fidelityPolicy": audit.FIDELITY_POLICY, "kind": "arcane-glb-conversion-audit", "jobId": request["jobId"],
         "parentJobId": request["parentJobId"], "parentManifestSha256": request["parentManifestSha256"],
         "requestSha256": options.request_sha256, "sourceSha256": request["sourceSha256"], "importSha256": request["importSha256"],
         "sourceMapSha256": request["sourceMapSha256"], "identityScheme": audit.IDENTITY,

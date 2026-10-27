@@ -211,6 +211,11 @@ async function assertSuccess(t, executable, expectedVersion, collision) {
   assert.equal(result.manifestPath, join(job.directory, 'manifest.json'));
   const manifest = await f.pipeline.validateConversion(result.manifestPath), journal = await closedJournal(job);
   assert.equal(manifest.origin, 'converted-glb'); assert.equal(manifest.jobId, job.id); assert.equal(journal.state, 'succeeded');
+  assert.equal(manifest.schemaVersion, 2);
+  for (const record of [manifest.request, manifest.sourceMap, manifest.validation]) {
+    assert.equal(record.schemaVersion, 2); assert.equal(record.fidelityPolicy, 'arcane-static-fidelity-v1');
+  }
+  assert.equal(manifest.validation.identityScheme, 'arcane-converted-v2');
   assert.equal(await realpath(manifest.runtime.executable), executable); assert.equal(manifest.runtime.version, expectedVersion);
   assert.equal(manifest.validation.blenderVersion, expectedVersion); assert.equal(manifest.runtime.background, true);
   assert.deepEqual(manifest.runtime.capabilities, { glbExport: true, glbImport: true, fbxExport: true, fbxImport: true, cycles: true });
@@ -221,9 +226,12 @@ async function assertSuccess(t, executable, expectedVersion, collision) {
   assert.equal(JSON.parse(originalParent.toString()).engineImport.status, 'unavailable');
   assert.equal(manifest.sourceMap.parts.length, 5); assert.equal(new Set(manifest.sourceMap.parts.map(part => part.sourceMeshIndex)).size, 2);
   assert.equal(manifest.sourceMap.parts.filter(part => part.sourceMeshIndex === 0).length, 4);
+  assert.ok(manifest.sourceMap.nodes.length > manifest.sourceMap.parts.length);
+  assert.ok(manifest.sourceMap.parts.every(part => Number.isInteger(part.vertexCount) && part.vertexCount >= 3));
   assert.equal(manifest.validation.savedSceneReopened, true); assert.deepEqual(manifest.validation.errors, []);
   assert.deepEqual(manifest.validation.importedParts, manifest.validation.reopenedParts);
   assert.ok(manifest.validation.importedParts.every(part => part.uvLayers === 1 && part.finitePositions && part.degenerateFaces === 0 && part.invalidUVs === 0));
+  assert.ok(manifest.validation.importedParts.every(part => /^[a-f0-9]{64}$/.test(part.correspondenceSha256) && /^[a-f0-9]{64}$/.test(part.geometrySha256)));
   assert.ok(manifest.validation.importedParts.some(part => part.vertices >= 6 && part.boundaryEdges > 0));
   assert.ok(manifest.validation.warnings.includes('open-render-surfaces'));
   assert.ok((await prefix(join(job.directory, 'asset.blend'), 7)).equals(Buffer.from('BLENDER')));

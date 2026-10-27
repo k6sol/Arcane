@@ -169,18 +169,22 @@ class ConversionGeometryDiagnosticsTests(unittest.TestCase):
         self.assertEqual(projections, audit.geometry_projection_hashes(rows(corners())))
         self.assertEqual(doc, before)
 
-    def controlled_measurement(self, actual_rows, triangle_count=1):
+    def controlled_measurement(self, actual_corners, triangle_count=1):
         doc, binary = actual_source()
         digest, semantics, _triangles, _world = audit.primitive_geometry(doc, binary, 0, 0)
-        part = {"sourceKey": "node0_primitive0", "sourceNodeIndex": 0, "sourcePrimitiveIndex": 0, "triangles": 1}
+        part = {"sourceKey": "node0_primitive0", "sourceNodeIndex": 0, "sourceMeshIndex": 0, "sourcePrimitiveIndex": 0, "triangles": 1, "vertexCount": 3}
         mapping = {"parts": [part], "sourceSceneIndex": 0}
-        evidence = {part["sourceKey"]: {"geometry": digest, "semantics": semantics}}
-        actual = {"sourceKey": part["sourceKey"], "triangles": triangle_count, "geometrySha256": audit.geometry_hash(actual_rows)}
+        evidence = {part["sourceKey"]: audit.source_fidelity(doc, binary, part, 0)}
+        actual = {"sourceKey": part["sourceKey"], "triangles": triangle_count, "geometrySha256": audit.geometry_hash(rows(actual_corners)),
+                  "correspondenceSha256": audit.correspondence_hash([[0, 1, 2]])}
 
-        def measure(_object, _part, _source_hash, _semantics, _bpy, diagnostic_rows=None, expected_geometry=None):
-            self.assertEqual(expected_geometry, digest)
-            if actual["geometrySha256"] != expected_geometry:
-                diagnostic_rows.extend(actual_rows)
+        def measure(_object, _part, _source_hash, _semantics, _bpy, fidelity_source=None):
+            self.assertEqual(fidelity_source["geometry"], digest)
+            # Controlled native boundary; real original accessors feed the actual
+            # policy comparator, while no bpy process/measurement is represented.
+            for source_id, corner in enumerate(actual_corners):
+                sample = {key: [n / 1000000 for n in values] for key, values in corner.items()}
+                audit.compare_fidelity_corner(fidelity_source, source_id, sample, sample)
             return actual
 
         with patch.object(audit, "measure", measure):
@@ -189,21 +193,21 @@ class ConversionGeometryDiagnosticsTests(unittest.TestCase):
 
     def test_controlled_measurement_boundary_refuses_and_redecodes_actual_source(self):
         changed = corners()
-        changed[0]["NORMAL"][0] += 1
+        changed[0]["NORMAL"][0] += 10000
         with self.assertRaises(audit.ConversionFailure) as failure:
-            self.controlled_measurement(rows(changed))
-        self.assertEqual(failure.exception.reason, "GEOMETRY_HASH_NORMAL")
+            self.controlled_measurement(changed)
+        self.assertEqual(failure.exception.reason, "FIDELITY_NORMAL")
 
     def test_controlled_measurement_success_returns_unchanged_audit_row_and_does_no_projection_work(self):
         with patch.object(audit, "geometry_projection_hashes", side_effect=AssertionError("unexpected diagnostic work")):
-            observed, actual = self.controlled_measurement(rows(corners()))
+            observed, actual = self.controlled_measurement(corners())
         self.assertEqual(observed, [actual])
-        self.assertEqual(set(observed[0]), {"sourceKey", "triangles", "geometrySha256"})
+        self.assertEqual(set(observed[0]), {"sourceKey", "triangles", "geometrySha256", "correspondenceSha256"})
 
     def test_original_triangle_count_refusal_precedes_semantic_hint_work(self):
         with patch.object(audit, "geometry_projection_hashes", side_effect=AssertionError("unexpected diagnostic work")):
             with self.assertRaises(audit.ConversionFailure) as failure:
-                self.controlled_measurement(rows(corners()), triangle_count=2)
+                self.controlled_measurement(corners(), triangle_count=2)
         self.assertEqual(failure.exception.reason, "GEOMETRY_TRIANGLES")
 
 
