@@ -15,7 +15,8 @@ async function fixture(t: test.TestContext) {
   const budget = new ChatTaskProposalBudget(), coordinator = new ChatTaskCoordinator({ directory: join(root, 'journal'), projectPath: project, proposalBudget: budget });
   const controlledJobCloses=new Map<string,()=>void>();
   coordinator.attachCancellation(Object.freeze({ async cancelExact(jobId:string) { const close=controlledJobCloses.get(jobId);assert.ok(close);close(); }, async revalidateExact() { return 'current' as const; } }));
-  t.after(async () => { closureGate.resolve(); await coordinator.close(); const part = relative(boundary, root);
+  let expectedCloseFailure: RegExp | null = null;
+  t.after(async () => { closureGate.resolve(); if (expectedCloseFailure) await assert.rejects(coordinator.close(), expectedCloseFailure); else await coordinator.close(); const part = relative(boundary, root);
     assert.ok(part.startsWith('arcane-plan-integration-') && !isAbsolute(part) && !part.includes(sep)); await rm(root, { recursive: true, force: true }); });
   const state: Snapshot = { connectionId: randomUUID(), provenance: 'spawned-node-fixture', mcpIsolation: 'arcane-only-verified', connected: true, ready: true,
     account: { auth: 'subscription', plan: null, requiresOpenaiAuth: true }, models: [], selection: { model: 'fixture', effort: 'low' }, operations: [], approvals: [], events: [], droppedEvents: 0, lastEventSeq: 0, failureCode: null,
@@ -54,6 +55,7 @@ async function fixture(t: test.TestContext) {
   } });
   return { coordinator, budget, state, owner, taskId, actorId, calls, scopes, start, workerEntered,
     controlledJobClose(jobId:string,close:()=>void){controlledJobCloses.set(jobId,close);},
+    expectCloseFailure(pattern: RegExp) { expectedCloseFailure = pattern; },
     corruptAck() { corruptAck = true; }, changeAccount() { liveAccount = 'b'.repeat(64); }, unconfirmedClose() { closeFailure = true; }, holdWorker() { held = true; }, releaseWorker() {held=false;for(const release of workerReleases)release();},holdClosures(){heldClosures=true;},releaseClosures(){closureGate.resolve();} };
 }
 
@@ -81,7 +83,7 @@ test('cancelling a held planned worker aborts before revoke, joins closure and p
 });
 
 test('an uncertain planned worker closure quarantines its existing budget and stops later effects', { timeout: 10000 }, async t => {
-  const f = await fixture(t); f.unconfirmedClose(); f.start(); await f.coordinator.drain();
+  const f = await fixture(t); f.unconfirmedClose(); f.expectCloseFailure(/unconfirmed closure/); f.start(); await f.coordinator.drain();
   assert.equal(f.budget.quarantined, 2); assert.equal(f.coordinator.plan(f.taskId)!.state, 'unknown');
   assert.equal(f.calls.filter(c => c === 'factory').length, 2); assert.ok(!f.calls.includes('parent'));
 });
