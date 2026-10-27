@@ -71,7 +71,11 @@ async function fixture(t:TestContext,options:{scenario?:boolean;runtime?:Scenari
   const openService=async()=>{const service=await createStudioTestService({directory,store,custody:store.bindNativeCustody(projectId,join(root,'studio')),pluginArtifactHash:ARTIFACT,connect,reports:writer,...(options.task?{taskPort}:{})});services.push(service);return service;};
   const service=await openService();
   const openReports=async()=>{const r=await openStudioTestReportStore({directory:reportDirectory,projectId,exclusiveWriter:()=>true});reportStores.push(r);return r;};
-  const prepare=()=>service.requests.prepare({sessionId:pair.sessionId,nativeStudioId:STUDIO,durationMs:5000,observationIntervalMs:250,failOnRuntimeError:true,...(options.scenario?{scenario:plan}:{})},ACTOR);
+  const prepare=()=>{
+    // Publish a real authenticated heartbeat for this admission; the interval is not an await boundary.
+    assert.deepEqual(publish(),[]);
+    return service.requests.prepare({sessionId:pair.sessionId,nativeStudioId:STUDIO,durationMs:5000,observationIntervalMs:250,failOnRuntimeError:true,...(options.scenario?{scenario:plan}:{})},ACTOR);
+  };
   return {root,directory,reportDirectory,store,reports,service,openService,openReports,state,packets,prepare};
 }
 
