@@ -1,6 +1,6 @@
 import test,{type TestContext} from 'node:test';
 import assert from 'node:assert/strict';
-import {copyFileSync,mkdirSync,readFileSync,rmSync,writeFileSync} from 'node:fs';
+import {copyFileSync,existsSync,mkdirSync,readFileSync,rmSync,writeFileSync} from 'node:fs';
 import {join,resolve,relative,isAbsolute} from 'node:path';
 import {request as httpRequest} from 'node:http';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
@@ -23,12 +23,13 @@ import {fixtureTempDirectory,makeFixtureDirectory} from './windows-fixture-paths
 type Lab=Awaited<ReturnType<typeof createConnectionLab>>;
 const NATIVE='history-fixture-native',MARKER='ArcaneTestProof_history_composition';
 const text=(value:string):CallToolResult=>({content:[{type:'text',text:value}]});
-async function fixture(t:TestContext){
-  const root=makeFixtureDirectory('arcane-report-composition-'),resources=join(root,'resources'),state=join(root,'lab');
-  mkdirSync(join(resources,'plugin','build'),{recursive:true});mkdirSync(join(resources,'plugin','src'));mkdirSync(state);
+async function fixture(t:TestContext,options:{siblingWorkspace?:boolean}={}){
+  const root=makeFixtureDirectory('arcane-report-composition-'),resources=join(root,'resources');
+  const storeDirectory=options.siblingWorkspace?join(root,'runtime','product'):root,state=options.siblingWorkspace?join(root,'runtime','connection-lab'):join(root,'lab');
+  mkdirSync(join(resources,'plugin','build'),{recursive:true});mkdirSync(join(resources,'plugin','src'));mkdirSync(state,{recursive:true});
   for(const file of ['manifest.json','ArcaneLocalBridge.rbxmx'])copyFileSync(resolve('plugin','build',file),join(resources,'plugin','build',file));
   for(const[,,file]of STUDIO_PLUGIN_SOURCES)copyFileSync(resolve('plugin','src',file),join(resources,'plugin','src',file));
-  const store=new StudioStore({directory:root}),labs:Lab[]=[],connections:NativeTestConnection[]=[];
+  const store=new StudioStore({directory:storeDirectory}),labs:Lab[]=[],connections:NativeTestConnection[]=[];
   const stats={connects:0,closes:0,providerActions:0,providerCloses:0,calls:[] as string[]};let failClose=false;
   const grant=store.createGrant({allowedRoots:['Workspace','ServerStorage'],allowWrites:true}),pair=store.pair({code:grant.code,protocolVersion:1,identity:{clientSessionId:'history-fixture-lifetime',placeId:0,universeId:0,name:'History disposable fixture',pluginVersion:'fixture-only'},capabilities:['scene.children']});
   const artifact=await studioImportPluginArtifactHash(resources);
@@ -47,7 +48,7 @@ async function fixture(t:TestContext){
   };
   const start=async(overrides:Partial<Parameters<typeof createConnectionLab>[0]>={})=>{const app=await createConnectionLab({cwd:resources,projectPath:root,stateDirectory:state,studioStore:store,codexService:codex,probe:async()=>[],studioTestConnect:connect,...overrides});labs.push(app);return app;};
   t.after(async()=>{failClose=false;for(const app of labs)try{await app.close();}catch{}for(const connection of connections)await connection.close();store.close();const tail=relative(fixtureTempDirectory(),root);assert.ok(!isAbsolute(tail)&&!tail.startsWith('..')&&tail.startsWith('arcane-report-composition-'));rmSync(root,{recursive:true,force:true});});
-  return{root,resources,state,store,pair,stats,start,publish,setCloseFailure(){failClose=true;},projectId:workflowProjectIdentity(root).projectId};
+  return{root,resources,state,storeDirectory,store,pair,stats,start,publish,setCloseFailure(){failClose=true;},projectId:workflowProjectIdentity(root).projectId};
 }
 function call(app:Lab,path:string,options:{agent?:boolean;token?:string;body?:unknown}={}){
   return new Promise<{status:number;bytes:Buffer;json:Record<string,unknown>}>((resolve,reject)=>{
@@ -101,4 +102,31 @@ test('daemon shutdown invalidates a real in-flight historical store read before 
   const reopened=await f.start();let closing:Promise<void>|undefined,reads=0;
   const mock=t.mock.method(prototype,'get',function(this:typeof reference,...args:Parameters<typeof original>){reads++;closing=reopened.close();return original.apply(this,args);});
   try{const result=await call(reopened,'/v1/playtests/history/report?id='+jobId).catch(()=>null);assert.ok(result===null||result.status!==200);assert.equal(reads,1);assert.ok(closing);await closing;}finally{mock.mock.restore();}
+});
+
+// Actual SQLite/LAB composition with the preserved default-product sibling paths.
+// The SDK peer is synthetic and never starts Studio; source wiring below is not native proof.
+test('trusted original workspace enables legacy sibling admission and independent retained history without moving data',async t=>{
+  const f=await fixture(t,{siblingWorkspace:true}),options={studioWorkspaceDirectory:f.storeDirectory};
+  const app=await f.start(options),jobId=await prepare(f,app);assert.equal(f.stats.connects,1);
+  assert.ok(existsSync(join(f.storeDirectory,'studio.sqlite')));
+  assert.ok(existsSync(join(f.state,'playtest-reports','reports.sqlite')));
+  assert.equal(existsSync(join(f.storeDirectory,'connection-lab')),false);
+  await app.close();assert.equal(f.stats.closes,1);
+  const lock=join(f.state,'playtests','ledger','writer.lock');writeFileSync(lock,'synthetic-retained-writer-fence');const retained=readFileSync(lock);
+  const reopened=await f.start(options),live=await call(reopened,'/v1/playtests',{agent:true});assert.equal(live.status,409);assert.equal(live.json.error,'FENCED');
+  const page=await call(reopened,'/v1/playtests/history');assert.equal(page.status,200);assert.deepEqual(page.json.archive,{state:'ready',code:null});
+  assert.equal(historical(await call(reopened,'/v1/playtests/history/report?id='+jobId)).jobId,jobId);assert.equal(f.stats.connects,1);
+  await reopened.close();assert.deepEqual(readFileSync(lock),retained);assert.equal(existsSync(join(f.storeDirectory,'connection-lab')),false);
+});
+
+test('absent sibling workspace and explicit foreign workspace refuse without fallback or SDK effects',async t=>{
+  for(const siblingWorkspace of [true,false]){
+    const f=await fixture(t,{siblingWorkspace}),foreign=join(f.root,'foreign-workspace');mkdirSync(foreign);
+    const app=await f.start(siblingWorkspace?{}:{studioWorkspaceDirectory:foreign});
+    const live=await call(app,'/v1/playtests',{agent:true});assert.equal(live.status,409);assert.equal(live.json.error,'SDK_CUSTODY_UNCONFIRMED');
+    const page=await call(app,'/v1/playtests/history');assert.equal(page.status,200);assert.deepEqual(page.json.archive,{state:'unavailable',code:'ARCHIVE_UNAVAILABLE'});
+    assert.equal(f.stats.connects,0);assert.equal(f.stats.closes,0);assert.equal(f.stats.providerActions,0);
+    await app.close();
+  }
 });

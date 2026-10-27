@@ -91,6 +91,8 @@ function unavailableStudioTestRoutes(code: keyof typeof unavailableTestMessages,
 interface Options {
   cwd: string;
   stateDirectory: string;
+  /** Trusted parent composition: original directory used to construct studioStore. Never route input. */
+  studioWorkspaceDirectory?: string;
   probe?: (cwd: string) => Promise<Connection[]>;
   studioStore?: StudioStore;
   workStore?: WorkStore;
@@ -236,12 +238,13 @@ export async function createConnectionLab(options: Options) {
         return null;
       };
       const studioStore=options.studioStore;
-      // Only this daemon can write the journal when its StudioStore holds the project's exclusive
-      // workspace lock and the playtest state lives inside that project directory.
-      exclusiveTestWriter=()=>studioStore.holdsWorkspaceLock(dirname(options.stateDirectory));
+      // The trusted parent supplies the original store workspace for legacy sibling state layouts.
+      // Other embeddings retain the nested-state convention; the exact workspace lock is still required.
+      const studioWorkspaceDirectory=options.studioWorkspaceDirectory??dirname(options.stateDirectory);
+      exclusiveTestWriter=()=>studioStore.holdsWorkspaceLock(studioWorkspaceDirectory);
       const testProject=captureStudioTestNativeProject(options.projectPath??options.cwd),testProjectId=testProject.projectId;
       assertNativeTestProject=testProject.assertCurrent;
-      try{nativeTestCustody=studioStore.bindNativeCustody(testProjectId,dirname(options.stateDirectory));}catch{/* History remains independently readable; native admission refuses below. */}
+      try{nativeTestCustody=studioStore.bindNativeCustody(testProjectId,studioWorkspaceDirectory);}catch{/* History remains independently readable; native admission refuses below. */}
       const archiveUnavailable=Object.freeze({state:'unavailable',code:'ARCHIVE_UNAVAILABLE'} as const);
       try {
         testReports=await openStudioTestReportStore({directory:join(options.stateDirectory,'playtest-reports'),
