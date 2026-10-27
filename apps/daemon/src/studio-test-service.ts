@@ -16,6 +16,7 @@ import {scenarioSubjectDigest,scenarioSubjectProgram} from './studio-test-subjec
 import {captureEditViewport,viewportRequestSchema,VIEWPORT_LIMITS} from '../../../packages/studio-test-controller/src/viewport.js';
 import {createNativeAssetRequests} from './studio-native-assets.js';
 import type {StudioTestTaskPort,StudioTestTaskOrigin,StudioTestTaskSettled} from '../../../packages/protocol/src/chat-task-playtest.js';
+import {createStudioTestOwnedClose,closeAfterStudioTestConnectFailure} from './studio-test-owned-close.js';
 import {createStudioTestHistoricalReport,StudioTestReportError,STUDIO_TEST_REPORT_ARCHIVE_CODES,type StudioTestReportWriter,type StudioTestReportArchiveStatus} from './studio-test-report-store.js';
 
 const id=z.string().regex(/^[A-Za-z0-9_-]{1,128}$/), hash=z.string().regex(/^[a-f0-9]{64}$/);
@@ -44,6 +45,7 @@ async function connectNativeTest(maxBufferSize:number=SCENARIO_LIMITS.wireBytes)
   const executable=await discoverNativeStudioExecutable();
   const transport=new StdioClientTransport({command:executable.path,args:[],cwd:dirname(executable.path),stderr:'ignore',maxBufferSize});
   const client=new Client({name:'arcane-owned-playtest',version:'0.1.0'},{capabilities:{}});
+  const ownedClose=createStudioTestOwnedClose(client,transport);
   try{
     await client.connect(transport,{timeout:10000,maxTotalTimeout:10000});
     if(client.getServerVersion()?.name!=='RobloxStudio')rejected('BAD_NATIVE_RESPONSE');
@@ -58,8 +60,8 @@ async function connectNativeTest(maxBufferSize:number=SCENARIO_LIMITS.wireBytes)
       const result=CallToolResultSchema.parse(await client.callTool({name:'execute_luau',arguments:{studio_id:studioId,datamodel_type:mode==='Edit'?'Edit':'Server',code}},CallToolResultSchema,{signal,timeout:5000,maxTotalTimeout:5000,resetTimeoutOnProgress:false}));
       if(result.isError||result.content.length!==1||result.content[0]?.type!=='text'||Buffer.byteLength(result.content[0].text)>4096)rejected('BAD_NATIVE_RESPONSE');
       try{return witnessSchema.parse(JSON.parse(result.content[0].text));}catch{rejected('BAD_NATIVE_RESPONSE');}
-    },async close(){await client.close();await transport.close();}};
-  }catch(error){await client.close().catch(()=>{});await transport.close().catch(()=>{});throw error;}
+    },close:()=>ownedClose.close()};
+  }catch(error){return closeAfterStudioTestConnectFailure(ownedClose,error);}
 }
 
 /** Real product lifecycle, not a fixture-only controller. Human approval is a
