@@ -394,6 +394,9 @@ export async function createAssetViewer({ host, bytes, label, signal, onStatus }
     metrics.renderFrames++;
     if (renderer.info.render.calls > MAX_DRAWS) throw previewError('Asset exceeds the 256 draw-call preview limit.');
     dirty = false;
+    // A synchronous measurement or fitting controls may have consumed a queued
+    // paused redraw. Do not leave that redundant frame scheduled after drawing.
+    if (!animate()) stopFrame();
   }
   function updateProjection() {
     const aspect = width / height;

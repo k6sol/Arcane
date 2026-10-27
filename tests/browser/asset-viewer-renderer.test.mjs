@@ -267,19 +267,9 @@ async function fixture(browser, t, sources, options = {}) {
 }
 const stats = page => page.evaluate(() => viewer.stats());
 async function idleFrames(page) {
-  // Loading, observer delivery and fitting may leave one-shot redraws queued.
-  // Cross two real frames before sampling; keep the original 100 ms readiness
-  // budget and refuse any remaining RAF rather than waiting a loop out.
-  const ready = await page.evaluate(() => new Promise(resolve => {
-    let frame;
-    const deadline = setTimeout(() => { cancelAnimationFrame(frame); resolve(false); }, 100);
-    frame = requestAnimationFrame(() => {
-      frame = requestAnimationFrame(() => { clearTimeout(deadline); resolve(true); });
-    });
-  }));
-  assert.equal(ready, true, 'idle readiness crosses two browser frames within 100 ms');
-  const { before, animation, pending } = await page.evaluate(() => ({ before: viewer.stats(), animation: viewer.animationState(), pending: meter.pendingFrames.size }));
-  assert.equal(pending, 0, 'idle readiness has no pending RAF');
+  await page.waitForTimeout(100);
+  const before = await stats(page);
+  const animation = await page.evaluate(() => viewer.animationState());
   await page.waitForTimeout(200);
   assert.equal((await stats(page)).renderFrames, before.renderFrames, 'no idle render loop');
   assert.deepEqual(await page.evaluate(() => viewer.animationState()), animation, 'suspended animation time does not advance');
@@ -317,11 +307,30 @@ test('real Three.js GLB renderer in isolated headless WebGL2', { timeout: 120_00
       syntheticIdleLoop();
     });
     try {
-      await assert.rejects(() => idleFrames(page), error => error.code === 'ERR_ASSERTION' && error.actual === 1 && error.expected === 0 && error.message.startsWith('idle readiness has no pending RAF'));
+      await assert.rejects(() => idleFrames(page), error => error.code === 'ERR_ASSERTION' && error.actual === 1 && error.expected === 0 && error.message.startsWith('no idle pending RAF'));
     } finally {
       await page.evaluate(() => { cancelAnimationFrame(syntheticIdleFrame); viewer.dispose(); });
     }
     await clean(page); assert.deepEqual(errors, []);
+  });
+
+  await t.test('a synchronous paused resize consumes its queued redraw, including fitting changes', async t => {
+    const { page, errors } = await fixture(browser, t, sources);
+    await page.evaluate(data => start(data), glb()); await idleFrames(page);
+    const event = await page.evaluate(() => {
+      const before = viewer.stats().renderFrames;
+      viewer.setView('front');
+      const queued = meter.pendingFrames.size;
+      window.dispatchEvent(new Event('resize'));
+      return { before, queued, after: viewer.stats().renderFrames, pending: meter.pendingFrames.size, animation: viewer.animationState() };
+    });
+    assert.equal(event.queued, 1, 'the view change queued one real redraw');
+    assert.equal(event.after, event.before + 1, 'resize synchronously drew the fitted view');
+    assert.equal(event.pending, 0, 'the completed paused draw cancels its redundant RAF');
+    await idleFrames(page);
+    assert.equal((await stats(page)).renderFrames, event.after, 'no later redraw remains after the synchronous draw');
+    assert.deepEqual(await page.evaluate(() => viewer.animationState()), event.animation);
+    await page.evaluate(() => viewer.dispose()); await clean(page); assert.deepEqual(errors, []);
   });
 
   await t.test('lazy context, visible PBR pixels, orbit, zoom, keyboard, wireframe, idle and disposal', async t => {
