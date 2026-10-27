@@ -348,7 +348,41 @@ test('owned Node loopback restart: exact persisted endpoint and original real-st
   const f = fixture(t);
   // Compile only the current store dependencies into this owned fixture,
   // using Node's type erasure. Never import stale dist or execute product services.
-  for (const name of ['packages/storage/src/studio-store.ts', 'packages/storage/src/sqlite-path.ts', 'packages/protocol/src/providers.ts', 'packages/protocol/src/studio.ts', 'packages/protocol/src/asset-conversation.ts', 'packages/core/src/studio-policy.ts', 'packages/core/src/studio-asset-policy.ts', 'packages/core/src/native-property-outcomes.ts', 'packages/core/src/gui-property-outcomes.ts', 'packages/core/src/terrain-policy.ts', 'packages/core/src/mesh-keep-policy.ts']) {
+  for (const name of [
+    'packages/storage/src/studio-store.ts',
+    'packages/storage/src/sqlite-path.ts',
+    'packages/protocol/src/providers.ts',
+    'packages/protocol/src/studio.ts',
+    'packages/protocol/src/asset-conversation.ts',
+    'packages/core/src/studio-policy.ts',
+    'packages/core/src/studio-asset-policy.ts',
+    'packages/core/src/native-property-outcomes.ts',
+    'packages/core/src/gui-property-outcomes.ts',
+    'packages/core/src/terrain-policy.ts',
+    'packages/core/src/mesh-keep-policy.ts',
+    'apps/desktop/src/glb-preflight.ts',
+    'packages/asset-pipeline/src/adopted-glb.ts',
+    'packages/asset-pipeline/src/conversion-fidelity-policy.ts',
+    'packages/asset-pipeline/src/converted-glb-collision.ts',
+    'packages/asset-pipeline/src/converted-glb-manifest.ts',
+    'packages/asset-pipeline/src/converted-glb.ts',
+    'packages/asset-pipeline/src/glb-conversion-fidelity.ts',
+    'packages/asset-pipeline/src/glb-conversion-source.ts',
+    'packages/asset-pipeline/src/material-png.ts',
+    'packages/asset-pipeline/src/model-spec.ts',
+    'packages/asset-pipeline/src/paths.ts',
+    'packages/asset-pipeline/src/procedural.ts',
+    'packages/asset-pipeline/src/recipe.ts',
+    'packages/asset-pipeline/src/studio-import-graph.ts',
+    'packages/asset-pipeline/src/studio-import-manifest.ts',
+    'packages/asset-pipeline/src/studio-import-payload.ts',
+    'packages/asset-pipeline/src/studio-import-textures.ts',
+    'packages/asset-pipeline/src/studio-import-transfer.ts',
+    'packages/asset-pipeline/src/studio-import-wire.ts',
+    'packages/asset-pipeline/src/types.ts',
+    'packages/asset-pipeline/src/validation.ts',
+    'packages/core/src/spatial-math.ts',
+  ]) {
     const full = path.join(f.productRoot, name.replace(/\.ts$/, '.js')); fs.mkdirSync(path.dirname(full), { recursive: true });
     fs.writeFileSync(full, stripTypeScriptTypes(source(name), { mode: 'transform' }));
   }
