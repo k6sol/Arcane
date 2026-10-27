@@ -246,9 +246,9 @@ function verifyStudioSchema(db:DatabaseSync,version:number):Set<string>{
  const application=Number(db.prepare('PRAGMA application_id').get()?.application_id);
  if(!Number.isSafeInteger(version)||version<0||version===1||version>STUDIO_DATABASE_VERSION||application!==(version===7?STUDIO_APPLICATION_ID:0))fail();
  if(db.prepare('PRAGMA quick_check').get()?.quick_check!=='ok')fail();
- const size=db.prepare("SELECT count(*) AS n,coalesce(max(length(CAST(sql AS BLOB))),0) AS largest FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'").get() as Row;
+ const size=db.prepare("SELECT count(*) AS n,coalesce(max(length(CAST(sql AS BLOB))),0) AS largest FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*'").get() as Row;
  if(Number(size.n)>STUDIO_SCHEMA.length||Number(size.largest)>8192)fail();
- const rows=db.prepare("SELECT type,name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'").all() as Row[];
+ const rows=db.prepare("SELECT type,name,sql FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*'").all() as Row[];
  if(version===0){if(rows.length)fail();return new Set();}
  const count=version===2?6:version===3?10:version===4?12:version===5?13:16;
  const expected=new Set<string>(STUDIO_SCHEMA.slice(0,count).map(schemaSql));
