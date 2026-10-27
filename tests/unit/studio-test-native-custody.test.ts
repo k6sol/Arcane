@@ -37,7 +37,7 @@ function owner(f:ReturnType<typeof database>){
 async function serviceFixture(t:TestContext){
   const db=database(t),reports=await openStudioTestReportStore({directory:join(db.root,'reports'),projectId:db.projectId,
     exclusiveWriter:()=>db.store.holdsWorkspaceLock(db.directory)});
-  const grant=db.store.createGrant({allowedRoots:['Workspace'],allowWrites:true});
+  const grant=db.store.createGrant({allowedRoots:['Workspace','ServerStorage'],allowWrites:true});
   const pair=db.store.pair({code:grant.code,protocolVersion:1,identity:{clientSessionId:'custody-plugin',placeId:0,universeId:0,name:NAME,pluginVersion:'fixture'},capabilities:['scene.children']});
   let mode:'Edit'|'Play'='Edit',playEpoch=0,allowPlay=false,heartbeat:ReturnType<typeof setInterval>|undefined;
   const publish=()=>{db.store.authenticate(pair.sessionId,pair.token);return db.store.poll(pair.sessionId,{sessionId:pair.sessionId,clientLifetimeId:'custody-plugin',pluginArtifactHash:ARTIFACT,

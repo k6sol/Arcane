@@ -589,10 +589,15 @@ describe('createStudioTestService: SDK/store/ledger fixture integration', { conc
     assert.equal(f.state.closes, 1);
     await assert.rejects(f.connections[0]!.client.listTools({}), /Not connected/);
     assert.equal(existsSync(join(f.directory, 'ledger', 'writer.lock')), false);
-    await assert.rejects(f.prepare(), { code: 'BUSY' });
+    // A retired custody epoch cannot allocate another connector, even after its original close settled.
+    await assert.rejects(f.prepare(), { code: 'SDK_CUSTODY_UNCONFIRMED' });
+    assert.equal(f.state.connects, 1);
+    assert.equal(f.connections.length, 1);
+    assert.equal(f.state.closes, 1);
     await assert.rejects(f.service.humanControl.approve(approval(job), () => {}), { code: 'HUMAN_AUTH_REQUIRED' });
     const reopened = await f.openService();
     const next = await reopened.requests.prepare(f.request, OTHER);
+    assert.equal(f.state.connects, 2);
     assert.equal(next.state, 'needs_approval');
     assert.equal(next.actor, OTHER);
     await reopened.requests.cancel(next.id, OTHER);
