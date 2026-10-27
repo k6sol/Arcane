@@ -90,6 +90,17 @@ test('work registration refuses unsafe records and Promise hooks without evaluat
   invalid(Object.freeze({kind:'prepare',completion:life.promise,cancel}));
 });
 
+test('work registration accepts runtime symbol fields on ordinary Promises but refuses symbol accessors',t=>{
+  const f=fixture(t),parent=f.own(),tagged=f.gate(),accessor=f.gate();let invoked=0;
+  // Mirrors the inert symbol data fields Node attaches while async hooks are enabled.
+  Object.defineProperty(tagged.promise,Symbol('runtime async id'),{value:1,writable:true,enumerable:false,configurable:true});
+  const work=f.coordinator.playtests.registerWork(parent.origin,Object.freeze({kind:'prepare' as const,completion:tagged.promise,cancel:async()=>tagged.resolve()}));
+  assert.ok(Object.isFrozen(work));
+  Object.defineProperty(accessor.promise,Symbol('hook'),{get(){invoked++;return 1;}});
+  assert.throws(()=>f.coordinator.playtests.registerWork(parent.origin,Object.freeze({kind:'prepare' as const,completion:accessor.promise,cancel:async()=>accessor.resolve()})));
+  assert.equal(invoked,0);tagged.resolve();accessor.resolve();
+});
+
 test('completed or foreign work cannot acquire a new job or first terminal',async t=>{
   const f=fixture(t),parent=f.own(),other=f.own(),life=f.gate();
   const work=f.coordinator.playtests.registerWork(parent.origin,Object.freeze({kind:'prepare' as const,completion:life.promise,cancel:async()=>life.resolve()}));

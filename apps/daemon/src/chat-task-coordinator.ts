@@ -91,9 +91,19 @@ const promiseSpecies=Object.getOwnPropertyDescriptor(NativePromise,Symbol.specie
 function sameDescriptor(a:PropertyDescriptor|undefined,b:PropertyDescriptor|undefined):boolean {
   return !!a&&!!b&&a.value===b.value&&a.get===b.get&&a.set===b.set&&a.writable===b.writable&&a.enumerable===b.enumerable&&a.configurable===b.configurable;
 }
+// Node's async hooks attach internal symbol-keyed data fields to every Promise
+// while hooks are enabled, so only string names and accessors are refused.
+function ownPromiseFieldsInert(value:object):boolean {
+  for(const key of Reflect.ownKeys(value)){
+    if(typeof key==='string')return false;
+    const field=Object.getOwnPropertyDescriptor(value,key);
+    if(!field||!Object.hasOwn(field,'value'))return false;
+  }
+  return true;
+}
 function ordinaryCompletion(value:unknown):value is Promise<void> {
   return !!value&&typeof value==='object'&&!types.isProxy(value)&&types.isPromise(value)&&Object.getPrototypeOf(value)===promisePrototype&&
-    Reflect.ownKeys(value).length===0&&sameDescriptor(Object.getOwnPropertyDescriptor(promisePrototype,'constructor'),promiseConstructor)&&
+    ownPromiseFieldsInert(value)&&sameDescriptor(Object.getOwnPropertyDescriptor(promisePrototype,'constructor'),promiseConstructor)&&
     promiseConstructor?.value===NativePromise&&sameDescriptor(Object.getOwnPropertyDescriptor(NativePromise,Symbol.species),promiseSpecies);
 }
 function observe<T>(promise:Promise<T>):Promise<JoinOutcome> {
