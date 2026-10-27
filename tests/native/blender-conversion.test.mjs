@@ -280,10 +280,10 @@ test('real Blender static conversion acceptance', { timeout: 900000 }, async t =
   });
   runtimeAcquisition = await runtimeAcquisitionEvidence(executable);
   await t.test('none: actual hierarchy/material/UV/shared-mesh/open-card conversion and real retained previews', { timeout: CASE_TIMEOUT }, async child => {
-    await assertSuccess(child, executable, expectedVersion, 'none');
+    await assertSuccess(child, executable, expectedVersion + ' LTS', 'none');
   });
   await t.test('convex-hull: actual multimesh open-card source produces independently validated positive-volume collision', { timeout: CASE_TIMEOUT }, async child => {
-    await assertSuccess(child, executable, expectedVersion, 'convex-hull');
+    await assertSuccess(child, executable, expectedVersion + ' LTS', 'convex-hull');
   });
   await t.test('actual worker source-map event cancellation waits for owned close and never becomes a success or replay', { timeout: CASE_TIMEOUT }, async child => {
     const f = await caseWorkspace(child, executable), source = originalGlb(), input = parentInput(source, 'native-cancel', 'none', 1024, 64);
