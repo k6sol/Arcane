@@ -52,7 +52,7 @@ test('large and tiny world scales cannot conceal local or world vertex displacem
 });
 test('full affine instances retain their physical and directional constraints', () => {
   const f = fixture(matrixFromTrs([12, -4, 8], quaternionFromAxisAngle([0, 1, 0], Math.PI / 6), [2, 3, 4]));
-  f.output.attributes.POSITION![0]![0] += 0.000001;
+  f.output.attributes.POSITION![0]![0]! += 0.000001;
   compareConversionPrimitive(f.source, f.output);
   f.output.world[12]! += 0.01;
   assert.throws(() => compareConversionPrimitive(f.source, f.output), refusal);
