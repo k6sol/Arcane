@@ -408,7 +408,8 @@ export class ChatTaskCoordinator {
   async #advance(entry: OwnedTask): Promise<void> {
     const id = entry.origin.taskId;
     let task = this.#store.get(id);
-    if (entry.revoked || !task.acknowledged || !task.nativeSettled) return;
+    // Paused or finished tasks have no remaining step; their own transition owns the reason.
+    if (entry.revoked || !ACTIVE.has(task.state) || !task.acknowledged || !task.nativeSettled) return;
     this.#assertTask(entry);
     if (task.state === 'awaiting_verification' && task.evidence.at(-1)?.jobId === task.prepared?.jobId) {
       const report = task.evidence.at(-1)!;
