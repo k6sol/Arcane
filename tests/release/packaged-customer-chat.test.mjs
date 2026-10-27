@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {readFile, mkdtemp, writeFile, link, rm} from 'node:fs/promises';
+import {readFile, mkdtemp, writeFile, link, rm, realpath} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join, resolve, dirname} from 'node:path';
 import {createRequire} from 'node:module';
@@ -34,7 +34,7 @@ test('reopen acceptance requires native completion, durable same identities and 
   for(const patch of [{nativeTurnVerified:false},{nativeHistoryVerified:false},{turnSha256:'c'.repeat(64)},{requestedModel:'fallback'},{dispatch:'armed-unknown'},{auth:'signed-out'},{persistedLibraryVerified:false}])assert.throws(()=>assertCustomerCheckCompletion(first,{...second,...patch}));
 });
 test('bounded report reader refuses oversized/indirect files and never follows a caller descriptor',async()=>{
-  const root=await mkdtemp(join(tmpdir(),'arcane-customer-check-fixture-'));
+  const root=await mkdtemp(join(await realpath(tmpdir()),'arcane-customer-check-fixture-'));
   try{const file=join(root,'report.json');await writeFile(file,JSON.stringify(receipt()));assert.equal((await readCustomerCheckJson(file)).runId,ID);await writeFile(file,'x'.repeat(16385));await assert.rejects(readCustomerCheckJson(file),/FILE_LIMIT/);
     const target=join(root,'real.json'),hardlink=join(root,'hardlink.json');await writeFile(target,'{}');assert.equal(await hashCustomerCheckFile(target),hash('{}'));await link(target,hardlink);await assert.rejects(readCustomerCheckJson(hardlink),/FILE_TYPE/);await assert.rejects(hashCustomerCheckFile(target),/FILE_TYPE/);
   }finally{await rm(root,{recursive:true,force:true});}

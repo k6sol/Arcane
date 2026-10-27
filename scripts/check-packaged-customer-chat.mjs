@@ -89,7 +89,8 @@ export async function runPackagedCustomerChat(args,{announce=console.log}={}) {
   const executableSha256=await pin();
   const main=join(options.bundle,'resources/app/main.cjs');await directCustomerCheckPath(main);
   if(!(await readCustomerCheckBytes(main,1024*1024)).toString('utf8').includes('ARCANE_CUSTOMER_CHAT_CHECK_V1_BEGIN'))throw Error('PACKAGE_MODE_UNSUPPORTED');
-  const runId=randomUUID(),root=join(tmpdir(),'arcane-customer-check-'+runId);await directCustomerCheckPath(tmpdir(),true);await mkdir(root,{mode:0o700});await directCustomerCheckPath(root,true);
+  const temporaryDirectory=await realpath(tmpdir());await directCustomerCheckPath(temporaryDirectory,true);
+  const runId=randomUUID(),root=join(temporaryDirectory,'arcane-customer-check-'+runId);await mkdir(root,{mode:0o700});await directCustomerCheckPath(root,true);
   const intent={schemaVersion:1,runId,provider:options.provider,model:options.model,effort:options.effort,nonce:randomBytes(16).toString('hex'),bundleManifestSha256:options['manifest-sha256'],executableSha256,authorizedOneTurn:true};
   const intentHash=sha256(JSON.stringify(intent)),prompt='Reply with exactly ARCANE_CUSTOMER_CHAT_OK '+intent.nonce+'. Do not use tools, files, network or Roblox Studio.';
   await writeFile(join(root,'intent.json'),JSON.stringify(intent)+'\n',{flag:'wx',mode:0o600});
