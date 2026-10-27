@@ -5,7 +5,7 @@ import { lstat, mkdir, mkdtemp, open, readFile, realpath, rm, writeFile } from '
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { deflateSync } from 'node:zlib';
+import { constants as zlibConstants, deflateSync, zstdCompressSync, zstdDecompressSync } from 'node:zlib';
 import { AssetPipeline } from '../../dist/packages/asset-pipeline/src/index.js';
 import { parseConvertedGlbJson } from '../../dist/packages/asset-pipeline/src/converted-glb-manifest.js';
 import { validateConvertedGlbCollision } from '../../dist/packages/asset-pipeline/src/converted-glb-collision.js';
@@ -20,6 +20,7 @@ import { validateGlb } from '../../dist/apps/desktop/src/glb-preflight.js';
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const JOB_DEADLINE = 180000;
 const CASE_TIMEOUT = 210000;
+const BLEND_CONTAINER_LIMIT = 128 * 1024 * 1024;
 const sha = value => createHash('sha256').update(value).digest('hex');
 const encode = value => Buffer.from(JSON.stringify(value));
 const evidenceNames = new Set(['native-conversion.json', 'none-hero.png', 'none-side.png', 'hull-hero.png', 'hull-side.png']);
@@ -152,7 +153,44 @@ function boundedResult(result) {
   return JSON.stringify({ state: result.state, code: result.error?.code ?? null, stage: result.error?.diagnostic?.stage ?? null,
     reasonCode: result.error?.diagnostic?.reasonCode ?? null, exceptionType: result.error?.diagnostic?.exceptionType ?? null });
 }
-async function prefix(path, count) { const handle = await open(path, 'r'); try { const bytes = Buffer.alloc(count); const result = await handle.read(bytes, 0, count, 0); return bytes.subarray(0, result.bytesRead); } finally { await handle.close(); } }
+function blendContainerPrefix(encoded, limit = BLEND_CONTAINER_LIMIT) {
+  assert.ok(Number.isSafeInteger(limit) && limit >= 7 && limit <= BLEND_CONTAINER_LIMIT);
+  assert.ok(Buffer.isBuffer(encoded) && encoded.length >= 7 && encoded.length <= limit, 'Saved scene exceeds its encoded container bound.');
+  const signature = Buffer.from('BLENDER');
+  if (encoded.subarray(0, 7).equals(signature)) return encoded.subarray(0, 7);
+  // The hosted workflow uses Node 24. Its 24.20 fix is required to refuse
+  // incomplete Zstd frames rather than returning a partial decoded header.
+  const [major, minor] = process.versions.node.split('.').map(Number);
+  assert.ok(major === 24 && minor >= 20, 'Compressed scene inspection requires Node 24.20 or newer in the Node 24 line.');
+  let at = 0, total = 0, frames = 0, decodedPrefix = Buffer.alloc(0);
+  while (at < encoded.length) {
+    assert.ok(++frames <= 4096 && at + 4 <= encoded.length, 'Saved scene has an invalid bounded frame inventory.');
+    const magic = encoded.readUInt32LE(at);
+    if (magic >= 0x184d2a50 && magic <= 0x184d2a5f) {
+      // Blender appends its seek table as a standard Zstd skippable frame.
+      assert.ok(at + 8 <= encoded.length, 'Saved scene has a truncated skippable frame header.');
+      const end = at + 8 + encoded.readUInt32LE(at + 4);
+      assert.ok(end <= encoded.length, 'Saved scene has a truncated skippable frame.');
+      at = end; continue;
+    }
+    assert.equal(magic, 0xfd2fb528, 'Saved scene must contain raw Blender data or supported Zstd frames.');
+    assert.ok(total < limit, 'Saved scene exceeds its decoded container bound.');
+    const decoded = zstdDecompressSync(encoded.subarray(at), { info: true, maxOutputLength: limit - total,
+      finishFlush: zlibConstants.ZSTD_e_end, params: { [zlibConstants.ZSTD_d_windowLogMax]: 27 } });
+    const consumed = decoded.engine.bytesWritten;
+    assert.ok(Number.isSafeInteger(consumed) && consumed > 0 && consumed <= encoded.length - at, 'Zstd decoding must consume complete bounded input.');
+    assert.ok(Buffer.isBuffer(decoded.buffer)); total += decoded.buffer.length;
+    assert.ok(total <= limit, 'Saved scene exceeds its decoded container bound.');
+    if (decodedPrefix.length < 7) decodedPrefix = Buffer.concat([decodedPrefix, decoded.buffer.subarray(0, 7 - decodedPrefix.length)]);
+    at += consumed;
+  }
+  assert.equal(at, encoded.length); assert.ok(decodedPrefix.equals(signature), 'Decoded saved scene must retain the exact BLENDER signature.');
+  return decodedPrefix;
+}
+async function prefix(path, count) {
+  assert.equal(count, 7);
+  return blendContainerPrefix(await readRegularFile(path, BLEND_CONTAINER_LIMIT));
+}
 async function closedJournal(job) {
   const journal = JSON.parse(await readFile(join(job.directory, 'job.json'), 'utf8'));
   assert.equal(journal.kind, 'converted-glb'); assert.equal(journal.jobId, job.id);
@@ -263,6 +301,53 @@ async function assertSuccess(t, executable, expectedVersion, collision) {
     workerRoles: journal.workers.map(worker => worker.role), allWorkersClosed: true,
     sourcePreserved: manifest.request.sourceSha256 === sourceHash, savedSceneReopened: manifest.validation.savedSceneReopened, cleanup: f.cleanup });
 }
+
+test('saved scene container inspection accepts bounded raw and actual Node Zstd data with the exact Blender signature', () => {
+  const raw = Buffer.from('BLENDER17-01v0500 tiny container fixture'), before = Buffer.from(raw), compressed = zstdCompressSync(raw);
+  assert.deepEqual(blendContainerPrefix(raw), Buffer.from('BLENDER'));
+  assert.deepEqual(blendContainerPrefix(compressed), Buffer.from('BLENDER'));
+  assert.deepEqual(raw, before); assert.deepEqual(blendContainerPrefix(Buffer.from('BLENDER'), 7), Buffer.from('BLENDER'));
+});
+test('saved scene container inspection consumes concatenated Zstd frames and bounded skippable seek metadata', () => {
+  const chunks = [Buffer.from('BLE'), Buffer.from('NDER17-01v0500 continued container fixture')], compressed = chunks.map(bytes => zstdCompressSync(bytes));
+  const seek = Buffer.alloc(8 + compressed.length * 8 + 9);
+  seek.writeUInt32LE(0x184d2a5e); seek.writeUInt32LE(seek.length - 8, 4);
+  compressed.forEach((frame, index) => { seek.writeUInt32LE(frame.length, 8 + index * 8); seek.writeUInt32LE(chunks[index].length, 12 + index * 8); });
+  seek.writeUInt32LE(compressed.length, seek.length - 9); seek.writeUInt32LE(0x8f92eab1, seek.length - 4);
+  const encoded = Buffer.concat([...compressed, seek]), before = Buffer.from(encoded);
+  assert.deepEqual(blendContainerPrefix(encoded), Buffer.from('BLENDER')); assert.deepEqual(encoded, before);
+  const emptyMetadata = Buffer.from([0x50, 0x2a, 0x4d, 0x18, 0, 0, 0, 0]);
+  assert.deepEqual(blendContainerPrefix(Buffer.concat([emptyMetadata, encoded])), Buffer.from('BLENDER'));
+  assert.throws(() => blendContainerPrefix(Buffer.concat([...compressed, seek.subarray(0, seek.length - 1)])));
+  assert.throws(() => blendContainerPrefix(Buffer.concat([...compressed, seek.subarray(0, 6)])));
+  assert.throws(() => blendContainerPrefix(emptyMetadata));
+});
+test('saved scene container inspection refuses malformed, truncated and wrong-signature Zstd data', () => {
+  const raw = Buffer.from('BLENDER17-01v0500 checksum-protected container fixture'), compressed = zstdCompressSync(raw,
+    { params: { [zlibConstants.ZSTD_c_checksumFlag]: 1 } });
+  const malformed = Buffer.from(compressed); malformed[4] |= 8; // Reserved frame-header bit.
+  for (const bytes of [Buffer.alloc(0), Buffer.from('BLENDXR invalid raw data'), Buffer.from([0x28, 0xb5, 0x2f, 0xfd]), malformed,
+    compressed.subarray(0, 7), compressed.subarray(0, Math.floor(compressed.length / 2)),
+    compressed.subarray(0, compressed.length - 1), Buffer.concat([compressed, Buffer.from('trailing junk')]),
+    zstdCompressSync(Buffer.from('NOTBLEND decoded data'))]) assert.throws(() => blendContainerPrefix(bytes));
+  for (const tail of [[0x28], [0x28, 0xb5], [0x28, 0xb5, 0x2f]])
+    assert.throws(() => blendContainerPrefix(Buffer.concat([compressed, Buffer.from(tail)])), 'An incomplete next-frame magic must refuse.');
+  assert.throws(() => blendContainerPrefix(compressed.subarray(0, compressed.length - 1)), { code: 'Z_BUF_ERROR' });
+});
+test('saved scene container inspection enforces encoded, aggregate decoded and Zstd window bounds with small fixtures', () => {
+  assert.throws(() => blendContainerPrefix(Buffer.from('BLENDER!'), 7));
+  assert.throws(() => blendContainerPrefix(Buffer.from('BLENDER'), BLEND_CONTAINER_LIMIT + 1));
+  const raw = Buffer.concat([Buffer.from('BLENDER'), Buffer.alloc(4096, 65)]), compressed = zstdCompressSync(raw);
+  assert.ok(compressed.length <= 64); assert.throws(() => blendContainerPrefix(compressed, 64), { code: 'ERR_BUFFER_TOO_LARGE' });
+  const first = zstdCompressSync(Buffer.concat([Buffer.from('BLENDER'), Buffer.alloc(33, 65)])), second = zstdCompressSync(Buffer.alloc(40, 66));
+  assert.ok(first.length + second.length <= 64);
+  assert.throws(() => blendContainerPrefix(Buffer.concat([first, second]), 64), { code: 'ERR_BUFFER_TOO_LARGE' });
+  // Complete raw-block frames request a 1 KiB versus 256 MiB decoder window.
+  const windowFrame = Buffer.concat([Buffer.from([0x28, 0xb5, 0x2f, 0xfd, 0, 0, 0x39, 0, 0]), Buffer.from('BLENDER')]);
+  assert.deepEqual(blendContainerPrefix(windowFrame), Buffer.from('BLENDER'));
+  const largeWindow = Buffer.from(windowFrame); largeWindow[5] = 0x90;
+  assert.throws(() => blendContainerPrefix(largeWindow));
+});
 
 test('real Blender static conversion acceptance', { timeout: 900000 }, async t => {
   const configured = process.env.ARCANE_TEST_BLENDER_EXECUTABLE, expectedVersion = process.env.ARCANE_TEST_BLENDER_VERSION;

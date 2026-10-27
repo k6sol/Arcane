@@ -24,7 +24,7 @@ test('conversion failures retain the exact bounded stage and reason through jour
 });
 
 test('all fixed worker reason tokens and conversion stages round-trip without invented exception types', () => {
-  const reasons = ['INPUT', 'SOURCE', 'MAP', 'FEATURE', 'GEOMETRY', 'MATERIAL', 'COLLISION', 'EXPORT', 'REOPEN', 'RENDER', 'IO', 'NATIVE', 'IO_PATH', 'IO_LINK', 'IO_TYPE', 'IO_SIZE', 'IO_IDENTITY', 'IO_READ', 'IO_CHANGED', 'IO_EXISTS', 'IO_ACCESS', 'GEOMETRY_COUNTS', 'GEOMETRY_TRANSFORM', 'GEOMETRY_DIRECTION', 'GEOMETRY_TOPOLOGY', 'GEOMETRY_AREA', 'GEOMETRY_UV', 'GEOMETRY_TRIANGLES', 'GEOMETRY_HASH', 'GEOMETRY_HASH_POSITION', 'GEOMETRY_HASH_NORMAL', 'GEOMETRY_HASH_TANGENT', 'GEOMETRY_HASH_UV', 'GEOMETRY_HASH_COLOR', 'GEOMETRY_HASH_CORNER_ASSOCIATION', 'FIDELITY_POSITION', 'FIDELITY_NORMAL', 'FIDELITY_TANGENT', 'FIDELITY_UV', 'FIDELITY_COLOR', 'FIDELITY_TRANSFORM', 'FIDELITY_CONDITION', 'FIDELITY_CORRESPONDENCE', 'FIDELITY_HIERARCHY', 'OPERATOR_ARGUMENT', 'OPERATOR_RUNTIME', 'OPERATOR_CANCELLED', 'OPERATOR_RESULT', 'OPERATOR_EXCEPTION'];
+  const reasons = ['INPUT', 'SOURCE', 'MAP', 'FEATURE', 'GEOMETRY', 'MATERIAL', 'COLLISION', 'EXPORT', 'REOPEN', 'RENDER', 'IO', 'NATIVE', 'IO_PATH', 'IO_LINK', 'IO_TYPE', 'IO_SIZE', 'IO_IDENTITY', 'IO_READ', 'IO_CHANGED', 'IO_EXISTS', 'IO_ACCESS', 'GEOMETRY_COUNTS', 'GEOMETRY_TRANSFORM', 'GEOMETRY_DIRECTION', 'GEOMETRY_TOPOLOGY', 'GEOMETRY_AREA', 'GEOMETRY_UV', 'GEOMETRY_TRIANGLES', 'GEOMETRY_HASH', 'GEOMETRY_HASH_POSITION', 'GEOMETRY_HASH_NORMAL', 'GEOMETRY_HASH_TANGENT', 'GEOMETRY_HASH_UV', 'GEOMETRY_HASH_COLOR', 'GEOMETRY_HASH_CORNER_ASSOCIATION', 'FIDELITY_POSITION', 'FIDELITY_NORMAL', 'FIDELITY_TANGENT', 'FIDELITY_UV', 'FIDELITY_COLOR', 'FIDELITY_TRANSFORM', 'FIDELITY_CONDITION', 'FIDELITY_CORRESPONDENCE', 'FIDELITY_HIERARCHY', 'OPERATOR_ARGUMENT', 'OPERATOR_RUNTIME', 'OPERATOR_CANCELLED', 'OPERATOR_RESULT', 'OPERATOR_EXCEPTION', 'OPERATOR_DIRECTORY_MISSING', 'OPERATOR_DIRECTORY_ACCESS', 'OPERATOR_DIRECTORY_IO', 'OPERATOR_DIRECTORY_ARGUMENT', 'OPERATOR_DIRECTORY_OTHER', 'OPERATOR_WRITE_MISSING', 'OPERATOR_WRITE_ACCESS', 'OPERATOR_WRITE_IO', 'OPERATOR_WRITE_ARGUMENT', 'OPERATOR_WRITE_OTHER', 'OPERATOR_SAVE_MISSING', 'OPERATOR_SAVE_ACCESS', 'OPERATOR_SAVE_IO', 'OPERATOR_SAVE_ARGUMENT', 'OPERATOR_SAVE_OTHER', 'OPERATOR_BEFORE_SAVE', 'OPERATOR_AFTER_SAVE'];
   const stages = ['input', 'source-import', 'source-map', 'collision', 'scene-save', 'export', 'scene-reopen', 'export-roundtrip', 'review-render', 'audit-write'];
   for (const reason of reasons) for (const stage of stages) {
     const error = conversionWorkerFailure(command(report(stage, reason)), 'generate');
@@ -162,4 +162,32 @@ test('export operator failures retain a finite explanation without native messag
     }
   }
   assert.equal(conversionWorkerFailure(command(report('export', 'OPERATOR_UNKNOWN')), 'source-map').diagnostic?.reasonCode, 'WORKER_EXIT');
+});
+
+test('export save observations expose only closed branch and exception categories through durable errors', () => {
+  const sites = { DIRECTORY: /output-directory handling/, WRITE: /final GLB writing/, SAVE: /save orchestration/ };
+  const categories = { MISSING: /was not found/, ACCESS: /access was denied/, IO: /operating-system I\/O/,
+    ARGUMENT: /argument or value exception/, OTHER: /another exception/ };
+  for (const [site, branch] of Object.entries(sites)) for (const [category, detail] of Object.entries(categories)) {
+    const reason = 'OPERATOR_' + site + '_' + category;
+    const error = conversionWorkerFailure(command(report('export', reason)), 'source-map');
+    assert.equal(error.diagnostic?.stage, 'export');
+    assert.equal(error.diagnostic?.reasonCode, 'CONVERSION_' + reason);
+    assert.equal(error.diagnostic?.exceptionType, null);
+    assert.match(error.message, branch); assert.match(error.message, detail);
+    assert.doesNotMatch(error.message, /private native traceback|approved|retry|root cause/);
+    assert.deepEqual(decodeAssetJobError(JSON.parse(JSON.stringify({ code: error.code, message: error.message, diagnostic: error.diagnostic }))).diagnostic, error.diagnostic);
+    for (const extra of [{ path: 'private-path-secret' }, { line: 59 }, { category: 'private-native-secret' }, { retry: true }]) {
+      const forged = 'ARCANE_FAILURE ' + JSON.stringify({ stage: 'export', reason, type: 'conversion-refused', ...extra });
+      const refused = conversionWorkerFailure(command(forged), 'source-map');
+      assert.equal(refused.diagnostic?.reasonCode, 'WORKER_EXIT'); assert.doesNotMatch(refused.message, /private-/);
+    }
+  }
+  for (const [reason, description] of [['OPERATOR_BEFORE_SAVE', /before entering/], ['OPERATOR_AFTER_SAVE', /after.*returned/]] as const) {
+    const error = conversionWorkerFailure(command(report('export', reason)), 'source-map');
+    assert.equal(error.diagnostic?.reasonCode, 'CONVERSION_' + reason); assert.match(error.message, description);
+    assert.deepEqual(decodeAssetJobError({ code: error.code, message: error.message, diagnostic: error.diagnostic }).diagnostic, error.diagnostic);
+  }
+  for (const reason of ['OPERATOR_IMAGE_IO', 'OPERATOR_DIRECTORY_RUNTIME', 'OPERATOR_WRITE_UNKNOWN', 'OPERATOR_AFTER_SAVE_IMAGE_IO'])
+    assert.equal(conversionWorkerFailure(command(report('export', reason)), 'source-map').diagnostic?.reasonCode, 'WORKER_EXIT');
 });

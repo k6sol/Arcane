@@ -1,7 +1,7 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, writeFile, readFile, rm, link, symlink } from 'node:fs/promises';
+import { mkdtemp, realpath, writeFile, readFile, rm, link, symlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { deflateSync } from 'node:zlib';
@@ -58,7 +58,7 @@ function png(size = 128, uniform = false): Buffer {
 }
 type CollisionKind = 'valid' | 'seams' | 'open' | 'flipped' | 'inward' | 'planar' | 'duplicate' | 'cracked' | 'disconnected';
 async function fixture(t: TestContext, collision = false, negativeRotation = false) {
-  const directory = await mkdtemp(join(tmpdir(), 'arcane-conversion-files-')); t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await realpath(await mkdtemp(join(tmpdir(), 'arcane-conversion-files-'))); t.after(() => rm(directory, { recursive: true, force: true }));
   // Two real adjacent faces with duplicated seam positions, two materials, two
   // shared instances and an empty leaf; no closed-solid assumption for foliage.
   const original = geometry([[0, 0, 0], [2, 0, 0], [0, 1, 0], [2, 0, 0], [2, 1, 0], [0, 1, 0]], [0, 1, 2, 3, 4, 5], true);

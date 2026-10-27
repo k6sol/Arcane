@@ -9,10 +9,12 @@ sys.dont_write_bytecode = True
 
 import argparse
 import contextlib
+import importlib
 import json
 import math
 import os
 from pathlib import Path
+from types import FunctionType, ModuleType
 
 # Blender --python places the fixed script directory first. Do not import helpers
 # from the process working directory or a caller-provided Python search path.
@@ -41,7 +43,211 @@ def quiet_native():
             yield
 
 
-def operate(operator, arguments, *, export_diagnostics=False):
+_EXPORT_SOURCE_PINS = {
+    "__init__.py": (86974, "e2aade05f42354f58c7b2908246289a7421cf196b35d771764ec69a89a9b4beb"),
+    "blender/__init__.py": (104, "59a7c3a3465a99ffb07cbdc268695b087151579cd6484567e0d60b0abbd12a50"),
+    "io/__init__.py": (124, "d1cd66e78241a927a36cd7b73c01f04adab808e8576775687f7b901f3dd5a2de"),
+    "blender/exp/export.py": (25976, "3559c044a5e3b31abf853bf4481e0d0f58891158e39034216d6f698afeee09d1"),
+    "io/exp/export.py": (3285, "5245a27046ec1d2184366b8e8f138a3e827a883967ca4998f389a1378f7d4c52"),
+}
+_EXPORT_OBSERVED_REASONS = {
+    ("DIRECTORY", "MISSING"): "OPERATOR_DIRECTORY_MISSING",
+    ("DIRECTORY", "ACCESS"): "OPERATOR_DIRECTORY_ACCESS",
+    ("DIRECTORY", "IO"): "OPERATOR_DIRECTORY_IO",
+    ("DIRECTORY", "ARGUMENT"): "OPERATOR_DIRECTORY_ARGUMENT",
+    ("DIRECTORY", "OTHER"): "OPERATOR_DIRECTORY_OTHER",
+    ("WRITE", "MISSING"): "OPERATOR_WRITE_MISSING",
+    ("WRITE", "ACCESS"): "OPERATOR_WRITE_ACCESS",
+    ("WRITE", "IO"): "OPERATOR_WRITE_IO",
+    ("WRITE", "ARGUMENT"): "OPERATOR_WRITE_ARGUMENT",
+    ("WRITE", "OTHER"): "OPERATOR_WRITE_OTHER",
+    ("SAVE", "MISSING"): "OPERATOR_SAVE_MISSING",
+    ("SAVE", "ACCESS"): "OPERATOR_SAVE_ACCESS",
+    ("SAVE", "IO"): "OPERATOR_SAVE_IO",
+    ("SAVE", "ARGUMENT"): "OPERATOR_SAVE_ARGUMENT",
+    ("SAVE", "OTHER"): "OPERATOR_SAVE_OTHER",
+}
+
+
+def _export_category(failure):
+    # Exact built-ins only: never invoke an arbitrary subclass's attributes.
+    kind = type(failure)
+    if kind is FileNotFoundError:
+        return "MISSING"
+    if kind is PermissionError:
+        return "ACCESS"
+    if kind in (OSError, FileExistsError, NotADirectoryError):
+        return "IO"
+    if kind in (TypeError, ValueError):
+        return "ARGUMENT"
+    return "OTHER"
+
+
+def _export_site(failure, sites):
+    current = BaseException.__traceback__.__get__(failure, BaseException)
+    site = None
+    for _ in range(64):
+        if current is None:
+            return site
+        code, line = current.tb_frame.f_code, current.tb_lineno
+        for trusted, intervals in sites:
+            if code is not trusted:
+                continue
+            for lower, upper, candidate in intervals:
+                if (lower is None or line >= lower) and (upper is None or line <= upper):
+                    site = candidate
+                    break
+            break
+        current = current.tb_next
+    # Do not mistake a truncated prefix for the innermost observed branch.
+    return site if current is None else None
+
+
+def _export_module(name, source, package=None):
+    module = sys.modules.get(name)
+    if type(module) is not ModuleType:
+        return None
+    data = module.__dict__
+    if data.get("__name__") != name:
+        return None
+    filename = data.get("__file__")
+    if source is None:
+        if filename is not None:
+            return None
+    else:
+        if type(filename) is not str:
+            return None
+        audit.no_links(Path(filename))
+        if not os.path.samefile(filename, source):
+            return None
+    if package is not None:
+        locations = data.get("__path__")
+        namespace_path = getattr(getattr(importlib, "_bootstrap_external", None), "_NamespacePath", None)
+        if (type(locations) is not list and type(locations) is not namespace_path) or len(locations) != 1:
+            return None
+        if type(locations[0]) is not str or not os.path.samefile(locations[0], package):
+            return None
+    return module
+
+
+def _export_function(module, name, source, first_line):
+    function = module.__dict__.get(name)
+    if (type(function) is not FunctionType or function.__globals__ is not module.__dict__ or
+            function.__module__ != module.__name__ or function.__code__.co_name != name or
+            function.__code__.co_firstlineno != first_line or
+            not os.path.samefile(function.__code__.co_filename, source)):
+        return None
+    audit.no_links(Path(function.__code__.co_filename))
+    return function
+
+
+def _export_observer_bindings(bpy):
+    # Recognition is optional and pinned to the reviewed bundled 5.2.3 source.
+    # No caller path, source-model name, or downloaded module is imported here.
+    try:
+        if tuple(bpy.app.version) != (5, 2, 3):
+            return None
+        executable = Path(bpy.app.binary_path)
+        audit.no_links(executable)
+        root = executable.parent / "5.2" / "scripts" / "addons_core" / "io_scene_gltf2"
+        audit.no_links(root, directory=True)
+        for relative, (size, digest) in _EXPORT_SOURCE_PINS.items():
+            if audit.sha(audit.read_owned(root / relative, size, size)) != digest:
+                return None
+        packages = (("io_scene_gltf2", root / "__init__.py", root),
+                    ("io_scene_gltf2.blender", root / "blender/__init__.py", root / "blender"),
+                    ("io_scene_gltf2.blender.exp", None, root / "blender/exp"),
+                    ("io_scene_gltf2.io", root / "io/__init__.py", root / "io"),
+                    ("io_scene_gltf2.io.exp", None, root / "io/exp"))
+        if _export_module(*packages[0]) is None:
+            return None
+        for name, source, directory in packages[1:]:
+            audit.no_links(directory, directory=True)
+            if source is None:
+                # These exact bundled parents are namespace packages, not code.
+                if any(os.path.lexists(directory / leaf) for leaf in ("__init__.py", "__init__.pyc")):
+                    return None
+            if name in sys.modules and _export_module(name, source, directory) is None:
+                return None
+        for name, source in (("io_scene_gltf2.blender.exp.export", root / "blender/exp/export.py"),
+                             ("io_scene_gltf2.io.exp.export", root / "io/exp/export.py")):
+            if name in sys.modules and _export_module(name, source) is None:
+                return None
+        # The operator loads its export side lazily. Only these fixed source-
+        # pinned modules beneath the validated existing package may be loaded.
+        export = importlib.import_module("io_scene_gltf2.blender.exp.export")
+        writer = importlib.import_module("io_scene_gltf2.io.exp.export")
+        if any(_export_module(*item) is None for item in packages):
+            return None
+        if (_export_module(export.__name__, root / "blender/exp/export.py") is not export or
+                _export_module(writer.__name__, root / "io/exp/export.py") is not writer or
+                export.__dict__.get("gltf2_io_export") is not writer):
+            return None
+        # Recheck source custody after imports; retain only actual code objects.
+        for relative, (size, digest) in _EXPORT_SOURCE_PINS.items():
+            if audit.sha(audit.read_owned(root / relative, size, size)) != digest:
+                return None
+        save = _export_function(export, "save", root / "blender/exp/export.py", 21)
+        assemble = _export_function(export, "__export", root / "blender/exp/export.py", 53)
+        write = _export_function(writer, "save_gltf", root / "io/exp/export.py", 23)
+        if save is None or assemble is None or write is None:
+            return None
+        sites = ((save.__code__, ((None, None, "SAVE"),)),
+                 (assemble.__code__, ((59, 59, "DIRECTORY"), (62, 62, "DIRECTORY"), (None, None, "SAVE"))),
+                 (write.__code__, ((85, None, "WRITE"), (None, None, "SAVE"))))
+        return export, save, sites
+    except Exception:
+        # No message, path, exception object or source is retained on failure.
+        return None
+
+
+@contextlib.contextmanager
+def _observe_export_save(bpy):
+    observation = {"available": False, "entries": 0, "returned": False, "failure": None}
+    try:
+        with quiet_native():
+            bindings = _export_observer_bindings(bpy)
+    except Exception:
+        bindings = None
+    if bindings is None:
+        yield observation
+        return
+    module, original, sites = bindings
+
+    def observed(*arguments, **keywords):
+        observation["entries"] = min(2, observation["entries"] + 1)
+        try:
+            result = original(*arguments, **keywords)
+        except Exception as failure:
+            try:
+                site = _export_site(failure, sites)
+                observation["failure"] = _EXPORT_OBSERVED_REASONS.get((site, _export_category(failure)))
+            except Exception:
+                observation["available"] = False
+            raise
+        observation["returned"] = True
+        return result
+
+    # Only the already validated plain module dictionary is temporarily changed.
+    module.__dict__["save"] = observed
+    observation["available"] = True
+    try:
+        yield observation
+    finally:
+        module.__dict__["save"] = original
+
+
+def _observed_export_reason(observation):
+    if observation is None or not observation["available"] or observation["entries"] > 1:
+        return "OPERATOR_RUNTIME"
+    if observation["entries"] == 0:
+        return "OPERATOR_BEFORE_SAVE"
+    if observation["returned"]:
+        return "OPERATOR_AFTER_SAVE"
+    return observation["failure"] or "OPERATOR_RUNTIME"
+
+
+def operate(operator, arguments, *, export_diagnostics=False, export_observation=None):
     properties = set(operator.get_rna_type().properties.keys())
     audit.require(set(arguments) <= properties, "FEATURE")
     try:
@@ -53,7 +259,7 @@ def operate(operator, arguments, *, export_diagnostics=False):
         if not export_diagnostics:
             raise
         reason = ("OPERATOR_ARGUMENT" if isinstance(failure, (TypeError, ValueError)) else
-                  "OPERATOR_RUNTIME" if isinstance(failure, RuntimeError) else "OPERATOR_EXCEPTION")
+                  _observed_export_reason(export_observation) if isinstance(failure, RuntimeError) else "OPERATOR_EXCEPTION")
         # Classify only fixed categories, never messages, paths or type names.
         raise audit.ConversionFailure(reason) from None
     reason = ("OPERATOR_CANCELLED" if result == {"CANCELLED"} else "OPERATOR_RESULT") if export_diagnostics else "NATIVE"
@@ -83,7 +289,8 @@ def export_model(bpy, directory, filename, objects, materials):
     path = directory / filename
     audit.require(not path.exists() and not path.is_symlink(), "IO_EXISTS")
     select_objects(bpy, objects)
-    operate(bpy.ops.export_scene.gltf, {"filepath": str(path), "check_existing": False,
+    with _observe_export_save(bpy) as observation:
+        operate(bpy.ops.export_scene.gltf, {"filepath": str(path), "check_existing": False,
         "export_format": "GLB", "use_selection": True, "export_extras": True,
         "export_yup": True, "export_apply": False, "export_texcoords": True,
         "export_normals": True, "export_tangents": True, "export_materials": materials,
@@ -92,7 +299,7 @@ def export_model(bpy, directory, filename, objects, materials):
         "export_image_format": "AUTO", "export_animations": False, "export_skins": False,
         "export_morph": False, "export_cameras": False, "export_lights": False,
         "export_gpu_instances": False, "export_draco_mesh_compression_enable": False,
-        "export_use_gltfpack": False}, export_diagnostics=True)
+        "export_use_gltfpack": False}, export_diagnostics=True, export_observation=observation)
     return audit.read_owned(path, audit.EXPORT_BYTES, 20)
 
 

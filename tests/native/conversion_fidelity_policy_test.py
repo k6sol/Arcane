@@ -1,7 +1,7 @@
 """Pure v2 fidelity/correspondence tests. No bpy, subprocess or native proof."""
 from copy import deepcopy
 from pathlib import Path
-from types import SimpleNamespace
+from types import FunctionType, ModuleType, SimpleNamespace
 import importlib.util
 import math
 import struct
@@ -218,6 +218,69 @@ class ControlledOperator:
 
 class ControlledViewObjects(dict):
     active = None
+
+
+class ControlledReportingOperator(ControlledOperator):
+    """Contract double for report wrapping, not native Blender evidence."""
+    def __init__(self, module, *, before=False, after=False, repeat=1):
+        super().__init__()
+        self.module = module; self.before = before; self.after = after; self.repeat = repeat
+        self.escaped = None
+
+    def __call__(self, **arguments):
+        self.calls.append(arguments)
+        if self.before:
+            raise RuntimeError("controlled pre-save report")
+        try:
+            for _ in range(self.repeat):
+                self.module.save("controlled context", arguments)
+        except Exception as failure:
+            self.escaped = failure
+            raise RuntimeError("untrusted report text /fake/path.py:59 PermissionError") from None
+        if self.after:
+            raise RuntimeError("controlled post-save report")
+        return self.result
+
+
+def controlled_observer(original, site="SAVE", intervals=None):
+    module = ModuleType("controlled_export_observer")
+    module.save = original
+    return module, original, ((original.__code__, intervals or ((None, None, site),)),)
+
+
+def observer_source_stub(*_arguments, **_keywords):
+    return {"FINISHED"}
+
+
+def observer_installation(directory):
+    """Owned source-custody fixture only; no downloaded/exporter code is run."""
+    executable = directory / "blender"
+    executable.write_bytes(b"controlled executable placeholder, never launched")
+    root = directory / "5.2/scripts/addons_core/io_scene_gltf2"
+    pins = {}
+    for relative in worker._EXPORT_SOURCE_PINS:
+        data = ("controlled source: " + relative).encode()
+        target = root / relative; target.parent.mkdir(parents=True, exist_ok=True); target.write_bytes(data)
+        pins[relative] = (len(data), audit.sha(data))
+    modules = {}
+    packages = (("io_scene_gltf2", "", True), ("io_scene_gltf2.blender", "blender", True),
+                ("io_scene_gltf2.blender.exp", "blender/exp", False),
+                ("io_scene_gltf2.io", "io", True), ("io_scene_gltf2.io.exp", "io/exp", False))
+    for name, relative, initialized in packages:
+        module = ModuleType(name); folder = root / relative
+        module.__path__ = [str(folder)]
+        module.__file__ = str(folder / "__init__.py") if initialized else None
+        modules[name] = module
+    for name, relative, functions in (("io_scene_gltf2.blender.exp.export", "blender/exp/export.py", (("save", 21), ("__export", 53))),
+                                      ("io_scene_gltf2.io.exp.export", "io/exp/export.py", (("save_gltf", 23),))):
+        module = ModuleType(name); module.__file__ = str(root / relative)
+        for function, line in functions:
+            code = observer_source_stub.__code__.replace(co_filename=module.__file__, co_firstlineno=line, co_name=function)
+            module.__dict__[function] = FunctionType(code, module.__dict__, function)
+        modules[name] = module
+    modules["io_scene_gltf2.blender.exp.export"].gltf2_io_export = modules["io_scene_gltf2.io.exp.export"]
+    bpy = SimpleNamespace(app=SimpleNamespace(version=(5, 2, 3), binary_path=str(executable)))
+    return bpy, root, pins, modules
 
 
 class CollisionVector:
@@ -775,6 +838,199 @@ class ConversionFidelityPolicyTests(unittest.TestCase):
                 for key in ("export_apply", "export_animations", "export_skins", "export_morph", "export_cameras", "export_lights", "export_gpu_instances", "export_draco_mesh_compression_enable", "export_use_gltfpack"):
                     self.assertIs(arguments[key], False)
                 self.assertFalse((directory / "asset.glb").exists())
+
+    def test_save_observer_forwards_once_and_restores_exact_binding_and_return_identity(self):
+        calls = []; result = object(); argument = object(); keyword = object()
+        def original(*arguments, **keywords):
+            calls.append((arguments, keywords)); return result
+        bindings = controlled_observer(original); module = bindings[0]
+        with patch.object(worker, "_export_observer_bindings", return_value=bindings):
+            with worker._observe_export_save(None) as observation:
+                self.assertIs(module.save(argument, item=keyword), result)
+                self.assertEqual(observation, {"available": True, "entries": 1, "returned": True, "failure": None})
+        self.assertIs(module.save, original)
+        self.assertEqual(calls, [((argument,), {"item": keyword})])
+
+    def test_save_observer_restores_on_exception_control_exit_and_classifier_failure(self):
+        for original_error in (FileNotFoundError("private path"), KeyboardInterrupt()):
+            for broken_classifier in (False, True):
+                with self.subTest(kind=type(original_error).__name__, classifier=broken_classifier):
+                    def original(*_a, **_k): raise original_error
+                    bindings = controlled_observer(original); module = bindings[0]
+                    with patch.object(worker, "_export_observer_bindings", return_value=bindings):
+                        classifier = (patch.object(worker, "_export_site", side_effect=ValueError("observer fault")) if broken_classifier else
+                                      patch.object(worker, "_export_site", wraps=worker._export_site))
+                        with classifier:
+                            with self.assertRaises(type(original_error)) as caught:
+                                with worker._observe_export_save(None) as observation:
+                                    module.save()
+                    self.assertIs(caught.exception, original_error)
+                    self.assertIs(module.save, original)
+                    if broken_classifier or isinstance(original_error, KeyboardInterrupt):
+                        self.assertEqual(worker._observed_export_reason(observation), "OPERATOR_RUNTIME")
+
+    def test_save_observer_categories_use_exact_types_without_subclass_attributes(self):
+        class ForeignMissing(FileNotFoundError):
+            def __getattribute__(self, _name): raise AssertionError("subclass attribute must not be read")
+        for failure, category in ((FileNotFoundError("sensitive"), "MISSING"), (PermissionError("sensitive"), "ACCESS"),
+                                  (OSError("sensitive"), "IO"), (FileExistsError("sensitive"), "IO"),
+                                  (NotADirectoryError("sensitive"), "IO"), (TypeError("sensitive"), "ARGUMENT"),
+                                  (ValueError("sensitive"), "ARGUMENT"), (RuntimeError("sensitive"), "OTHER"),
+                                  (ForeignMissing("sensitive"), "OTHER")):
+            self.assertEqual(worker._export_category(failure), category)
+
+    def test_save_observer_directory_and_write_are_caller_sites_not_shared_helper_names(self):
+        def shared(failure): raise failure
+        def caller(failure): shared(failure)
+        line = caller.__code__.co_firstlineno + 0  # One-line body has its declaration line.
+        for site, intervals in (("DIRECTORY", ((line, line, "DIRECTORY"), (None, None, "SAVE"))),
+                                ("WRITE", ((line, None, "WRITE"), (None, None, "SAVE")))):
+            try: caller(FileNotFoundError("no paths retained"))
+            except FileNotFoundError as failure:
+                self.assertEqual(worker._export_site(failure, ((caller.__code__, intervals),)), site)
+                self.assertEqual(worker._export_site(failure, ((caller.__code__, ((line + 1, line + 1, site), (None, None, "SAVE"))),)), "SAVE")
+
+    def test_save_observer_requires_code_identity_and_rejects_overlong_tracebacks(self):
+        def original(failure): raise failure
+        clone = FunctionType(original.__code__.replace(), globals())
+        self.assertIsNot(clone.__code__, original.__code__)
+        try: clone(FileNotFoundError("fake DIRECTORY line59"))
+        except FileNotFoundError as failure:
+            self.assertIsNone(worker._export_site(failure, ((original.__code__, ((None, None, "DIRECTORY"),)),)))
+        def recurse(depth):
+            if depth: return recurse(depth - 1)
+            raise FileNotFoundError("bounded traceback")
+        for depth, expected in ((8, "SAVE"), (70, None)):
+            try: recurse(depth)
+            except FileNotFoundError as failure:
+                self.assertEqual(worker._export_site(failure, ((recurse.__code__, ((None, None, "SAVE"),)),)), expected)
+
+    def test_save_observer_reports_all_fifteen_closed_pairs_without_report_text_or_exception_storage(self):
+        errors = ((FileNotFoundError, "MISSING"), (PermissionError, "ACCESS"), (FileExistsError, "IO"),
+                  (ValueError, "ARGUMENT"), (RuntimeError, "OTHER"))
+        self.assertEqual(len(worker._EXPORT_OBSERVED_REASONS), 15)
+        for site in ("DIRECTORY", "WRITE", "SAVE"):
+            for error_type, category in errors:
+                with self.subTest(site=site, category=category):
+                    original_error = error_type("secret/source/name OPERATOR_DIRECTORY_MISSING")
+                    def original(*_a, **_k): raise original_error
+                    bindings = controlled_observer(original, site); module = bindings[0]
+                    operator = ControlledReportingOperator(module)
+                    with patch.object(worker, "_export_observer_bindings", return_value=bindings):
+                        with worker._observe_export_save(None) as observation:
+                            reason = "OPERATOR_" + site + "_" + category
+                            self.refused(reason, lambda: worker.operate(operator, {}, export_diagnostics=True, export_observation=observation))
+                    self.assertIs(operator.escaped, original_error)
+                    self.assertIs(module.save, original)
+                    self.assertEqual(len(operator.calls), 1)
+                    self.assertNotIn("secret", audit.canonical(observation).decode())
+                    self.assertTrue(all(type(value) in (bool, int, str, type(None)) for value in observation.values()))
+                    self.assertIn(reason, audit.REASONS)
+
+    def test_save_observer_before_after_and_multiple_entries_are_observations_without_retry(self):
+        for before, after, repeat, expected in ((True, False, 1, "OPERATOR_BEFORE_SAVE"),
+                                                (False, True, 1, "OPERATOR_AFTER_SAVE"),
+                                                (False, True, 2, "OPERATOR_RUNTIME")):
+            calls = []
+            def original(*arguments): calls.append(arguments); return {"FINISHED"}
+            bindings = controlled_observer(original); operator = ControlledReportingOperator(bindings[0], before=before, after=after, repeat=repeat)
+            with patch.object(worker, "_export_observer_bindings", return_value=bindings):
+                with worker._observe_export_save(None) as observation:
+                    self.refused(expected, lambda: worker.operate(operator, {}, export_diagnostics=True, export_observation=observation))
+            self.assertEqual(len(operator.calls), 1)
+            self.assertEqual(len(calls), 0 if before else repeat)
+            self.assertIs(bindings[0].save, original)
+
+    def test_save_observer_does_not_promote_handled_errors_or_change_success_and_cancel(self):
+        def original(*_a, **_k):
+            try: raise PermissionError("handled image-style error")
+            except PermissionError: return {"FINISHED"}
+        bindings = controlled_observer(original)
+        for result in ({"FINISHED"}, {"CANCELLED"}):
+            operator = ControlledReportingOperator(bindings[0]); operator.result = result
+            with patch.object(worker, "_export_observer_bindings", return_value=bindings):
+                with worker._observe_export_save(None) as observation:
+                    if result == {"FINISHED"}:
+                        self.assertIsNone(worker.operate(operator, {}, export_diagnostics=True, export_observation=observation))
+                    else:
+                        self.refused("OPERATOR_CANCELLED", lambda: worker.operate(operator, {}, export_diagnostics=True, export_observation=observation))
+                    self.assertIsNone(observation["failure"])
+            self.assertEqual(len(operator.calls), 1)
+            self.assertIs(bindings[0].save, original)
+
+    def test_save_observer_unavailable_setup_does_not_block_or_change_existing_error(self):
+        for setup_error in (None, ValueError("private setup failure")):
+            for failure in (None, RuntimeError("private operator failure")):
+                operator = ControlledOperator(failure=failure)
+                with patch.object(worker, "_export_observer_bindings", return_value=None, side_effect=setup_error):
+                    with worker._observe_export_save(None) as observation:
+                        if failure is None:
+                            self.assertIsNone(worker.operate(operator, {}, export_diagnostics=True, export_observation=observation))
+                        else:
+                            self.refused("OPERATOR_RUNTIME", lambda: worker.operate(operator, {}, export_diagnostics=True, export_observation=observation))
+                self.assertEqual(len(operator.calls), 1)
+
+    def test_save_observer_validates_owned_sources_packages_functions_and_lazy_import_targets(self):
+        with tempfile.TemporaryDirectory(prefix="arcane-observer-source-") as temporary:
+            bpy, root, pins, modules = observer_installation(Path(temporary).resolve())
+            export = modules["io_scene_gltf2.blender.exp.export"]
+            lazy = {name: module for name, module in modules.items() if name.endswith(".export")}
+            loaded = {name: module for name, module in modules.items() if name not in lazy}
+            def fixed_import(name):
+                self.assertIn(name, lazy)
+                sys.modules[name] = lazy[name]
+                return lazy[name]
+            with patch.dict(sys.modules, loaded), patch.object(worker, "_EXPORT_SOURCE_PINS", pins), patch.object(worker.importlib, "import_module", side_effect=fixed_import) as imports:
+                # Ensure the actual loader has to perform its fixed lazy loads.
+                with patch.dict(sys.modules, {name: None for name in lazy}):
+                    for name in lazy: del sys.modules[name]
+                    bindings = worker._export_observer_bindings(bpy)
+                    self.assertIsNotNone(bindings)
+                    self.assertIs(bindings[0], export)
+                    self.assertIs(bindings[1], export.save)
+                    self.assertEqual([call.args[0] for call in imports.call_args_list], list(lazy))
+                    self.assertEqual(bindings[2][1][1][:2], ((59, 59, "DIRECTORY"), (62, 62, "DIRECTORY")))
+                    self.assertEqual(bindings[2][2][1][0], (85, None, "WRITE"))
+
+    def test_save_observer_refuses_changed_sources_foreign_packages_and_function_origins_before_mutation(self):
+        for mode in ("hash", "post-import-hash", "namespace-code", "foreign-search", "function-origin", "version"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory(prefix="arcane-observer-refusal-") as temporary:
+                bpy, root, pins, modules = observer_installation(Path(temporary).resolve())
+                export = modules["io_scene_gltf2.blender.exp.export"]; original = export.save
+                target = root / "blender/exp/export.py"
+                def change_source():
+                    raw = target.read_bytes(); target.write_bytes(b"X" + raw[1:])
+                if mode == "hash": change_source()
+                elif mode == "namespace-code": (root / "blender/exp/__init__.py").write_bytes(b"unrecognized initializer")
+                elif mode == "foreign-search": modules["io_scene_gltf2"].__path__ = [str(root), str(root.parent)]
+                elif mode == "function-origin": export.save = observer_source_stub
+                elif mode == "version": bpy.app.version = (5, 2, 4)
+                expected = export.save
+                def fixed_import(name):
+                    if mode == "post-import-hash": change_source()
+                    return modules[name]
+                with patch.dict(sys.modules, modules), patch.object(worker, "_EXPORT_SOURCE_PINS", pins), patch.object(worker.importlib, "import_module", side_effect=fixed_import):
+                    self.assertIsNone(worker._export_observer_bindings(bpy))
+                self.assertIs(export.save, expected)
+                if mode != "function-origin": self.assertIs(export.save, original)
+
+    def test_actual_export_wrapper_uses_observation_without_changing_selected_arguments(self):
+        with tempfile.TemporaryDirectory(prefix="arcane-export-observed-") as temporary:
+            directory = Path(temporary).resolve()
+            original_error = PermissionError("private owned output name")
+            def original(*_a): raise original_error
+            bindings = controlled_observer(original, "DIRECTORY")
+            operator = ControlledReportingOperator(bindings[0])
+            bpy = SimpleNamespace(ops=SimpleNamespace(export_scene=SimpleNamespace(gltf=operator)),
+                                  context=SimpleNamespace(view_layer=SimpleNamespace(objects=ControlledViewObjects())))
+            with patch.object(worker, "_export_observer_bindings", return_value=bindings):
+                self.refused("OPERATOR_DIRECTORY_ACCESS", lambda: worker.export_model(bpy, directory, "asset.glb", [], "EXPORT"))
+            self.assertEqual(len(operator.calls), 1)
+            self.assertEqual(operator.calls[0]["filepath"], str(directory / "asset.glb"))
+            self.assertIs(operator.calls[0]["export_tangents"], True)
+            self.assertIs(operator.calls[0]["export_use_gltfpack"], False)
+            self.assertIs(bindings[0].save, original)
+            self.assertFalse((directory / "asset.glb").exists())
 
     def test_collision_position_targets_use_exact_finite_values_without_distance_or_centroid(self):
         vertices = [CollisionVertex(value) for value in ((0, 0, 0), (-0.0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1), (2**-30, 0, 0))]
