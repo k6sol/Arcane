@@ -153,6 +153,24 @@ function boundedResult(result) {
   return JSON.stringify({ state: result.state, code: result.error?.code ?? null, stage: result.error?.diagnostic?.stage ?? null,
     reasonCode: result.error?.diagnostic?.reasonCode ?? null, exceptionType: result.error?.diagnostic?.exceptionType ?? null });
 }
+function zstdFrameEnd(encoded, start) {
+  let at = start;
+  const advance = count => { const before = at; at += count;
+    assert.ok(at <= encoded.length, 'Saved scene has a truncated Zstd frame envelope.'); return before; };
+  assert.equal(encoded.readUInt32LE(advance(4)), 0xfd2fb528, 'Saved scene has an unsupported Zstd frame.');
+  const descriptor = encoded[advance(1)], single = !!(descriptor & 0x20);
+  assert.equal(descriptor & 0x18, 0, 'Saved scene has unsupported Zstd frame-header bits.');
+  advance((single ? 0 : 1) + [0, 1, 2, 4][descriptor & 3] + [single ? 1 : 0, 2, 4, 8][descriptor >>> 6]);
+  let last = false;
+  while (!last) {
+    const header = encoded.readUIntLE(advance(3), 3), type = (header >>> 1) & 3, size = header >>> 3;
+    assert.notEqual(type, 3, 'Saved scene has a reserved Zstd block type.');
+    assert.ok(size <= 128 * 1024, 'Saved scene exceeds the Zstd block size bound.');
+    advance(type === 1 ? 1 : size); last = !!(header & 1);
+  }
+  if (descriptor & 4) advance(4);
+  return at;
+}
 function blendContainerPrefix(encoded, limit = BLEND_CONTAINER_LIMIT) {
   assert.ok(Number.isSafeInteger(limit) && limit >= 7 && limit <= BLEND_CONTAINER_LIMIT);
   assert.ok(Buffer.isBuffer(encoded) && encoded.length >= 7 && encoded.length <= limit, 'Saved scene exceeds its encoded container bound.');
@@ -175,10 +193,13 @@ function blendContainerPrefix(encoded, limit = BLEND_CONTAINER_LIMIT) {
     }
     assert.equal(magic, 0xfd2fb528, 'Saved scene must contain raw Blender data or supported Zstd frames.');
     assert.ok(total < limit, 'Saved scene exceeds its decoded container bound.');
-    const decoded = zstdDecompressSync(encoded.subarray(at), { info: true, maxOutputLength: limit - total,
+    // Delimit one complete frame so the native decoder never sees a partial next magic.
+    const end = zstdFrameEnd(encoded, at);
+    const decoded = zstdDecompressSync(encoded.subarray(at, end), { info: true, maxOutputLength: limit - total, rejectGarbageAfterEnd: true,
       finishFlush: zlibConstants.ZSTD_e_end, params: { [zlibConstants.ZSTD_d_windowLogMax]: 27 } });
     const consumed = decoded.engine.bytesWritten;
     assert.ok(Number.isSafeInteger(consumed) && consumed > 0 && consumed <= encoded.length - at, 'Zstd decoding must consume complete bounded input.');
+    assert.equal(consumed, end - at, 'Native Zstd decoding must consume the exact admitted frame.');
     assert.ok(Buffer.isBuffer(decoded.buffer)); total += decoded.buffer.length;
     assert.ok(total <= limit, 'Saved scene exceeds its decoded container bound.');
     if (decodedPrefix.length < 7) decodedPrefix = Buffer.concat([decodedPrefix, decoded.buffer.subarray(0, 7 - decodedPrefix.length)]);
@@ -332,7 +353,7 @@ test('saved scene container inspection refuses malformed, truncated and wrong-si
     zstdCompressSync(Buffer.from('NOTBLEND decoded data'))]) assert.throws(() => blendContainerPrefix(bytes));
   for (const tail of [[0x28], [0x28, 0xb5], [0x28, 0xb5, 0x2f]])
     assert.throws(() => blendContainerPrefix(Buffer.concat([compressed, Buffer.from(tail)])), 'An incomplete next-frame magic must refuse.');
-  assert.throws(() => blendContainerPrefix(compressed.subarray(0, compressed.length - 1)), { code: 'Z_BUF_ERROR' });
+  assert.throws(() => blendContainerPrefix(compressed.subarray(0, compressed.length - 1)), /truncated Zstd frame envelope/);
 });
 test('saved scene container inspection enforces encoded, aggregate decoded and Zstd window bounds with small fixtures', () => {
   assert.throws(() => blendContainerPrefix(Buffer.from('BLENDER!'), 7));
@@ -347,6 +368,41 @@ test('saved scene container inspection enforces encoded, aggregate decoded and Z
   assert.deepEqual(blendContainerPrefix(windowFrame), Buffer.from('BLENDER'));
   const largeWindow = Buffer.from(windowFrame); largeWindow[5] = 0x90;
   assert.throws(() => blendContainerPrefix(largeWindow));
+});
+
+test('saved scene Zstd envelopes admit each supported header width and stop at the exact frame boundary', () => {
+  const short = Buffer.from('BLENDER'), long = Buffer.concat([short, Buffer.alloc(249, 65)]);
+  const variants = [[0x00, [0], short], [0x21, [0, 7], short], [0x42, [0, 0, 0, 0, 0], long],
+    [0xa3, [0, 0, 0, 0, 7, 0, 0, 0], short], [0xc3, [0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0], short]];
+  for (const [descriptor, fields, payload] of variants) {
+    const block = Buffer.alloc(3); block.writeUIntLE((payload.length << 3) | 1, 0, 3);
+    const frame = Buffer.concat([Buffer.from([0x28, 0xb5, 0x2f, 0xfd, descriptor, ...fields]), block, payload]);
+    assert.equal(zstdFrameEnd(Buffer.concat([frame, Buffer.from([0x28, 0xb5, 0x2f])]), 0), frame.length);
+    assert.deepEqual(blendContainerPrefix(frame), Buffer.from('BLENDER'));
+    for (let cut = 0; cut < frame.length; cut++) assert.throws(() => zstdFrameEnd(frame.subarray(0, cut), 0), /truncated Zstd frame envelope/);
+  }
+});
+test('saved scene Zstd envelopes retain raw, RLE and compressed blocks while refusing unsupported headers and blocks', () => {
+  const header = Buffer.from([0x28, 0xb5, 0x2f, 0xfd, 0, 0]);
+  const rawBlocks = Buffer.concat([header, Buffer.from([0x18, 0, 0]), Buffer.from('BLE'), Buffer.from([0x21, 0, 0]), Buffer.from('NDER')]);
+  const rle = Buffer.concat([header, Buffer.from([0x38, 0, 0]), Buffer.from('BLENDER'), Buffer.from([0x43, 0, 0, 65])]);
+  const compressed = zstdCompressSync(Buffer.concat([Buffer.from('BLENDER'), Buffer.alloc(4096, 65)]));
+  for (const frame of [rawBlocks, rle, compressed]) {
+    assert.equal(zstdFrameEnd(frame, 0), frame.length); assert.deepEqual(blendContainerPrefix(frame), Buffer.from('BLENDER'));
+  }
+  for (const bit of [8, 16]) { const unsupported = Buffer.from(rawBlocks); unsupported[4] |= bit;
+    assert.throws(() => zstdFrameEnd(unsupported, 0), /unsupported Zstd frame-header bits/); }
+  assert.throws(() => zstdFrameEnd(Buffer.concat([header, Buffer.from([7, 0, 0])]), 0), /reserved Zstd block type/);
+  for (const type of [0, 1, 2]) { const block = Buffer.alloc(3); block.writeUIntLE(((128 * 1024 + 1) << 3) | (type << 1) | 1, 0, 3);
+    assert.throws(() => zstdFrameEnd(Buffer.concat([header, block, Buffer.from([65])]), 0), /Zstd block size bound/); }
+});
+test('saved scene complete Zstd frames still require the actual native checksum after envelope admission', () => {
+  const frame = zstdCompressSync(Buffer.from('BLENDER17-01v0500 checksum validation fixture'),
+    { params: { [zlibConstants.ZSTD_c_checksumFlag]: 1 } });
+  assert.equal(zstdFrameEnd(frame, 0), frame.length); assert.deepEqual(blendContainerPrefix(frame), Buffer.from('BLENDER'));
+  const corrupt = Buffer.from(frame); corrupt[corrupt.length - 1] ^= 1;
+  assert.equal(zstdFrameEnd(corrupt, 0), corrupt.length);
+  assert.throws(() => blendContainerPrefix(corrupt), { code: 'ZSTD_error_checksum_wrong' });
 });
 
 test('real Blender static conversion acceptance', { timeout: 900000 }, async t => {

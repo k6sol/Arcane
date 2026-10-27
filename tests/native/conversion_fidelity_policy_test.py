@@ -1032,6 +1032,50 @@ class ConversionFidelityPolicyTests(unittest.TestCase):
             self.assertIs(bindings[0].save, original)
             self.assertFalse((directory / "asset.glb").exists())
 
+    def test_recognition_checkpoints_identify_refusal_without_retaining_exception_or_source_values(self):
+        for mode, expected in (("version", "VERSION"), ("root-source", "SOURCE_ROOT"),
+                               ("export-source", "SOURCE_EXPORT"), ("package", "PACKAGE_PRE"),
+                               ("function", "FUNCTION")):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory(prefix="arcane-recognition-") as temporary:
+                bpy, root, pins, modules = observer_installation(Path(temporary).resolve())
+                if mode == "version": bpy.app.version = (5, 2, 4)
+                elif mode.endswith("source"):
+                    target = root / ("__init__.py" if mode == "root-source" else "blender/exp/export.py")
+                    raw = target.read_bytes(); target.write_bytes(b"X" + raw[1:])
+                elif mode == "package": modules["io_scene_gltf2"].__path__ = []
+                else: modules["io_scene_gltf2.blender.exp.export"].save = observer_source_stub
+                with patch.dict(sys.modules, modules), patch.object(worker, "_EXPORT_SOURCE_PINS", pins), patch.object(worker.importlib, "import_module", side_effect=lambda name: modules[name]):
+                    recognition = {"reason": None}
+                    self.assertIsNone(worker._export_observer_bindings(bpy, recognition))
+                    self.assertEqual(recognition, {"reason": "OPERATOR_OBSERVER_" + expected})
+
+    def test_recognition_checkpoint_only_changes_outer_runtime_error_detail_and_never_success(self):
+        for result in ({"FINISHED"}, {"CANCELLED"}):
+            for failure in (None, RuntimeError("private report must not escape")):
+                operator = ControlledOperator(failure=failure); operator.result = result
+                def unavailable(_bpy, recognition):
+                    recognition["reason"] = "OPERATOR_OBSERVER_SOURCE_ROOT"
+                    return None
+                with patch.object(worker, "_export_observer_bindings", side_effect=unavailable):
+                    with worker._observe_export_save(None) as observation:
+                        self.assertEqual(observation["failure"], "OPERATOR_OBSERVER_SOURCE_ROOT")
+                        if failure is not None:
+                            self.refused("OPERATOR_OBSERVER_SOURCE_ROOT", lambda: worker.operate(operator, {}, export_diagnostics=True, export_observation=observation))
+                        elif result == {"FINISHED"}:
+                            self.assertIsNone(worker.operate(operator, {}, export_diagnostics=True, export_observation=observation))
+                        else:
+                            self.refused("OPERATOR_CANCELLED", lambda: worker.operate(operator, {}, export_diagnostics=True, export_observation=observation))
+                self.assertEqual(len(operator.calls), 1)
+
+    def test_unrecognized_ordinary_save_exception_has_a_closed_site_diagnostic_without_control_exit_reclassification(self):
+        def original(): raise ValueError("private ordinary save exception")
+        module, function, _sites = controlled_observer(original)
+        with patch.object(worker, "_export_observer_bindings", return_value=(module, function, ())):
+            with worker._observe_export_save(None) as observation:
+                with self.assertRaises(ValueError): module.save()
+                self.assertEqual(worker._observed_export_reason(observation), "OPERATOR_OBSERVER_SITE")
+        self.assertIs(module.save, function)
+
     def test_collision_position_targets_use_exact_finite_values_without_distance_or_centroid(self):
         vertices = [CollisionVertex(value) for value in ((0, 0, 0), (-0.0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1), (2**-30, 0, 0))]
         targets, unique = worker._collision_position_targets(vertices)

@@ -68,6 +68,9 @@ _EXPORT_OBSERVED_REASONS = {
     ("SAVE", "OTHER"): "OPERATOR_SAVE_OTHER",
 }
 
+_EXPORT_RECOGNITION_REASONS = frozenset(('OPERATOR_OBSERVER_VERSION', 'OPERATOR_OBSERVER_ROOT', 'OPERATOR_OBSERVER_SOURCE_ROOT', 'OPERATOR_OBSERVER_SOURCE_BLENDER', 'OPERATOR_OBSERVER_SOURCE_IO', 'OPERATOR_OBSERVER_SOURCE_EXPORT', 'OPERATOR_OBSERVER_SOURCE_WRITER', 'OPERATOR_OBSERVER_PACKAGE_PRE', 'OPERATOR_OBSERVER_IMPORT', 'OPERATOR_OBSERVER_PACKAGE_POST', 'OPERATOR_OBSERVER_FUNCTION', 'OPERATOR_OBSERVER_SITE'))
+_EXPORT_SOURCE_REASONS = {'__init__.py': 'OPERATOR_OBSERVER_SOURCE_ROOT', 'blender/__init__.py': 'OPERATOR_OBSERVER_SOURCE_BLENDER', 'io/__init__.py': 'OPERATOR_OBSERVER_SOURCE_IO', 'blender/exp/export.py': 'OPERATOR_OBSERVER_SOURCE_EXPORT', 'io/exp/export.py': 'OPERATOR_OBSERVER_SOURCE_WRITER'}
+
 
 def _export_category(failure):
     # Exact built-ins only: never invoke an arbitrary subclass's attributes.
@@ -141,17 +144,23 @@ def _export_function(module, name, source, first_line):
     return function
 
 
-def _export_observer_bindings(bpy):
+def _export_observer_bindings(bpy, recognition=None):
+    def checkpoint(reason):
+        if recognition is not None:
+            recognition["reason"] = reason
     # Recognition is optional and pinned to the reviewed bundled 5.2.3 source.
     # No caller path, source-model name, or downloaded module is imported here.
     try:
+        checkpoint("OPERATOR_OBSERVER_VERSION")
         if tuple(bpy.app.version) != (5, 2, 3):
             return None
+        checkpoint("OPERATOR_OBSERVER_ROOT")
         executable = Path(bpy.app.binary_path)
         audit.no_links(executable)
         root = executable.parent / "5.2" / "scripts" / "addons_core" / "io_scene_gltf2"
         audit.no_links(root, directory=True)
         for relative, (size, digest) in _EXPORT_SOURCE_PINS.items():
+            checkpoint(_EXPORT_SOURCE_REASONS[relative])
             if audit.sha(audit.read_owned(root / relative, size, size)) != digest:
                 return None
         packages = (("io_scene_gltf2", root / "__init__.py", root),
@@ -159,6 +168,7 @@ def _export_observer_bindings(bpy):
                     ("io_scene_gltf2.blender.exp", None, root / "blender/exp"),
                     ("io_scene_gltf2.io", root / "io/__init__.py", root / "io"),
                     ("io_scene_gltf2.io.exp", None, root / "io/exp"))
+        checkpoint("OPERATOR_OBSERVER_PACKAGE_PRE")
         if _export_module(*packages[0]) is None:
             return None
         for name, source, directory in packages[1:]:
@@ -175,8 +185,10 @@ def _export_observer_bindings(bpy):
                 return None
         # The operator loads its export side lazily. Only these fixed source-
         # pinned modules beneath the validated existing package may be loaded.
+        checkpoint("OPERATOR_OBSERVER_IMPORT")
         export = importlib.import_module("io_scene_gltf2.blender.exp.export")
         writer = importlib.import_module("io_scene_gltf2.io.exp.export")
+        checkpoint("OPERATOR_OBSERVER_PACKAGE_POST")
         if any(_export_module(*item) is None for item in packages):
             return None
         if (_export_module(export.__name__, root / "blender/exp/export.py") is not export or
@@ -185,8 +197,10 @@ def _export_observer_bindings(bpy):
             return None
         # Recheck source custody after imports; retain only actual code objects.
         for relative, (size, digest) in _EXPORT_SOURCE_PINS.items():
+            checkpoint(_EXPORT_SOURCE_REASONS[relative])
             if audit.sha(audit.read_owned(root / relative, size, size)) != digest:
                 return None
+        checkpoint("OPERATOR_OBSERVER_FUNCTION")
         save = _export_function(export, "save", root / "blender/exp/export.py", 21)
         assemble = _export_function(export, "__export", root / "blender/exp/export.py", 53)
         write = _export_function(writer, "save_gltf", root / "io/exp/export.py", 23)
@@ -204,12 +218,15 @@ def _export_observer_bindings(bpy):
 @contextlib.contextmanager
 def _observe_export_save(bpy):
     observation = {"available": False, "entries": 0, "returned": False, "failure": None}
+    recognition = {"reason": None}
     try:
         with quiet_native():
-            bindings = _export_observer_bindings(bpy)
+            bindings = _export_observer_bindings(bpy, recognition)
     except Exception:
         bindings = None
     if bindings is None:
+        if recognition["reason"] in _EXPORT_RECOGNITION_REASONS:
+            observation["failure"] = recognition["reason"]
         yield observation
         return
     module, original, sites = bindings
@@ -221,7 +238,7 @@ def _observe_export_save(bpy):
         except Exception as failure:
             try:
                 site = _export_site(failure, sites)
-                observation["failure"] = _EXPORT_OBSERVED_REASONS.get((site, _export_category(failure)))
+                observation["failure"] = _EXPORT_OBSERVED_REASONS.get((site, _export_category(failure))) or "OPERATOR_OBSERVER_SITE"
             except Exception:
                 observation["available"] = False
             raise
@@ -238,8 +255,10 @@ def _observe_export_save(bpy):
 
 
 def _observed_export_reason(observation):
-    if observation is None or not observation["available"] or observation["entries"] > 1:
+    if observation is None or observation["entries"] > 1:
         return "OPERATOR_RUNTIME"
+    if not observation["available"]:
+        return observation["failure"] if observation["failure"] in _EXPORT_RECOGNITION_REASONS else "OPERATOR_RUNTIME"
     if observation["entries"] == 0:
         return "OPERATOR_BEFORE_SAVE"
     if observation["returned"]:
