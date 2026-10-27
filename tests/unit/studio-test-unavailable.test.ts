@@ -15,6 +15,8 @@ import { BridgeError, DaemonClient } from '../../apps/mcp/src/daemon-client.js';
 import { StudioStore } from '../../packages/storage/src/studio-store.js';
 import { WorkStore } from '../../packages/storage/src/work-store.js';
 import { ConversationWorkStore } from '../../packages/storage/src/conversation-work-store.js';
+import { openStudioTestReportStore } from '../../apps/daemon/src/studio-test-report-store.js';
+import { workflowProjectIdentity } from '../../packages/storage/src/workflow-store.js';
 import { TestLedger, digest } from '../../packages/studio-test-controller/src/index.js';
 import { STUDIO_PLUGIN_SOURCES } from '../../packages/protocol/src/studio-plugin-artifact.js';
 import { studioImportPluginArtifactHash } from '../../apps/daemon/src/studio-import-plugin-artifact.js';
@@ -183,20 +185,20 @@ async function mountedRefusals(f: ReturnType<typeof fixture>, lab: Lab, code: 'U
 }
 
 test('actual bundled modular plugin initializes the production playtest service without launching native tools', async t => {
-  const f = fixture(t);
+  const f = fixture(t), layout = projectLayout(f);
   assert.equal(existsSync(join(f.artifacts, 'ArcaneLocalBridge.lua')), false, 'No legacy single-script artifact may mask the modular path.');
   const xmlHash = createHash('sha256').update(readFileSync(join(f.artifacts, 'ArcaneLocalBridge.rbxmx'))).digest('hex');
   assert.notEqual(f.runtimeHash, xmlHash, 'The loaded-source identity is distinct from the delivery checksum.');
   assert.equal(await studioImportPluginArtifactHash(f.cwd), f.runtimeHash);
-  const lab = await f.start();
+  const lab = await f.start({ stateDirectory: layout.stateDirectory });
   for (const token of [lab.token, lab.agentToken]) {
     const listed = await call(lab, { token }); assert.equal(listed.status, 200); assert.deepEqual(listed.json, { jobs: [] });
   }
   const state = await call(lab, { path: '/v1/state', token: lab.token });
   assert.equal(state.status, 200); assert.deepEqual(state.json.warnings, []);
-  assert.equal(existsSync(join(f.ledgerDirectory, 'writer.lock')), true, 'The real owned service opened its ledger.');
+  assert.equal(existsSync(join(layout.ledgerDirectory, 'writer.lock')), true, 'The real owned service opened its ledger.');
   f.noExecution(); await lab.close();
-  assert.equal(existsSync(join(f.ledgerDirectory, 'writer.lock')), false, 'Shutdown releases only the owned idle ledger.');
+  assert.equal(existsSync(join(layout.ledgerDirectory, 'writer.lock')), false, 'Shutdown releases only the owned idle ledger.');
   f.noExecution();
 });
 
@@ -361,6 +363,13 @@ test('a foreign lock, unresolved run or lab outside the project lock stays fence
     mkdirSync(layout.ledgerDirectory, { recursive: true });
     writeFileSync(join(layout.ledgerDirectory, 'writer.lock'), kind === 'foreign-lock' ? PRIVATE : '');
     if (kind === 'unresolved-run') writeFileSync(join(layout.ledgerDirectory, '00001.json'), unresolvedRecord());
+    if (kind !== 'no-project-lock') {
+      const reports = await openStudioTestReportStore({ directory: join(layout.stateDirectory, 'playtest-reports'),
+        projectId: workflowProjectIdentity(f.cwd).projectId,
+        exclusiveWriter: () => f.store.holdsWorkspaceLock(join(f.root, 'studio-fixture')) });
+      try { assert.deepEqual(reports.status(), { state: 'ready', code: null }); }
+      finally { reports.close(); }
+    }
     const before = persistentFiles(f.root);
     const lab = await f.start({ stateDirectory: layout.stateDirectory });
     refusal(await call(lab), 'FENCED', lab, f.root);
