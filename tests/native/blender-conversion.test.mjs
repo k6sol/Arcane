@@ -29,6 +29,33 @@ const results = [];
 const attempts = [];
 let evidenceDirectory;
 
+async function bundledExporterSourceEvidence(executable) {
+  const root = join(dirname(executable), '5.2', 'scripts', 'addons_core', 'io_scene_gltf2');
+  // Fixed C68 LF source pins; the retained rows never include these relative paths.
+  const sources = [
+    ['operator', ['__init__.py'], 86974, 'e2aade05f42354f58c7b2908246289a7421cf196b35d771764ec69a89a9b4beb'],
+    ['blender', ['blender', '__init__.py'], 104, '59a7c3a3465a99ffb07cbdc268695b087151579cd6484567e0d60b0abbd12a50'],
+    ['io', ['io', '__init__.py'], 124, 'd1cd66e78241a927a36cd7b73c01f04adab808e8576775687f7b901f3dd5a2de'],
+    ['exporter', ['blender', 'exp', 'export.py'], 25976, '3559c044a5e3b31abf853bf4481e0d0f58891158e39034216d6f698afeee09d1'],
+    ['writer', ['io', 'exp', 'export.py'], 3285, '5245a27046ec1d2184366b8e8f138a3e827a883967ca4998f389a1378f7d4c52'],
+  ];
+  return Promise.all(sources.map(async ([role, relative, expectedLfBytes, expectedLfSha256]) => {
+    const unavailable = { role, status: 'unavailable', category: 'READ_UNAVAILABLE', bytes: null, sha256: null, utf8Valid: null,
+      lfBytes: null, lfSha256: null, expectedLfBytes, expectedLfSha256, rawMatchesExpectedLf: null, lfMatchesExpectedLf: null };
+    try {
+      const path = join(root, ...relative); await noLinks(path);
+      const raw = await readRegularFile(path, 128 * 1024), normalized = Buffer.alloc(raw.length); let lfBytes = 0, utf8Valid = true;
+      try { new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(raw); } catch { utf8Valid = false; }
+      // Remove only CR immediately followed by LF; keep BOM, lone CR and every other byte.
+      for (let at = 0; at < raw.length; at++) { if (raw[at] === 13 && raw[at + 1] === 10) continue; normalized[lfBytes++] = raw[at]; }
+      const sha256 = sha(raw), lfSha256 = sha(normalized.subarray(0, lfBytes));
+      return { role, status: 'available', category: null, bytes: raw.length, sha256, utf8Valid, lfBytes, lfSha256, expectedLfBytes, expectedLfSha256,
+        rawMatchesExpectedLf: raw.length === expectedLfBytes && sha256 === expectedLfSha256,
+        lfMatchesExpectedLf: lfBytes === expectedLfBytes && lfSha256 === expectedLfSha256 };
+    } catch { return unavailable; } // Diagnostic failure never changes runtime admission or conversion outcome.
+  }));
+}
+
 async function runtimeAcquisitionEvidence(executable) {
   const configured = process.env.ARCANE_TEST_BLENDER_RUNTIME_RECEIPT;
   if (configured === undefined) return null;
@@ -67,7 +94,8 @@ async function runtimeAcquisitionEvidence(executable) {
   assert.equal(count, receipt.executableBytes); const executableSha256 = digest.digest('hex'); assert.equal(executableSha256, receipt.executableSha256);
   // Acquisition evidence is separate from actual pipeline version/capabilities,
   // fidelity, previews and observed child closure, all required below.
-  return { installerReceipt: receipt, configuredExecutable: { bytes: count, sha256: executableSha256 }, executableHashMatched: true };
+  return { installerReceipt: receipt, configuredExecutable: { bytes: count, sha256: executableSha256 }, executableHashMatched: true,
+    bundledExporterSources: await bundledExporterSourceEvidence(executable) };
 }
 
 function chunk(kind, data) {
