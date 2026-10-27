@@ -96,8 +96,9 @@ async function fixture(t) {
     import {join} from 'node:path';
     const data = (directory, file) => existsSync(join(directory,file)) ? JSON.parse(readFileSync(join(directory,file),'utf8')) : [];
     const lifecycle = [], artifactHash = 'd'.repeat(64);
-    let sharedStudioStore, sharedConversationStore, sharedPreparations, sharedImportHost, sharedAssets, sharedStaging, persistPreparation, savedArgs;
+    let sharedStudioStore, sharedConversationStore, sharedPreparations, sharedImportHost, sharedAssets, sharedStaging, persistPreparation, savedArgs, readPreparation, expectedReadArgs, readArgs;
     const persistenceArgumentCounts = [];
+    const preparationReadArgumentCounts = [], originalReadResult = Object.freeze({fixture:'original-ledger-result'});
     const created = resource => {
       if (process.env.FIXTURE_SERVICE_FAIL === resource) throw new Error('Fixture startup failure: ' + resource);
       lifecycle.push({operation:'create',resource});
@@ -147,13 +148,16 @@ async function fixture(t) {
       assert.equal(sharedPreparations, undefined); created('preparations');
       sharedPreparations = Object.freeze({directory:options.directory,projectPath:options.projectPath,
         async save(...args) { assert.equal(this,sharedPreparations); savedArgs=args; },
-        async get() { assert.fail('Metadata startup never reads a preparation.'); },
+        async get(...args) {
+          if (!expectedReadArgs) assert.fail('Metadata startup never reads a preparation.');
+          assert.equal(this,sharedPreparations);readArgs=args;return originalReadResult;
+        },
         async close() { assert.equal(this,sharedPreparations); closed('preparations'); }
       });
       return sharedPreparations;
     }
     export function createStudioImportHost(options) {
-      assert.deepEqual(Object.keys(options).sort(), ['persistPreparation','pluginArtifactHash','projectPath','studio','workAssociations']);
+      assert.deepEqual(Object.keys(options).sort(), ['persistPreparation','pluginArtifactHash','projectPath','readPreparation','studio','workAssociations']);
       assert.equal(options.projectPath, sharedConversationStore.projectPath);
       assert.equal(options.workAssociations, sharedConversationStore);
       assert.equal(options.studio, sharedStudioStore);
@@ -161,6 +165,7 @@ async function fixture(t) {
       assert.equal(lifecycle.filter(value => value.operation === 'create' && value.resource === 'artifact').length, 1);
       assert.ok(sharedPreparations); assert.equal(sharedImportHost, undefined); created('host');
       assert.equal(typeof options.persistPreparation, 'function'); persistPreparation=options.persistPreparation;
+      assert.equal(typeof options.readPreparation, 'function'); readPreparation=options.readPreparation;
       sharedImportHost = Object.freeze({hooks:Object.freeze({
         workAssociations:sharedConversationStore,
         selectTarget() { assert.fail('Metadata fixture must not observe Studio.'); },
@@ -185,6 +190,17 @@ async function fixture(t) {
         assert.equal(savedArgs.length, forwarded.length, 'Do not discard the optional sixth preparation-attempt argument.');
         for (let i=0;i<forwarded.length;i++) assert.equal(savedArgs[i],forwarded[i], 'Forward persistence arguments unchanged to the same ledger.');
         persistenceArgumentCounts.push(savedArgs.length);
+      }
+      const originalReadArgs = [args[0],args[1],args[4]];
+      for (const forwarded of [originalReadArgs,[...originalReadArgs,undefined],[...originalReadArgs,'22222222-2222-4222-8222-222222222222']]) {
+        expectedReadArgs=forwarded;
+        try {
+          const result=await readPreparation(...forwarded);
+          assert.equal(result,originalReadResult,'Return the same original preparation ledger record.');
+          assert.equal(readArgs.length,4,'The fixed callback forwards the optional fourth attempt slot.');
+          for(let i=0;i<4;i++) assert.equal(readArgs[i],forwarded[i],'Forward read actor, job, guard and optional attempt unchanged.');
+          preparationReadArgumentCounts.push(readArgs.length);
+        } finally { expectedReadArgs=undefined; }
       }
       created('assets');
       const outputRoot = options.outputRoot ?? join(options.cwd,'runtime','assets');
@@ -214,7 +230,7 @@ async function fixture(t) {
         assetProject:options.assetService.options.projectPath,assetCwd:options.assetService.options.cwd,
         assetOutputOverride:options.assetService.options.outputRoot??null,assetRoot:options.assetService.outputRoot,
         assetJobs:options.assetService.jobs,preparationDirectory:sharedPreparations.directory,preparationProject:sharedPreparations.projectPath,
-        importHostWired:options.assetService.options.studioImport===sharedImportHost.hooks,pluginArtifactHash:artifactHash,persistenceArgumentCounts}));
+        importHostWired:options.assetService.options.studioImport===sharedImportHost.hooks,pluginArtifactHash:artifactHash,persistenceArgumentCounts,preparationReadArgumentCounts}));
       return {origin:'http://127.0.0.1:49999',token:'offline-fixture',url:'offline-fixture',close:async()=>{closed('lab');}};
     }
   `);
@@ -362,6 +378,7 @@ test('actual product entry forwards original and explicit preparation attempts w
   const product = observed(result.stdout, 'fixture-product:');
   assert.equal(product.importHostWired, true);
   assert.deepEqual(product.persistenceArgumentCounts, [5,6,6]);
+  assert.deepEqual(product.preparationReadArgumentCounts, [4,4,4]);
 });
 
 test('product configuration preserves default product/lab/asset paths and default port', async t => {

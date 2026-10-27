@@ -218,3 +218,54 @@ test('legacy generated staging and reconstruction retain their exact graphless v
   assert.equal(JSON.stringify(validateCommandArgs('asset.reconstruct',args,s)),JSON.stringify(args));assert.equal('formatVersion'in args,false);assert.equal('nodes'in args,false);
 });
 
+
+
+test('converted begin requires explicit null observation for an original create-only plan',async()=>{
+  const f=await staged(),begin=f.measured.arguments[0]!;
+  assert.equal(JSON.parse(begin.packet).delta.observation,null);
+  assert.deepEqual(validateCommandArgs('asset.stage_packet',begin,f.s),begin);
+  for(const mutate of [(p:Doc)=>{delete p.delta.observation;},(p:Doc)=>{p.delta.observation={};},
+    (p:Doc)=>{p.delta.receiptSha256=sha('invented receipt');},(p:Doc)=>{p.delta.modelRef='invented root';},
+    (p:Doc)=>{p.delta.modelAssetId='999';},(p:Doc)=>{p.delta.graph.previousDigest=sha('invented graph');},
+    (p:Doc)=>{p.delta.placementChanged=true;},(p:Doc)=>{p.delta.reviewRemovals=[{}];}])
+    assert.throws(()=>validateCommandArgs('asset.stage_packet',altered(begin,mutate),f.s),refused);
+});
+
+async function revisionBegin(hull:boolean,live:boolean){
+  const fixture=hostFixture(hull),previous=await converted(fixture.host()),input=fixture.host(NEXT);input.baseline=baseline(previous,live);
+  const prepared=await converted(input),payload=decodeStudioImportPayload(prepared,new Map(input.files.map(file=>[file.fileId,file.bytes])));
+  if(payload.formatVersion!==2)assert.fail('Expected actual converted decoder');
+  const transfer=createStudioImportTransfer(prepared,payload),s=session(),continuity={clientLifetimeId:s.clientSessionId,pluginArtifactHash:s.proof!.pluginArtifactHash,playEpoch:s.proof!.playEpoch};
+  const measured=measureStudioImportTransferArguments(transfer,input.target,continuity);return{prepared,begin:measured.arguments[0]!,s};
+}
+for(const hull of [false,true])test('actual converted '+(hull?'hull':'none')+' revision begin accepts closed observed baseline with nullable live mesh IDs',async()=>{
+  for(const live of [false,true]){
+    const f=await revisionBegin(hull,live);assert.ok(f.prepared.delta.observation);assert.equal(f.prepared.delta.modelAssetId,null);
+    assert.ok(f.prepared.delta.objects.every(row=>live?row.meshAssetId===null:row.meshAssetId!==null));
+    assert.deepEqual(validateCommandArgs('asset.stage_packet',f.begin,f.s),f.begin);
+  }
+});
+
+test('converted begin refuses missing malformed stale or wrong-scope observed witnesses after actual encoding',async()=>{
+  const f=await revisionBegin(false,true);
+  const mutations:((p:Doc)=>void)[]=[p=>{delete p.delta.observation;},p=>{p.delta.observation=null;},p=>{p.delta.observation.extra=true;},
+    p=>{p.delta.observation.commandId='not-a-command';},p=>{p.delta.observation.observation.receiptScope='historical-revision';},
+    p=>{p.delta.observation.observation.source.projectId=sha('foreign project');},p=>{p.delta.observation.observation.source.assetId='arcane_'+sha('foreign asset');},
+    p=>{p.delta.observation.observation.source.sourceSha256=sha('foreign source');},p=>{p.delta.observation.observation.source.manifestDigest=sha('foreign old manifest');},
+    p=>{p.delta.observation.observation.source.graphDigest=sha('foreign old graph');},p=>{p.delta.observation.observation.target.parentRef='foreign-parent';},
+    p=>{p.delta.observation.observation.modelRef.instanceId='foreign-root';},p=>{p.delta.modelAssetId='123';},
+    p=>{p.delta.observation.receiptSha256=sha('stale checksum');},p=>{p.delta.receiptSha256=sha('different wrapper checksum');}];
+  for(const mutate of mutations){
+    const bad=altered(f.begin,p=>{mutate(p);
+      // Reseal only well-formed synthetic metadata to reach scope/root correlation,
+      // while checksum-specific negative cases intentionally remain stale.
+      const witness=p.delta.observation;
+      if(witness?.observation&&witness.receiptSha256!==sha('stale checksum')&&p.delta.receiptSha256!==sha('different wrapper checksum')){
+        try{witness.receiptSha256=studioImportObservationReceiptDigest(witness.observation);p.delta.receiptSha256=witness.receiptSha256;}catch{}
+      }
+    });
+    assert.throws(()=>validateCommandArgs('asset.stage_packet',bad,f.s),refused);
+  }
+  const tampered=altered(f.begin,p=>{p.delta.observation.observation.modelOwnedStateSha256=sha('changed state without checksum');});
+  assert.throws(()=>validateCommandArgs('asset.stage_packet',tampered,f.s),refused);
+});

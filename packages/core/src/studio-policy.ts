@@ -1,3 +1,4 @@
+import {createHash} from 'node:crypto';
 import {types as observationTypes} from 'node:util';
 import {STUDIO_IMPORT_OBSERVATION_LIMITS,type StudioAssetStageArgs,type InstanceRef,type StudioImportObservationSource,type StudioImportObservedChild,type StudioImportObservedNode,type StudioImportObservedObject,type StudioImportObservationArgs,type StudioImportObservationReceipt,type StudioImportObservationWitness,type StudioImportRevisionArgs,type StudioImportRevisionReceipt} from '../../protocol/src/studio.js';
 import { ArcaneError } from '../../protocol/src/providers.js';
@@ -940,8 +941,23 @@ function convertedPacket(packet:Record<string,unknown>,raw:string,target:Record<
     const files=convertedList(packet.files,r.collision==='convex-hull'?2:1,r.collision==='convex-hull'?2:1),ids=new Set<string>();
     for(const row of files){const file=convertedClosed(row,['fileId','contentType','sha256','byteLength']);if(!['asset-glb',...(r.collision==='convex-hull'?['collision-glb']:[])].includes(file.fileId as string)||ids.has(file.fileId as string)||file.contentType!=='model/gltf-binary')convertedInput();ids.add(file.fileId as string);convertedHash(file.sha256);convertedInteger(file.byteLength,20,20000000);}
     const documents=new Set<string>();for(const row of convertedList(packet.sourceDocuments,files.length,files.length)){const source=convertedClosed(row,['fileId','jsonSha256','document']);if(!ids.has(source.fileId as string)||documents.has(source.fileId as string))convertedInput();documents.add(source.fileId as string);convertedHash(source.jsonSha256);object(source.document);}
-    const delta=convertedClosed(packet.delta,['previousDigest','nextDigest','receiptSha256','modelRef','modelAssetId','placementChanged','objects','reviewRemovals','reviewAnchors','geometry','textures','preservation','graph','nodes','reviewNodeRemovals']);
+    const delta=convertedClosed(packet.delta,['previousDigest','nextDigest','receiptSha256','modelRef','modelAssetId','observation','placementChanged','objects','reviewRemovals','reviewAnchors','geometry','textures','preservation','graph','nodes','reviewNodeRemovals']);
     const graph=convertedClosed(delta.graph,['previousDigest','nextDigest','changed']);if(graph.nextDigest!==h.digest||delta.nextDigest!==packet.manifestDigest||typeof graph.changed!=='boolean'||delta.preservation!=='preserve-all-scripts-attachments-constraints')convertedInput();convertedList(delta.nodes,h.nodeCount as number,h.nodeCount as number);
+    // Closed detached metadata only; the connected host still owns fresh custody.
+    if(delta.modelAssetId!==null||typeof delta.placementChanged!=='boolean')convertedInput();
+    if(delta.previousDigest===null){
+      if(delta.observation!==null||delta.receiptSha256!==null||delta.modelRef!==null||graph.previousDigest!==null||graph.changed!==true||delta.placementChanged!==false)convertedInput();
+      convertedList(delta.reviewRemovals,0,0);convertedList(delta.reviewNodeRemovals,0,0);
+    }else{
+      convertedHash(delta.previousDigest);convertedHash(graph.previousDigest);convertedHash(delta.receiptSha256);
+      let witness:StudioImportObservationWitness;
+      try{witness=parseStudioImportObservationWitness(delta.observation);}catch{convertedInput();}
+      const observed=witness.observation,source=observed.source;
+      if(source.projectId!==packet.projectId||source.assetId!==packet.assetId||source.sourceSha256!==packet.sourceSha256||
+        canonical(observed.target)!==canonical(target)||source.manifestDigest!==delta.previousDigest||source.graphDigest!==graph.previousDigest||
+        observed.modelRef.instanceId!==delta.modelRef||witness.receiptSha256!==delta.receiptSha256||
+        createHash('sha256').update(observationCanonical(observed)).digest('hex')!==witness.receiptSha256)convertedInput();
+    }
   }else if(kind==='node'){
     if(packet.ordinal===0)convertedInput();const node=convertedClosed(packet.node,['nodeKey','parentKey','localMatrix','name']);convertedId(node.nodeKey,CONVERTED_NODE);
     if(node.parentKey!==null){convertedId(node.parentKey,CONVERTED_NODE);if(node.parentKey===node.nodeKey)convertedInput();}convertedMatrix(node.localMatrix);

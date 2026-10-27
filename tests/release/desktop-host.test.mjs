@@ -166,6 +166,7 @@ const policy = windowsPolicy();
 function productServiceFixture({ closeFailAt } = {}) {
   const directory = 'C:\\UserData\\runtime\\projects\\fixture', cwd = 'C:\\Arcane\\resources\\product', projectPath = 'C:\\Project';
   const artifactHash = 'd'.repeat(64), services = {}, events = [];
+  const preparationRead = {expected:null,args:null,result:Object.freeze({fixture:'original-ledger-result'})};
   let hostConfiguration, savedArgs, exitCode, descriptorRemoved = false;
   const created = (resource, instance) => { assert.equal(services[resource], undefined); services[resource]=instance; events.push({operation:'create',resource}); return instance; };
   const closed = (resource, instance) => {
@@ -190,14 +191,18 @@ function productServiceFixture({ closeFailAt } = {}) {
       assert.equal(options.projectPath,projectPath); assert.equal(options.directory,win32.join(directory,'studio-import-preparations'));
       assert.equal(options.studio,services.studio); assert.equal(options.workAssociations,services.associations);
       return created('preparations',Object.freeze({async save(...args){assert.equal(this,services.preparations);savedArgs=args;},
-        async get(){assert.fail('Metadata fixture never reads preparations.');},async close(){closed('preparations',this);}}));
+        async get(...args){
+          if (!preparationRead.expected) assert.fail('Metadata fixture never reads preparations.');
+          assert.equal(this,services.preparations);preparationRead.args=args;return preparationRead.result;
+        },async close(){closed('preparations',this);}}));
     },
     createStudioImportHost(options) {
-      assert.deepEqual(Object.keys(options).sort(), ['persistPreparation','pluginArtifactHash','projectPath','studio','workAssociations']);
+      assert.deepEqual(Object.keys(options).sort(), ['persistPreparation','pluginArtifactHash','projectPath','readPreparation','studio','workAssociations']);
       assert.equal(options.projectPath,projectPath); assert.equal(options.studio,services.studio); assert.equal(options.workAssociations,services.associations);
       assert.equal(options.pluginArtifactHash,artifactHash,'Await the bundled artifact loader.');
       assert.equal(events.filter(value => value.resource === 'artifact').length,1); assert.ok(services.preparations);
       assert.equal(typeof options.persistPreparation,'function'); hostConfiguration=options;
+      assert.equal(typeof options.readPreparation,'function');
       const hooks=Object.freeze({workAssociations:services.associations,selectTarget(){assert.fail('Metadata fixture must not observe Studio.');},
         validateTarget(){assert.fail('Metadata fixture must not read engine state.');},recordPrepared(){assert.fail('Metadata fixture must not prepare or upload.');},
         releaseTarget(){assert.fail('Metadata fixture must not operate on an engine target.');}});
@@ -243,7 +248,7 @@ function productServiceFixture({ closeFailAt } = {}) {
       async unlink(path){assert.equal(path,descriptor);descriptorRemoved=true;},
     });
   };
-  return {initialize,shutdown,services,events,get hostConfiguration(){return hostConfiguration;},get savedArgs(){return savedArgs;},get exitCode(){return exitCode;},get descriptorRemoved(){return descriptorRemoved;}};
+  return {initialize,shutdown,services,events,preparationRead,get hostConfiguration(){return hostConfiguration;},get savedArgs(){return savedArgs;},get exitCode(){return exitCode;},get descriptorRemoved(){return descriptorRemoved;}};
 }
 
 test('product import wiring forwards original and explicit preparation attempts to the same owned ledger', async () => {
@@ -256,6 +261,16 @@ test('product import wiring forwards original and explicit preparation attempts 
     await f.hostConfiguration.persistPreparation(...forwarded);
     assert.equal(f.savedArgs.length,forwarded.length,'Do not discard the optional sixth preparation-attempt argument.');
     for(let i=0;i<forwarded.length;i++) assert.equal(f.savedArgs[i],forwarded[i],'Preserve actor, plan, witness, guard and attempt identity/order.');
+  }
+  const readArgs=[args[0],args[1],args[4]];
+  for (const forwarded of [readArgs,[...readArgs,undefined],[...readArgs,'22222222-2222-4222-8222-222222222222']]) {
+    f.preparationRead.expected=forwarded;
+    try {
+      const result=await f.hostConfiguration.readPreparation(...forwarded);
+      assert.equal(result,f.preparationRead.result,'Return the original ledger record without replacing it.');
+      assert.equal(f.preparationRead.args.length,4,'The fixed callback forwards the optional fourth attempt slot.');
+      for(let i=0;i<4;i++) assert.equal(f.preparationRead.args[i],forwarded[i],'Preserve read actor, job, guard and optional attempt identity/order.');
+    } finally { f.preparationRead.expected=null; }
   }
   await f.shutdown();
   assert.deepEqual(f.events.filter(value => value.operation === 'close').map(value => value.resource).sort(),['assets','associations','host','lab','learning','preparations','staging','studio','work']);

@@ -113,6 +113,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test --test-concurrency=1 services/gateway/test/account-routes.test.ts
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test deterministic Studio plugin
+        if: matrix.suite == 'release'
+        run: npm run test:plugin
       - name: Test release contracts
         if: matrix.suite == 'release'
         run: node --test --test-concurrency=1 tests/release/*.test.mjs
@@ -127,9 +130,6 @@ jobs:
             plugin/build/ArcaneLocalBridge.rbxmx
           if-no-files-found: error
           retention-days: 7
-      - name: Test deterministic Studio plugin
-        if: matrix.suite == 'release'
-        run: npm run test:plugin
       - name: Validate actual skill file integrity
         if: matrix.suite == 'release'
         run: node scripts/skill-pack.mjs validate
