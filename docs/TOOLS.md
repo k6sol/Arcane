@@ -2,7 +2,7 @@
 
 # Arcane MCP tools
 
-Arcane's MCP server (`arcane-studio`) exposes 41 tools to every connected client. Conversation-bound Codex, Claude and Arcane clients also list 7 asset-delivery tools (48 in total). Asset operations are scoped to the host's exact project and conversation; starting or cancelling work needs explicit host asset permission and an open admission window. Listing tools grants no authority. This reference is generated from the tool definitions in `apps/mcp/src`; descriptions are the exact text the model receives.
+Arcane's MCP server (`arcane-studio`) exposes 41 tools to every connected client. Conversation-bound Codex, Claude and Arcane clients also list 8 asset-delivery tools (49 in total). Asset operations are scoped to the host's exact project and conversation; starting or cancelling work needs explicit host asset permission and an open admission window. Listing tools grants no authority. This reference is generated from the tool definitions in `apps/mcp/src`; descriptions are the exact text the model receives.
 
 Regenerate after changing any tool:
 
@@ -32,7 +32,7 @@ node scripts/generate-tool-docs.mjs
 - **Blender assets:** `assets_probe`, `assets_jobs`, `assets_start`, `assets_cancel`, `assets_manifest`, `assets_procedural`, `assets_preview`
 - **Bundled skills:** `skills_recommend`, `skills_list`, `skills_get`
 - **Work graph:** `work_runs`, `work_ready`, `work_create`, `work_claim`, `work_progress`, `work_submit`
-- **In-app asset delivery:** `assets_adopt_glb`, `assets_prepare_studio_import`, `assets_stage_studio_import`, `assets_studio_staging_status`, `assets_reconstruct_studio_import`, `assets_studio_reconstruction_status`, `assets_place_studio_import`
+- **In-app asset delivery:** `assets_adopt_glb`, `assets_convert_glb`, `assets_prepare_studio_import`, `assets_stage_studio_import`, `assets_studio_staging_status`, `assets_reconstruct_studio_import`, `assets_studio_reconstruction_status`, `assets_place_studio_import`
 
 ## Studio connection and reading
 
@@ -653,6 +653,20 @@ Write: adopt an owned project-relative GLB file into an immutable chat asset for
 |---|---|---|---|
 | `name` | string | yes | ≤ 48 chars |
 | `path` | string | yes |  |
+
+### `assets_convert_glb`
+
+**Safety:** Writes (additive)
+
+Write: start a separate supervised local Blender conversion of an already managed adopted GLB parent job in this authorized native conversation. The host captures immutable retained source and parent bytes. Accepts only parentJobId, a new name, collision mode and bounded preview settings. Returns a job acknowledgement, not completion, human approval or Studio import/upload rights. On ambiguity inspect assets_jobs in this same scope; never auto-retry or re-adopt. Converted review/import remain unavailable. Native-session: the bearer’s exact project and host-bound conversation scope (daemon-enforced); start/cancel need explicit host asset permission and an open admission window; the client routing mode grants no authority and no originating-turn provenance.
+
+| Parameter | Type | Required | Limits |
+|---|---|---|---|
+| `parentJobId` | string | yes | ≤ 36 chars |
+| `name` | string | yes | ≤ 48 chars |
+| `collision` | "none" / "convex-hull" | yes |  |
+| `renderResolution` | integer | yes | 128–1024 |
+| `renderSamples` | integer | yes | 1–64 |
 
 ### `assets_prepare_studio_import`
 

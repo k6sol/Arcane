@@ -9,7 +9,7 @@ import { CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js';
 import { DaemonClient, type AssetAudience } from '../../apps/mcp/src/daemon-client.js';
 import { createMcpServer } from '../../apps/mcp/src/server.js';
 import { compactAssetJobPage } from '../../apps/mcp/src/token-lean.js';
-import { assetHistoryInput, assetJobPage, nativeAssetHistoryInput, nativeAssetJobPage, nativeAssetStart, nativeAssetCancel } from '../../apps/mcp/src/asset-schemas.js';
+import { assetHistoryInput, assetJobPage, nativeConvertGlbInput, nativeAssetHistoryInput, nativeAssetJobPage, nativeAssetStart, nativeAssetCancel } from '../../apps/mcp/src/asset-schemas.js';
 import { normalizeRequest } from '../../packages/asset-pipeline/src/validation.js';
 import type { AssetManifest } from '../../packages/asset-pipeline/src/types.js';
 import type { AssetConversation } from '../../packages/protocol/src/asset-conversation.js';
@@ -20,6 +20,7 @@ import { HISTORY_PAGE_BYTES, type AssetJobRecord } from '../../apps/daemon/src/a
 const ROOT = resolve(process.cwd()), TOKEN = 'owned-native-asset-fixture-bearer';
 const JOB_ID = '11111111-1111-4111-8111-111111111111', OTHER_ID = '22222222-2222-4222-8222-222222222222';
 const INPUT = { template: 'hero-prop' as const, name: 'native-fixture' }, REQUEST = normalizeRequest(INPUT);
+const CONVERSION = {parentJobId:'abcdefab-cdef-4abc-8def-abcdefabcdef',name:'converted-fixture',collision:'none' as const,renderResolution:256,renderSamples:8};
 const SCOPE = { projectId: 'a'.repeat(64), projectPath: ROOT,
   conversation: { provider: 'codex' as const, threadId: 'Native:Thread.Exact', sessionId: null as string | null } };
 const PROBE = { observedAt: '2026-10-13T00:00:00Z', available: false, blender: null, python: null, attempts: [] };
@@ -349,7 +350,7 @@ test('native MCP: fixed descriptions/annotations explain scope, host permission 
   const f = await fixture(t, () => assert.fail('Listing tools must not contact HTTP'));
   const tools = (await f.client.listTools()).tools.filter(tool => tool.name.startsWith('assets_'));
   assert.deepEqual(tools.map(tool => tool.name).sort(), [
-    'assets_probe', 'assets_jobs', 'assets_start', 'assets_cancel', 'assets_manifest', 'assets_adopt_glb',
+    'assets_probe', 'assets_jobs', 'assets_start', 'assets_cancel', 'assets_manifest', 'assets_adopt_glb', 'assets_convert_glb',
     'assets_prepare_studio_import', 'assets_stage_studio_import', 'assets_studio_staging_status',
     'assets_reconstruct_studio_import', 'assets_studio_reconstruction_status',
     'assets_procedural', 'assets_preview', 'assets_place_studio_import',
@@ -360,7 +361,7 @@ test('native MCP: fixed descriptions/annotations explain scope, host permission 
     assert.match(tool.description!, /explicit host asset permission.*open admission window/);
     assert.match(tool.description!, /routing mode grants no authority/);
     assert.match(tool.description!, /no originating-turn provenance/);
-    const mutation = ['assets_start', 'assets_adopt_glb', 'assets_cancel', 'assets_prepare_studio_import', 'assets_stage_studio_import', 'assets_reconstruct_studio_import',
+    const mutation = ['assets_start', 'assets_adopt_glb', 'assets_convert_glb', 'assets_cancel', 'assets_prepare_studio_import', 'assets_stage_studio_import', 'assets_reconstruct_studio_import',
       'assets_procedural', 'assets_place_studio_import'].includes(tool.name);
     assert.equal(tool.annotations?.readOnlyHint, !mutation); assert.equal(tool.annotations?.idempotentHint, !mutation);
   }
@@ -399,4 +400,102 @@ test('generic MCP: endpoints, envelopes, UUID cursors, bearer, descriptions and 
   const native = new DaemonClient({ url: f.daemon.url, token: TOKEN, assetAudience: 'native-session' });
   assert.deepEqual(await native.workRuns(), { runs: [] });
   assert.equal(f.requests.at(-1)!.url, '/v1/work/runs', 'Asset audience does not retarget other capabilities');
+});
+
+test('native MCP conversion lists exactly five required scalars and forwards a single detached conversion body',async t=>{
+  const f=await fixture(t,(url,response,_request,body)=>{
+    assert.equal(url.pathname,'/v1/assets/native/convert-glb');assert.equal(url.search,'');
+    assert.ok(body&&typeof body==='object'&&!Array.isArray(body));
+    assert.deepEqual(Object.keys(body).sort(),Object.keys(CONVERSION).sort());send(response,200,ack());
+  });
+  const tool=(await f.client.listTools()).tools.find(row=>row.name==='assets_convert_glb');assert.ok(tool);
+  assert.equal(tool.inputSchema.additionalProperties,false);
+  assert.deepEqual(Object.keys(tool.inputSchema.properties??{}).sort(),Object.keys(CONVERSION).sort());
+  assert.deepEqual([...(tool.inputSchema.required??[])].sort(),Object.keys(CONVERSION).sort());
+  assert.equal(tool.annotations?.readOnlyHint,false);assert.equal(tool.annotations?.idempotentHint,false);assert.equal(tool.annotations?.destructiveHint,false);
+  assert.match(tool.description!,/acknowledgement, not completion/);assert.match(tool.description!,/Converted review\/import remain unavailable/);
+  for(const input of [{...CONVERSION,renderResolution:128,renderSamples:1},{...CONVERSION,collision:'convex-hull' as const,renderResolution:1024,renderSamples:64}]){
+    const result=await call(f.client,'assets_convert_glb',input);assert.notEqual(result.isError,true);assert.deepEqual(result.structuredContent,ack());
+    assert.deepEqual(f.requests.at(-1)?.body,input);
+  }
+  const input={...CONVERSION},pending=f.daemon.assetsConvertGlb(input);input.name='newer-local-value';
+  assert.deepEqual(await pending,ack());assert.deepEqual(f.requests.at(-1)?.body,CONVERSION);
+  assert.equal(f.requests.length,3);assert.ok(f.requests.every(request=>request.method==='POST'&&request.auth==='Bearer '+TOKEN&&request.origin===undefined));onlyNative(f.requests);
+});
+
+test('generic MCP conversion remains unlisted and SDK audience refusal never inspects input or sends HTTP',async t=>{
+  const f=await fixture(t,()=>assert.fail('Generic conversion cannot contact HTTP'),'generic');
+  assert.equal((await f.client.listTools()).tools.some(row=>row.name==='assets_convert_glb'),false);
+  let inspected=0;const input=new Proxy({...CONVERSION},{get(){inspected++;throw Error('Must not inspect before audience refusal');},ownKeys(){inspected++;throw Error('Must not inspect before audience refusal');}});
+  await assert.rejects(f.daemon.assetsConvertGlb(input),{code:'ASSET_AUDIENCE'});
+  assert.equal(inspected,0);assert.equal(f.requests.length,0);
+});
+
+test('conversion missing scalars, bounds and authority fields refuse before any MCP or SDK POST',async t=>{
+  const f=await fixture(t,()=>assert.fail('Invalid conversion input cannot contact HTTP'));
+  const invalid:Record<string,unknown>[]=[];
+  for(const key of Object.keys(CONVERSION)){const value:Record<string,unknown>={...CONVERSION};delete value[key];invalid.push(value);}
+  for(const key of ['path','sourceGlb','parentManifest','parentManifestSha256','sourceSha256','actor','projectId','conversation','permission','fidelityPolicy','waitMs','timeoutMs'])invalid.push({...CONVERSION,[key]:'untrusted'});
+  invalid.push({...CONVERSION,parentJobId:CONVERSION.parentJobId.toUpperCase()},{...CONVERSION,parentJobId:CONVERSION.parentJobId+'\n'},
+    {...CONVERSION,name:'con'},{...CONVERSION,name:'trailing\n'},{...CONVERSION,name:'x'.repeat(49)},
+    {...CONVERSION,collision:'box'},{...CONVERSION,renderResolution:127},{...CONVERSION,renderResolution:1025},
+    {...CONVERSION,renderSamples:0},{...CONVERSION,renderSamples:65},{...CONVERSION,renderSamples:1.5},{...CONVERSION,renderResolution:'256'});
+  for(const input of invalid){
+    assert.equal(nativeConvertGlbInput.safeParse(input).success,false);
+    assert.equal((await call(f.client,'assets_convert_glb',input)).isError,true);
+    await assert.rejects(f.daemon.assetsConvertGlb(input as Parameters<DaemonClient['assetsConvertGlb']>[0]),{code:'ASSET_CONVERT_INPUT'});
+  }
+  assert.equal(f.requests.length,0);
+});
+
+test('SDK conversion rejects original hostile descriptors and prototypes without running caller code or posting',async t=>{
+  const f=await fixture(t,()=>assert.fail('Hostile conversion input cannot contact HTTP'));let called=0;
+  const getter={...CONVERSION};Object.defineProperty(getter,'renderSamples',{enumerable:true,get(){called++;return 8;}});
+  const proxy=new Proxy({...CONVERSION},{ownKeys(){called++;throw Error('Must not invoke proxy');},getOwnPropertyDescriptor(){called++;throw Error('Must not invoke proxy');},getPrototypeOf(){called++;throw Error('Must not invoke proxy');}});
+  const custom={...CONVERSION};Object.setPrototypeOf(custom,{untrusted:true});
+  const hidden=Object.defineProperty({...CONVERSION},'permission',{value:true,enumerable:false});
+  const hiddenRequired=Object.defineProperty({...CONVERSION},'name',{value:CONVERSION.name,enumerable:false});
+  const symbol=Object.defineProperty({...CONVERSION},Symbol('scope'),{value:'untrusted'});
+  const inherited={};Object.setPrototypeOf(inherited,CONVERSION);
+  for(const input of [getter,proxy,custom,hidden,hiddenRequired,symbol,inherited,null,[],()=>{called++;}]){
+    await assert.rejects(f.daemon.assetsConvertGlb(input as Parameters<DaemonClient['assetsConvertGlb']>[0]),{code:'ASSET_CONVERT_INPUT'});
+  }
+  assert.equal(called,0);assert.equal(f.requests.length,0);
+});
+
+for(const failure of ['dropped','malformed','schema','overflow','500','redirect'] as const)test('native MCP conversion '+failure+' retains unknown delivery with exactly one POST and no polling',async t=>{
+  const f=await fixture(t,(url,response,request,body)=>{
+    assert.equal(url.pathname,'/v1/assets/native/convert-glb');assert.deepEqual(body,CONVERSION);
+    switch(failure){
+      case 'dropped':request.socket.destroy();break;
+      case 'malformed':response.writeHead(202,{'Content-Type':'application/json'});response.end('{');break;
+      case 'schema':send(response,202,{...ack(),creation:'unknown'});break;
+      case 'overflow':send(response,202,{...ack(),job:{...job(),ignored:'x'.repeat(HISTORY_PAGE_BYTES)}});break;
+      case '500':send(response,500,{error:'INTERNAL',message:'Controlled conversion acknowledgement failure'});break;
+      case 'redirect':response.writeHead(302,{Location:'/v1/assets/start'});response.end();break;
+    }
+  });
+  const result=await call(f.client,'assets_convert_glb',CONVERSION);assert.notEqual(result.isError,true);
+  const data=result.structuredContent;assert.ok(data);
+  assert.equal(data.jobId,null);assert.equal(data.name,CONVERSION.name);assert.equal(data.state,'unknown');
+  assert.equal(data.terminal,false);assert.equal(data.ambiguous,true);assert.equal(data.retry,false);assert.equal(data.wait,'interrupted');
+  assert.match(String(data.operationId),/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/);
+  assert.match(String(data.nextStep),/assets_jobs.*same native project and conversation scope/);assert.match(String(data.nextStep),/do not repeat or re-adopt automatically/);
+  assert.equal(f.requests.length,1);assert.equal(f.requests[0]?.method,'POST');onlyNative(f.requests);
+});
+
+test('SDK conversion transport timeout stays unknown without a public wait field or automatic GET/retry',async t=>{
+  const f=await fixture(t,(url,_response,_request,body)=>{assert.equal(url.pathname,'/v1/assets/native/convert-glb');assert.deepEqual(body,CONVERSION);});
+  const result=await f.daemon.assetsConvertGlb(CONVERSION,{timeoutMs:150});assert.ok('state'in result);
+  assert.equal(result.state,'unknown');assert.equal(result.jobId,null);assert.equal(result.terminal,false);assert.equal(result.ambiguous,true);assert.equal(result.retry,false);assert.equal(result.wait,'timeout');
+  assert.match(result.nextStep,/assets_jobs.*same native project and conversation scope/);
+  assert.equal(f.requests.length,1);assert.equal(f.requests[0]?.method,'POST');onlyNative(f.requests);
+});
+
+test('native MCP conversion retains explicit 202 creation and binding uncertainty without lookup or replay',async t=>{
+  let value=ack(null,'unknown','unknown');
+  const f=await fixture(t,(url,response)=>{assert.equal(url.pathname,'/v1/assets/native/convert-glb');send(response,202,value);});
+  const values=[ack(null,'unknown','unknown'),ack(JOB_ID,'unknown','unknown'),ack(JOB_ID,'unknown','created')];
+  for(const current of values){value=current;const result=await call(f.client,'assets_convert_glb',CONVERSION);assert.notEqual(result.isError,true);assert.deepEqual(result.structuredContent,current);}
+  assert.equal(f.requests.length,values.length);assert.ok(f.requests.every(request=>request.method==='POST'));onlyNative(f.requests);
 });

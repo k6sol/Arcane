@@ -293,6 +293,7 @@ export async function createConnectionLab(options: Options) {
       start: async request => (await options.assetService!.start(request)).jobId,
       startNative: async (request,admission) => (await options.assetService!.start(request,admission)).jobId,
       ...(typeof options.assetService.adoptProjectGlb === 'function' ? {adoptNative: async (request,actor,admission) => (await options.assetService!.adoptProjectGlb(request,actor,admission)).jobId} satisfies Pick<import('./asset-conversation-host.js').AssetConversationHostOptions,'adoptNative'> : {}),
+      ...(typeof options.assetService.convertProjectGlb === 'function' ? {convertNative: async (request,actor,admission) => (await options.assetService!.convertProjectGlb(request,actor,admission)).jobId} satisfies Pick<import('./asset-conversation-host.js').AssetConversationHostOptions,'convertNative'> : {}),
     }) : null;
     if(options.assetReviewHostFactory){if(!conversationAssets)throw new ArcaneError('ASSET_REVIEW_CONFIGURATION','Model review requires the current asset conversation.');modelReviews=options.assetReviewHostFactory(conversationAssets,humanAssetSelection.epoch);}
   } catch (error) {

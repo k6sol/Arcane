@@ -21,6 +21,8 @@ import { normalizeRequest } from '../../packages/asset-pipeline/src/validation.j
 import { DaemonClient } from '../../apps/mcp/src/daemon-client.js';
 import { createMcpServer } from '../../apps/mcp/src/server.js';
 import { nativeAssetStart, nativeAssetJobPage } from '../../apps/mcp/src/asset-schemas.js';
+import { ArcaneError } from '../../packages/protocol/src/providers.js';
+import { assertNativeAssetActor, nativeAssetActorScope } from '../../apps/daemon/src/native-asset-authority.js';
 
 // Actual LAB, SQLite and official SDK/HTTP. Only CodexHostClient and AssetService
 // are explicit provider/runtime doubles; this is not installed-native attestation.
@@ -371,4 +373,24 @@ test('LAB existing codexService injection takes precedence over the trusted conn
     'Content-Type': 'application/json', Origin: lab.origin }, body: JSON.stringify({ requestId: randomUUID(), connectionId: null, action: 'connect' }),signal:AbortSignal.any([t.signal,AbortSignal.timeout(6000)]) });
   assert.equal(response.status, 409); const outcome = await response.json() as CodexActionOutcome;
   assert.equal(outcome.record.errorCode, 'FIXTURE_INJECTED'); assert.equal(injectedConnects, 1); assert.equal(ownedConnects, 0);
+});
+
+test('LAB conversion forwards the original native actor and branded admission to the typed service callback once', { timeout: 15000 }, async t => {
+  const f = await fixture(t); await f.ready();
+  assert.equal((await f.action('grant-assets', { threadId: f.threadId })).status, 200);
+  const pending = f.action('turn-start', { threadId: f.threadId, text: 'Explicit conversion callback fixture turn' }); await f.turnEntered;
+  const input = { parentJobId: randomUUID(), name: 'lab-conversion-fixture', collision: 'none', renderResolution: 256, renderSamples: 8 };
+  let calls = 0;
+  t.mock.method(f.fakeAssetService, 'convertProjectGlb', async (...[request, actor, admission]: Parameters<AssetService['convertProjectGlb']>) => {
+    calls++; assert.deepEqual(request, input); assert.equal(Object.isFrozen(request), true);
+    assertNativeAssetActor(actor, 'mutate'); const scope = nativeAssetActorScope(actor);
+    assert.equal(scope.projectPath, f.projectPath); assert.deepEqual(scope.conversation, { provider: 'codex', threadId: f.threadId, sessionId: f.sessionId });
+    assert.ok(admission.work); assert.equal(admission.signal, admission.work.signal); assert.equal(admission.signal?.aborted, false);
+    assert.equal(typeof admission.beforeCreate, 'function'); assert.equal(typeof admission.created, 'function');
+    throw new ArcaneError('LAB_CONVERT_FIXTURE', 'Controlled service refusal before allocation; no worker or native proof.');
+  });
+  const reply = await f.native('/v1/assets/native/convert-glb', input);
+  assert.equal(reply.status, 503); assert.equal(reply.data.error, 'LAB_CONVERT_FIXTURE'); assert.equal(calls, 1);
+  assert.equal(f.fakeAssetService.jobs().length, 0); assert.equal(f.starts, 0); assert.equal(f.cancels, 0);
+  f.releaseTurn(); assert.equal((await pending).status, 200);
 });

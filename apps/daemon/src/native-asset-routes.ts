@@ -3,6 +3,7 @@ import {isIP} from 'node:net';
 import {isDeepStrictEqual} from 'node:util';
 import {ArcaneError} from '../../../packages/protocol/src/providers.js';
 import {parseAdoptGlbInput} from '../../../packages/asset-pipeline/src/adopted-glb.js';
+import {parseConvertGlbInput} from './conversion-start.js';
 import {normalizeRequest,AssetError} from '../../../packages/asset-pipeline/src/index.js';
 import type {AssetService} from './asset-service.js';
 import type {createStudioImportStagingController} from './studio-import-staging-controller.js';
@@ -16,7 +17,7 @@ import {parseNativeStudioReconstructionResponse,parseNativeStudioReconstructionS
 export {NATIVE_STUDIO_IMPORT_RESPONSE_BYTES,parseNativeStudioImportResponse} from '../../../packages/asset-pipeline/src/studio-import-wire.js';
 import {readAssetJson,discardRejectedAssetBody} from './asset-routes.js';
 const PREFIX='/v1/assets/native/';
-const METHODS=new Map([['start','POST'],['adopt-glb','POST'],['cancel','POST'],['prepare-studio-import','POST'],['stage-studio-import','POST'],['studio-staging-status','GET'],['reconstruct-studio-import','POST'],['studio-reconstruction-status','GET'],['probe','POST'],['jobs','GET'],['manifest','GET'],['preview','GET']]);
+const METHODS=new Map([['start','POST'],['adopt-glb','POST'],['convert-glb','POST'],['cancel','POST'],['prepare-studio-import','POST'],['stage-studio-import','POST'],['studio-staging-status','GET'],['reconstruct-studio-import','POST'],['studio-reconstruction-status','GET'],['probe','POST'],['jobs','GET'],['manifest','GET'],['preview','GET']]);
 const UUID=/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}(?![\s\S])/;
 function fail(code:string):never {throw new ArcaneError(code,'Native chat asset request refused.');}
 function jobId(value:unknown):string {if(typeof value!=='string'||!UUID.test(value))fail('INPUT');return value;}
@@ -50,7 +51,7 @@ export function nativeAssetRoutes(service:AssetService,host:NativeAssetConversat
    const credential=ingress(request,url,origin),route=url.pathname.slice(PREFIX.length),method=METHODS.get(route);
    if(!method){await send(404,{error:'NOT_FOUND',message:'Unknown native asset route.'});return true;}
    if(request.method!==method){response.setHeader('Allow',method);await send(405,{error:'METHOD',message:'Wrong native asset method.'});return true;}
-   const mutation=route==='start'||route==='adopt-glb'||route==='cancel'||route==='prepare-studio-import'||route==='stage-studio-import'||route==='reconstruct-studio-import';
+   const mutation=route==='start'||route==='adopt-glb'||route==='convert-glb'||route==='cancel'||route==='prepare-studio-import'||route==='stage-studio-import'||route==='reconstruct-studio-import';
    // Capture BEFORE body reads/queue waits. Never resolve again into a fresh generation.
    const actor=registry.capture(credential,mutation?'mutate':'read');
    const allowed=route==='manifest'||route==='studio-staging-status'||route==='studio-reconstruction-status'?['jobId']:route==='preview'?['jobId','path']:route==='jobs'?['limit','after']:[];
@@ -93,6 +94,11 @@ export function nativeAssetRoutes(service:AssetService,host:NativeAssetConversat
     await send(200,envelope,serialized);return true;
    }
    const input=await readAssetJson(request,route==='start');assertNativeAssetActor(actor,mutation?'mutate':'read');
+   if(route==='convert-glb'){
+    const checked=parseConvertGlbInput(input);if(!host.convertNative)fail('ASSET_CONVERT_UNAVAILABLE');
+    const result=await host.convertNative(actor,checked);
+    await send(result.association==='bound'&&result.creation==='created'?200:202,result);return true;
+   }
    if(route==='adopt-glb'){
     const checked=parseAdoptGlbInput(input);if(!host.adoptNative)fail('ASSET_ADOPT_UNAVAILABLE');
     const result=await host.adoptNative(actor,checked);
@@ -152,7 +158,7 @@ export function nativeAssetRoutes(service:AssetService,host:NativeAssetConversat
    const probe=await service.probe();assertNativeAssetActor(actor,'read');await send(200,{probe});return true;
   }catch(error){
    const code=error instanceof ArcaneError||error instanceof AssetError?error.code:'NATIVE_ASSET_UNAVAILABLE';
-   const status=code==='HOST'||code==='ORIGIN'||code==='AUTH'||code==='NATIVE_ASSET_AUTHORITY'?403:code==='NOT_FOUND'?404:code==='BODY_LIMIT'?413:code==='BODY_TIMEOUT'?408:code==='ASSET_ADOPT_GLB'?422:code==='ASSET_ADOPT_INPUT'||code==='ASSET_ADOPT_PATH'||code==='INPUT'||code==='CONTENT_TYPE'||code==='JSON'||code==='BODY'?400:503;
+   const status=code==='HOST'||code==='ORIGIN'||code==='AUTH'||code==='NATIVE_ASSET_AUTHORITY'?403:code==='NOT_FOUND'?404:code==='BODY_LIMIT'?413:code==='BODY_TIMEOUT'?408:code==='ASSET_ADOPT_GLB'?422:code==='ASSET_CONVERT_INPUT'||code==='ASSET_ADOPT_INPUT'||code==='ASSET_ADOPT_PATH'||code==='INPUT'||code==='CONTENT_TYPE'||code==='JSON'||code==='BODY'?400:503;
    await send(status,{error:code,message:'Native chat asset request refused or unavailable.'});return true;
   }
  };

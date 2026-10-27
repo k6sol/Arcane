@@ -3,6 +3,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { performance } from 'node:perf_hooks';
 import { z } from 'zod';
 import { jsonSnapshot } from '../../../packages/asset-pipeline/src/recipe.js';
+import {parseConvertGlbInput,type ConvertGlbInput} from '../../daemon/src/conversion-start.js';
 import { jsonObject, methodField, instanceRef } from '../../../packages/protocol/src/studio.js';
 import type { StudioCommand, StudioMethod, StudioSession, Json } from '../../../packages/protocol/src/studio.js';
 import { command, session } from './schemas.js';
@@ -337,6 +338,14 @@ export class DaemonClient {
     const body=nativeAdoptGlbInput.parse(input);
     return this.postOnce('/v1/assets/native/adopt-glb',body,nativeAssetStart,{jobId:null,name:body.name,retry:false},
       'Inspect assets_jobs in this exact native project and conversation; adoption or binding may be unknown. Never auto-retry or manufacture a worker manifest. Preview does not establish engine import rights.',options);
+  }
+  async assetsConvertGlb(input:ConvertGlbInput,options:WaitOptions={}) {
+    if(this.assetAudience!=='native-session')throw new BridgeError('ASSET_AUDIENCE','GLB conversion requires the dedicated native-session audience.');
+    // Inspect the original object's own descriptors before any schema library,
+    // serialization or await can invoke accessors or discard hidden fields.
+    const body=parseConvertGlbInput(input);
+    return this.postOnce('/v1/assets/native/convert-glb',body,nativeAssetStart,{jobId:null,name:body.name,retry:false},
+      'Inspect assets_jobs in this same native project and conversation scope. Conversion creation or binding may be unknown; do not repeat or re-adopt automatically. operationId is diagnostic, not a daemon idempotency key. Conversion does not grant review, Studio import or upload rights.',options);
   }
   async assetsCancel(jobId: string, options: WaitOptions = {}) {
     (this.assetAudience === 'native-session' ? nativeAssetJobId : assetJobId).parse(jobId);

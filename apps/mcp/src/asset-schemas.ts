@@ -4,6 +4,7 @@ import { isDeepStrictEqual, types } from 'node:util';
 import { createHash } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 import {parseAdoptGlbInput,parseAdoptedGlbRequest,parseAdoptedGlbManifest,type AdoptedGlbRequest} from '../../../packages/asset-pipeline/src/adopted-glb.js';
+import {parseConvertGlbInput} from '../../daemon/src/conversion-start.js';
 import type {AssetPreviewManifest} from '../../daemon/src/asset-service.js';
 import { normalizeRequest, validateAudit } from '../../../packages/asset-pipeline/src/validation.js';
 import { jsonSnapshot, JOB_JOURNAL_BYTES } from '../../../packages/asset-pipeline/src/recipe.js';
@@ -38,6 +39,13 @@ export const assetInput = z.strictObject({
 export type SafeAssetInput = z.output<typeof assetInput>;
 export const nativeAdoptGlbInput=z.strictObject({name:assetSlug,path:z.string().min(1).max(4096)}).superRefine((value,context)=>{
  try{parseAdoptGlbInput(value);}catch{context.addIssue({code:'custom',message:'Use a direct project-relative .glb path, not URLs, links, traversal or authority fields.'});}
+});
+export const nativeConvertGlbInput=z.strictObject({
+ parentJobId:z.string().length(36).regex(/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}(?![\s\S])/),
+ name:assetSlug,collision:z.enum(['none','convex-hull']),
+ renderResolution:z.number().int().min(128).max(1024),renderSamples:z.number().int().min(1).max(64),
+}).superRefine((value,context)=>{
+ try{parseConvertGlbInput(value);}catch{context.addIssue({code:'custom',message:'Choose a managed parent job, safe name, collision mode and bounded preview settings.'});}
 });
 export const adoptedGlbRequest:z.ZodType<AdoptedGlbRequest>=z.unknown().transform((value,context)=>{
  try{return parseAdoptedGlbRequest(value);}catch{context.addIssue({code:'custom',message:'Invalid adopted GLB request provenance.'});return z.NEVER;}

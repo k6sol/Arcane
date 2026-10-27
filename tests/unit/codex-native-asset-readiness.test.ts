@@ -14,7 +14,7 @@ import { requireArcaneBuildTools, type McpInventoryRow } from '../../packages/co
 import { ARCANE_TOOL_NAMES, ARCANE_NATIVE_TOOL_NAMES } from '../../packages/protocol/src/arcane-tools.js';
 
 const ROOT = resolve(process.cwd()), HUMAN = { initiatedBy: 'human' } as const;
-const THREAD = 'readiness.thread:exact', ADOPT = 'assets_adopt_glb', PREPARE = 'assets_prepare_studio_import', STAGE = 'assets_stage_studio_import', STATUS = 'assets_studio_staging_status';
+const THREAD = 'readiness.thread:exact', ADOPT = 'assets_adopt_glb', CONVERT = 'assets_convert_glb', PREPARE = 'assets_prepare_studio_import', STAGE = 'assets_stage_studio_import', STATUS = 'assets_studio_staging_status';
 const INPUT = { ...HUMAN, threadId: THREAD, text: 'Synthetic readiness turn' };
 type Wire = { method?: string; params?: { threadId?: string } };
 
@@ -72,7 +72,7 @@ const calls = (wire: Wire[], method: string) => wire.filter(row => row.method ==
 const setup = (session: CodexSession, method: 'start' | 'resume') => method === 'start'
  ? session.startThread(HUMAN) : session.resumeThread({ ...HUMAN, threadId: THREAD });
 
-for (const method of ['start', 'resume'] as const) for (const native of [false, true]) for (const missing of [ADOPT, PREPARE, STAGE, STATUS]) {
+for (const method of ['start', 'resume'] as const) for (const native of [false, true]) for (const missing of [ADOPT, CONVERT, PREPARE, STAGE, STATUS]) {
  test(`${method}: missing ${missing} ${native ? 'fences native' : 'allows generic'} setup despite opposing metadata`, async t => {
    const partial = native ? ARCANE_NATIVE_TOOL_NAMES.filter(name => name !== missing) : ARCANE_TOOL_NAMES;
    const f = await fixture(t, native, partial);

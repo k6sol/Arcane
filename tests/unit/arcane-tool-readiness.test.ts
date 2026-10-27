@@ -44,12 +44,12 @@ test('managed task instructions describe the optional arcane-choices and arcane-
  assert.ok(ARCANE_TASK_INSTRUCTIONS.indexOf('arcane-choices')>ARCANE_TASK_INSTRUCTIONS.indexOf('Do not claim an edit'),'existing evidence guarantees come first');
 });
 
-test('native asset readiness requires adoption, preparation, staging, detached reconstruction and historical status',()=>{
+test('native asset readiness requires adoption, conversion, preparation, staging, detached reconstruction and historical status',()=>{
  assert.equal(Object.isFrozen(ARCANE_TOOL_NAMES),true);
  assert.equal(Object.isFrozen(ARCANE_NATIVE_TOOL_NAMES),true);
- assert.deepEqual(ARCANE_NATIVE_TOOL_NAMES,[...ARCANE_TOOL_NAMES,'assets_adopt_glb','assets_prepare_studio_import','assets_stage_studio_import','assets_studio_staging_status','assets_reconstruct_studio_import','assets_studio_reconstruction_status','assets_place_studio_import']);
+ assert.deepEqual(ARCANE_NATIVE_TOOL_NAMES,[...ARCANE_TOOL_NAMES,'assets_adopt_glb','assets_convert_glb','assets_prepare_studio_import','assets_stage_studio_import','assets_studio_staging_status','assets_reconstruct_studio_import','assets_studio_reconstruction_status','assets_place_studio_import']);
  assert.equal(new Set(ARCANE_NATIVE_TOOL_NAMES).size,ARCANE_NATIVE_TOOL_NAMES.length);
- assert.deepEqual(missingArcaneTools(ARCANE_TOOL_NAMES,true),['assets_adopt_glb','assets_prepare_studio_import','assets_stage_studio_import','assets_studio_staging_status','assets_reconstruct_studio_import','assets_studio_reconstruction_status','assets_place_studio_import']);
+ assert.deepEqual(missingArcaneTools(ARCANE_TOOL_NAMES,true),['assets_adopt_glb','assets_convert_glb','assets_prepare_studio_import','assets_stage_studio_import','assets_studio_staging_status','assets_reconstruct_studio_import','assets_studio_reconstruction_status','assets_place_studio_import']);
  assert.deepEqual(missingArcaneTools(ARCANE_NATIVE_TOOL_NAMES,true),[]);
  assert.doesNotThrow(()=>requireArcaneBuildTools([row(ARCANE_TOOL_NAMES)]));
  assert.doesNotThrow(()=>requireArcaneBuildTools([row(ARCANE_NATIVE_TOOL_NAMES)],true));

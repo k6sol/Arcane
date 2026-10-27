@@ -19,6 +19,7 @@ import type { AssetManifest } from '../../packages/asset-pipeline/src/types.js';
 // are explicit fixtures. No provider, installed runtime or engine is involved.
 const PREFIX = '/v1/assets/native/';
 const INPUT = { template: 'hero-prop' as const, name: 'http-boundary-fixture' };
+const CONVERT = { parentJobId: '11111111-1111-4111-8111-111111111111', name: 'http-conversion-fixture', collision: 'none' as const, renderResolution: 256, renderSamples: 8 };
 const ORIGINAL = { provider: 'codex' as const, threadId: 'Boundary.original-chat', sessionId: 'Boundary.original-session' };
 const FOREIGN = { provider: 'codex' as const, threadId: 'Boundary.replacement-chat', sessionId: 'Boundary.replacement-session' };
 const MARKER = 'PRIVATE-FAKE-RUNTIME-COMPLETION';
@@ -164,9 +165,9 @@ async function fixture(t: test.TestContext) {
   };
 }
 
-for (const operation of ['start', 'cancel'] as const) for (const transition of ['revoke-regrant', 'terminal-new-intent', 'retire-replacement', 'registry-close'] as const)
+for (const operation of ['start', 'cancel', 'convert-glb'] as const) for (const transition of ['revoke-regrant', 'terminal-new-intent', 'retire-replacement', 'registry-close'] as const)
   test('native HTTP held ' + operation + ' cannot upgrade across ' + transition, { timeout: 8000 }, async t => {
-    const f = await fixture(t), body = Buffer.from(JSON.stringify(operation === 'start' ? INPUT : { jobId: f.jobId }));
+    const f = await fixture(t), body = Buffer.from(JSON.stringify(operation === 'start' ? INPUT : operation === 'convert-glb' ? CONVERT : { jobId: f.jobId }));
     const pending = f.http(PREFIX + operation, body, {}, true); await pending.captured(); f.assertUntouched();
     f.transition(transition);
     if (transition !== 'registry-close') assert.deepEqual(f.freshScope(), transition === 'retire-replacement' ? FOREIGN : ORIGINAL);
@@ -233,4 +234,25 @@ test('native HTTP preserves shared JSON byte limits, content checks and custom-r
   assert.equal(invalidUtf8.status, 400); assert.equal(invalidUtf8.data.error, 'JSON');
   assert.equal((await f.http(PREFIX + 'cancel', padded({ jobId: f.jobId }, 16384)).result).status, 200);
   assert.equal(f.starts, 1); assert.equal(f.allocations, 1); assert.equal(f.cancels, 1);
+});
+
+test('native conversion validates its fixed method, five-field body and authority before optional host availability', { timeout: 8000 }, async t => {
+  const f = await fixture(t), encode = (value: unknown) => Buffer.from(JSON.stringify(value));
+  const wrongMethod = await f.http(PREFIX + 'convert-glb').result;
+  assert.equal(wrongMethod.status, 405); assert.equal(wrongMethod.data.error, 'METHOD');
+  for (const value of [{ ...CONVERT, waitMs: 1 }, { ...CONVERT, parentJobId: CONVERT.parentJobId.toUpperCase() + 'x' }, { ...CONVERT, renderSamples: 0 }, { name: CONVERT.name }]) {
+    const reply = await f.http(PREFIX + 'convert-glb', encode(value)).result;
+    assert.equal(reply.status, 400); assert.equal(reply.data.error, 'ASSET_CONVERT_INPUT');
+  }
+  const unavailable = await f.http(PREFIX + 'convert-glb', encode(CONVERT)).result;
+  assert.equal(unavailable.status, 503); assert.equal(unavailable.data.error, 'ASSET_CONVERSATION_NATIVE_UNAVAILABLE');
+  const rejectedHeaders: Record<string, string>[] = [{ Authorization: 'Bearer ' + 'a'.repeat(64) }, { Origin: f.origin }];
+  for (const headers of rejectedHeaders) {
+    const denied = await f.http(PREFIX + 'convert-glb', encode(CONVERT), headers).result;
+    assert.equal(denied.status, 403);
+  }
+  const extraScope = await f.http(PREFIX + 'convert-glb?projectId=forged', encode(CONVERT)).result;
+  assert.equal(extraScope.status, 400); assert.equal(extraScope.data.error, 'INPUT');
+  const oversized = await f.http(PREFIX + 'convert-glb', Buffer.from(JSON.stringify(CONVERT) + ' '.repeat(16385))).result;
+  assert.equal(oversized.status, 413); assert.equal(oversized.data.error, 'BODY_LIMIT'); f.assertUntouched();
 });
