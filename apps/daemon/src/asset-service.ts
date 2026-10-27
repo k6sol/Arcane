@@ -4,13 +4,18 @@ import {lstatSync,realpathSync} from 'node:fs';
 import { lstat, opendir, mkdir, writeFile, rename } from 'node:fs/promises';
 import {randomUUID} from 'node:crypto';
 import {isDeepStrictEqual} from 'node:util';
-import {parseAdoptGlbInput, parseAdoptedGlbRequest, snapshotAdoptedGlbConversation, isAdoptedGlbRequest, isAdoptedGlbManifest, readOwnedProjectGlb, validateAdoptedGlbManifest, ADOPTED_GLB_LIMITS, type AdoptedGlbRequest, type AdoptedGlbManifest} from '../../../packages/asset-pipeline/src/adopted-glb.js';
-export type AssetPreviewManifest = AssetManifest | AdoptedGlbManifest;
+import {parseAdoptGlbInput, parseAdoptedGlbRequest, parseAdoptedGlbManifest, snapshotAdoptedGlbConversation, isAdoptedGlbRequest, isAdoptedGlbManifest, readOwnedProjectGlb, validateAdoptedGlbManifest, ADOPTED_GLB_LIMITS, type AdoptedGlbRequest, type AdoptedGlbManifest} from '../../../packages/asset-pipeline/src/adopted-glb.js';
+export type AssetPreviewManifest = AssetManifest | AdoptedGlbManifest | ConvertedGlbManifest;
+import { parseConvertedGlbJobMetadata, type ConvertedGlbCreation, type ConvertedGlbJobMetadata } from '../../../packages/asset-pipeline/src/converted-glb-creation.js';
+import { parseConvertedGlbJson, type ConvertedGlbManifest } from '../../../packages/asset-pipeline/src/converted-glb-manifest.js';
+import { GLB_CONVERSION_LIMITS, type ConvertedGlbRequest } from '../../../packages/asset-pipeline/src/converted-glb.js';
+import { parseConvertGlbInput } from './conversion-start.js';
 import { atomicAssetJson, AtomicJsonFailure } from '../../../packages/asset-pipeline/src/atomic-json.js';
 import { isAbsolute, join, resolve } from 'node:path';
 import { ArcaneError } from '../../../packages/protocol/src/providers.js';
 import { AssetError, AssetPipeline, MAX_CONCURRENT_ASSET_JOBS, normalizeRequest } from '../../../packages/asset-pipeline/src/index.js';
 import type { ProcessQueryHost } from '../../../packages/asset-pipeline/src/worker-identity.js';
+import { parseWorkerRecords } from '../../../packages/asset-pipeline/src/worker-journal.js';
 import { RESOLUTION_RECORD_BYTES, assessJobForResolution, validateResolution,
   type ResolutionEvidence, type ResolutionReason, type WorkerResolutionRecord } from '../../../packages/asset-pipeline/src/worker-resolution.js';
 import type { AssetInput, AssetJob, AssetJobEvent, AssetJobState, AssetManifest, AssetProbe, AssetRequest, OperationOptions } from '../../../packages/asset-pipeline/src/index.js';
@@ -89,14 +94,13 @@ function synchronousAdmissionResult(result: unknown): void {
     throw new ArcaneError('ADMISSION_ASYNC', 'Asset start admission callbacks must be synchronous.');
   }
 }
-export interface AssetJobRecord {
+export interface AssetJobBase {
   schemaVersion: 1;
   reportId?:string;
   jobId: string;
   directory: string;
   manifestPath: string | null;
   finishedAt?: string;
-  request: AssetRequest | AdoptedGlbRequest;
   state: AssetJobState;
   stage: string;
   startedAt: string;
@@ -107,6 +111,34 @@ export interface AssetJobRecord {
   /** Display only for interrupted jobs; admission always re-validates the stored marker from disk. */
   resolution?: { status: 'resolved'; resolvedAt: string } | { status: 'invalid' | 'uncertain' };
   retention?:{status:'archived';archivedAt:string};
+}
+/** Existing generated/adopted wire records keep their original shape. */
+export interface GeneratedOrAdoptedAssetJobRecord extends AssetJobBase {
+  request: AssetRequest | AdoptedGlbRequest;
+  kind?: never;
+  form?: never;
+  creation?: never;
+}
+export type LegacyAssetJobRecord = GeneratedOrAdoptedAssetJobRecord;
+export type ConvertedAssetJobRecord = AssetJobBase & { kind: 'converted-glb' } & (
+  | { form: 'new-pending'; creation: ConvertedGlbCreation; request: null }
+  | { form: 'new-prepared'; creation: ConvertedGlbCreation; request: ConvertedGlbRequest }
+  | { form: 'legacy-pending'; creation?: never; request: null }
+  | { form: 'legacy-prepared'; creation?: never; request: ConvertedGlbRequest }
+);
+export type AssetJobRecord = GeneratedOrAdoptedAssetJobRecord | ConvertedAssetJobRecord;
+type WithoutJobBase<T> = T extends AssetJobBase ? Omit<T, keyof AssetJobBase> : never;
+type ConvertedRecordMetadata = WithoutJobBase<ConvertedAssetJobRecord>;
+function conversionRecordMetadata(metadata: ConvertedGlbJobMetadata): ConvertedRecordMetadata {
+  switch (metadata.form) {
+    case 'new-pending': return { kind: 'converted-glb', form: metadata.form, creation: metadata.creation, request: null };
+    case 'new-prepared': return { kind: 'converted-glb', form: metadata.form, creation: metadata.creation, request: metadata.request };
+    case 'legacy-pending': return { kind: 'converted-glb', form: metadata.form, request: null };
+    case 'legacy-prepared': return { kind: 'converted-glb', form: metadata.form, request: metadata.request };
+  }
+}
+function convertedManifest(value: AssetPreviewManifest): value is ConvertedGlbManifest {
+  return 'origin' in value && value.origin === 'converted-glb';
 }
 export interface AssetHistoryUnavailable {jobId:string;name?:string;status:'missing'|'changed'|'conflict'|'unclassified'}
 class UnavailableAssetHistory extends ArcaneError {
@@ -175,7 +207,10 @@ export async function createAssetService(options: AssetServiceOptions) {
   const historyReads=new Set<Promise<unknown>>();
   const reviewedImports=new Map<string,{subject:AssetReviewSubject;reference:AssetReviewReference;assertSourceCurrent():void}>();
   let probeActive: AbortController | null = null;
-  let adoption: Promise<AssetJobRecord> | null = null;
+  let adoption: Promise<GeneratedOrAdoptedAssetJobRecord> | null = null;
+  // The parent remains read-pinned across actual accepted worker cleanup. An
+  // unresolved child retains this pin until its exact human resolution proof.
+  const conversionParents = new Map<string, { parentJobId: string; release(): void }>();
   let artifactReadActive = false;
   let studioImportActive = false;
   let pending: Promise<void> = Promise.resolve(), persistenceError = false, closed = false;
@@ -251,7 +286,36 @@ export async function createAssetService(options: AssetServiceOptions) {
     else if (stored.status === 'resolved') job.resolution = { status: 'resolved', resolvedAt: stored.record.assessedAt };
     else if (stored.status === 'invalid') job.resolution = { status: 'invalid' };
     else delete job.resolution;
+    if (job.kind === 'converted-glb' && job.state === 'interrupted') {
+      if (stored.status === 'resolved' && !uncertainResolutions.has(job.jobId)) releaseConversionParent(job.jobId);
+      else retainConversionParent(job);
+    }
   };
+  function releaseConversionParent(jobId: string): void {
+    const held = conversionParents.get(jobId);
+    if (held) { conversionParents.delete(jobId); held.release(); }
+  }
+  function retainConversionParent(job: ConvertedAssetJobRecord, release?: () => void): void {
+    const parentJobId = job.creation?.parentJobId ?? job.request?.parentJobId;
+    if (!parentJobId) { release?.(); return; } // Genuine legacy absence is not lineage.
+    const held = conversionParents.get(job.jobId);
+    if (held) {
+      release?.();
+      if (held.parentJobId !== parentJobId) throw new AssetError('RECOVERY', 'Converted parent lineage changed.');
+      return;
+    }
+    conversionParents.set(job.jobId, { parentJobId, release: release ?? archives.pin([parentJobId]) });
+  }
+  async function readConversionJournal(directory: string): Promise<{ journal: Record<string, unknown>; metadata: ConvertedGlbJobMetadata }> {
+    const journal = record(parseConvertedGlbJson(await readRegularFile(artifactPath(directory, 'job.json'), JOB_JOURNAL_BYTES)), 'conversion journal');
+    return { journal, metadata: parseConvertedGlbJobMetadata(journal) };
+  }
+  function convertedWorkersClosed(journal: Record<string, unknown>): boolean {
+    const workers = Object.hasOwn(journal, 'workers') ? parseWorkerRecords(journal.workers) : null;
+    // An explicit empty list is a pre-worker outcome. Absent, malformed or
+    // unresolved records never establish closure from a terminal state label.
+    return workers !== null && workers.every(worker => worker.state === 'closed');
+  }
   const holdsFence = (job: AssetJobRecord) => job.state === 'interrupted' && !isAdoptedGlbRequest(job.request);
   /** Blocked while any interrupted job lacks a currently valid, confirmed marker; otherwise the witnessed bytes. */
   const fenced = async (): Promise<{ blocked: boolean; witnesses: Witness[] }> => {
@@ -274,6 +338,38 @@ export async function createAssetService(options: AssetServiceOptions) {
       // Reclassification is read-only. A newly discovered running journal retains
       // its admission fence instead of being rewritten as part of rebuilding an index.
       if(readOnly&&journal.state==='running')throw new AssetError('RECOVERY','The saved job still needs supervision recovery.');
+      if (journal.kind === 'converted-glb' || Object.hasOwn(journal, 'creation')) {
+        const saved = await readConversionJournal(directory);
+        if (saved.metadata.jobId !== ref.jobId || saved.metadata.name !== null && saved.metadata.name !== ref.name) throw new AssetError('RECOVERY', 'Converted job directory and metadata disagree.');
+        let state: AssetJobState, error: AssetJobError | null = null;
+        try {
+          const recovered = await pipeline.recover(directory);
+          state = recovered.result.state;
+          if (recovered.result.error) error = decodeAssetJobError(recovered.result.error);
+        } catch (e) {
+          if (e instanceof AssetError && e.code === 'BUSY') throw e;
+          // A recovery exception is not proof that the original worker closed.
+          state = 'interrupted'; error = { code: 'HISTORY_INTEGRITY', message: 'Converted retained evidence or worker closure could not be verified.' };
+        }
+        const latest = await readConversionJournal(directory), now = new Date().toISOString();
+        if (!isDeepStrictEqual(latest.metadata, saved.metadata)) throw new AssetError('RECOVERY', 'Converted metadata changed during recovery.');
+        if (!convertedWorkersClosed(latest.journal)) {
+          state = 'interrupted'; error = { code: 'SUPERVISION_LOST', message: 'Converted worker closure remains unverified; no replay.' };
+        }
+        const startedAt = timestamp(latest.journal.startedAt, now);
+        const job: ConvertedAssetJobRecord = { schemaVersion: 1, jobId: ref.jobId, directory,
+          ...conversionRecordMetadata(latest.metadata), state, error,
+          manifestPath: state === 'succeeded' ? join(directory, 'manifest.json') : null,
+          manifestAvailable: state === 'succeeded', stage: state === 'interrupted' ? 'supervision-lost' : 'complete',
+          startedAt, updatedAt: timestamp(latest.journal.finishedAt, startedAt), events: [],
+          ...(typeof latest.journal.finishedAt === 'string' ? { finishedAt: latest.journal.finishedAt } : {}) };
+        if (state === 'succeeded') {
+          try { await verifiedSavedManifest(directory, ref.jobId, job); }
+          catch { job.state = 'failed'; job.error = { code: 'HISTORY_INTEGRITY', message: 'Converted retained scope or artifacts failed verification.' }; job.manifestPath = null; job.manifestAvailable = false; }
+        }
+        if (job.state === 'interrupted') retainConversionParent(job);
+        return { directory, job };
+      }
       if (isAdoptedGlbRequest(journal.request)) {
         const request = parseAdoptedGlbRequest(journal.request);
         if (request.name !== match[1]) throw new AssetError('RECOVERY','Adopted job identity disagrees.');
@@ -351,7 +447,25 @@ export async function createAssetService(options: AssetServiceOptions) {
     const task=Promise.resolve().then(read).finally(()=>{release();historyReads.delete(task);});
     historyReads.add(task);return task;
   }
-  async function verifiedSavedManifest(directory:string,jobId:string,request:AssetRequest|AdoptedGlbRequest,bindFullRequest=true):Promise<AssetPreviewManifest>{
+  async function verifiedSavedManifest(directory:string,jobId:string,job:AssetJobRecord,bindFullRequest=true):Promise<AssetPreviewManifest>{
+    if (job.kind === 'converted-glb') {
+      if (!job.request) throw new AssetError('MANIFEST', 'Converted manifest requires an observed prepared request.');
+      const manifest = await pipeline.validateConversion(join(directory, 'manifest.json'));
+      if (manifest.jobId !== jobId || !isDeepStrictEqual(manifest.request, job.request)) throw new AssetError('MANIFEST', 'Converted manifest differs from its recorded request.');
+      const rawParent = await readRegularFile(artifactPath(directory, 'parent-manifest.json'), GLB_CONVERSION_LIMITS.jsonBytes);
+      const parent = parseAdoptedGlbManifest(parseConvertedGlbJson(rawParent));
+      if (sha256(rawParent) !== job.request.parentManifestSha256 || parent.jobId !== job.request.parentJobId) throw new AssetError('MANIFEST', 'Converted parent snapshot differs from its recorded lineage.');
+      const associations = importHost?.workAssociations;
+      const childBinding = associations?.captureBinding('asset-job', jobId), parentBinding = associations?.captureBinding('asset-job', parent.jobId);
+      if (!associations || associations.projectPath !== projectPath || !childBinding || !parentBinding ||
+          associations.projectId !== parent.provenance.projectId || childBinding.binding.projectId !== parent.provenance.projectId ||
+          parentBinding.binding.projectId !== parent.provenance.projectId ||
+          !isDeepStrictEqual(childBinding.binding.conversation, parent.provenance.conversation) ||
+          !isDeepStrictEqual(parentBinding.binding.conversation, parent.provenance.conversation)) throw new AssetError('MANIFEST', 'Converted lineage differs from its durable conversation bindings.');
+      childBinding.assertCurrent(); parentBinding.assertCurrent();
+      return manifest;
+    }
+    const request = job.request;
     const manifest=isAdoptedGlbRequest(request)
       ?await validateAdoptedGlbManifest(directory,await readJson(join(directory,'manifest.json')))
       :await pipeline.validate(join(directory,'manifest.json'));
@@ -375,6 +489,33 @@ export async function createAssetService(options: AssetServiceOptions) {
     if(retained.status!=='archived'||!retained.journal)throw new UnavailableAssetHistory({jobId:requested,name:retained.entry.name,status:retained.status==='archived'?'conflict':retained.status});
     // Read-only hydration: never call recover() for archived bytes (it can rewrite a running journal).
     const journal=record(JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(retained.journal)),'archived job');
+    if (journal.kind === 'converted-glb' || Object.hasOwn(journal, 'creation')) {
+      try {
+      const strict = record(parseConvertedGlbJson(retained.journal), 'archived conversion'), metadata = parseConvertedGlbJobMetadata(strict);
+      if (metadata.jobId !== requested || metadata.name !== null && metadata.name !== retained.entry.name) throw new UnavailableAssetHistory({jobId:requested,name:retained.entry.name,status:'conflict'});
+      const startedAt = timestamp(strict.startedAt, retained.entry.archivedAt), finishedAt = timestamp(strict.finishedAt, startedAt);
+      const originalError = strict.error === undefined || strict.error === null ? null : decodeAssetJobError(strict.error);
+      if (retained.entry.state === 'succeeded' && originalError) throw new UnavailableAssetHistory({jobId:requested,name:retained.entry.name,status:'conflict'});
+      const job: ConvertedAssetJobRecord = { schemaVersion:1,jobId:requested,directory:retained.directory,
+        ...conversionRecordMetadata(metadata),state:retained.entry.state,
+        stage:retained.entry.state==='interrupted'?'supervision-lost':'complete',startedAt,updatedAt:finishedAt,
+        ...(typeof strict.finishedAt==='string'?{finishedAt:strict.finishedAt}:{}),manifestPath:null,manifestAvailable:false,events:[],
+        error:originalError??(retained.entry.state==='interrupted'?{code:'SUPERVISION_LOST',message:'The interrupted conversion was retained; no replay.'}:null),
+        retention:{status:'archived',archivedAt:retained.entry.archivedAt}};
+      if (job.state === 'succeeded') {
+        try { await verifiedSavedManifest(retained.directory,requested,job);job.manifestAvailable=true;job.manifestPath=join(retained.directory,'manifest.json'); }
+        catch { ensureOpen();throw new UnavailableAssetHistory({jobId:requested,name:retained.entry.name,status:'conflict'}); }
+      }
+      if (job.state === 'interrupted') { retainConversionParent(job);showResolution(job,await storedResolution(retained.directory,requested)); }
+      const current = await archives.read(requested);ensureOpen();
+      if(current.status!=='archived'||!current.journal?.equals(retained.journal))throw new UnavailableAssetHistory({jobId:requested,name:retained.entry.name,status:'changed'});
+      return {directory:retained.directory,job};
+      } catch (error) {
+        ensureOpen();
+        if (error instanceof UnavailableAssetHistory) throw error;
+        throw new UnavailableAssetHistory({jobId:requested,name:retained.entry.name,status:'conflict'});
+      }
+    }
     let request:AssetRequest|AdoptedGlbRequest;
     try{request=isAdoptedGlbRequest(journal.request)?parseAdoptedGlbRequest(journal.request):normalizeRequest(journal.request);}
     catch{throw new UnavailableAssetHistory({jobId:requested,name:retained.entry.name,status:'conflict'});}
@@ -394,7 +535,7 @@ export async function createAssetService(options: AssetServiceOptions) {
     if(job.state==='succeeded'&&!job.manifestAvailable){
       // A rebuilt ledger cannot infer exports from a terminal state. A scoped
       // history read may establish availability from the actual saved files.
-      try{await verifiedSavedManifest(retained.directory,requested,request);job.manifestAvailable=true;job.manifestPath=join(retained.directory,'manifest.json');}
+      try{await verifiedSavedManifest(retained.directory,requested,job);job.manifestAvailable=true;job.manifestPath=join(retained.directory,'manifest.json');}
       catch{ensureOpen();job.error={code:'HISTORY_INTEGRITY',message:'Saved exports need inspection before they can be used.'};}
       const current=await archives.read(requested);ensureOpen();
       if(current.status!=='archived'||!current.journal?.equals(retained.journal))throw new UnavailableAssetHistory({jobId:requested,name:retained.entry.name,status:'changed'});
@@ -423,6 +564,10 @@ export async function createAssetService(options: AssetServiceOptions) {
   async function retentionFacts(jobId:string):Promise<ArchiveHostFacts>{
     ensureOpen();if(importHost&&!options.retentionPins)throw new ArcaneError('HISTORY_INTEGRITY','Retained import state needs host inspection before archival.');
     const preparationRecord=options.retentionPins?await options.retentionPins.preparationRecord(jobId):false;ensureOpen();
+    // Refresh relevant child witnesses before parent retention effects. A marker
+    // that was once valid cannot permanently release a changed/uncertain child.
+    for (const {job,directory} of entries.values()) if (job.kind === 'converted-glb' && job.state === 'interrupted' &&
+        (job.creation?.parentJobId ?? job.request?.parentJobId) === jobId) showResolution(job,await storedResolution(directory,job.jobId));
     const pendingStage=options.retentionPins?.pendingStage(jobId)??false,importCaptured=options.retentionPins?.importCaptured(jobId)??false;
     if(typeof preparationRecord!=='boolean'||typeof pendingStage!=='boolean'||typeof importCaptured!=='boolean')throw new ArcaneError('HISTORY_INTEGRITY','Retained-work facts are unavailable.');
     return{active:active.has(jobId),readPinned:false,importCaptured,preparationRecord,pendingStage,uncertainLatch:uncertainResolutions.has(jobId),manifestVerified:entries.get(jobId)?.job.manifestAvailable===true};
@@ -509,9 +654,9 @@ export async function createAssetService(options: AssetServiceOptions) {
     const currentBinding=()=>{ensureOpen();try{binding.assertCurrent();}catch{assetReviewFailure('SCOPE');}};
     const check=()=>{guard();currentBinding();if(Date.now()>=end)assetReviewFailure('TIMEOUT');};
     const entry=await loadEntry(requested);check();
-    if(entry.job.state!=='succeeded'||!entry.job.manifestAvailable||active.has(requested)||isAdoptedGlbRequest(entry.job.request))assetReviewFailure('JOB_STATE');
-    const first=await verifiedSavedManifest(entry.directory,requested,entry.job.request);check();
-    if(isAdoptedGlbManifest(first))assetReviewFailure('JOB_STATE');
+    if(entry.job.kind==='converted-glb'||entry.job.state!=='succeeded'||!entry.job.manifestAvailable||active.has(requested)||isAdoptedGlbRequest(entry.job.request))assetReviewFailure('JOB_STATE');
+    const first=await verifiedSavedManifest(entry.directory,requested,entry.job);check();
+    if(isAdoptedGlbManifest(first)||convertedManifest(first))assetReviewFailure('JOB_STATE');
     const paths=[join(entry.directory,'manifest.json'),...first.artifacts.map(a=>artifactPath(entry.directory,a.path))];
     const fingerprint=(path:string):string=>{
       try{
@@ -525,8 +670,8 @@ export async function createAssetService(options: AssetServiceOptions) {
     const unchanged=()=>{guard();sourceCurrent();};
     // Verify once more INSIDE the captured metadata window. A source replaced
     // between the first proof and capture cannot become a valid new witness.
-    const manifest=await verifiedSavedManifest(entry.directory,requested,entry.job.request);check();unchanged();
-    if(isAdoptedGlbManifest(manifest)||assetReviewCanonical(manifest)!==assetReviewCanonical(first))assetReviewFailure('SOURCE');
+    const manifest=await verifiedSavedManifest(entry.directory,requested,entry.job);check();unchanged();
+    if(isAdoptedGlbManifest(manifest)||convertedManifest(manifest)||assetReviewCanonical(manifest)!==assetReviewCanonical(first))assetReviewFailure('SOURCE');
     const exports=new Map<'asset.glb'|'collision.glb',Buffer>();
     for(const name of ['asset.glb','collision.glb'] as const){
       const bytes=await readRegularFile(artifactPath(entry.directory,name),STUDIO_IMPORT_LIMITS.fileBytes);check();unchanged();exports.set(name,bytes);
@@ -572,6 +717,7 @@ export async function createAssetService(options: AssetServiceOptions) {
     const check = () => { guard();review?.assertCurrent(); return assertStudioImportJobScope(projectPath, importHost.workAssociations, actor, requested); };
     const originalScope = check();
     const e = await loadEntry(requested);check();
+    if (e.job.kind === 'converted-glb') throw new ArcaneError('STUDIO_IMPORT_UNSUPPORTED','Converted GLB review and delivery adapters are not implemented; conversion metadata grants no import authority.');
     if (isAdoptedGlbRequest(e.job.request)) throw new ArcaneError('STUDIO_IMPORT_UNSUPPORTED','Adopted GLB origin requires safe conversion and observed source mapping; engine import is unavailable.');
     if (e.job.state !== 'succeeded' || !e.job.manifestAvailable || active.has(requested)) throw new ArcaneError('JOB_STATE', 'Import preparation requires a verified completed job.');
     if (studioImportActive) throw new AssetError('BUSY', 'A Studio import preparation is already running.');
@@ -606,6 +752,7 @@ export async function createAssetService(options: AssetServiceOptions) {
       // Tighten import size BEFORE the service's existing complete manifest proof.
       for (const name of ['asset.glb', 'collision.glb'] as const) await wait(() => regularFile(artifactPath(e.directory, name), STUDIO_IMPORT_LIMITS.fileBytes));
       const manifest = await wait(() => readers.manifest(requested));
+      if (convertedManifest(manifest)) throw new ArcaneError('STUDIO_IMPORT_UNSUPPORTED','Converted GLB does not have a reviewed delivery adapter.');
       if (isAdoptedGlbManifest(manifest)) throw new ArcaneError('STUDIO_IMPORT_UNSUPPORTED','Adopted GLB has preview-only provenance; engine import is unavailable.');
       if (!manifest.validation.studioImport) throw new AssetError('STUDIO_IMPORT_UNSUPPORTED', 'This completed job predates producer import identities; generate a new owned job.');
       const selection = snapshotStudioImportSelection(await wait(() => importHost.selectTarget(scope, requested, actor, guard)));
@@ -763,7 +910,7 @@ export async function createAssetService(options: AssetServiceOptions) {
     },
     /** Native-only ordinary-file adoption. Actor/project authority is private;
      * request JSON carries only a name and project-relative .glb path. */
-    adoptProjectGlb(input: unknown, actor: NativeAssetActor, admission: AssetStartAdmission): Promise<AssetJobRecord> {
+    adoptProjectGlb(input: unknown, actor: NativeAssetActor, admission: AssetStartAdmission): Promise<GeneratedOrAdoptedAssetJobRecord> {
       ensureOpen();
       const source = parseAdoptGlbInput(input), associations = importHost?.workAssociations;
       assertNativeAssetActor(actor,'mutate');
@@ -781,8 +928,8 @@ export async function createAssetService(options: AssetServiceOptions) {
         associations.list(original.conversation,'asset-job',{limit:1});
       };
       const wait = async <T>(p:Promise<T>):Promise<T> => {const value=await p;guard();return value;};
-      const run = async ():Promise<AssetJobRecord> => {
-        let job:AssetJobRecord|null=null;
+      const run = async ():Promise<GeneratedOrAdoptedAssetJobRecord> => {
+        let job:GeneratedOrAdoptedAssetJobRecord|null=null;
         try {
           await wait(flushed());
           await ensureHistoryRoom(guard);
@@ -794,7 +941,7 @@ export async function createAssetService(options: AssetServiceOptions) {
           guard();
           const jobId=randomUUID(),directory=join(root,source.name+'-'+jobId),staging=join(root,'.adopting-'+jobId),now=new Date().toISOString();
           const request:AdoptedGlbRequest={schemaVersion:1,template:'adopted-glb',...source,sourceSha256:sha256(owned.bytes),sourceBytes:owned.bytes.length};
-          const initial:AssetJobRecord={schemaVersion:1,jobId,directory,manifestPath:null,request,state:'running',stage:'adopting',startedAt:now,updatedAt:now,events:[],manifestAvailable:false,error:null};
+          const initial:GeneratedOrAdoptedAssetJobRecord={schemaVersion:1,jobId,directory,manifestPath:null,request,state:'running',stage:'adopting',startedAt:now,updatedAt:now,events:[],manifestAvailable:false,error:null};
           // Publish a discoverable job only AFTER its first fsynced journal.
           // A crash before publication leaves owned staging evidence, not a
           // matching journal-less directory that prevents all history reopening.
@@ -839,7 +986,109 @@ export async function createAssetService(options: AssetServiceOptions) {
       const task=run();adoption=task;
       return task.finally(()=>{if(adoption===task) adoption=null;});
     },
-    async start(input: AssetInput, admission?: AssetStartAdmission): Promise<AssetJobRecord> {
+    /** Native-only conversion of an exact already managed adopted parent. Public
+     * input never supplies bytes, paths, hashes, identity or a fidelity policy. */
+    async convertProjectGlb(input: unknown, actor: NativeAssetActor, admission: AssetStartAdmission): Promise<ConvertedAssetJobRecord> {
+      ensureOpen();
+      const requested = parseConvertGlbInput(input), work = admission?.work, associations = importHost?.workAssociations;
+      if (!work || admission.signal !== work.signal || typeof admission.beforeCreate !== 'function' || typeof admission.created !== 'function') throw new ArcaneError('ADMISSION_WORK','Conversion requires the original native work lifetime.');
+      assertNativeAssetWorkLease(work);assertNativeAssetActor(actor,'mutate');
+      const original = nativeAssetActorScope(actor);
+      if (!(associations instanceof ConversationWorkStore) || associations.projectPath !== projectPath ||
+          original.projectPath !== projectPath || original.projectId !== associations.projectId) throw new ArcaneError('ASSET_CONVERT_SCOPE','Exact native project/store admission is required.');
+      const parentBinding = associations.captureBinding('asset-job',requested.parentJobId);
+      if (!parentBinding || parentBinding.binding.projectId !== original.projectId ||
+          !isDeepStrictEqual(parentBinding.binding.conversation,original.conversation)) throw new ArcaneError('ASSET_CONVERT_SCOPE','The managed parent is not bound to the original conversation.');
+      if (admitting || resolution || retentionOperation || probeActive || adoption || active.size >= MAX_CONCURRENT_ASSET_JOBS) throw new AssetError('BUSY','An asset operation or retained-history change is already running.');
+      const releaseParent = archives.pin([requested.parentJobId]);
+      let transferred = false;
+      admitting = true;
+      const end = Date.now()+ARTIFACT_DOWNLOAD_TIMEOUT_MS;
+      const guard = () => {
+        ensureOpen();assertNativeAssetActor(actor,'mutate');parentBinding.assertCurrent();
+        if (work.signal.aborted) throw new ArcaneError('CANCELLED','Conversion admission was stopped.');
+        if (Date.now() >= end || !isDeepStrictEqual(nativeAssetActorScope(actor),original) ||
+            associations.projectPath !== projectPath || associations.projectId !== original.projectId) throw new ArcaneError('ASSET_CONVERT_SCOPE','Original conversion admission expired or changed.');
+      };
+      const wait = async <T>(task: Promise<T>): Promise<T> => {const value=await task;guard();return value;};
+      try {
+        await wait(flushed());
+        const fence = await wait(fenced());
+        if (fence.blocked) throw new ArcaneError('RECONCILIATION','An interrupted asset job still needs a confirmed worker status check.');
+        await ensureHistoryRoom(guard);guard();
+        const parent = await wait(loadEntry(requested.parentJobId));
+        if (parent.job.kind === 'converted-glb' || parent.job.state !== 'succeeded' || !parent.job.manifestAvailable || active.has(requested.parentJobId) ||
+            !isAdoptedGlbRequest(parent.job.request)) throw new ArcaneError('ASSET_CONVERT_PARENT','Conversion requires a verified succeeded adopted managed parent.');
+        const manifestPath = artifactPath(parent.directory,'manifest.json'), sourcePath = artifactPath(parent.directory,'asset.glb');
+        const manifestBefore = await wait(lstat(manifestPath)), sourceBefore = await wait(lstat(sourcePath));
+        const parentManifest = await wait(readRegularFile(manifestPath,GLB_CONVERSION_LIMITS.jsonBytes));
+        const adopted = parseAdoptedGlbManifest(parseConvertedGlbJson(parentManifest));guard();
+        if (adopted.jobId !== requested.parentJobId || !isDeepStrictEqual(adopted.request,parent.job.request) ||
+            adopted.provenance.projectId !== original.projectId || !isDeepStrictEqual(adopted.provenance.conversation,original.conversation)) throw new ArcaneError('ASSET_CONVERT_SCOPE','Managed parent provenance differs from its exact binding.');
+        await wait(validateAdoptedGlbManifest(parent.directory,adopted));
+        const sourceGlb = await wait(readRegularFile(sourcePath,GLB_CONVERSION_LIMITS.sourceBytes));
+        if (sourceGlb.length !== adopted.provenance.sourceBytes || sha256(sourceGlb) !== adopted.provenance.sourceSha256) throw new AssetError('HASH','Managed parent source changed during conversion admission.');
+        await wait(unchangedFile(manifestPath,manifestBefore));await wait(unchangedFile(sourcePath,sourceBefore));
+        if (fence.witnesses.length && !await wait(witnessUnchanged(fence.witnesses))) throw new ArcaneError('RECONCILIATION','An interrupted job changed during conversion admission.');
+        guard();
+        if (probeActive || adoption || active.size >= MAX_CONCURRENT_ASSET_JOBS) throw new AssetError('BUSY','Blender operation capacity is already reserved.');
+        synchronousAdmissionResult(admission.beforeCreate());guard();
+        const now = new Date().toISOString();
+        let handle!: ReturnType<AssetPipeline['startConversion']>, job!: ConvertedAssetJobRecord;
+        const operation = { ...(options.jobDeadlineMs ? { deadlineMs: options.jobDeadlineMs } : {}), signal:work.signal,
+          onEvent(event:AssetJobEvent):void {
+            const entry=entries.get(event.jobId);if(!entry||closed)return;
+            entry.job.stage=event.stage;entry.job.updatedAt=event.at;
+            entry.job.events.push(event);entry.job.events=entry.job.events.slice(-64);persist();
+          } };
+        const supervise = ():Promise<void> => {
+          handle=pipeline.startConversion({sourceGlb,parentManifest,parentManifestSha256:sha256(parentManifest),
+            name:requested.name,collision:requested.collision,renderResolution:requested.renderResolution,renderSamples:requested.renderSamples},operation);
+          job={schemaVersion:1,jobId:handle.id,directory:handle.directory,kind:'converted-glb',form:'new-pending',creation:handle.creation,request:null,
+            state:'running',stage:'starting',startedAt:now,updatedAt:now,events:[],manifestAvailable:false,manifestPath:null,error:null};
+          entries.set(handle.id,{directory:handle.directory,job});
+          retainConversionParent(job,releaseParent);transferred=true;
+          let closedResult=false;
+          return handle.completion.then(async result=>{
+            if(result.state==='interrupted')work.finish('unresolved');
+            const saved=await readConversionJournal(handle.directory);
+            if(saved.metadata.jobId!==handle.id||!saved.metadata.creation||!isDeepStrictEqual(saved.metadata.creation,handle.creation)||saved.journal.state!==result.state)
+              throw new AssetError('RECOVERY','Converted completion metadata differs from the allocated job.');
+            Object.assign(job,conversionRecordMetadata(saved.metadata));
+            let state:AssetJobState=result.state,error=result.error,manifestPath:string|null=null;
+            if(!convertedWorkersClosed(saved.journal)) {
+              state='interrupted';error={code:'SUPERVISION_LOST',message:'Converted worker closure remains unverified; no replay.'};work.finish('unresolved');
+            }
+            if(state==='succeeded'&&result.manifestPath){
+              try {await verifiedSavedManifest(handle.directory,handle.id,job);manifestPath=join(handle.directory,'manifest.json');}
+              catch {state='failed';error={code:'HISTORY_INTEGRITY',message:'Completed converted artifacts or conversation lineage failed verification.'};}
+            } else if(state==='succeeded') {state='failed';error={code:'HISTORY_INTEGRITY',message:'Completed conversion has no verified manifest.'};}
+            const finishedAt=new Date().toISOString();
+            Object.assign(job,{state,stage:state==='interrupted'?'supervision-lost':'complete',updatedAt:finishedAt,finishedAt,error,manifestPath,manifestAvailable:manifestPath!==null});
+            closedResult=state!=='interrupted';
+            await reportFailure(job);
+          }).catch(async()=>{
+            closedResult=false;work.finish('unresolved');job.state='interrupted';job.stage='supervision-lost';job.manifestAvailable=false;job.manifestPath=null;
+            job.error={code:'SUPERVISION_LOST',message:'Converted supervision or retained completion is unknown; inspect the original job without replay.'};
+            await reportFailure(job);
+          }).finally(()=>{
+            active.delete(handle.id);if(closedResult)releaseConversionParent(handle.id);persist();
+          });
+        };
+        // The real completion owns the work hold before a creation/binding ACK
+        // can throw, retire the host or return to a model caller.
+        const completion=work.run(supervise);
+        active.set(handle.id,{handle,completion});
+        let admissionFailure:ArcaneError|undefined;
+        try{synchronousAdmissionResult(admission.created(handle.id));}
+        catch{admissionFailure=new ArcaneError('ADMISSION_CREATED','The original conversion job was created, but its attribution acknowledgement is unknown; inspect retained history without replay.');}
+        persist();
+        try{await flushed();}catch(error){handle.cancel();await completion;throw admissionFailure??error;}
+        if(admissionFailure)throw admissionFailure;
+        return structuredClone(job);
+      } finally {admitting=false;if(!transferred)releaseParent();}
+    },
+    async start(input: AssetInput, admission?: AssetStartAdmission): Promise<GeneratedOrAdoptedAssetJobRecord> {
       ensureOpen();
       const work = admission?.work;
       if (work) {
@@ -889,7 +1138,7 @@ export async function createAssetService(options: AssetServiceOptions) {
         ensureOpen();
         if (probeActive || active.size >= MAX_CONCURRENT_ASSET_JOBS || adoption) throw new AssetError('BUSY', 'Blender generation capacity is already reserved.');
         if (admission) synchronousAdmissionResult(admission.beforeCreate());
-        let handle!: AssetJob, job!: AssetJobRecord;
+        let handle!: AssetJob, job!: GeneratedOrAdoptedAssetJobRecord;
         const supervise = () => {
         handle = pipeline.start(originalInput, operation);
         job = { schemaVersion: 1, jobId: handle.id, directory: handle.directory, manifestPath: null, request, state: 'running', stage: 'starting', startedAt: now, updatedAt: now, events: [], manifestAvailable: false, error: null };
@@ -1011,7 +1260,7 @@ export async function createAssetService(options: AssetServiceOptions) {
       if (!e.job.manifestAvailable || e.job.state !== 'succeeded') throw new ArcaneError('JOB_STATE', 'A verified completed manifest is unavailable for this job.');
       // Inspection may expose a changed generated manifest; artifact and import
       // admission still compare its full request before authorizing any use.
-      return verifiedSavedManifest(e.directory,e.job.jobId,e.job.request,false);
+      return verifiedSavedManifest(e.directory,e.job.jobId,e.job,false);
 
       });
     },

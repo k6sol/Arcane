@@ -17,7 +17,7 @@ import { SkillRegistry } from '../../apps/mcp/src/skills.js';
 import { createConnectionLab } from '../../apps/daemon/src/lab-server.js';
 import { refuseNativeCodex, noProviderProbe } from './native-fixture-refusal.js';
 import { assetRoutes } from '../../apps/daemon/src/asset-routes.js';
-import { HISTORY_PAGE_BYTES, type AssetService, type AssetJobRecord, type AssetJobPage } from '../../apps/daemon/src/asset-service.js';
+import { HISTORY_PAGE_BYTES, type AssetService, type GeneratedOrAdoptedAssetJobRecord as AssetJobRecord, type AssetJobPage } from '../../apps/daemon/src/asset-service.js';
 import { StudioStore } from '../../packages/storage/src/studio-store.js';
 import { WorkStore } from '../../packages/storage/src/work-store.js';
 import type { AssetInput, AssetManifest, AssetProbe, AssemblyRecipe, AssemblyGeometry, MeshMetrics, Vec3 } from '../../packages/asset-pipeline/src/types.js';
@@ -900,6 +900,7 @@ test('actual daemon asset routes + SDK: native agent bearer, fixed tools and 202
     async start(input) { started++; current = { ...jobFixture(), request: normalizeRequest(input) }; return current; },
     async cancel(jobId) { assert.equal(jobId, ASSET_JOB_ID); current = { ...current, state: 'cancelled', stage: 'complete' }; return current; },
     async manifest(jobId) { assert.equal(jobId, ASSET_JOB_ID); return manifestFixture(ASSET_JOB_ID); },
+    async convertProjectGlb() { assert.fail('Conversion is outside this fixture.'); },
     async adoptProjectGlb() { throw new Error('Adoption is unavailable in this existing non-adoption fixture.'); },
     async prepareStudioImport() { throw new Error('No generated import preparation evidence in this service fixture.'); },
     async modelReviewSubject() { throw new Error('Model review must not be called by this metadata fixture.'); },
@@ -1011,6 +1012,7 @@ async function customAssetLabFixture(t: test.TestContext) {
     },
     async cancel(jobId) { const job = jobs.find(job=>job.jobId === jobId)!;job.state = 'cancelled';return structuredClone(job); },
     async manifest(jobId) { return deliveredManifest ?? customManifestFixture(inputs[jobs.findIndex(job=>job.jobId === jobId)]!,String(jobId)); },
+    async convertProjectGlb() { assert.fail('Conversion is outside this fixture.'); },
     async adoptProjectGlb() { throw new Error('Adoption is unavailable in this existing non-adoption fixture.'); },
     async prepareStudioImport() { throw new Error('No generated import preparation evidence in this service fixture.'); },
     async modelReviewSubject() { throw new Error('Model review must not be called by this metadata fixture.'); },

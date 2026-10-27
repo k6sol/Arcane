@@ -12,7 +12,7 @@ import { DaemonClient } from '../../apps/mcp/src/daemon-client.js';
 import { createMcpServer } from '../../apps/mcp/src/server.js';
 import { KIT_TRIANGLE_BUDGET, forestOriginals } from '../../apps/mcp/src/scene-kits.js';
 import { createConnectionLab } from '../../apps/daemon/src/lab-server.js';
-import { HISTORY_PAGE_BYTES, type AssetService, type AssetJobRecord } from '../../apps/daemon/src/asset-service.js';
+import { HISTORY_PAGE_BYTES, type AssetService, type GeneratedOrAdoptedAssetJobRecord as AssetJobRecord } from '../../apps/daemon/src/asset-service.js';
 import { studioImportPluginArtifactHash } from '../../apps/daemon/src/studio-import-plugin-artifact.js';
 import { StudioStore } from '../../packages/storage/src/studio-store.js';
 import { WorkStore } from '../../packages/storage/src/work-store.js';
@@ -247,6 +247,7 @@ function simulatedAssets(projectPath: string, outputRoot: string) {
     },
     async cancel() { assert.fail('No cancellation in this scenario.'); },
     async manifest() { assert.fail('The scenario reviews previews, not manifests.') as unknown as AssetManifest; return null as unknown as AssetManifest; },
+    async convertProjectGlb() { assert.fail('Conversion is outside this fixture.'); },
     async adoptProjectGlb() { throw new Error('Unavailable.'); }, async prepareStudioImport() { throw new Error('Unavailable.'); },
     async modelReviewSubject() { throw new Error('Unavailable.'); }, async reviewImport() { throw new Error('Unavailable.'); },
     assertReviewedImport() { throw new Error('Unavailable.'); }, async prepareStudioImportPayload() { throw new Error('Unavailable.'); },

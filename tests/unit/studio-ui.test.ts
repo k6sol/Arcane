@@ -5,7 +5,7 @@ import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { createHash } from 'node:crypto';
 import { png, audit } from '../../packages/asset-pipeline/testing/fixture.js';
-import type { AssetJobRecord } from '../../apps/daemon/src/asset-service.js';
+import type { GeneratedOrAdoptedAssetJobRecord as AssetJobRecord } from '../../apps/daemon/src/asset-service.js';
 import type { AssetManifest, AssetRequest } from '../../packages/asset-pipeline/src/types.js';
 import { join, relative, resolve, isAbsolute } from 'node:path';
 import { tmpdir } from 'node:os';

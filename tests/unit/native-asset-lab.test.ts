@@ -11,7 +11,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js';
 import { createConnectionLab } from '../../apps/daemon/src/lab-server.js';
 import { createCodexService, type CodexHostClient, type CodexActionRecord, type CodexActionOutcome, type CodexProductState } from '../../apps/daemon/src/codex-service.js';
-import type { AssetService, AssetJobRecord } from '../../apps/daemon/src/asset-service.js';
+import type { AssetService, GeneratedOrAdoptedAssetJobRecord as AssetJobRecord } from '../../apps/daemon/src/asset-service.js';
 import { CodexClientError, type NativeAssetHooks, type Snapshot } from '../../packages/codex-client/src/index.js';
 import { ConversationWorkStore } from '../../packages/storage/src/conversation-work-store.js';
 import { StudioStore } from '../../packages/storage/src/studio-store.js';
@@ -139,6 +139,7 @@ async function fixture(t: test.TestContext, options:{signal?:AbortSignal;setupSt
     async cancel(id) { const job = jobs.find(value => value.jobId === id); assert.ok(job); cancels++; job.state = 'cancelled'; return structuredClone(job); },
     async probe() { throw new Error('No runtime probes in LAB proof'); },
     async manifest() { throw new Error('No generated manifests in LAB proof'); },
+    async convertProjectGlb() { assert.fail('Conversion is outside this fixture.'); },
     async adoptProjectGlb() { throw new Error('Adoption is unavailable in this existing non-adoption fixture.'); },
     async prepareStudioImport() { throw new Error('No generated import preparation evidence in LAB proof'); },
     async modelReviewSubject() { throw new Error('Model review must not be called by this metadata fixture.'); },

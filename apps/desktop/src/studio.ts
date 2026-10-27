@@ -33,7 +33,10 @@ import { StudioKeySettings, StudioPairing, trustedKeyAction } from './studio-key
 import type { NativeStudioMetadata, NativeStudioInventoryItem } from '../../../packages/studio-adapter/src/session.js';
 import type { NativeStudioReadMethod } from '../../../packages/studio-adapter/src/policy.js';
 import type { AssetInput, AssetProbe } from '../../../packages/asset-pipeline/src/types.js';
-import type { AssetPreviewManifest as AssetManifest, AssetJobRecord } from '../../daemon/src/asset-service.js';
+import { decodeAssetJobError } from '../../../packages/asset-pipeline/src/failure-diagnostics.js';
+import type { ConvertedGlbRequest } from '../../../packages/asset-pipeline/src/converted-glb.js';
+import type { ConvertedGlbCreation } from '../../../packages/asset-pipeline/src/converted-glb-creation.js';
+import type { AssetPreviewManifest as AssetManifest, AssetJobRecord, ConvertedAssetJobRecord } from '../../daemon/src/asset-service.js';
 import type { WorkRun, WorkTask } from '../../../packages/storage/src/work-store.js';
 import type { InstanceRef, Json, MutationReceipt, StudioCommand, StudioMethod, StudioRoot, StudioSession } from '../../../packages/protocol/src/studio.js';
 
@@ -268,12 +271,113 @@ function assetFields(value: unknown, required: readonly string[], optional: read
 }
 const assetText = (value: unknown, maximum: number): value is string => typeof value === 'string' && value.length > 0 && value.length <= maximum && !/[\x00-\x1f]/.test(value);
 const assetId = (value: unknown): value is string => assetText(value, 64) && /^[A-Za-z0-9_-]+$/.test(value);
+const convertedId = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}(?![\s\S])/.test(value);
+const convertedHash = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{64}(?![\s\S])/.test(value);
+const convertedName = (value: unknown): value is string => typeof value === 'string' && /^[a-z][a-z0-9-]{0,47}(?![\s\S])/.test(value) && !/^(con|prn|aux|nul|com[0-9]|lpt[0-9])(?:-|$)/i.test(value);
+const convertedInteger = (value: unknown, low: number, high: number): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= low && value <= high;
+const conversionRequestFields = ['schemaVersion', 'fidelityPolicy', 'kind', 'jobId', 'parentJobId', 'parentManifestSha256', 'name',
+  'sourceSha256', 'sourceBytes', 'importSha256', 'importBytes', 'sourceMapSha256', 'collision', 'renderResolution', 'renderSamples'] as const;
+/** Browser wire data only. Node's source/worker/manifest validators remain authoritative. */
+function convertedAssetData(input: unknown): Record<string, unknown> {
+  let nodes = 0, bytes = 0;
+  const charge = (count: number) => { bytes += count; if (bytes > ASSET_CONVERSATION_BYTES) throw new Error('Converted asset response exceeds its bound.'); };
+  const copy = (value: unknown, depth: number): unknown => {
+    if (++nodes > 100000 || depth > 16) throw new Error('Invalid converted asset response structure.');
+    if (value === null || typeof value === 'boolean') { charge(JSON.stringify(value).length); return value; }
+    if (typeof value === 'number') { if (!Number.isFinite(value)) throw new Error('Invalid converted asset number.'); charge(JSON.stringify(value).length); return value === 0 ? 0 : value; }
+    if (typeof value === 'string') {
+      if (value.length > ASSET_CONVERSATION_BYTES || new TextDecoder().decode(new TextEncoder().encode(value)) !== value) throw new Error('Invalid converted asset text.');
+      charge(utf8(JSON.stringify(value))); return value;
+    }
+    if (!value || typeof value !== 'object') throw new Error('Converted assets require plain data.');
+    const array = Array.isArray(value), prototype: unknown = Object.getPrototypeOf(value);
+    if (array ? prototype !== Array.prototype : prototype !== Object.prototype && prototype !== null) throw new Error('Converted assets require plain data.');
+    const descriptors = Object.getOwnPropertyDescriptors(value), keys = Reflect.ownKeys(descriptors);
+    if (keys.some(key => typeof key !== 'string')) throw new Error('Invalid converted asset fields.');
+    const out: Record<string, unknown> = Object.create(null) as Record<string, unknown>; let entries = 0; charge(2);
+    for (const key of keys) {
+      if (typeof key !== 'string' || array && key === 'length') continue;
+      const descriptor = descriptors[key];
+      if (!descriptor || !descriptor.enumerable || !Object.hasOwn(descriptor, 'value') || key.length > 64 || ['__proto__', 'constructor', 'prototype'].includes(key)) throw new Error('Converted asset fields must be own data.');
+      if (entries) charge(1); if (!array) charge(utf8(JSON.stringify(key)) + 1);
+      out[key] = copy(descriptor.value as unknown, depth + 1); entries++;
+    }
+    if (!array) return out;
+    const length = descriptors.length;
+    if (!length || !Object.hasOwn(length, 'value') || !convertedInteger(length.value, 0, 4096) || length.value !== entries ||
+        Object.keys(out).some(key => !/^(0|[1-9][0-9]*)(?![\s\S])/.test(key) || Number(key) >= length.value)) throw new Error('Converted asset arrays must be bounded and dense.');
+    return Array.from({ length: length.value as number }, (_, at) => out[String(at)]);
+  };
+  const result = copy(input, 0); if (!record(result)) throw new Error('Invalid converted asset record.'); return result;
+}
+function readConvertedRequest(value: unknown): ConvertedGlbRequest {
+  const r = assetFields(value, conversionRequestFields);
+  if (r.schemaVersion !== 2 || r.fidelityPolicy !== 'arcane-static-fidelity-v1' || r.kind !== 'converted-glb' ||
+      !convertedId(r.jobId) || !convertedId(r.parentJobId) || r.jobId === r.parentJobId || !convertedHash(r.parentManifestSha256) || !convertedName(r.name) ||
+      !convertedHash(r.sourceSha256) || !convertedInteger(r.sourceBytes, 20, 64 * 1024 * 1024) || !convertedHash(r.importSha256) ||
+      !convertedInteger(r.importBytes, 20, 64 * 1024 * 1024) || !convertedHash(r.sourceMapSha256) ||
+      (r.collision !== 'none' && r.collision !== 'convex-hull') || !convertedInteger(r.renderResolution, 128, 1024) || !convertedInteger(r.renderSamples, 1, 64)) throw new Error('Invalid prepared converted asset request.');
+  return Object.freeze(r) as unknown as ConvertedGlbRequest;
+}
+function readConvertedCreation(value: unknown): ConvertedGlbCreation {
+  const r = assetFields(value, ['schemaVersion', 'kind', 'jobId', 'parentJobId', 'parentManifestSha256', 'name', 'collision', 'renderResolution', 'renderSamples']);
+  if (r.schemaVersion !== 1 || r.kind !== 'arcane-glb-conversion-creation' || !convertedId(r.jobId) || !convertedId(r.parentJobId) || r.jobId === r.parentJobId ||
+      !convertedHash(r.parentManifestSha256) || !convertedName(r.name) || (r.collision !== 'none' && r.collision !== 'convex-hull') ||
+      !convertedInteger(r.renderResolution, 128, 1024) || !convertedInteger(r.renderSamples, 1, 64) || utf8(JSON.stringify(r)) > 1024) throw new Error('Invalid converted asset creation.');
+  return Object.freeze(r) as unknown as ConvertedGlbCreation;
+}
+function readConvertedAssetJob(value: unknown): ConvertedAssetJobRecord {
+  const r = assetFields(convertedAssetData(value), ['schemaVersion', 'kind', 'form', 'jobId', 'directory', 'manifestPath', 'request', 'state', 'stage', 'startedAt', 'updatedAt', 'events', 'manifestAvailable', 'error'], ['creation', 'finishedAt', 'resolution', 'retention', 'reportId']);
+  const states = ['running', 'succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted'];
+  const time = (v: unknown) => assetText(v, 64) && Number.isFinite(Date.parse(v));
+  if (r.schemaVersion !== 1 || r.kind !== 'converted-glb' || !convertedId(r.jobId) || !assetText(r.directory, 4096) ||
+      !(r.manifestPath === null || assetText(r.manifestPath, 4096)) || typeof r.state !== 'string' || !states.includes(r.state) ||
+      !assetText(r.stage, 256) || !time(r.startedAt) || !time(r.updatedAt) || Object.hasOwn(r, 'finishedAt') && !time(r.finishedAt) ||
+      typeof r.manifestAvailable !== 'boolean' || !Array.isArray(r.events) || r.events.length > 64) throw new Error('Invalid recorded converted asset job.');
+  const hasCreation = Object.hasOwn(r, 'creation'), creation = hasCreation ? readConvertedCreation(r.creation) : null;
+  const request = r.request === null ? null : readConvertedRequest(r.request);
+  const form = creation ? request ? 'new-prepared' : 'new-pending' : request ? 'legacy-prepared' : 'legacy-pending';
+  if (r.form !== form || creation && creation.jobId !== r.jobId || request && request.jobId !== r.jobId ||
+      request === null && (r.manifestAvailable || r.manifestPath !== null) || (r.manifestPath !== null) !== r.manifestAvailable ||
+      r.manifestAvailable && r.state !== 'succeeded' || r.state === 'succeeded' && (request === null || r.error !== null)) throw new Error('Contradictory converted asset job metadata.');
+  if (creation && request && ['parentJobId', 'parentManifestSha256', 'name', 'collision', 'renderResolution', 'renderSamples'].some(key => creation[key as keyof ConvertedGlbCreation] !== request[key as keyof ConvertedGlbRequest])) throw new Error('Converted asset creation and request disagree.');
+  if (r.retention !== undefined) { const retained = assetFields(r.retention, ['status', 'archivedAt']); if (retained.status !== 'archived' || !time(retained.archivedAt) || r.state === 'running') throw new Error('Invalid converted asset retention.'); }
+  if (r.resolution !== undefined) {
+    const resolved = record(r.resolution) && r.resolution.status === 'resolved';
+    const resolution = assetFields(r.resolution, resolved ? ['status', 'resolvedAt'] : ['status']);
+    if (r.state !== 'interrupted' || !['resolved', 'invalid', 'uncertain'].includes(String(resolution.status)) || resolved && !time(resolution.resolvedAt)) throw new Error('Invalid converted asset worker status.');
+  }
+  if (r.retention !== undefined && r.state === 'interrupted' && (!record(r.resolution) || r.resolution.status !== 'resolved')) throw new Error('Archived converted asset worker closure is unresolved.');
+  for (const event of r.events) { const e = assetFields(event, ['jobId', 'at', 'stage', 'state']); if (e.jobId !== r.jobId || !time(e.at) || !assetText(e.stage, 256) || typeof e.state !== 'string' || !states.includes(e.state)) throw new Error('Invalid converted asset event.'); }
+  if (r.error !== null) r.error = decodeAssetJobError(r.error);
+  if (r.reportId !== undefined && (!convertedId(r.reportId) || r.error === null)) throw new Error('Invalid converted asset report reference.');
+  r.request = request; if (creation) r.creation = creation;
+  return r as unknown as ConvertedAssetJobRecord;
+}
+export function assetJobName(job: AssetJobRecord): string {
+  return job.kind === 'converted-glb' ? job.form === 'new-pending' || job.form === 'new-prepared' ? job.creation.name : job.request?.name ?? 'Legacy conversion' : job.request.name;
+}
+export function assetJobKind(job: AssetJobRecord): string { return job.kind === 'converted-glb' ? 'converted-glb' : job.request.template; }
+export function assetManifestMatchesJob(manifest: AssetManifest, job: AssetJobRecord): boolean {
+  if (manifest.jobId !== job.jobId) return false;
+  const converted = 'origin' in manifest && manifest.origin === 'converted-glb';
+  if (job.kind === 'converted-glb') {
+    if (!converted || job.request === null) return false;
+    const selectedRequest = job.request;
+    try { const request = readConvertedRequest(convertedAssetData(manifest.request)); return conversionRequestFields.every(key => request[key] === selectedRequest[key]); } catch { return false; }
+  }
+  return !converted && 'template' in manifest.request && manifest.request.template === job.request.template && manifest.request.name === job.request.name;
+}
 function readAssetConversation(value: unknown): AssetConversation {
   const r = assetFields(value, ['provider', 'threadId', 'sessionId']);
   if (!['codex', 'claude-code', 'arcane'].includes(String(r.provider)) || !assetText(r.threadId, 256) || !(r.sessionId === null || assetText(r.sessionId, 256))) throw new Error('Invalid exact asset conversation.');
   return { provider: r.provider as AssetConversation['provider'], threadId: r.threadId, sessionId: r.sessionId };
 }
-function readAssetJob(value: unknown): AssetJobRecord {
+export function readAssetJob(value: unknown): AssetJobRecord {
+  if (record(value)) {
+    const descriptors = Object.getOwnPropertyDescriptors(value), request = descriptors.request?.value as unknown;
+    if (['kind', 'form', 'creation'].some(key => Object.hasOwn(descriptors, key)) || record(request) && Object.getOwnPropertyDescriptor(request, 'kind')?.value === 'converted-glb') return readConvertedAssetJob(value);
+  }
   const r = assetFields(value, ['schemaVersion', 'jobId', 'directory', 'manifestPath', 'request', 'state', 'stage', 'startedAt', 'updatedAt', 'events', 'manifestAvailable', 'error'], ['finishedAt', 'resolution','retention']);
   const states = ['running', 'succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted'];
   const time = (v: unknown) => assetText(v, 64) && Number.isFinite(Date.parse(v));
@@ -1662,7 +1766,7 @@ export class StudioWorkbench {
     const picker = this.el<HTMLSelectElement>('asset-job-picker'); picker.replaceChildren(); this.option(picker, '', 'Choose a recorded asset job');
     for (const job of this.assetJobs) {
       const ambiguous = this.assetContext.unknownDetails().some(item => item.jobId === job.jobId);
-      this.option(picker, job.jobId, job.request.name + ' · ' + job.state.replaceAll('_', ' ') + (ambiguous ? ' · association unknown' : '') + ' · ' + job.jobId);
+      this.option(picker, job.jobId, assetJobName(job) + ' · ' + job.state.replaceAll('_', ' ') + (ambiguous ? ' · association unknown' : '') + ' · ' + job.jobId);
     }
     if (this.assetJobs.some(job => job.jobId === this.assetJobId)) picker.value = this.assetJobId;
     else { this.assetJobId = ''; this.clearAssetPreview(); }
@@ -1737,7 +1841,7 @@ export class StudioWorkbench {
     const viewable = (jobId: string) => !this.stopped && this.assetAvailable && !this.assetUnknown && this.assetJobs.some(job => job.jobId === jobId && job.state === 'succeeded' && job.manifestAvailable);
     return {
       viewer: this.assetViewer,
-      generated: () => this.assetJobs.filter(job => viewable(job.jobId)).slice(0, 32).map(job => ({ jobId: job.jobId, name: job.request.name.replaceAll('-', ' ') })),
+      generated: () => this.assetJobs.filter(job => viewable(job.jobId)).slice(0, 32).map(job => ({ jobId: job.jobId, name: assetJobName(job).replaceAll('-', ' ') })),
       view: jobId => {
         if (this.assetBusy || !viewable(jobId)) return false;
         this.selectAssetJob(jobId, true); this.renderAssetPicker(); void this.loadAssetManifest(); return true;
@@ -1779,7 +1883,7 @@ export class StudioWorkbench {
     const ticket = this.assetContext.capture();
     if (this.stopped || ticket.global || !ticket.conversation || !this.assetSignedIn() || !this.assetAvailable || !(this.assetJobs.length||this.assetUnavailable.length)) { this.clearChatAssets(); return; }
     const jobs = this.assetJobs.slice(0, this.assetCardsLimit);
-    const signature = JSON.stringify([ticket.epoch, this.assetJobId, this.assetBusy, this.assetNextCursor, this.assetCardsLimit,this.assetUnavailable, jobs.map(job => [job.jobId, job.state, job.manifestAvailable, job.request.name,job.resolution,job.retention,this.assetWorkerMessages.get(job.jobId),this.assetHistoryMessages.get(job.jobId)])]);
+    const signature = JSON.stringify([ticket.epoch, this.assetJobId, this.assetBusy, this.assetNextCursor, this.assetCardsLimit,this.assetUnavailable, jobs.map(job => [job.jobId, job.state, job.manifestAvailable, assetJobName(job),assetJobKind(job),job.resolution,job.retention,this.assetWorkerMessages.get(job.jobId),this.assetHistoryMessages.get(job.jobId)])]);
     if (signature === this.assetCardsSignature) return;
     this.assetCardsSignature = signature; const epoch = ++this.assetCardsEpoch;
     const section = this.make('div', undefined, 'chat-asset-list'); section.setAttribute('role', 'list');
@@ -1791,8 +1895,8 @@ export class StudioWorkbench {
     const current = () => epoch === this.assetCardsEpoch && this.assetCurrent(ticket) && this.assetSignedIn() && this.assetAvailable && !this.assetUnknown;
     for (const job of jobs) {
       const card = this.make('article', undefined, 'chat-asset-card'); card.setAttribute('role', 'listitem'); card.setAttribute('data-job-id', job.jobId);
-      const name = job.request.name.replaceAll('-', ' '), title = this.make('strong', name.charAt(0).toUpperCase() + name.slice(1));
-      const state = this.make('span', (job.state === 'succeeded' && !job.manifestAvailable ? 'Finalizing' : labels[job.state]) + (job.request.template === 'adopted-glb' ? ' · Adopted GLB · preview only' : ''), 'chat-asset-state');
+      const name = assetJobName(job).replaceAll('-', ' '), title = this.make('strong', name.charAt(0).toUpperCase() + name.slice(1));
+      const state = this.make('span', (job.state === 'succeeded' && !job.manifestAvailable ? 'Finalizing' : labels[job.state]) + (assetJobKind(job) === 'adopted-glb' ? ' · Adopted GLB · preview only' : assetJobKind(job) === 'converted-glb' ? ' · Converted GLB · preview only' : ''), 'chat-asset-state');
       const info = this.make('div', undefined, 'chat-asset-info'); info.append(title, state); card.append(info);
       this.renderWorkerStatus(card,job,current);
       this.renderRetentionStatus(card,job,current);
@@ -1821,7 +1925,7 @@ export class StudioWorkbench {
     }
   }
   private renderAssetControls() {
-    const ticket = this.assetContext.capture(), running = this.assetJobs.some(j => j.state === 'running'), interrupted = this.assetJobs.some(j => j.state === 'interrupted'&&j.request.template!=='adopted-glb'&&j.resolution?.status!=='resolved'), blocked = !this.assetSignedIn() || !this.assetAvailable || this.assetBusy || Boolean(this.assetUnknown) || !this.assetContext.ready();
+    const ticket = this.assetContext.capture(), running = this.assetJobs.some(j => j.state === 'running'), interrupted = this.assetJobs.some(j => j.state === 'interrupted'&&assetJobKind(j)!=='adopted-glb'&&j.resolution?.status!=='resolved'), blocked = !this.assetSignedIn() || !this.assetAvailable || this.assetBusy || Boolean(this.assetUnknown) || !this.assetContext.ready();
     let valid = false; try { this.text('asset-request-preview', json(this.assetInput())); valid = true; } catch (error) { this.text('asset-request-preview', error instanceof Error ? error.message : String(error)); }
     this.el<HTMLButtonElement>('asset-start').disabled = blocked || !valid || !this.assetProbed || running || interrupted || !this.assetContext.canStart();
     this.text('asset-start', ticket.global ? 'Start unscoped template job' : 'Start template job in this chat');
@@ -1847,7 +1951,7 @@ export class StudioWorkbench {
     const job = this.currentAssetJob(); this.text('asset-job-record', job ? json(job) : 'No asset job selected.');
     const workerHost=this.doc.getElementById('asset-worker-status');
     if(workerHost){workerHost.replaceChildren();if(job){const current=()=>this.currentAssetJob()?.jobId===job.jobId;this.renderWorkerStatus(workerHost,job,current);this.renderRetentionStatus(workerHost,job,current);}}
-    const summary = this.el('asset-job-summary'); summary.setAttribute('data-asset-state', job?.state ?? ''); summary.setAttribute('data-asset-name', job?.request.name ?? '');
+    const summary = this.el('asset-job-summary'); summary.setAttribute('data-asset-state', job?.state ?? ''); summary.setAttribute('data-asset-name', job ? assetJobName(job) : '');
     if (job?.state === 'running' && this.assetAvailable) {
       const key = this.historyProjectPath() + '\0' + job.jobId;
       if (key !== this.assetActivitySignature) { this.assetActivitySignature = key;
@@ -1855,7 +1959,7 @@ export class StudioWorkbench {
         if (EventType) this.doc.dispatchEvent(new EventType<WorkspaceAssetActivity>(WORKSPACE_ASSET_ACTIVITY_EVENT, {detail:{jobId:job.jobId,state:'running'},bubbles:false}));
       }
     }
-    this.text('asset-job-summary', job ? job.request.name + (job.request.template === 'adopted-glb' ? ' · adopted GLB; engine import unavailable' : '') + ' · ' + job.state.replaceAll('_', ' ') + ' · stage ' + job.stage + (job.error ? ' · ' + job.error.code + ': ' + job.error.message : '') : 'Choose an exact recorded job to inspect progress and evidence.');
+    this.text('asset-job-summary', job ? assetJobName(job) + (assetJobKind(job) === 'adopted-glb' ? ' · adopted GLB; engine import unavailable' : assetJobKind(job) === 'converted-glb' ? ' · converted GLB; engine import unavailable' : '') + ' · ' + job.state.replaceAll('_', ' ') + ' · stage ' + job.stage + (job.error ? ' · ' + job.error.code + ': ' + job.error.message : '') : 'Choose an exact recorded job to inspect progress and evidence.');
   }
   private bindAssetAcknowledgement():void{
     const button=this.doc.getElementById('asset-acknowledge');if(!button||this.assetAcknowledgementBound)return;
@@ -1872,7 +1976,7 @@ export class StudioWorkbench {
     note.setAttribute('role','status');note.setAttribute('aria-live','polite');note.setAttribute('data-asset-retained-note',job.jobId);note.tabIndex=-1;
     if(job.retention){
       const button=this.make('button',this.assetHistoryChange&&this.assetBusy?'Restoring history…':'Restore to active history','secondary');button.type='button';
-      button.setAttribute('aria-label','Restore '+job.request.name.replaceAll('-',' ')+' to active history');
+      button.setAttribute('aria-label','Restore '+assetJobName(job).replaceAll('-',' ')+' to active history');
       button.disabled=this.assetBusy||!this.assetAvailable||!this.assetSignedIn()||!!this.assetUnknown||!this.assetContext.ready();
       button.addEventListener('click',event=>{if(event.isTrusted&&!event.defaultPrevented&&event.button===0&&!event.altKey&&!event.ctrlKey&&!event.metaKey&&!event.shiftKey&&current())
         void this.restoreAssetHistory(job.jobId,host.id==='asset-worker-status'?'asset-worker-status':'chat-assets');});host.append(button);
@@ -1967,12 +2071,12 @@ export class StudioWorkbench {
     }
   }
   private renderWorkerStatus(host:HTMLElement,job:AssetJobRecord,current:()=>boolean):void{
-    if(job.state!=='interrupted'||job.request.template==='adopted-glb')return;
+    if(job.state!=='interrupted'||assetJobKind(job)==='adopted-glb')return;
     const notice=this.make('p',this.assetWorkerMessages.get(job.jobId)??(job.resolution?.status==='resolved'?'Worker confirmed stopped. Partial files are kept; this job remains interrupted.':'Partial files are kept while this job’s worker status is checked.'),'hint');
     notice.setAttribute('role','status');notice.setAttribute('aria-live','polite');notice.setAttribute('data-worker-status-note',job.jobId);notice.tabIndex=-1;
     if(job.resolution?.status!=='resolved'){
       const button=this.make('button',this.assetWorkerCheck&&this.assetBusy?'Checking worker…':'Check worker status','secondary');button.type='button';
-      button.setAttribute('aria-label','Check worker status for '+job.request.name.replaceAll('-',' '));
+      button.setAttribute('aria-label','Check worker status for '+assetJobName(job).replaceAll('-',' '));
       button.disabled=this.assetBusy||!this.assetAvailable||!this.assetSignedIn()||!!this.assetUnknown||!workerJobId(job.jobId);
       button.addEventListener('click',event=>{if(event.isTrusted&&!event.defaultPrevented&&current())void this.checkAssetWorker(job.jobId,host.id==='asset-worker-status'?'asset-worker-status':'chat-assets');});host.append(button);
     }
@@ -1981,7 +2085,7 @@ export class StudioWorkbench {
   private async checkAssetWorker(jobId:string,focusHost?:'asset-worker-status'|'chat-assets'):Promise<void>{
     if(this.assetBusy||!this.assetAvailable||this.assetUnknown||!this.assetSignedIn())return;
     const job=this.assetJobs.find(item=>item.jobId===jobId);
-    if(!job||job.state!=='interrupted'||job.request.template==='adopted-glb'||job.resolution?.status==='resolved')return;
+    if(!job||job.state!=='interrupted'||assetJobKind(job)==='adopted-glb'||job.resolution?.status==='resolved')return;
     const ticket=this.assetTicket(),controller=new AbortController();
     if(!this.assetContext.ready())return;
     this.assetWorkerCheck=controller;this.assetBusy=true;this.assetWorkerMessages.set(jobId,'Checking this job’s worker status…');this.renderAssetControls();this.renderAssetJob();
@@ -2035,7 +2139,7 @@ export class StudioWorkbench {
         }
       }
       if (!this.assetCurrent(ticket)) return;
-      if (!data.job?.jobId || data.job.request?.name !== input.name || data.job.request?.template !== input.template) throw new StudioRequestError('Start returned no matching recorded job.', 'unknown', { code: 'ASSET_RECEIPT', status: 200, payload: data });
+      if (!data.job?.jobId || data.job.kind === 'converted-glb' || data.job.request?.name !== input.name || data.job.request?.template !== input.template) throw new StudioRequestError('Start returned no matching recorded job.', 'unknown', { code: 'ASSET_RECEIPT', status: 200, payload: data });
       this.assetJobs = [data.job, ...this.assetJobs.filter(job => job.jobId !== data.job.jobId)];
       if (!ticket.global) this.automaticAssets.observe([data.job]);
       this.assetJobId = data.job.jobId; this.clearAssetPreview(); this.text('asset-notice', 'Asset job recorded: ' + data.job.jobId + '. Completion and preview evidence arrive through its manifest.');
@@ -2060,7 +2164,7 @@ export class StudioWorkbench {
     this.assetBusy = true; this.assetDownloads.clear(); this.assetViewer.clear(); const epoch = ++this.assetPreviewEpoch; this.renderAssetControls(); this.el('asset-previews').replaceChildren();
     try {
       const { manifest } = await this.api.assetManifest(job.jobId);
-      if (manifest.jobId !== job.jobId || manifest.request.template !== job.request.template || manifest.request.name !== job.request.name) throw new Error('Manifest identity does not match the selected job.');
+      if (!assetManifestMatchesJob(manifest, job)) throw new Error('Manifest identity does not match the selected job.');
       if (!this.assetCurrent(ticket) || epoch !== this.assetPreviewEpoch || this.assetJobId !== job.jobId) return;
       this.text('asset-manifest', json(manifest));
       this.assetDownloads.show(manifest, job.jobId);

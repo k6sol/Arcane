@@ -2,6 +2,7 @@ import { types } from 'node:util';
 import { CUSTOM_REQUEST_BYTES } from '../../../packages/asset-pipeline/src/recipe.js';
 import type { AssetRequest } from '../../../packages/asset-pipeline/src/types.js';
 import {parseAdoptGlbInput, type AdoptGlbInput} from '../../../packages/asset-pipeline/src/adopted-glb.js';
+import {parseConvertGlbInput,type ConvertGlbInput} from './conversion-start.js';
 import { normalizeRequest } from '../../../packages/asset-pipeline/src/validation.js';
 import { ArcaneError } from '../../../packages/protocol/src/providers.js';
 import {
@@ -25,6 +26,7 @@ export interface AssetConversationHostOptions {
   /** Trusted service creation witness only. Admission is host code, never JSON. */
   startNative?: (request: AssetRequest, admission: AssetStartAdmission) => Promise<string>;
   adoptNative?: (request: AdoptGlbInput, actor: NativeAssetActor, admission: AssetStartAdmission) => Promise<string>;
+  convertNative?: (request: ConvertGlbInput, actor: NativeAssetActor, admission: AssetStartAdmission) => Promise<string>;
 }
 export interface AssetConversationStartResult {
   projectId: string;
@@ -132,10 +134,11 @@ function equal(a: NativeConversation, b: NativeConversation): boolean {
  * human methods must never be reachable with an agent bearer. No client role,
  * project path, conversation, service or callback is accepted in operation data. */
 export function createAssetConversationHost(options: AssetConversationHostOptions) {
-  const a = fields(options, ['projectPath', 'workAssociations', 'conversation', 'start'], ['startNative', 'adoptNative']);
+  const a = fields(options, ['projectPath', 'workAssociations', 'conversation', 'start'], ['startNative', 'adoptNative', 'convertNative']);
   if (!a.workAssociations || types.isProxy(a.workAssociations) || !(a.workAssociations instanceof ConversationWorkStore) ||
       typeof a.conversation !== 'function' || typeof a.start !== 'function' ||
-      (Object.hasOwn(a, 'startNative') && typeof a.startNative !== 'function') || (Object.hasOwn(a,'adoptNative') && typeof a.adoptNative !== 'function')) fail('INPUT');
+      (Object.hasOwn(a, 'startNative') && typeof a.startNative !== 'function') || (Object.hasOwn(a,'adoptNative') && typeof a.adoptNative !== 'function') ||
+      (Object.hasOwn(a,'convertNative') && typeof a.convertNative !== 'function')) fail('INPUT');
   const associations = a.workAssociations;
   // Do not normalize a different project spelling into authority.
   if (typeof a.projectPath !== 'string' || a.projectPath !== associations.projectPath) fail('PROJECT');
@@ -144,6 +147,7 @@ export function createAssetConversationHost(options: AssetConversationHostOption
   const start = a.start as AssetConversationHostOptions['start'];
   const startNative = a.startNative as AssetConversationHostOptions['startNative'];
   const adoptNative = a.adoptNative as AssetConversationHostOptions['adoptNative'];
+  const convertNative = a.convertNative as AssetConversationHostOptions['convertNative'];
   function captured(actor: NativeAssetActor, operation: 'read' | 'mutate'): NativeConversation {
     assertNativeAssetActor(actor, operation);
     const scope = nativeAssetActorScope(actor);
@@ -239,6 +243,46 @@ export function createAssetConversationHost(options: AssetConversationHostOption
       }finally{active=false;}
       return {projectId,projectPath,jobId:id,association:uncertain?'unknown':association,conversation:{...conversation},creation:uncertain?'unknown':'created',retry:false};
     },
+    async convertNative(actor: NativeAssetActor,input:unknown):Promise<NativeAssetConversationStartResult> {
+      const conversation=captured(actor,'mutate'),request=parseConvertGlbInput(input);
+      page(conversation,{limit:1});if(!convertNative)fail('NATIVE_UNAVAILABLE');
+      const work=acquireNativeAssetWork(actor,'generation');
+      let active=true,attempted=false,admitted=false,witnessed=false,uncertain=false,returnedObserved=false;
+      let id:string|null=null,association:'bound'|'unknown'='unknown',admissionFailure:unknown;
+      const exactJob=(value:unknown):string=>{
+        const parsed=jobId(value);
+        if(!/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}(?![\s\S])/.test(parsed))fail('JOB_ID');
+        return parsed;
+      };
+      const admission:AssetStartAdmission=Object.freeze({signal:work.signal,work,
+        beforeCreate():void {
+          if(!active||attempted||witnessed){uncertain=true;fail('ADMISSION');}attempted=true;
+          try{assertNativeAssetActor(actor,'mutate');page(conversation,{limit:1});admitted=true;}
+          catch(error){admissionFailure=error;throw error;}
+        },
+        created(value:string):void {
+          if(!active||witnessed){uncertain=true;fail('ADMISSION');}witnessed=true;
+          try{id=exactJob(value);}catch{uncertain=true;return;}
+          if(!admitted){uncertain=true;return;}
+          // Allocation is a fact. Attribute once to the original capture even
+          // when the actor retires while durable bookkeeping is returning.
+          try{associations.bind({conversation,kind:'asset-job',id});association='bound';}
+          catch{uncertain=true;fail('BINDING_UNKNOWN');}
+        },
+      });
+      try{
+        const raw=await convertNative(request,actor,admission);returnedObserved=true;
+        const returned=exactJob(raw);
+        if(!witnessed){id=returned;uncertain=true;}else if(id!==returned)uncertain=true;
+      }catch(error){
+        if(!witnessed&&!admitted&&admissionFailure!==undefined)throw admissionFailure;
+        // Actual service preflight rejects before beforeCreate or allocation.
+        // A malformed returned acknowledgement never proves that no job exists.
+        if(!attempted&&!witnessed&&!returnedObserved)throw error;
+        uncertain=true;
+      }finally{active=false;work.finish('closed');}
+      return{projectId,projectPath,jobId:id,association:uncertain?'unknown':association,conversation:{...conversation},creation:uncertain?'unknown':'created',retry:false};
+    },
     listNative(actor: NativeAssetActor, pagination: unknown = {}): AssetConversationListing {
       const conversation = captured(actor, 'read'), result = page(conversation, pagination);
       return { projectId, projectPath, conversation: { ...conversation }, ...result };
@@ -283,4 +327,4 @@ export function createAssetConversationHost(options: AssetConversationHostOption
 export type AssetConversationHost = Pick<ReturnType<typeof createAssetConversationHost>,
   'startHuman' | 'startAgent' | 'listHuman' | 'bindingHuman'>;
 export type NativeAssetConversationHost = Pick<ReturnType<typeof createAssetConversationHost>,
-  'startNative' | 'listNative' | 'bindingNative'> & Partial<Pick<ReturnType<typeof createAssetConversationHost>, 'adoptNative'>>;
+  'startNative' | 'listNative' | 'bindingNative'> & Partial<Pick<ReturnType<typeof createAssetConversationHost>, 'adoptNative' | 'convertNative'>>;

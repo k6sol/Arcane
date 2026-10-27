@@ -4,6 +4,8 @@ import { assetName } from './paths.js';
 import { JOB_JOURNAL_BYTES } from './recipe.js';
 import { parseWorkerRecords } from './worker-journal.js';
 import { RESOLUTION_RECORD_BYTES, validateResolution } from './worker-resolution.js';
+import { parseConvertedGlbJobMetadata } from './converted-glb-creation.js';
+import { parseConvertedGlbJson } from './converted-glb-manifest.js';
 
 /** Logical archive classification for asset jobs (pure core; no filesystem writes).
  * Files never move and each job's journal stays its only state authority. The ledger classifies jobs the host
@@ -19,7 +21,7 @@ export const LEDGER_MAX_ENTRIES = 4096;
 export const LEDGER_MAX_BYTES = 4 * 1024 * 1024;
 export const ACTIVE_LIMIT = 256;
 export type ArchivedState = 'succeeded' | 'failed' | 'cancelled' | 'timed_out' | 'interrupted';
-export type ArchivedTemplate = 'hero-prop' | 'environment-kit' | 'custom-assembly' | 'adopted-glb';
+export type ArchivedTemplate = 'hero-prop' | 'environment-kit' | 'custom-assembly' | 'adopted-glb' | 'converted-glb';
 /** Bounded canonical decimal strings from a bigint stat. dev/ino may be 0 on some filesystems. */
 export interface Fingerprint { readonly dev: string; readonly ino: string; readonly size: string; readonly mtimeNs: string; readonly ctimeNs: string }
 export interface LedgerEntry {
@@ -36,7 +38,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![\
 const SHA = /^[a-f0-9]{64}(?![\s\S])/;
 const DECIMAL = /^(?:0|[1-9][0-9]{0,24})(?![\s\S])/;
 const STATES: readonly string[] = ['succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted'];
-const TEMPLATES: readonly string[] = ['hero-prop', 'environment-kit', 'custom-assembly', 'adopted-glb'];
+const TEMPLATES: readonly string[] = ['hero-prop', 'environment-kit', 'custom-assembly', 'adopted-glb', 'converted-glb'];
 const sha256 = (bytes: Uint8Array | string) => createHash('sha256').update(bytes).digest('hex');
 /** Date.prototype.toISOString form only, and a real instant. */
 export const isoTimestamp = (value: unknown): value is string =>
@@ -146,12 +148,28 @@ export function assessEligibility(input: { jobId: string; name: string; journal:
   } catch { return refuse('journal-malformed'); }
   if (journal.schemaVersion !== 1 || typeof journal.jobId !== 'string' || !UUID.test(journal.jobId)) return refuse('journal-malformed');
   if (journal.jobId !== input.jobId) return refuse('job-mismatch');
-  const request = journal.request && typeof journal.request === 'object' && !Array.isArray(journal.request) ? journal.request as Record<string, unknown> : null;
-  if (!request || !safeName(input.name) || request.name !== input.name) return refuse('name-mismatch');
-  if (!TEMPLATES.includes(request.template as string)) return refuse('unsupported-template');
+  let template: ArchivedTemplate;
+  const converted = journal.kind === 'converted-glb' || Object.hasOwn(journal, 'creation');
+  if (converted) {
+    try {
+      const strict = parseConvertedGlbJson(journalBytes), metadata = parseConvertedGlbJobMetadata(strict);
+      if (metadata.jobId !== input.jobId) return refuse('job-mismatch');
+      // The name remains the actual managed-directory locator when legacy
+      // pending metadata has no recorded name; never fabricate its creation.
+      if (!safeName(input.name) || metadata.name !== null && metadata.name !== input.name) return refuse('name-mismatch');
+      journal = strict as Record<string, unknown>;
+      template = 'converted-glb';
+    } catch { return refuse('journal-malformed'); }
+  } else {
+    const request = journal.request && typeof journal.request === 'object' && !Array.isArray(journal.request) ? journal.request as Record<string, unknown> : null;
+    if (!request || !safeName(input.name) || request.name !== input.name) return refuse('name-mismatch');
+    if (!TEMPLATES.includes(request.template as string) || request.template === 'converted-glb') return refuse('unsupported-template');
+    template = request.template as ArchivedTemplate;
+  }
   const state = journal.state;
   if (state === 'running') return refuse('running');
   if (!STATES.includes(state as string)) return refuse('journal-malformed');
+  if (converted && !Object.hasOwn(journal, 'workers')) return refuse('workers-invalid');
   if (Object.hasOwn(journal, 'workers')) {
     const records = parseWorkerRecords(journal.workers);
     if (!records) return refuse('workers-invalid');
@@ -159,12 +177,12 @@ export function assessEligibility(input: { jobId: string; name: string; journal:
   }
   let markerSha: string | null = null;
   if (state === 'interrupted') {
-    if (request.template === 'adopted-glb' || markerBytes === null) return refuse('interrupted-unresolved');
+    if (template === 'adopted-glb' || markerBytes === null) return refuse('interrupted-unresolved');
     if (!validateResolution({ jobId: input.jobId, journal: journalBytes, record: markerBytes }).valid) return refuse('resolution-invalid');
     markerSha = sha256(markerBytes);
   } else if (markerBytes !== null) return refuse('unexpected-marker');
   const time = (value: unknown) => isoTimestamp(value) ? value : null;
-  return { eligible: true, entry: Object.freeze({ jobId: input.jobId, name: input.name, template: request.template as ArchivedTemplate, state: state as ArchivedState,
+  return { eligible: true, entry: Object.freeze({ jobId: input.jobId, name: input.name, template, state: state as ArchivedState,
     manifestAvailable: state === 'succeeded' && f.manifestVerified === true, startedAt: time(journal.startedAt), finishedAt: time(journal.finishedAt),
     journalSha256: sha256(journalBytes), resolutionMarkerSha256: markerSha }) };
 }

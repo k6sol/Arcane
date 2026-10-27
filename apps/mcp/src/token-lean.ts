@@ -1,4 +1,5 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { parseConvertedGlbJobMetadata } from '../../../packages/asset-pipeline/src/converted-glb-creation.js';
 
 // Token-lean model surface. Every tool list and result is paid on every turn, so the serialized
 // form drops what the model never needs. Nothing here changes validation: each call is still
@@ -348,6 +349,22 @@ const jobKind = (request: Node): string => {
 };
 /** One job as {jobId, name, kind, seed, state, stage (while unfinished), triangleBudget, at, error, archived}. */
 export function compactAssetJob(job: unknown): unknown {
+  if (isNode(job) && job.kind === 'converted-glb') {
+    try {
+      const metadata = parseConvertedGlbJobMetadata(job);
+      if (job.form !== metadata.form || !isText(job.state)) return job;
+      // These bounded scalar records retain actual lineage and prepared source
+      // evidence. Null requests and legacy descriptor absence stay explicit.
+      return { jobId: metadata.jobId, name: metadata.name ?? 'Legacy conversion', kind: 'converted-glb', form: metadata.form,
+        ...(metadata.creation ? { creation: metadata.creation } : {}), request: metadata.request, state: job.state,
+        ...(job.state !== 'succeeded' && isText(job.stage) ? { stage: job.stage } : {}),
+        at: job.finishedAt ?? job.updatedAt,
+        ...(job.manifestAvailable !== (job.state === 'succeeded') ? { manifest: job.manifestAvailable } : {}),
+        ...(isNode(job.error) ? { error: job.error } : {}),
+        ...(isText(job.reportId) ? { reportId: job.reportId } : {}),
+        ...(isNode(job.retention) ? { archived: true } : {}) };
+    } catch { return job; }
+  }
   if (!isNode(job) || !isText(job.jobId) || !isText(job.state) || !isNode(job.request)) return job;
   const request = job.request, error = isNode(job.error) ? job.error : undefined;
   const message = error && isText(error.message) ? error.message : undefined;

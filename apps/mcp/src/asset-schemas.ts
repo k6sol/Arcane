@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { ASSET_CONVERSATION_PROVIDERS } from '../../../packages/protocol/src/asset-conversation.js';
-import { isDeepStrictEqual } from 'node:util';
+import { isDeepStrictEqual, types } from 'node:util';
 import { createHash } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 import {parseAdoptGlbInput,parseAdoptedGlbRequest,parseAdoptedGlbManifest,type AdoptedGlbRequest} from '../../../packages/asset-pipeline/src/adopted-glb.js';
@@ -8,6 +8,8 @@ import type {AssetPreviewManifest} from '../../daemon/src/asset-service.js';
 import { normalizeRequest, validateAudit } from '../../../packages/asset-pipeline/src/validation.js';
 import { jsonSnapshot, JOB_JOURNAL_BYTES } from '../../../packages/asset-pipeline/src/recipe.js';
 import { decodeAssetJobError } from '../../../packages/asset-pipeline/src/failure-diagnostics.js';
+import { parseConvertedGlbJobMetadata } from '../../../packages/asset-pipeline/src/converted-glb-creation.js';
+import { parseConvertedGlbManifest } from '../../../packages/asset-pipeline/src/converted-glb-manifest.js';
 import type { AssetInput, AssetRequest, AssetProbe, AssetManifest } from '../../../packages/asset-pipeline/src/types.js';
 import { id, boundedText } from './schemas.js';
 import { HISTORY_PAGE_BYTES,HISTORY_RECORD_LIMIT, type AssetJobRecord, type AssetJobPage } from '../../daemon/src/asset-service.js';
@@ -68,7 +70,7 @@ const jobError = z.unknown().transform((value, context) => {
   try { return decodeAssetJobError(value); }
   catch { context.addIssue({ code: 'custom', message: 'Invalid asset failure evidence.' }); return z.NEVER; }
 });
-export const assetJob: z.ZodType<AssetJobRecord> = z.object({
+const legacyAssetJob = z.object({
   schemaVersion: z.literal(1), jobId: assetJobId, reportId:assetJobId.optional(), directory: path, state: jobState,
   manifestPath: path.nullable(), error: jobError.nullable(), request: z.union([assetRequest,adoptedGlbRequest]),
   stage: id.max(48), startedAt: id, updatedAt: id, manifestAvailable: z.boolean(),
@@ -81,6 +83,49 @@ export const assetJob: z.ZodType<AssetJobRecord> = z.object({
   // are never exposed to an agent as a reusable approval or effect capability.
   .transform(({ finishedAt,retention,reportId,resolution:_resolution, ...job }) => ({ ...job, ...(finishedAt === undefined ? {} : { finishedAt }),...(reportId===undefined?{}:{reportId}),
     ...(retention===undefined?{}:{retention}) }));
+
+const convertedAssetJob = z.strictObject({
+  schemaVersion: z.literal(1), jobId: assetJobId, reportId:assetJobId.length(36).optional(), directory: path, state: jobState,
+  manifestPath: path.nullable(), error: jobError.nullable(), request: z.unknown(),
+  kind: z.literal('converted-glb'), form: z.enum(['new-pending', 'new-prepared', 'legacy-pending', 'legacy-prepared']),
+  creation: z.unknown().optional(), stage: id.max(48), startedAt: id, updatedAt: id, manifestAvailable: z.boolean(),
+  events: z.array(z.strictObject({ jobId: assetJobId, at: id, stage: id.max(48), state: jobState })).max(64), finishedAt: id.optional(),
+  retention:z.strictObject({status:z.literal('archived'),archivedAt:z.iso.datetime()}).optional(),
+  resolution:z.union([z.strictObject({status:z.literal('resolved'),resolvedAt:z.iso.datetime({precision:7})}),z.strictObject({status:z.enum(['invalid','uncertain'])})]).optional(),
+});
+/** Select conversion before a legacy object schema can strip its discriminator.
+ * Inspect descriptors only; the conversion parser rejects nested caller code. */
+function hasOwnWireField(value: unknown, fields: readonly string[]): boolean {
+  if (!value || typeof value !== 'object') return false;
+  if (types.isProxy(value)) throw new Error('Proxy wire record.');
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  return fields.some(field => Object.hasOwn(descriptors, field));
+}
+function hasConversionWireSignal(value: unknown, fields: readonly string[]): boolean {
+  const outer = hasOwnWireField(value, fields);
+  const request = value && typeof value === 'object' ? Object.getOwnPropertyDescriptor(value, 'request') : undefined;
+  if (request && !Object.hasOwn(request, 'value')) throw new Error('Accessor wire request.');
+  return outer || hasOwnWireField(request?.value, ['kind', 'fidelityPolicy']);
+}
+export const assetJob: z.ZodType<AssetJobRecord> = z.unknown().transform((value, context) => {
+  try {
+    if (!hasConversionWireSignal(value, ['kind', 'form', 'creation'])) return legacyAssetJob.parse(value);
+    // The metadata parser copies/bounds the original plain data before Zod can
+    // read values, and validates the actual request rather than inventing one.
+    const metadata = parseConvertedGlbJobMetadata(value), parsed = convertedAssetJob.parse(value);
+    if (parsed.form !== metadata.form || parsed.events.some(event => event.jobId !== parsed.jobId) ||
+        (parsed.resolution && parsed.state !== 'interrupted') ||
+        (parsed.retention && (parsed.state === 'running' || parsed.state === 'interrupted' && parsed.resolution?.status !== 'resolved')) ||
+        (!metadata.request && (parsed.manifestAvailable || parsed.manifestPath !== null)) ||
+        ((parsed.manifestPath !== null) !== parsed.manifestAvailable) ||
+        (parsed.manifestAvailable && parsed.state !== 'succeeded') || (parsed.state === 'succeeded' && parsed.error !== null) ||
+        (parsed.reportId !== undefined && parsed.error === null)) throw new Error('Inconsistent converted job.');
+    const { creation: _creation, request: _request, form: _form, resolution: _resolution, finishedAt, retention, reportId, ...job } = parsed;
+    return { ...job, form: metadata.form, ...(metadata.creation ? { creation: metadata.creation } : {}), request: metadata.request,
+      ...(finishedAt === undefined ? {} : { finishedAt }), ...(reportId === undefined ? {} : { reportId }),
+      ...(retention === undefined ? {} : { retention }) } as AssetJobRecord;
+  } catch { context.addIssue({ code: 'custom', message: 'Invalid converted or legacy asset job record.' }); return z.NEVER; }
+});
 
 export const assetHistoryInput = z.strictObject({ limit: z.number().int().min(1).max(64).optional(), after: assetJobId.optional() });
 const unavailableAsset=z.strictObject({jobId:assetJobId.length(36),name:z.string().min(1).max(48).regex(/^[a-z][a-z0-9-]*(?![\s\S])/).optional(),status:z.enum(['missing','changed','conflict','unclassified'])})
@@ -174,6 +219,12 @@ const generatedAssetManifest: z.ZodType<AssetManifest> = z.object({
     } catch { context.addIssue({ code: 'custom', message: 'Custom manifest requires matching assembly, source digest, mesh bounds/digests, export sockets and shared audit evidence.' }); }
   });
 
-export const assetManifest:z.ZodType<AssetPreviewManifest>=z.union([generatedAssetManifest,z.unknown().transform((value,context)=>{
+const legacyAssetManifest=z.union([generatedAssetManifest,z.unknown().transform((value,context)=>{
  try{return parseAdoptedGlbManifest(value);}catch{context.addIssue({code:'custom',message:'Invalid preview-only adopted GLB manifest.'});return z.NEVER;}
 })]);
+export const assetManifest:z.ZodType<AssetPreviewManifest>=z.unknown().transform((value,context)=>{
+ try {
+  if(hasConversionWireSignal(value,['origin']))return parseConvertedGlbManifest(value);
+  return legacyAssetManifest.parse(value);
+ } catch {context.addIssue({code:'custom',message:'Invalid asset preview manifest.'});return z.NEVER;}
+});

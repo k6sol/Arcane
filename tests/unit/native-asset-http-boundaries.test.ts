@@ -9,7 +9,7 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { createNativeAssetRegistry, nativeAssetActorScope } from '../../apps/daemon/src/native-asset-authority.js';
 import { nativeAssetRoutes } from '../../apps/daemon/src/native-asset-routes.js';
 import { createAssetConversationHost } from '../../apps/daemon/src/asset-conversation-host.js';
-import type { AssetService, AssetJobRecord } from '../../apps/daemon/src/asset-service.js';
+import type { AssetService, GeneratedOrAdoptedAssetJobRecord as AssetJobRecord } from '../../apps/daemon/src/asset-service.js';
 import { ConversationWorkStore } from '../../packages/storage/src/conversation-work-store.js';
 import { normalizeRequest } from '../../packages/asset-pipeline/src/validation.js';
 import { CUSTOM_REQUEST_BYTES } from '../../packages/asset-pipeline/src/recipe.js';
@@ -69,6 +69,7 @@ async function fixture(t: test.TestContext) {
       probeReads++; readEntered.release(); await readRelease.promise;
       return { observedAt: now, available: false, blender: null, python: null, attempts: [], fixtureMarker: MARKER };
     },
+    async convertProjectGlb() { assert.fail('Conversion is outside this fixture.'); },
     async adoptProjectGlb() { throw new Error('Adoption is unavailable in this existing non-adoption fixture.'); },
     async prepareStudioImport() { throw new Error('No generated import preparation evidence in the native HTTP fixture.'); },
     async modelReviewSubject() { throw new Error('Model review must not be called by this metadata fixture.'); },

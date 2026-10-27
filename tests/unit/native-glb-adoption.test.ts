@@ -270,7 +270,9 @@ test('native-only MCP tool registration and call reach actual HTTP/service rathe
  assert.equal(tool.annotations?.readOnlyHint,false);assert.equal(tool.annotations?.idempotentHint,false);
  const result=await client.callTool({name:'assets_adopt_glb',arguments:{name:'owned-mcp',path:'exports/owned.glb'}});
  assert.notEqual(result.isError,true);const data=result.structuredContent as {jobId:string;association:string};assert.ok(data.jobId);assert.equal(data.association,'bound');
- assert.equal(f.service.jobs().find(row=>row.jobId===data.jobId)?.request.template,'adopted-glb');
+ const managed=f.service.jobs().find(row=>row.jobId===data.jobId);
+ assert.ok(managed&&!('kind' in managed),'This adoption tool must return the original adopted record.');
+ assert.equal(managed.request.template,'adopted-glb');
  const generic=createMcpServer({client:new DaemonClient({url:f.origin,token:f.generic}),projectRoot:f.project});
  const genericClient=new Client({name:'generic-adoption-test',version:'1'}),[c,d]=InMemoryTransport.createLinkedPair();
  await Promise.all([generic.connect(c),genericClient.connect(d)]);t.after(async()=>{await genericClient.close();await generic.close();});
