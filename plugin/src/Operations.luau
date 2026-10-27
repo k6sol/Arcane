@@ -268,7 +268,7 @@ function Operations:reconstructAsset(args: any, guard: () -> ()): any
 		owner.finished = true
 		local receipt = {runId = runId, transferDigest = identity.digest, state = "reconstructed", objects = V.array(summary), imported = false, engineVerification = "pending"}
 		if graphPlan then
-			(receipt :: any).formatVersion=2;(receipt :: any).graphDigest=graphPlan.graph.digest
+			(receipt :: any).formatVersion=2;(receipt :: any).graphDigest=graphPlan.graph.digest;
 			(receipt :: any).nodeCount=#nodes;(receipt :: any).nodes=V.array(nodes)
 		end
 		if #V.encode(receipt, self.http) > V.RESULT_BYTES then V.fail("BODY_LIMIT", "Reconstruction receipt exceeds its bound.") end
