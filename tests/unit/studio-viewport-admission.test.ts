@@ -19,7 +19,7 @@ const READ={readOnlyHint:true,destructiveHint:false,idempotentHint:true};
 const TOOLS:Tool[]=[
   {name:'get_studio_state',annotations:READ,inputSchema:{type:'object',required:['studio_id'],properties:{studio_id:{type:'string'}}}},
   {name:'execute_luau',inputSchema:{type:'object',required:['studio_id','datamodel_type','code'],properties:{studio_id:{type:'string'},datamodel_type:{type:'string',enum:['Edit']},code:{type:'string'}}}},
-  {name:'screen_capture',annotations:READ,inputSchema:{type:'object',required:['studio_id','capture_id'],properties:{studio_id:{type:'string'},capture_id:{type:'string'},camera_position:{type:'array'},look_at_position:{type:'array'}}},
+  {name:'screen_capture',annotations:READ,inputSchema:{type:'object',required:['studio_id','capture_id'],properties:{studio_id:{type:'string'},capture_id:{type:'string'},camera_position:{type:'array'},look_at_position:{type:'array'}}}},
 ];
 const text=(value:string):CallToolResult=>({content:[{type:'text',text:value}]});
 function gate(){let release=()=>{};const promise=new Promise<void>(resolve=>{release=resolve;});return{promise,release};}
