@@ -115,7 +115,7 @@ export function modelReviewSubject(scope:AssetReviewScope,manifest:AssetManifest
     return {path,sha256:file.sha256,bytes:file.bytes};
   });
   return snapshotAssetReviewSubject({schemaVersion:1,...canonicalScope,jobId:manifest.jobId,
-    manifestSha256:assetReviewDigest(manifest),sourceRequestSha256:manifest.sourceRequestSha256,artifacts});
+    manifestSha256:assetReviewDigest(manifest),sourceRequestSha256:assetReviewHash(manifest.sourceRequestSha256),artifacts});
 }
 
 function snapshotConvertedReviewSubject(value:unknown):ConvertedAssetReviewSubject {

@@ -128,7 +128,7 @@ function request(origin:string,token=CONTROL):IncomingMessage {
 async function hostFixture(t:test.TestContext,provider:AssetReviewSubject['conversation']['provider']='codex'){
   const f=await fixture(t,provider);f.store.close();
   const work=new ConversationWorkStore({directory:join(f.directory,'work'),projectPath:f.project.projectPath});
-  work.bind({conversation:{...f.subject.conversation},kind:'asset-job',id:JOB});let current=true,source=f.subject,reads=0;
+  work.bind({conversation:{...f.subject.conversation},kind:'asset-job',id:JOB});let current=true,source:AssetReviewSubject=f.subject,reads=0;
   let hold:(()=>Promise<void>)|undefined;
   const host=createAssetReviewHost({directory:f.directory,projectPath:f.project.projectPath,workAssociations:work,receiptAuthority:f.authority,
     bindingHuman:jobId=>current?work.binding('asset-job',jobId):null,async readSubject(_job,scope,guard){reads++;guard();assert.deepEqual(scope.conversation,source.conversation);await hold?.();guard();return source;}});
