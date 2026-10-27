@@ -50,6 +50,14 @@ _EXPORT_SOURCE_PINS = {
     "blender/exp/export.py": (25976, "3559c044a5e3b31abf853bf4481e0d0f58891158e39034216d6f698afeee09d1"),
     "io/exp/export.py": (3285, "5245a27046ec1d2184366b8e8f138a3e827a883967ca4998f389a1378f7d4c52"),
 }
+# Exact reviewed Windows archive bytes; no runtime newline normalization.
+_EXPORT_SOURCE_CRLF_PINS = {
+    "__init__.py": (89287, "29b040a623c4f32ab12d00e795e3d6610bbae67f6c517302f122e7a6b2ecaa0a"),
+    "blender/__init__.py": (107, "3ffe49be200093f15f51336b4b78d40339f9a1014554c22fd9490608f8a9cd09"),
+    "io/__init__.py": (129, "6f22bed7794715b57f5aa9be292fd2def09f73e83c4b903a574871f50508f698"),
+    "blender/exp/export.py": (26574, "28058857c3935162839da76d99aa8883e506cac066fb05cf2d611d96e66808bd"),
+    "io/exp/export.py": (3407, "3831bcad523bfe12bc970c0491203a06b2859a2c52df55a4bfcde570d832df6c"),
+}
 _EXPORT_OBSERVED_REASONS = {
     ("DIRECTORY", "MISSING"): "OPERATOR_DIRECTORY_MISSING",
     ("DIRECTORY", "ACCESS"): "OPERATOR_DIRECTORY_ACCESS",
@@ -144,6 +152,14 @@ def _export_function(module, name, source, first_line):
     return function
 
 
+def _export_source_matches(root, relative):
+    pairs = (_EXPORT_SOURCE_PINS[relative],)
+    if sys.platform == "win32":
+        pairs += (_EXPORT_SOURCE_CRLF_PINS[relative],)
+    raw = audit.read_owned(root / relative, max(size for size, _digest in pairs), min(size for size, _digest in pairs))
+    return (len(raw), audit.sha(raw)) in pairs
+
+
 def _export_observer_bindings(bpy, recognition=None):
     def checkpoint(reason):
         if recognition is not None:
@@ -159,9 +175,9 @@ def _export_observer_bindings(bpy, recognition=None):
         audit.no_links(executable)
         root = executable.parent / "5.2" / "scripts" / "addons_core" / "io_scene_gltf2"
         audit.no_links(root, directory=True)
-        for relative, (size, digest) in _EXPORT_SOURCE_PINS.items():
+        for relative in _EXPORT_SOURCE_PINS:
             checkpoint(_EXPORT_SOURCE_REASONS[relative])
-            if audit.sha(audit.read_owned(root / relative, size, size)) != digest:
+            if not _export_source_matches(root, relative):
                 return None
         packages = (("io_scene_gltf2", root / "__init__.py", root),
                     ("io_scene_gltf2.blender", root / "blender/__init__.py", root / "blender"),
@@ -196,9 +212,9 @@ def _export_observer_bindings(bpy, recognition=None):
                 export.__dict__.get("gltf2_io_export") is not writer):
             return None
         # Recheck source custody after imports; retain only actual code objects.
-        for relative, (size, digest) in _EXPORT_SOURCE_PINS.items():
+        for relative in _EXPORT_SOURCE_PINS:
             checkpoint(_EXPORT_SOURCE_REASONS[relative])
-            if audit.sha(audit.read_owned(root / relative, size, size)) != digest:
+            if not _export_source_matches(root, relative):
                 return None
         checkpoint("OPERATOR_OBSERVER_FUNCTION")
         save = _export_function(export, "save", root / "blender/exp/export.py", 21)

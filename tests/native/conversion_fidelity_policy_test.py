@@ -283,6 +283,19 @@ def observer_installation(directory):
     return bpy, root, pins, modules
 
 
+def observer_source_variants(root, *, crlf=False):
+    """Small controlled byte records only; no bundled exporter or native proof."""
+    lf_pins, crlf_pins, variants = {}, {}, {}
+    for relative in worker._EXPORT_SOURCE_PINS:
+        lf = ("controlled source: " + relative + "\nsecond line\nthird line\n").encode("ascii")
+        windows = lf.replace(b"\n", b"\r\n")
+        lf_pins[relative] = (len(lf), audit.sha(lf))
+        crlf_pins[relative] = (len(windows), audit.sha(windows))
+        variants[relative] = (lf, windows)
+        (root / relative).write_bytes(windows if crlf else lf)
+    return lf_pins, crlf_pins, variants
+
+
 class CollisionVector:
     def __init__(self, values):
         self.x, self.y, self.z = values
@@ -1075,6 +1088,99 @@ class ConversionFidelityPolicyTests(unittest.TestCase):
                 with self.assertRaises(ValueError): module.save()
                 self.assertEqual(worker._observed_export_reason(observation), "OPERATOR_OBSERVER_SITE")
         self.assertIs(module.save, function)
+
+    def test_export_source_matches_exact_controlled_lf_on_both_platforms_and_crlf_only_on_windows(self):
+        with tempfile.TemporaryDirectory(prefix="arcane-source-variants-") as temporary:
+            _bpy, root, _pins, _modules = observer_installation(Path(temporary).resolve())
+            lf_pins, crlf_pins, variants = observer_source_variants(root)
+            before_pins = deepcopy((lf_pins, crlf_pins))
+            for platform in ("linux", "win32"):
+                with patch.object(sys, "platform", platform), patch.object(worker, "_EXPORT_SOURCE_PINS", lf_pins), patch.object(worker, "_EXPORT_SOURCE_CRLF_PINS", crlf_pins):
+                    for relative, pair in variants.items():
+                        for index, raw in enumerate(pair):
+                            with self.subTest(platform=platform, relative=relative, crlf=bool(index)):
+                                target = root / relative; target.write_bytes(raw)
+                                if platform == "linux" and index == 1:
+                                    self.refused("IO_SIZE", lambda: worker._export_source_matches(root, relative))
+                                else:
+                                    self.assertTrue(worker._export_source_matches(root, relative))
+                                self.assertEqual(target.read_bytes(), raw)
+            self.assertEqual((lf_pins, crlf_pins), before_pins)
+
+    def test_export_source_matches_refuses_mixed_lone_cr_bom_and_same_length_changes_without_rewriting(self):
+        with tempfile.TemporaryDirectory(prefix="arcane-source-byte-refusal-") as temporary:
+            _bpy, root, _pins, _modules = observer_installation(Path(temporary).resolve())
+            lf_pins, crlf_pins, variants = observer_source_variants(root)
+            relative = "__init__.py"; target = root / relative; lf, crlf = variants[relative]
+            changed = (("mixed", lf.replace(b"\n", b"\r\n", 1)),
+                       ("lone-cr", lf.replace(b"\n", b"\r", 1)),
+                       ("bom", b"\xef\xbb\xbf" + lf),
+                       ("lf-tamper", b"X" + lf[1:]), ("crlf-tamper", b"X" + crlf[1:]))
+            for platform in ("linux", "win32"):
+                with patch.object(sys, "platform", platform), patch.object(worker, "_EXPORT_SOURCE_PINS", lf_pins), patch.object(worker, "_EXPORT_SOURCE_CRLF_PINS", crlf_pins):
+                    for mode, raw in changed:
+                        with self.subTest(platform=platform, mode=mode):
+                            target.write_bytes(raw)
+                            if platform == "linux" and len(raw) != len(lf):
+                                self.refused("IO_SIZE", lambda: worker._export_source_matches(root, relative))
+                            else:
+                                self.assertFalse(worker._export_source_matches(root, relative))
+                            self.assertEqual(target.read_bytes(), raw)
+
+    def test_export_source_matches_keeps_selected_size_bounds_and_actual_hardlink_custody(self):
+        with tempfile.TemporaryDirectory(prefix="arcane-source-custody-") as temporary:
+            _bpy, root, _pins, _modules = observer_installation(Path(temporary).resolve())
+            lf_pins, crlf_pins, variants = observer_source_variants(root)
+            relative = "__init__.py"; target = root / relative; lf, crlf = variants[relative]
+            alias = root / "controlled-source-hardlink"
+            for platform in ("linux", "win32"):
+                with patch.object(sys, "platform", platform), patch.object(worker, "_EXPORT_SOURCE_PINS", lf_pins), patch.object(worker, "_EXPORT_SOURCE_CRLF_PINS", crlf_pins):
+                    maximum = len(crlf) if platform == "win32" else len(lf)
+                    for raw in (b"", lf[:-1], b"X" * (maximum + 1)):
+                        with self.subTest(platform=platform, size=len(raw)):
+                            target.write_bytes(raw)
+                            self.refused("IO_SIZE", lambda: worker._export_source_matches(root, relative))
+                            self.assertEqual(target.read_bytes(), raw)
+                    target.write_bytes(lf); alias.hardlink_to(target)
+                    try:
+                        self.refused("IO_LINK", lambda: worker._export_source_matches(root, relative))
+                        self.assertEqual(target.read_bytes(), lf); self.assertEqual(alias.read_bytes(), lf)
+                    finally:
+                        alias.unlink()
+                    self.assertTrue(worker._export_source_matches(root, relative))
+
+    def test_export_source_variants_recheck_before_and_after_import_before_wrapping_save(self):
+        cases = (("linux", False, "none"), ("win32", False, "none"), ("win32", True, "none"),
+                 ("linux", True, "none"), ("linux", False, "before"), ("linux", False, "after"),
+                 ("win32", True, "before"), ("win32", True, "after"))
+        for platform, crlf, change in cases:
+            with self.subTest(platform=platform, crlf=crlf, change=change), tempfile.TemporaryDirectory(prefix="arcane-source-import-custody-") as temporary:
+                bpy, root, _pins, modules = observer_installation(Path(temporary).resolve())
+                lf_pins, crlf_pins, variants = observer_source_variants(root, crlf=crlf)
+                export = modules["io_scene_gltf2.blender.exp.export"]; original = export.save
+                relative = "blender/exp/export.py"; target = root / relative; calls = []
+                def tamper():
+                    raw = target.read_bytes(); target.write_bytes(b"X" + raw[1:])
+                if change == "before": tamper()
+                def fixed_import(name):
+                    calls.append(name)
+                    if change == "after" and name == "io_scene_gltf2.io.exp.export": tamper()
+                    return modules[name]
+                expected = ("OPERATOR_OBSERVER_SOURCE_ROOT" if platform == "linux" and crlf else
+                            "OPERATOR_OBSERVER_SOURCE_EXPORT" if change != "none" else None)
+                with patch.object(sys, "platform", platform), patch.dict(sys.modules, modules), patch.object(worker, "_EXPORT_SOURCE_PINS", lf_pins), patch.object(worker, "_EXPORT_SOURCE_CRLF_PINS", crlf_pins), patch.object(worker.importlib, "import_module", side_effect=fixed_import):
+                    with worker._observe_export_save(bpy) as observation:
+                        self.assertEqual(observation["available"], expected is None)
+                        self.assertEqual(observation["failure"], expected)
+                        if expected is None:
+                            self.assertIsNot(export.save, original)
+                        else:
+                            self.assertIs(export.save, original)
+                self.assertIs(export.save, original)
+                self.assertEqual(calls, [] if change == "before" or platform == "linux" and crlf else
+                                 ["io_scene_gltf2.blender.exp.export", "io_scene_gltf2.io.exp.export"])
+                raw = variants[relative][int(crlf)]
+                self.assertEqual(target.read_bytes(), b"X" + raw[1:] if change != "none" else raw)
 
     def test_collision_position_targets_use_exact_finite_values_without_distance_or_centroid(self):
         vertices = [CollisionVertex(value) for value in ((0, 0, 0), (-0.0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1), (2**-30, 0, 0))]
