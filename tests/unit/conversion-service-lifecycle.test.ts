@@ -228,11 +228,13 @@ test('archive classification keeps all four metadata forms distinct and rejects 
   }
 });
 
-test('converted review/import are explicitly unavailable without target calls or generated adapter access',async t=>{
+test('pending converted jobs refuse review/import before target calls or generated adapter access',async t=>{
   const f=await fixture(t),result=await f.host.convertNative(f.current.actor,f.input());
+  const child=f.service.jobs().find(job=>job.jobId===result.jobId);assert.ok(child&&child.kind==='converted-glb'&&child.form==='new-pending');
+  assert.equal(child.state,'running');assert.equal(child.request,null);assert.equal(child.manifestAvailable,false);
   const scope={projectId:f.store.projectId,conversation:f.current.conversation};
   await assert.rejects(f.service.modelReviewSubject(result.jobId,scope),code('ASSET_REVIEW_JOB_STATE'));
-  await assert.rejects(f.service.prepareStudioImport(result.jobId,f.current.actor),code('STUDIO_IMPORT_UNSUPPORTED'));
+  await assert.rejects(f.service.prepareStudioImport(result.jobId,f.current.actor),code('JOB_STATE'));
   assert.equal(f.selected(),0);assert.equal(f.spawns(),0);f.controls[0]!.finish('cancelled');await f.service.cancel(result.jobId);
 });
 

@@ -172,7 +172,7 @@ test('graph node/name/parent/matrix/pivot/digest edits cannot be admitted agains
     (v:Doc)=>{v.graph.nodes=v.graph.nodes.filter((n:Doc)=>n.nodeKey!=='node3');resealGraph(v);},
     (v:Doc)=>{v.graph.meshes[0].sourcePivot=[1,0,0];},(v:Doc)=>{v.models[0].objects[0].pivot=[1,0,0];},
     (v:Doc)=>{v.graph.digest=sha('wrong graph');}]){
-    const input=hostFixture().host() as unknown as Doc;mutate(input);await assert.rejects(prepare(input as unknown as HostStudioImport),refused);
+    const input=structuredClone(hostFixture().host()) as unknown as Doc;mutate(input);await assert.rejects(prepare(input as unknown as HostStudioImport),refused);
   }
 });
 

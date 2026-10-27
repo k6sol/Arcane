@@ -56,8 +56,6 @@ test('both native unit shards and the full release lane preserve the existing ve
     localTest[1].replace(' dist/tests/unit/',' --test-shard='+shard+'/2 dist/tests/unit/'));
   lane('Test offline skill contracts','release',localTest[2]);
   lane('Test release contracts','release',localTest[3]);
-  lane('Build deterministic Studio plugin','release','npm run build:plugin');
-  lane('Verify deterministic Studio plugin artifacts','release','node scripts/build-plugin.mjs --check');
   lane('Test deterministic Studio plugin','release','npm run test:plugin');
   lane('Validate actual skill file integrity','release','node scripts/skill-pack.mjs validate');
 });
@@ -65,7 +63,8 @@ test('both native unit shards and the full release lane preserve the existing ve
 test('every lane builds after pinned tooling and retains the Windows private-owner preflight',()=>{
   const prerequisites=[['Install pinned dependencies without lifecycle scripts','npm ci --ignore-scripts --no-audit --no-fund'],
     ['Acquire and verify pinned standalone Luau for mandatory VM tests','node scripts/luau-test-runtime.mjs --install --github-env'],
-    ['Strict type checking','npm run typecheck'],['Build product for the selected inventory','npm run build']];
+    ['Strict type checking','npm run typecheck'],['Build product for the selected inventory','npm run build'],
+    ['Build deterministic Studio plugin','npm run build:plugin'],['Verify deterministic Studio plugin artifacts','node scripts/build-plugin.mjs --check']];
   let previous=-1;
   for(const[name,command]of prerequisites){const body=step(name);assert.doesNotMatch(body,/^        if:/m);assert.ok(body.includes('        run: '+command+'\n'));
     const at=source.indexOf(body);assert.ok(at>previous);previous=at;}
@@ -73,6 +72,8 @@ test('every lane builds after pinned tooling and retains the Windows private-own
   assert.match(owner,/node --test --test-concurrency=1 dist\/tests\/unit\/workflow-normal-owner.test.js dist\/tests\/unit\/workflow-permission-equivalence.test.js/);
   assert.ok(source.indexOf(owner)>previous);assert.ok(source.indexOf(owner)<source.indexOf(step('Test complete unit inventory shard 1 of 2')));
   assert.equal([...local.matchAll(/^        run: npm run build$/gm)].length,1,'Each lane builds once before compiled tests.');
+  assert.equal([...local.matchAll(/^        run: npm run build:plugin$/gm)].length,1,'Each lane builds its current source plugin once before native import fixtures.');
+  assert.equal([...local.matchAll(/^        run: node scripts\/build-plugin.mjs --check$/gm)].length,1,'Each lane verifies the exact generated artifacts before fixtures read them.');
 });
 
 test('Windows warmup includes the exact read-only diagnostic serializer before bounded permission probes',()=>{
@@ -192,7 +193,10 @@ test('packaged workflow contract rejects prerequisite bypass, replay, reordered 
     ['uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9','uses: actions/upload-artifact@v7'],
     ['          retention-days: 7\n','          retention-days: 30\n'],
   ];
-  for(const [before,after]of alterations){assert.ok(source.includes(before),'Mutation must target actual workflow bytes.');
-    assert.throws(()=>packagedContract(source.replace(before,after)),assert.AssertionError);}
+  const packaged=job('packaged-desktop');
+  for(const [before,after]of alterations){assert.ok(packaged.includes(before),'Mutation must target actual packaged workflow bytes.');
+    const mutated=source.replace(packaged,packaged.replace(before,after));
+    assert.notEqual(mutated,source,'The intended packaged step must actually change.');
+    assert.throws(()=>packagedContract(mutated),assert.AssertionError);}
   assert.throws(()=>packagedContract(source+'  extra-job:\n    runs-on: windows-latest\n'),assert.AssertionError);
 });

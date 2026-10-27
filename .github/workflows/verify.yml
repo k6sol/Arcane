@@ -52,6 +52,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build product for the selected inventory
         run: npm run build
+      - name: Build deterministic Studio plugin
+        run: npm run build:plugin
+      - name: Verify deterministic Studio plugin artifacts
+        run: node scripts/build-plugin.mjs --check
       - name: Prepare Windows owner policy metadata fixture
         if: runner.os == 'Windows'
         timeout-minutes: 1
@@ -112,12 +116,6 @@ jobs:
       - name: Test release contracts
         if: matrix.suite == 'release'
         run: node --test --test-concurrency=1 tests/release/*.test.mjs
-      - name: Build deterministic Studio plugin
-        if: matrix.suite == 'release'
-        run: npm run build:plugin
-      - name: Verify deterministic Studio plugin artifacts
-        if: matrix.suite == 'release'
-        run: node scripts/build-plugin.mjs --check
       - name: Retain verified modular Studio plugin artifacts
         if: runner.os == 'Windows' && matrix.suite == 'release'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

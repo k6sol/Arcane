@@ -170,6 +170,6 @@ test('converted packet reader refuses mixed versions, unknown fields, duplicate 
   assert.throws(()=>measureStudioImportTransferArguments(transfer,{...f.prepared.manifest.target,parentRef:'another-parent'},continuity));
 });
 test('actual escaped converted metadata is refused before a transfer can be staged',async()=>{
-  const f=await transferFixture(false,fixture=>{fixture.output.extras={ownedMetadata:'"\\'.repeat(40_000)};});
+  const f=await transferFixture(false,fixture=>{fixture.output.extras={ownedMetadata:Array.from({length:64},()=>'"\\'.repeat(625))};});
   assert.throws(()=>f.transfer(),(error:unknown)=>!!error&&typeof error==='object'&&'code'in error&&error.code==='BUDGET');
 });

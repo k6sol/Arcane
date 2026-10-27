@@ -189,6 +189,8 @@ for(const affine of ['scale','shear','reflection'] as const)test('native target 
 for(const value of [.5,1])test('payload2 independently refuses '+(value===.5?'fractional':'reassociated')+' host IDs after export checksums are resealed',async()=>{
   const input=hostFixture().host(),prepared=await converted(input),changed=changedExport(prepared,input,(doc,bin)=>{
     const p=primitive(doc),a=doc.accessors[p.attributes[CONVERSION_VERTEX_ID]],view=doc.bufferViews[a.bufferView],at=(view.byteOffset??0)+(a.byteOffset??0);bin.writeFloatLE(value,at);
+    // Keep the GLB structurally valid so the independent ID mapping check is reached.
+    const ids=Array.from({length:a.count},(_,index)=>bin.readFloatLE(at+index*(view.byteStride??4)));a.min=[Math.min(...ids)];a.max=[Math.max(...ids)];
   });
   assert.throws(()=>decodeStudioImportPayload(changed.prepared,changed.map),failCode('MAPPING'));
 });

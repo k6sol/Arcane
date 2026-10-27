@@ -122,12 +122,13 @@ for(const provider of ['codex','claude-code','arcane'] as const)test(provider+' 
   assert.equal(f.controls.length,1);const control=f.controls[0]!;assert.equal(control.id,ack.jobId);assert.deepEqual(control.input.sourceGlb,f.source);assert.deepEqual(control.input.parentManifest,f.parentManifest);
   assert.equal(control.input.parentManifestSha256,sha256(f.parentManifest));assert.equal(control.options.signal?.aborted,false);
   const child=f.service.jobs().find(job=>job.jobId===ack.jobId);assert.ok(child&&child.kind==='converted-glb'&&child.form==='new-pending');assert.equal(child.form,'new-pending');assert.equal(child.request,null);assert.equal(child.manifestAvailable,false);
+  assert.equal(child.state,'running');
   assert.equal(child.creation.parentJobId,f.parentId);assert.equal(child.creation.parentManifestSha256,sha256(f.parentManifest));assert.deepEqual(parseConvertedGlbCreation(child.creation),child.creation);
   assert.deepEqual(f.store.binding('asset-job',ack.jobId)?.conversation,f.current.conversation);
   const metadata=parseConvertedGlbJobMetadata(JSON.parse(await readFile(join(control.directory,'job.json'),'utf8')));assert.equal(metadata.form,'new-pending');assert.equal(metadata.request,null);
   const pending=nativeAssetJobPage.parse(await f.sdk().assetsJobs());const visible=pending.jobs.find(job=>job.jobId===ack.jobId);assert.ok(visible&&visible.kind==='converted-glb');assert.equal(visible.request,null);assert.equal(visible.form,'new-pending');
   await assert.rejects(f.service.modelReviewSubject(ack.jobId,{projectId:f.store.projectId,conversation:f.current.conversation}),{code:'ASSET_REVIEW_JOB_STATE'});
-  await assert.rejects(f.service.prepareStudioImport(ack.jobId,f.current.actor()),{code:'STUDIO_IMPORT_UNSUPPORTED'});assert.equal(f.selected(),0);
+  await assert.rejects(f.service.prepareStudioImport(ack.jobId,f.current.actor()),{code:'JOB_STATE'});assert.equal(f.selected(),0);
   control.finish();await until(()=>f.service.jobs().find(job=>job.jobId===ack.jobId)?.state==='failed');
   const ended=nativeAssetJobPage.parse(await f.sdk().assetsJobs()).jobs.find(job=>job.jobId===ack.jobId);assert.ok(ended&&ended.kind==='converted-glb');assert.equal(ended.request,null);assert.equal(ended.state,'failed');assert.equal(ended.error?.code,'ASSET_FAILED');
   assert.equal(ended.manifestAvailable,false);assert.equal(f.spawns(),0);assert.deepEqual(await readFile(join(f.parentDirectory,'asset.glb')),f.source);assert.equal(f.posts.length,1);

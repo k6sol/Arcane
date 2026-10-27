@@ -413,7 +413,9 @@ test('native MCP conversion lists exactly five required scalars and forwards a s
   assert.deepEqual(Object.keys(tool.inputSchema.properties??{}).sort(),Object.keys(CONVERSION).sort());
   assert.deepEqual([...(tool.inputSchema.required??[])].sort(),Object.keys(CONVERSION).sort());
   assert.equal(tool.annotations?.readOnlyHint,false);assert.equal(tool.annotations?.idempotentHint,false);assert.equal(tool.annotations?.destructiveHint,false);
-  assert.match(tool.description!,/acknowledgement, not completion/);assert.match(tool.description!,/Converted review\/import remain unavailable/);
+  assert.match(tool.description!,/acknowledgement, not completion/);assert.match(tool.description!,/Completed converted exports use exact-model human review/);
+  assert.match(tool.description!,/host-scoped Studio preparation, staging and placement flow/);
+  assert.match(tool.description!,/Completion alone grants no approval or import\/upload permission/);
   for(const input of [{...CONVERSION,renderResolution:128,renderSamples:1},{...CONVERSION,collision:'convex-hull' as const,renderResolution:1024,renderSamples:64}]){
     const result=await call(f.client,'assets_convert_glb',input);assert.notEqual(result.isError,true);assert.deepEqual(result.structuredContent,ack());
     assert.deepEqual(f.requests.at(-1)?.body,input);

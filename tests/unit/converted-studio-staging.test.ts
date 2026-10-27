@@ -116,7 +116,11 @@ async function stagingFixture(t:test.TestContext,collision=false){
   const grant=store.createGrant({allowedRoots:['Workspace','ServerStorage'],allowWrites:true}),pair=store.pair({code:grant.code,protocolVersion:1,capabilities:['asset.stage_packet','asset.reconstruct','scene.import_context'],identity:{clientSessionId:'converted-plugin',pluginVersion:'0.1.9',name:'Synthetic converted staging',placeId:12,universeId:34}});
   const proof=()=>({sessionId:pair.sessionId,clientLifetimeId:'converted-plugin',pluginArtifactHash:PLUGIN,markerName:'ArcaneTestProof_converted',placeId:12,universeId:34,placeName:'Synthetic converted staging',mode:'Edit',playEpoch:0,continuitySupported:true,connected:true});store.poll(pair.sessionId,proof());
   const target={sessionId:pair.sessionId,placeId:12,universeId:34,root:'Workspace' as const,parentRef:'converted-parent',creator:{kind:'group' as const,id:'56'}};
-  async function bundle(padding=0){const source=hostFixture(collision);if(padding)source.output.extras={padding:'A'.repeat(padding)};const input=source.host();input.projectId=work.projectId;input.target=target;
+  async function bundle(padding=0){const source=hostFixture(collision);if(padding){
+      assert.ok(Number.isSafeInteger(padding)&&padding>0&&padding<=64*4096);
+      // Fixed array shape lets the probe include all escaping overhead while every GLB string stays bounded.
+      source.output.extras={padding:Array.from({length:64},(_,index)=>'A'.repeat(Math.max(0,Math.min(4096,padding-index*4096))))};
+    }const input=source.host();input.projectId=work.projectId;input.target=target;
     const prepared=await converted(input),payload=decodeStudioImportPayload(prepared,new Map(input.files.map(file=>[file.fileId,file.bytes])));assert.equal(payload.formatVersion,2);
     return {prepared,payload:payload as ConvertedStudioImportPayloadV2,transfer:createStudioImportTransfer(prepared,payload)};
   }
