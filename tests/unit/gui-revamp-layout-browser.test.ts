@@ -113,7 +113,8 @@ test('Edge: production picker and settings handlers open reachable surfaces afte
       return String(path)==='/v1/codex/state'?Response.json({state}):new Response('',{status:404});
     });
     const shell=startWorkspaceShell(document),chat=new CodexChat(document,api);
-    await chat.start(); window.guiFixtureDispose=()=>{chat.stop();shell.cleanup();}; window.guiFixtureReady=true;`;
+    await chat.start(); await document.fonts.ready;
+    window.guiFixtureDispose=()=>{chat.stop();shell.cleanup();}; window.guiFixtureReady=true;`;
   const errors: string[] = [], unexpected: string[] = [];
   const server = createServer((request, response) => { void (async () => {
     if (request.url === '/studio' || request.url === '/gui-controller-fixture.js') {
@@ -138,7 +139,8 @@ test('Edge: production picker and settings handlers open reachable surfaces afte
     if (new URL(route.request().url()).origin === origin) await route.continue();
     else { unexpected.push(route.request().url()); await route.abort(); }
   });
-  await page.goto(origin + '/studio');
+  // Handler startup and layout fonts define readiness for these interactions.
+  await page.goto(origin + '/studio', { waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() => Boolean((window as Window & { guiFixtureReady?: boolean }).guiFixtureReady));
   const fitsAndHit = async (selector: string, label: string) => {
     const facts = await page.locator(selector).evaluate(node => {

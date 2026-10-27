@@ -38,11 +38,12 @@ function jpeg(quantizer=1):Buffer {
   return Buffer.from([255,216,...segment(0xdb,[0,...Array<number>(64).fill(quantizer)]),
     ...segment(0xc0,[8,0,1,0,1,1,1,0x11,0]),...segment(0xc4,[0,...counts,0,0x10,...counts,0]),...segment(0xda,[1,1,0,0,63,0]),0x3f,255,217]);
 }
-function fixture(textured=false,worldScale=1,seams=false,image=PNG,mimeType='image/png') {
+function fixture(textured=false,worldScale=1,seams=false,image=PNG,mimeType='image/png',nestedConditioning=false) {
   const doc:Doc={asset:{version:'2.0'},buffers:[{byteLength:0}],bufferViews:[],accessors:[],
     materials:[{doubleSided:true,alphaMode:'MASK',pbrMetallicRoughness:{baseColorFactor:[0.2,0.4,0.6,1],metallicFactor:0.25,roughnessFactor:0.7}},
       {pbrMetallicRoughness:{baseColorFactor:[0.8,0.6,0.2,1]}}],meshes:[],
     nodes:[{children:[1,2],translation:[2,3,4],scale:[worldScale,worldScale,worldScale]},{mesh:0,scale:[2,3,4]},{mesh:0,translation:[5,0,0]}],scene:0,scenes:[{nodes:[0]}]};
+  if(nestedConditioning)doc.nodes=[{scale:[100,1,1],children:[1]},{scale:[100,1,1],children:[2]},{scale:[0.0001,1,1],mesh:0}];
   let bin:Buffer=Buffer.alloc(0);
   function accessor(values:number[],size:number,type=5126):number {
     const width=type===5123?2:4,raw=Buffer.alloc(values.length*width);
@@ -269,4 +270,14 @@ test('independent GLB fidelity keeps JPEG and unsupported PNG encodings exact wi
   const image=materialPng([255,255,255,255],16),unsupported=fixture(true,1,false,image);assert.equal(unsupported.verify().length,4);
   unsupported.replaceImage(Buffer.concat([image.subarray(0,-12),pngChunk('tEXt',Buffer.from('description\0same unsupported pixels')),image.subarray(-12)]));
   assert.throws(unsupported.verify,fidelityError);
+});
+
+test('independent GLB fidelity checks world conditioning on empty ancestors even when mesh world transforms pass',()=>{
+  const f=fixture(false,1,false,PNG,'image/png',true);
+  assert.equal(f.verify().length,2);
+  // Every local matrix remains within its bound, and the mesh transform stays
+  // near identity. The intermediate empty node nevertheless crosses condition
+  // number 10,000 and must be rejected by the independent file validator.
+  f.outputDoc.nodes[1].scale[0]+=0.00005;
+  assert.throws(f.verify,fidelityError);
 });

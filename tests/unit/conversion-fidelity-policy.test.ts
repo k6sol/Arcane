@@ -71,9 +71,11 @@ test('shared accessor storage preserves each material primitive without treating
   // A real exporter may compact that same primitive to its three used slots.
   for (const name of Object.keys(f.output.attributes)) f.output.attributes[name]!.pop();
   f.output.vertexIds.pop(); compareConversionPrimitive(f.source, f.output);
-  // It may also share a larger accessor, but every stored sample retains its ID.
+  // It may also share a larger accessor; unindexed slots are not rendered faces.
   for (const name of Object.keys(f.output.attributes)) f.output.attributes[name]!.push([...f.source.attributes[name]![3]!]);
   f.output.vertexIds.push(3); f.output.attributes.TEXCOORD_0![3]![0] = 0.5;
+  compareConversionPrimitive(f.source, f.output);
+  f.output.attributes.TEXCOORD_0![0]![0] = 0.5;
   assert.throws(() => compareConversionPrimitive(f.source, f.output), refusal);
 });
 test('fractional foreign and nonfinite correspondence cannot borrow nearby source vertices', () => {

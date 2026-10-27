@@ -120,12 +120,21 @@ def mapped_scene_nodes(scene, mapping, request, stamped):
                       not obj.modifiers and not obj.constraints and obj.animation_data is None, "FEATURE")
         found[key] = obj
     audit.require(set(found) == set(expected), "FIDELITY_HIERARCHY")
-    observed = {}
     for key, obj in found.items():
         parent = expected[key]["parentKey"]
-        audit.require(obj.parent == found[parent] if parent is not None else obj.parent is None, "FIDELITY_HIERARCHY")
-        observed[key] = {"parentKey": parent, "localMatrix": audit.bpy_matrix_y_up(obj.matrix_local),
-                         "worldMatrix": audit.bpy_matrix_y_up(obj.matrix_world)}
+        audit.require(obj.parent_type == "OBJECT" and
+                      (obj.parent == found[parent] if parent is not None else obj.parent is None), "FIDELITY_HIERARCHY")
+    # RNA matrix_local derives parent^-1 * world with another float inversion
+    # and product. Observe each actual world once, then derive the effective
+    # parent-relative transform with our checked double affine math instead.
+    # No source matrix supplies any actual observation or repairs its values.
+    actual_worlds = {key: audit.bpy_matrix_y_up(obj.matrix_world) for key, obj in found.items()}
+    inverse_worlds = {key: audit.check_fidelity_matrix(matrix) for key, matrix in actual_worlds.items()}
+    observed = {}
+    for key in found:
+        parent = expected[key]["parentKey"]
+        local = list(actual_worlds[key]) if parent is None else audit.multiply_matrix(inverse_worlds[parent], actual_worlds[key])
+        observed[key] = {"parentKey": parent, "localMatrix": local, "worldMatrix": actual_worlds[key]}
     return found, audit.check_node_bindings(mapping, observed)
 
 

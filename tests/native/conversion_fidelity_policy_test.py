@@ -1,6 +1,7 @@
 """Pure v2 fidelity/correspondence tests. No bpy, subprocess or native proof."""
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 import importlib.util
 import math
 import struct
@@ -107,6 +108,42 @@ def corner(source, source_id=0):
         elif key == "TANGENT": world[key] = audit.policy_normalize(audit.policy_vector(source["world"], value[:3]), "FIDELITY_TANGENT") + [value[3]*audit.matrix_sign(source["world"])]
         else: world[key] = list(value)
     return local, world
+
+
+class ObservedSceneObject(dict):
+    """Controlled RNA-shaped observation; no bpy or native evidence."""
+    def __init__(self, key, mesh, actual_world):
+        super().__init__({audit.NODE_KEY: key})
+        self.type = "MESH" if mesh else "EMPTY"
+        self.modifiers = []; self.constraints = []; self.animation_data = None
+        self.parent_type = "OBJECT"; self.parent = None
+        self.actual_world = list(actual_world); self.world_reads = 0
+
+    @property
+    def matrix_local(self):
+        raise AssertionError("Effective local observations must not read RNA matrix_local")
+
+    @property
+    def matrix_world(self):
+        self.world_reads += 1
+        # Inverse of the fixed signed-axis permutation, not Blender mathutils.
+        axes, signs = (0, 2, 1, 3), (1, 1, -1, 1)
+        matrix = [[0.0]*4 for _ in range(4)]
+        for col in range(4):
+            for row in range(4):
+                matrix[axes[row]][axes[col]] = self.actual_world[row+4*col]*signs[row]*signs[col]
+        return matrix
+
+
+def observed_scene(mapping, actual_worlds=None):
+    values = audit.hierarchy_worlds(mapping) if actual_worlds is None else actual_worlds
+    part_keys = {part["sourceKey"] for part in mapping["parts"]}
+    objects = {row["nodeKey"]: ObservedSceneObject(row["nodeKey"], row["nodeKey"] in part_keys, values[row["nodeKey"]])
+               for row in mapping["nodes"]}
+    for row in mapping["nodes"]:
+        if row["parentKey"] is not None: objects[row["nodeKey"]].parent = objects[row["parentKey"]]
+    # Graph validation and observation cannot depend on scene iteration order.
+    return SimpleNamespace(objects=list(reversed(list(objects.values())))), objects
 
 
 class ConversionFidelityPolicyTests(unittest.TestCase):
@@ -355,6 +392,87 @@ class ConversionFidelityPolicyTests(unittest.TestCase):
             self.refused("FIDELITY_HIERARCHY", lambda: audit.glb_node_bindings(changed, mapping))
         cycle = deepcopy(mapping); cycle["nodes"][0]["parentKey"] = "node1"
         self.refused("FIDELITY_HIERARCHY", lambda: audit.hierarchy_map(cycle))
+
+    def test_effective_locals_use_each_actual_world_once_without_reading_rna_local(self):
+        _d, _b, _r, _m, _mb, _mr, _p, mapping, request = fixture()
+        scene, objects = observed_scene(mapping)
+        found, rows = worker.mapped_scene_nodes(scene, mapping, request, False)
+        self.assertEqual(set(found), set(objects))
+        self.assertTrue(all(found[key] is obj for key, obj in objects.items()))
+        self.assertEqual({key: obj.world_reads for key, obj in objects.items()}, dict.fromkeys(objects, 1))
+        expected = audit.hierarchy_map(mapping)
+        for row in rows:
+            self.assertEqual(row["worldMatrix"], objects[row["nodeKey"]].actual_world)
+            audit.compare_fidelity_transform(expected[row["nodeKey"]]["localMatrix"], row["localMatrix"])
+        # Repeated controlled snapshots keep exact rows; production's actual
+        # saved/reopened comparison remains unchanged and requires native proof.
+        _found, reopened = worker.mapped_scene_nodes(scene, mapping, request, False)
+        self.assertEqual(rows, reopened)
+        self.assertEqual({key: obj.world_reads for key, obj in objects.items()}, dict.fromkeys(objects, 2))
+
+    def test_effective_local_rows_retain_actual_allowed_motion_instead_of_source_values(self):
+        _d, _b, _r, _m, _mb, _mr, _p, mapping, request = fixture()
+        actual = deepcopy(audit.hierarchy_worlds(mapping))
+        for matrix in actual.values(): matrix[12] += audit.TRANSLATION_LIMIT/2
+        scene, _objects = observed_scene(mapping, actual)
+        _found, rows = worker.mapped_scene_nodes(scene, mapping, request, False)
+        root = next(row for row in rows if row["parentKey"] is None)
+        self.assertEqual(root["localMatrix"], actual[root["nodeKey"]])
+        self.assertEqual(root["worldMatrix"], actual[root["nodeKey"]])
+        original = next(row for row in mapping["nodes"] if row["nodeKey"] == root["nodeKey"])
+        self.assertNotEqual(root["localMatrix"], original["localMatrix"])
+        for row in rows: self.assertEqual(row["worldMatrix"], actual[row["nodeKey"]])
+
+    def test_effective_local_graph_and_object_parent_type_are_validated_before_sampling(self):
+        _d, _b, _r, _m, _mb, _mr, _p, mapping, request = fixture()
+        for mode in ("BONE", "VERTEX", "VERTEX_3", "wrong-parent", "missing-parent"):
+            with self.subTest(mode=mode):
+                scene, objects = observed_scene(mapping)
+                if mode == "wrong-parent": objects["node1_primitive0"].parent = objects["node0"]
+                elif mode == "missing-parent": objects["node1"].parent = None
+                else: objects["node1"].parent_type = mode
+                self.refused("FIDELITY_HIERARCHY", lambda: worker.mapped_scene_nodes(scene, mapping, request, False))
+                self.assertTrue(all(obj.world_reads == 0 for obj in objects.values()))
+
+    def test_effective_local_missing_duplicate_or_foreign_objects_refuse_before_sampling(self):
+        _d, _b, _r, _m, _mb, _mr, _p, mapping, request = fixture()
+        for mode in ("missing", "duplicate", "foreign"):
+            with self.subTest(mode=mode):
+                scene, objects = observed_scene(mapping)
+                if mode == "missing": scene.objects.pop()
+                elif mode == "duplicate": scene.objects.append(objects["node1"])
+                else: objects["node1"][audit.NODE_KEY] = "node99"
+                self.refused("FIDELITY_HIERARCHY", lambda: worker.mapped_scene_nodes(scene, mapping, request, False))
+                self.assertTrue(all(obj.world_reads == 0 for obj in objects.values()))
+
+    def test_effective_local_sampling_never_repairs_nonaffine_or_ill_conditioned_actual_worlds(self):
+        _d, _b, _r, _m, _mb, _mr, _p, mapping, request = fixture()
+        for mode, reason in (("affine", "FIDELITY_TRANSFORM"), ("nonfinite", "FIDELITY_TRANSFORM"),
+                             ("singular", "FIDELITY_CONDITION"), ("condition", "FIDELITY_CONDITION")):
+            with self.subTest(mode=mode):
+                actual = deepcopy(audit.hierarchy_worlds(mapping))
+                if mode == "affine": actual["node0"][15] = 1-2**-24
+                elif mode == "nonfinite": actual["node0"][0] = math.nan
+                else:
+                    actual["node0"] = identity()
+                    actual["node0"][0] = 0 if mode == "singular" else .00001
+                scene, _objects = observed_scene(mapping, actual)
+                self.refused(reason, lambda: worker.mapped_scene_nodes(scene, mapping, request, False))
+
+    def test_effective_derived_locals_still_refuse_actual_translation_linear_and_handedness_changes(self):
+        _d, _b, _r, _m, _mb, _mr, _p, mapping, request = fixture()
+        for mode in ("translation", "linear", "handedness"):
+            with self.subTest(mode=mode):
+                changed = deepcopy(mapping)
+                local = changed["nodes"][1]["localMatrix"]
+                if mode == "translation": local[12] += 2*audit.TRANSLATION_LIMIT
+                else:
+                    factor = -1 if mode == "handedness" else 1+2*audit.LINEAR_LIMIT
+                    for axis in range(3): local[axis] *= factor
+                # The controlled actual graph is internally coherent; rejection
+                # comes from its unchanged comparison with the original map.
+                scene, _objects = observed_scene(mapping, audit.hierarchy_worlds(changed))
+                self.refused("FIDELITY_TRANSFORM", lambda: worker.mapped_scene_nodes(scene, mapping, request, False))
 
     def test_strict_v2_inputs_refuse_prototype_or_caller_policy_and_keep_real_source_bytes(self):
         _d, _b, raw, _m, _mb, marked_raw, _p, mapping, request = fixture()

@@ -87,8 +87,8 @@ export function compareConversionPrimitive(expected: ConversionPrimitiveSamples,
   if (ids.some(id => !Number.isInteger(id) || id < 0 || id >= count)) refused('Conversion contains missing, foreign or fractional vertex correspondence.');
   const usedSource = new Set(expected.triangles.flat()), usedTarget = new Set(actual.triangles.flat());
   // A primitive may index a subset of an accessor shared with another material.
-  // Stored but unindexed slots are not faces. Every actual slot is still checked
-  // against its source ID below; the exact face multiset proves drawn coverage.
+  // Stored but unindexed slots are not faces. Their shape, finite values and ID
+  // range remain validated; the exact face multiset proves drawn coverage.
   if (usedSource.size < 3 || [...usedSource].some(id => !Number.isInteger(id) || id < 0 || id >= count) ||
       [...usedTarget].some(id => !Number.isInteger(id) || id < 0 || id >= ids.length)) refused('Conversion face indices are outside their source or exported accessor.');
   const correspondence = conversionCorrespondenceSha256(expected.triangles);
@@ -97,7 +97,7 @@ export function compareConversionPrimitive(expected: ConversionPrimitiveSamples,
   const inverseSource = inverseAffine4(expected.world), expectedSign = Math.sign(determinant(expected.world)), actualSign = Math.sign(determinant(actual.world));
   if (expectedSign !== actualSign) refused('Conversion changed world-transform handedness.');
   const vector = (row: readonly number[]) => row.slice(0, 3) as unknown as SpatialVector3;
-  for (let index = 0; index < ids.length; index++) {
+  for (const index of usedTarget) {
     const id = ids[index]!, a = source.POSITION![id]!, b = target.POSITION[index]!;
     const sourceWorld = transformPoint3(expected.world, vector(a)), actualWorld = transformPoint3(actual.world, vector(b));
     compareConversionPosition(a, b);

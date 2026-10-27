@@ -6,7 +6,7 @@ import { parseConvertedGlbRequest, parseConvertedGlbSourceMap, parseConvertedGlb
   type ConvertedGlbRequest, type ConvertedGlbSourceMap, type ConvertedGlbAudit, GLB_CONVERSION_LIMITS } from './converted-glb.js';
 import { AssetError } from './types.js';
 import { prepareGlbConversionSource } from './glb-conversion-source.js';
-import { CONVERSION_NODE_KEY, CONVERSION_VERTEX_ID, compareConversionTransforms, compareConversionPrimitive } from './conversion-fidelity-policy.js';
+import { CONVERSION_NODE_KEY, CONVERSION_VERTEX_ID, checkConversionMatrix, compareConversionTransforms, compareConversionPrimitive } from './conversion-fidelity-policy.js';
 import { decodeMaterialPng } from './material-png.js';
 
 type Doc = Record<string, any>;
@@ -74,13 +74,15 @@ function worldMatrices(doc: Doc): Map<number, number[]> {
   return world;
 }
 function verifyHierarchy(doc: Doc, map: ConvertedGlbSourceMap): void {
-  if (doc.nodes.length !== map.nodes.length || worldMatrices(doc).size !== map.nodes.length) refused('Conversion lost or introduced a selected hierarchy node.');
+  const actualWorlds = worldMatrices(doc);
+  if (doc.nodes.length !== map.nodes.length || actualWorlds.size !== map.nodes.length) refused('Conversion lost or introduced a selected hierarchy node.');
   const expected = new Map(map.nodes.map(node => [node.nodeKey, node])), parents = new Map<number, number>(), found = new Set<string>();
   doc.nodes.forEach((node: Doc, index: number) => { for (const child of node.children ?? []) parents.set(child, index); });
   doc.nodes.forEach((node: Doc, index: number) => {
     const key = node.extras?.[CONVERSION_NODE_KEY], binding = expected.get(key);
     if (typeof key !== 'string' || !binding || found.has(key)) refused('Conversion lost unique host-owned hierarchy correspondence.');
     found.add(key);
+    checkConversionMatrix(actualWorlds.get(index)!);
     const parent = parents.has(index) ? doc.nodes[parents.get(index)!].extras?.[CONVERSION_NODE_KEY] : null;
     if (parent !== binding.parentKey || (node.mesh !== undefined) !== map.parts.some(part => part.sourceKey === key)) refused('Conversion changed a selected parent or mesh-node relationship.');
     compareConversionTransforms(binding.localMatrix, node.matrix ?? matrixFromTrs(node.translation, node.rotation, node.scale));
