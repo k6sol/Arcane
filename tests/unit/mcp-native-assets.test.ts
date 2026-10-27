@@ -443,7 +443,7 @@ test('conversion missing scalars, bounds and authority fields refuse before any 
   for(const input of invalid){
     assert.equal(nativeConvertGlbInput.safeParse(input).success,false);
     assert.equal((await call(f.client,'assets_convert_glb',input)).isError,true);
-    await assert.rejects(f.daemon.assetsConvertGlb(input as Parameters<DaemonClient['assetsConvertGlb']>[0]),{code:'ASSET_CONVERT_INPUT'});
+    await assert.rejects(f.daemon.assetsConvertGlb(input as unknown as Parameters<DaemonClient['assetsConvertGlb']>[0]),{code:'ASSET_CONVERT_INPUT'});
   }
   assert.equal(f.requests.length,0);
 });
@@ -487,6 +487,7 @@ for(const failure of ['dropped','malformed','schema','overflow','500','redirect'
 test('SDK conversion transport timeout stays unknown without a public wait field or automatic GET/retry',async t=>{
   const f=await fixture(t,(url,_response,_request,body)=>{assert.equal(url.pathname,'/v1/assets/native/convert-glb');assert.deepEqual(body,CONVERSION);});
   const result=await f.daemon.assetsConvertGlb(CONVERSION,{timeoutMs:150});assert.ok('state'in result);
+  assert.ok('jobId'in result&&'retry'in result,'A transport timeout must preserve the ambiguous job envelope');
   assert.equal(result.state,'unknown');assert.equal(result.jobId,null);assert.equal(result.terminal,false);assert.equal(result.ambiguous,true);assert.equal(result.retry,false);assert.equal(result.wait,'timeout');
   assert.match(result.nextStep,/assets_jobs.*same native project and conversation scope/);
   assert.equal(f.requests.length,1);assert.equal(f.requests[0]?.method,'POST');onlyNative(f.requests);
