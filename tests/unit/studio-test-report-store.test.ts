@@ -68,8 +68,8 @@ test('metadata history retains the 65th job and pages by exact project and retai
   const store=await openStudioTestReportStore({directory:await directory(t),projectId:PROJECT,exclusiveWriter:()=>true});t.after(()=>store.close());
   for(let n=1;n<=65;n++)assert.deepEqual(store.recordAdmission(snapshot(n),[id(n)]),{stored:true});
   assert.equal(store.get(id(1),guard)?.jobId,id(1));const page=store.list({cursor:null},guard);assert.equal(page.reports.length,8);assert.equal(page.reports[0]?.jobId,id(65));assert.equal(page.omittedReports,0);
-  assert.ok(page.nextCursor);assert.equal(store.list({cursor:page.nextCursor},guard).reports[0]?.jobId,id(57));
-  assert.throws(()=>store.list({cursor:page.nextCursor.replace(PROJECT,OTHER)},guard),{code:'CURSOR_INVALID'});
+  const cursor=page.nextCursor;assert.ok(cursor);assert.equal(store.list({cursor},guard).reports[0]?.jobId,id(57));
+  assert.throws(()=>store.list({cursor:cursor.replace(PROJECT,OTHER)},guard),{code:'CURSOR_INVALID'});
   assert.throws(()=>parseStudioTestReportCursor(`1.${PROJECT}.9007199254740992`,PROJECT),{code:'CURSOR_INVALID'});
   assert.throws(()=>store.list({cursor:null,projectId:OTHER},guard),{code:'CURSOR_INVALID'});
   let checks=0;assert.throws(()=>store.get(id(1),()=>{if(++checks===2)throw new Error('original epoch retired');}),/original epoch retired/);assert.equal(checks,2);assert.deepEqual(store.status(),{state:'ready',code:null});

@@ -354,7 +354,7 @@ function timestamp(value:unknown):string {const result=text(value,64);if(!/^\d{4
 function archiveStatus(value:unknown):StudioTestReportArchiveStatus {
   const row=object(value);keys(row,['state','code']);
   if(row.state==='ready'&&row.code===null)return{state:'ready',code:null};
-  return{state:choice(row.state,['degraded','unavailable']),code:choice(row.code,['ARCHIVE_UNAVAILABLE','ARCHIVE_WRITE','ARCHIVE_CORRUPT','ARCHIVE_LIMIT','ARCHIVE_INPUT','ARCHIVE_CONFLICT'])};
+  return{state:choice(row.state,['degraded','unavailable']),code:choice(row.code,['ARCHIVE_UNAVAILABLE','ARCHIVE_WRITE','ARCHIVE_CORRUPT','ARCHIVE_LIMIT','ARCHIVE_INPUT','ARCHIVE_CONFLICT'] as const)};
 }
 function reportSummary(value:unknown):StudioTestReportSummary {
   const row=object(value);keys(row,['jobId','taskId','createdAt','observedAt','snapshot','targetName','observedState','outcome','code','cleanup','evidence','nativeAcceptance','historicalDigest']);

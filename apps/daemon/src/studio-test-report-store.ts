@@ -44,7 +44,7 @@ export interface StudioTestReportStore extends StudioTestReportWriter {
 export class StudioTestReportError extends Error {
   constructor(readonly code:StudioTestReportArchiveCode|'CURSOR_INVALID'){super(code);this.name='StudioTestReportError';}
 }
-const fail=(code:StudioTestReportArchiveCode|'CURSOR_INVALID'):never=>{throw new StudioTestReportError(code);};
+function fail(code:StudioTestReportArchiveCode|'CURSOR_INVALID'):never{throw new StudioTestReportError(code);}
 const hash=z.string().regex(/^[a-f0-9]{64}(?![\s\S])/), uuid=z.string().regex(/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}(?![\s\S])/);
 const time=z.string().datetime(), integer=z.number().int().nonnegative().safe();
 const displaySchema=z.strictObject({proposal:proposalSchema,cleanupGraceMs:z.number().int().min(1).max(15000),requestTimeoutMs:z.number().int().min(1).max(15000),
@@ -193,7 +193,7 @@ class ReportStore implements StudioTestReportStore {
   #check():void{if(this.#closed)fail('ARCHIVE_UNAVAILABLE');filesCheck(this.#directory);const stat=lstatSync(join(this.#directory,'reports.sqlite'));
     if(stat.dev!==this.#identity.dev||stat.ino!==this.#identity.ino)fail('ARCHIVE_CORRUPT');validateDatabase(this.#db,this.projectId,false);}
   #read<T>(guard:()=>void,read:()=>T):T{guard();let result:T;try{this.#check();validateDatabase(this.#db,this.projectId);result=read();}catch(e){if(e instanceof StudioTestReportError&&e.code==='CURSOR_INVALID')throw e;
-      const code=e instanceof StudioTestReportError?e.code:'ARCHIVE_CORRUPT';this.noteFailure(code);throw new StudioTestReportError(code);}
+      const code=e instanceof StudioTestReportError&&e.code!=='CURSOR_INVALID'?e.code:'ARCHIVE_CORRUPT';this.noteFailure(code);throw new StudioTestReportError(code);}
     guard();return result;}
   #write(snapshot:unknown,kind:'admission'|'terminal',protectedJobIds:readonly string[]):StudioTestReportArchiveResult {
     let transaction=false;
