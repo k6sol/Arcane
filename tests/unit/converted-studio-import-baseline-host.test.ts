@@ -161,10 +161,10 @@ async function baselineFixture(t:test.TestContext,collision=false){
   const controller=createStudioImportStagingController({projectPath,workAssociations:work,studio,assets,host:host.hooks,pluginArtifactHash:PLUGIN});
   const delivered:StudioCommand[]=[],failures:unknown[]=[],counts=new Map<string,{count:number;bytes:number}>();let onObserve:(()=>boolean)|null=null,onApply:(()=>boolean)|null=null;
   const modelRef={instanceId:fixedRef('observed-model'),sessionId:pair.sessionId,root:'Workspace' as const,pathSegments:['Converted model'],className:'Model'};
-  function observedState(job:string){
+  function observedState(job:string,authoredChildren=true){
     const graph=bundles.get(job)!.prepared.manifest.graph;
     const nodes=graph.nodes.map(node=>({nodeKey:node.nodeKey,instanceRef:fixedRef(node.nodeKey),ownedStateSha256:sha('state-'+stateVersion+'-'+node.nodeKey),
-      authoredChildren:node.nodeKey===graph.nodes[0]!.nodeKey?[{instanceRef:fixedRef('actual-preserved-script'),kind:'script' as const,stateSha256:sha('unchanged-script')}]:[]}));
+      authoredChildren:authoredChildren&&node.nodeKey===graph.nodes[0]!.nodeKey?[{instanceRef:fixedRef('actual-preserved-script'),kind:'script' as const,stateSha256:sha('unchanged-script')}]:[]}));
     const objects=graph.meshes.map(mesh=>{const node=nodes.find(node=>node.nodeKey===mesh.nodeKey);return{sourceObjectId:mesh.sourceObjectId,instanceRef:node?.instanceRef??fixedRef(mesh.sourceObjectId),
       ownedStateSha256:node?.ownedStateSha256??sha('state-'+stateVersion+'-'+mesh.sourceObjectId),authoredChildren:node?.authoredChildren??[],meshAssetId:meshId};});
     return{modelOwnedStateSha256:sha('actual-root-'+stateVersion),nodes,objects};
@@ -180,7 +180,8 @@ async function baselineFixture(t:test.TestContext,collision=false){
       const args=command.args as unknown as StudioAssetReconstructArgs;assert.ok('formatVersion'in args&&args.formatVersion===2);
       result={runId:args.runId,transferDigest:args.expected.digest,state:'reconstructed',objects:args.objects,imported:false,engineVerification:'pending',formatVersion:2,graphDigest:args.graphDigest,nodeCount:args.nodeCount,nodes:args.nodes};
     }else if(command.method==='scene.place_asset'){
-      const state=observedState(JOB);result={ref:modelRef,mutation:{kind:'scene.place_asset',ref:modelRef,before:null,after:{descendants:state.nodes.length+1,removedScripts:0,keptScripts:1,scale:1}},converted:{formatVersion:2,receiptScope:'studio-session-observation',imported:false,engineVerification:'pending',graphDigest:bundles.get(JOB)!.prepared.manifest.graph.digest,
+      // Initial adoption is script-free; later fresh reads observe a human-authored child.
+      const state=observedState(JOB,false);result={ref:modelRef,mutation:{kind:'scene.place_asset',ref:modelRef,before:null,after:{descendants:state.nodes.length+1,removedScripts:0,keptScripts:0,scale:1}},converted:{formatVersion:2,receiptScope:'studio-session-observation',imported:false,engineVerification:'pending',graphDigest:bundles.get(JOB)!.prepared.manifest.graph.digest,
         conversionRequestDigest:sha(json(bundles.get(JOB)!.prepared.manifest.conversionRequest)),nodes:state.nodes,objects:state.objects}};
     }else if(command.method==='scene.observe_import'){
       if(onObserve&&!onObserve())continue;const args=command.args,source=object(args.source);
@@ -196,7 +197,7 @@ async function baselineFixture(t:test.TestContext,collision=false){
   function nextActor(){incarnation.ended(operation);operation='operation-'+(++counter);incarnation.dispatched({...binding,operationId:operation});actor=registry.capture(incarnation.credential(),'mutate');return actor;}
   async function initial(){await controller.stage(JOB,actor);await controller.reconstruct(JOB,nextActor());
     const command=studio.enqueue({sessionId:pair.sessionId,requestId:'observed_initial_place',method:'scene.place_asset',args:{watch:'editable-'+bundles.get(JOB)!.transfer.digest,parent:context().parentRef,name:'Converted model',position:[0,0,0],yaw:0,ground:true,anchor:true,allowScripts:false}});
-    while(studio.command(command.id).state!=='succeeded'){t.signal.throwIfAborted();await studio.waitForCommandResult(command.id,25);}
+    while(studio.command(command.id).state!=='succeeded'){t.signal.throwIfAborted();if(failures.length)throw failures[0];await studio.waitForCommandResult(command.id,25);}
   }
   return{root,projectPath,work,registry,incarnation,studio,host,ledger,controller,pair,proof,conversation,delivered,bundles,modelRef,context,initial,nextActor,get actor(){return actor;},
     get scope(){return nativeAssetActorScope(actor);},get operation(){return operation;},observe:(callback:(()=>boolean)|null)=>{onObserve=callback;},apply:(callback:(()=>boolean)|null)=>{onApply=callback;},
