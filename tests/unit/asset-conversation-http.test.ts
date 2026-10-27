@@ -489,7 +489,9 @@ test('full recipe history respects the UTF-8 byte cap and resumes at the last in
     const result = page(await f.call<JobsReply>(JOBS + '?limit=64' + (after === null ? '' : '&after=' + encodeURIComponent(after))), f.store.projectId, f.projectPath);
     pages++; assert.ok(result.jobs.length > 0 && result.jobs.length < 5);
     for (const job of result.jobs) {
-      assert.deepEqual(job, actual.get(job.jobId)); assert.ok(job.request.recipe); assert.equal(job.events.length, 2);
+      assert.deepEqual(job, actual.get(job.jobId));
+      assert.ok(job.kind !== 'converted-glb', 'This pagination fixture contains generated custom assemblies.');
+      assert.ok(job.request.recipe); assert.equal(job.events.length, 2);
       seen.push(job.jobId);
     }
     const expected = f.store.list(NATIVE, 'asset-job', { limit: result.jobs.length, ...(after === null ? {} : { after }) });
