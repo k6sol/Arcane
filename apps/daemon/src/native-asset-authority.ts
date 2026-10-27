@@ -314,7 +314,9 @@ export function createNativeAssetRegistry(options: {projectPath: string}): Nativ
           entry.active=null;entry.automaticIntent=null;entry.nextIntent=false;bump(entry);
         },
         cancelWork(scope:'active-operation'|'incarnation') {
-          open();if (scope !== 'active-operation' && scope !== 'incarnation') fail();if(cell.released)return;const entry=allocated(cell);
+          // Registry close fences admission but never aborts accepted work; Stop
+          // must stay effective afterwards, and it only fences and aborts.
+          if (scope !== 'active-operation' && scope !== 'incarnation') fail();if(cell.released)return;const entry=allocated(cell);
           const controllers = scope === 'incarnation' ? [...entry.work.values()] : entry.active === null ? [] : [entry.work.get(entry.active)!];
           // Fence admission before notifying any accepted worker. Completed
           // workers removed their listeners; other incarnations are untouched.

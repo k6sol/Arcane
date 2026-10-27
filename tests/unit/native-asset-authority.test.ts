@@ -193,6 +193,13 @@ test('shutdown retires every admitted actor synchronously and is idempotent',t=>
 });
 
 
+test('incarnation cancellation still aborts accepted work after registry shutdown',t=>{
+  const f=fixture(t);f.ready();const actor=f.registry.capture(f.token,'mutate'),signal=nativeAssetOperationSignal(actor);
+  f.registry.close();assert.throws(()=>assertNativeAssetActor(actor,'mutate'),refused);
+  assert.doesNotThrow(()=>f.incarnation.cancelWork('incarnation'));assert.equal(signal.aborted,true);
+  assert.doesNotThrow(()=>f.incarnation.cancelWork('active-operation'));assert.throws(()=>f.registry.issue(),refused);
+});
+
 test('close fences all entries when the first epoch is saturated',t=>{
  const f=fixture(t);f.incarnation.seal(f.seal);
  for(let i=1;i<65535;i++) f.incarnation.revokeGrant();

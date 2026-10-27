@@ -325,7 +325,7 @@ test('shutdown fences and closes every navigation-retained native owner despite 
 
 test('registry retirement before daemon close cannot strand an owned native task process',async t=>{
  const f=await fixture(t);await f.ready();await f.send();const origin=f.taskOrigin(),report=packet();f.prepare(origin,report);
- f.registry.close();await f.expectCloseFailure(/Native asset authority is unavailable or changed/);assert.equal(f.clients[0]!.snapshot().connected,false);assert.deepEqual(f.cancelled.map(value=>value.jobId),[report.jobId]);
+ f.registry.close();await f.service.close();assert.equal(f.clients[0]!.snapshot().connected,false);assert.deepEqual(f.cancelled.map(value=>value.jobId),[report.jobId]);
 });
 
 test('a broken action journal still fences and closes all retained owners when every task write fails',async t=>{
