@@ -227,11 +227,15 @@ test('packaged source confines asset APIs to reviewed bindings and excludes arbi
   // Exactly one MeshPart creation: the materialization of this plugin's own retained
   // reconstruction, reached only through guarded scene.place_asset adoption (no upload).
   const meshParts=/:CreateMeshPartAsync\s*\(/g;
-  // A second one only in AssetPlacement.keep: persistent parts from the person's own confirmed upload IDs.
-  assert.deepEqual(files.flatMap(file=>[...file.source.matchAll(meshParts)].map(()=>file.filename)).sort(),['AssetPlacement.luau','Operations.luau']);
+  // Persistent parts from confirmed upload IDs use the generated keep branch or its private converted keep helper.
+  assert.deepEqual(files.flatMap(file=>[...file.source.matchAll(meshParts)].map(()=>file.filename)).sort(),['AssetPlacement.luau','AssetPlacement.luau','Operations.luau']);
   const placement=byFile['AssetPlacement.luau'],kStart=placement.indexOf('function AssetPlacement.keep('),kEnd=placement.indexOf('return table.freeze(AssetPlacement)',kStart);
   assert.ok(kStart>=0&&kEnd>kStart);assert.equal([...placement.slice(kStart,kEnd).matchAll(meshParts)].length,1);
-  assert.doesNotMatch(placement.slice(0,kStart),/:CreateMeshPartAsync\s*\(|:CreateAssetAsync\s*\(/);
+  const convertedStart=placement.indexOf('local function keepConverted(');
+  assert.ok(convertedStart>=0&&convertedStart<kStart);
+  assert.equal([...placement.slice(convertedStart,kStart).matchAll(meshParts)].length,1,'Only the private converted keep swap adds a second placement call.');
+  assert.match(placement.slice(kStart,kEnd),/keepConverted\(ops,convertedState,owner,entries,guard,engine,attemptId\)/);
+  assert.doesNotMatch(placement.slice(0,convertedStart),/:CreateMeshPartAsync\s*\(|:CreateAssetAsync\s*\(/);
   // Uploads: AssetUpload calls the engine method by reference; the only direct call is AssetPlacement.keep's
   // pass-through recorder, which AssetPlacement.keep hands to that uploader.
   assert.deepEqual(files.flatMap(file=>[...file.source.matchAll(/:CreateAssetAsync\s*\(/g)].map(()=>file.filename)),['AssetPlacement.luau']);

@@ -11,7 +11,7 @@ const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '.
 const STUDIO_PAIRING_CAPABILITY_LIMIT = Number(/STUDIO_PAIRING_CAPABILITY_LIMIT = (\d+)/.exec(await readFile(path.join(repository, 'packages/protocol/src/studio.ts'), 'utf8'))[1]);
 const runtime = process.env.ARCANE_LUAU_BIN;
 const compile = process.env.ARCANE_LUAU_COMPILE ?? (runtime ? path.join(path.dirname(runtime), process.platform === 'win32' ? 'luau-compile.exe' : 'luau-compile') : undefined);
-const modules = ['Validation', 'Registry', 'Properties', 'AssetMaterials','Operations'];
+const modules = ['Sha256Stream', 'Validation', 'Registry', 'Properties', 'AssetMaterials','Operations'];
 
 // Engine doubles owned by this harness. They model the documented value types (Vector2, NumberRange,
 // NumberSequence, ColorSequence), typed enums, Attachment-only Beam/Trail links, Studio refusing a
@@ -116,7 +116,7 @@ async function runLuau(checks, marker) {
   try {
     const sources = await Promise.all([
       readFile(path.join(repository, 'plugin/fixtures/MockEngine.luau'), 'utf8'),
-      ...modules.map(async name => `local ${name} = (function()\n${(await readFile(path.join(repository, `plugin/src/${name}.luau`), 'utf8')).replace(/require\(script\.Parent\.([A-Za-z]+)\)/g, '$1')}\nend)()\n`),
+      ...modules.map(async name => `local ${name} = (function()\n${(await readFile(path.join(repository, `plugin/src/${name}.luau`), 'utf8')).replace(/require\(script\.Parent\.([A-Za-z][A-Za-z0-9_]*)\)/g, '$1')}\nend)()\n`),
     ]);
     sources.splice(1, 0, engineFixture);
     const harness = path.join(directory, 'effects.luau');

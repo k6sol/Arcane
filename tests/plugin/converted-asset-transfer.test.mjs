@@ -165,7 +165,7 @@ local function decode(s) assert(decoded[s],'unknown fixture JSON');return decode
 local function receiver() return AssetTransfer.new(expected,decode,guard,yieldBatch) end
 local function feed(r) for _,p in ipairs(packets) do r:accept(p) end end
 local function rejects(fn,code)
- local ok,e=pcall(fn);assert(not ok and type(e)=='table' and e.code==code,'expected '..code..': '..tostring(e))
+ local ok,e=pcall(fn);assert(not ok and type(e)=='table' and e.code==code,'expected '..code..', got '..tostring(if type(e)=='table' then e.code else e)..': '..tostring(if type(e)=='table' then e.message else ''))
 end
 local function count(t) local n=0;for _ in pairs(t) do n+=1 end;return n end
 `+body;
@@ -238,7 +238,7 @@ const structural=[
 ];
 for(const [name,change,code]of structural)test('converted receiver independently refuses '+name+' before allocation',options,async t=>{
   await run(t,`local r=receiver();local ok,e=pcall(function() feed(r);r:reconstruct(service) end)
-assert(not ok and type(e)=='table' and e.code=='${code}');assert(creates==0)
+assert(not ok and type(e)=='table' and e.code=='${code}','expected ${code}, got '..tostring(if type(e)=='table' then e.code else e)..': '..tostring(if type(e)=='table' then e.message else ''));assert(creates==0)
 `,{change});
 });
 test('converted stream byte corruption fails before any allocation',options,async t=>{

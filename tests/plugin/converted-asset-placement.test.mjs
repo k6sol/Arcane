@@ -196,7 +196,8 @@ async function run(t,body,collision=false){
   if(name==='Operations')source+=`__mods.AssetMaterials={plan=function() return {supported=true} end,create=function() return {surfaceAppearance=Instance.new('SurfaceAppearance'),meshPartProperties={Color=Color3.new(.2,.4,.6),Transparency=0,DoubleSided=true}} end}\n`;
   source+='__mods.'+name+'=(function()\n'+(await readFile(join(resolve('.'),'plugin/src',name+'.luau'),'utf8')).replace(/require\(script\.Parent\.(\w+)\)/g,'__mods.$1')+'\nend)()\n';
  }
- source+='local collision='+collision+'\n'+setup+'\n'+body+'\nprint("CONVERTED_PLACEMENT_OK")\n';
+ source+='local success,reason=pcall(function()\nlocal collision='+collision+'\n'+setup+'\n'+body+'\nprint("CONVERTED_PLACEMENT_OK")\nend)\n';
+ source+="if not success then if type(reason)=='table' then error(tostring(reason.code)..': '..tostring(reason.message),0) else error(reason,0) end end\n";
  const file=join(directory,'placement.luau');await writeFile(file,source);
  const result=spawnSync(runtime,[file],{encoding:'utf8',timeout:120000,windowsHide:true,maxBuffer:4*1024*1024});
  assert.ifError(result.error);assert.equal(result.status,0,result.stdout+'\n'+result.stderr);assert.match(result.stdout,/CONVERTED_PLACEMENT_OK/);

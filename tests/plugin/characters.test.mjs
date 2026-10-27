@@ -9,7 +9,7 @@ import { spawnSync } from 'node:child_process';
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const runtime = process.env.ARCANE_LUAU_BIN;
 const compile = process.env.ARCANE_LUAU_COMPILE ?? (runtime ? path.join(path.dirname(runtime), process.platform === 'win32' ? 'luau-compile.exe' : 'luau-compile') : undefined);
-const modules = ['Validation', 'Registry', 'Properties', 'AssetMaterials','Operations'];
+const modules = ['Sha256Stream', 'Validation', 'Registry', 'Properties', 'AssetMaterials','Operations'];
 
 // Engine doubles owned by this harness: typed Color3, typed enums, Humanoid/AnimationController class checks and the
 // documented clamp of Humanoid.Health to MaxHealth. They do not certify Roblox.
@@ -136,7 +136,7 @@ async function runLuau(source, marker) {
   try {
     const sources = await Promise.all([
       readFile(path.join(repository, 'plugin/fixtures/MockEngine.luau'), 'utf8'),
-      ...modules.map(async name => `local ${name} = (function()\n${(await readFile(path.join(repository, `plugin/src/${name}.luau`), 'utf8')).replace(/require\(script\.Parent\.([A-Za-z]+)\)/g, '$1')}\nend)()\n`),
+      ...modules.map(async name => `local ${name} = (function()\n${(await readFile(path.join(repository, `plugin/src/${name}.luau`), 'utf8')).replace(/require\(script\.Parent\.([A-Za-z][A-Za-z0-9_]*)\)/g, '$1')}\nend)()\n`),
     ]);
     sources.splice(1, 0, engineFixture);
     const harness = path.join(directory, 'characters.luau');
