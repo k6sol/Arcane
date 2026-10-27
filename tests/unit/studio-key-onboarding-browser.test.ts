@@ -48,6 +48,9 @@ for (const storageAvailable of [true, false]) test('key onboarding: trusted rota
     for (const name of await readdir(resolve(build, 'apps/desktop/src'))) {
       if (name.endsWith('.js')) files.set('/' + name, resolve(build, 'apps/desktop/src', name));
     }
+    for (const name of ['failure-diagnostics', 'types', 'probe-diagnostics']) {
+      files.set('/packages/asset-pipeline/src/' + name + '.js', resolve(build, 'packages/asset-pipeline/src', name + '.js'));
+    }
     // The shipped faces (studio.css @font-face, same-origin /fonts) are part of the product page.
     for (const name of await readdir(resolve('apps/desktop/public/fonts'))) if (name.endsWith('.woff2')) files.set('/fonts/' + name, resolve('apps/desktop/public/fonts', name));
     const server = createServer((request, response) => { void (async () => {

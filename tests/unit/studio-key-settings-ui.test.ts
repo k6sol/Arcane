@@ -35,6 +35,9 @@ async function fixture(t: TestContext, native: boolean, legacy = false, fail: Fa
     ['/studio', [resolve('apps/desktop/public/studio.html'), 'text/html']],
     ['/studio.css', [resolve('apps/desktop/public/studio.css'), 'text/css']],
     ['/brand/arcane-ridges.png', [resolve('apps/desktop/public/brand/arcane-ridges.png'), 'image/png']],
+    ['/packages/asset-pipeline/src/failure-diagnostics.js', [resolve(build, 'packages/asset-pipeline/src/failure-diagnostics.js'), 'text/javascript']],
+    ['/packages/asset-pipeline/src/types.js', [resolve(build, 'packages/asset-pipeline/src/types.js'), 'text/javascript']],
+    ['/packages/asset-pipeline/src/probe-diagnostics.js', [resolve(build, 'packages/asset-pipeline/src/probe-diagnostics.js'), 'text/javascript']],
     // The shipped faces (studio.css @font-face, same-origin /fonts) are part of the product page.
     ...(await readdir(resolve('apps/desktop/public/fonts'))).filter(name => name.endsWith('.woff2')).map(name => ['/fonts/' + name, [resolve('apps/desktop/public/fonts', name), 'font/woff2']] as [string, [string, string]]),
   ]);

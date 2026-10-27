@@ -97,6 +97,9 @@ async function sources(emit) {
   const fonts = (await readdir(resolve(root, 'apps/desktop/public/fonts'))).filter(name => name.endsWith('.woff2')).map(name => '/fonts/' + name);
   const paths = ['/studio.css', '/asset-viewer-runtime.mjs', ...vendorPaths, ...fonts];
   const result = new Map(await Promise.all(paths.map(async path => [path, await readFile(resolve(root, 'apps/desktop/public', '.' + path))])));
+  for (const name of ['failure-diagnostics', 'types', 'probe-diagnostics']) {
+    result.set('/packages/asset-pipeline/src/' + name + '.js', await readFile(resolve(emit, 'packages/asset-pipeline/src', name + '.js')));
+  }
   const html = (await readFile(resolve(root, 'apps/desktop/public/studio.html'), 'utf8'))
     .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
     .replace('</head>', '<link rel="stylesheet" href="/viewer-fixture.css"></head>');
