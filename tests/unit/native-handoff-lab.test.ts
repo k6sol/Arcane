@@ -52,7 +52,7 @@ async function fixture(t: TestContext) {
   const tokens: string[] = [], providers: CodexSession[] = [], agents: Client[] = [], servers: { close(): Promise<void> }[] = [];
   const proposalWorker: ChatTaskProposalFactory = async () => ({
     propose: async () => ({ threadId: 'worker.thread', sessionId: null, turnId: 'worker.turn:' + randomUUID(), text: 'Suggestion: keep the change bounded.' }), close: async () => {} });
-  const lab = await createConnectionLab({ cwd: process.cwd(), stateDirectory: join(root, 'lab'), projectPath: project, studioStore: studio, workStore: work, assetService: assets,
+  const lab = await createConnectionLab({ cwd: process.cwd(), stateDirectory: join(root, 'studio', 'lab'), projectPath: project, studioStore: studio, workStore: work, assetService: assets,
     codexProposalWorker: proposalWorker, codexAutomaticTaskPlanning: true,
     codexConnect: async hooks => {
       assert.ok(hooks); tokens.push(hooks.finalCredential());
@@ -76,6 +76,8 @@ async function fixture(t: TestContext) {
     return { status: response.status, body: parsed, text };
   };
   const human = (path: string, body?: unknown) => call(lab.token, path, body);
+  const playtests = await human('/v1/playtests');
+  assert.equal(playtests.status, 200, playtests.text); assert.deepEqual(playtests.body.jobs, [], 'the actual owned verification service is attached before managed planning');
   const projectId = async () => (await human('/v1/native-handoffs')).body.projectId as string;
   const begin = async (requestId = randomUUID()) => human('/v1/native-handoffs/begin', { requestId, projectId: await projectId() });
   const seal = async (handoffId: string) => human('/v1/native-handoffs/seal', { handoffId, projectId: await projectId() });
