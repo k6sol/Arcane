@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID, createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative, sep } from 'node:path';
-import { AssetPipeline, AssetError, type GlbConversionInput } from '../../packages/asset-pipeline/src/index.js';
+import { AssetPipeline, AssetError, parseConvertedGlbJobMetadata, type GlbConversionInput } from '../../packages/asset-pipeline/src/index.js';
 import { snapshotGlbConversionInput, prepareRetainedGlbConversionInput } from '../../packages/asset-pipeline/src/conversion-input.js';
 import type { CommandOptions, CommandResult, CommandSpec } from '../../packages/asset-pipeline/src/process.js';
 import { validateGlb } from '../../apps/desktop/src/glb-preflight.js';
@@ -201,4 +202,125 @@ test('conversion reports empty runtime discovery without starting a child or cla
   assert.match(result.error!.message, /No eligible installed Blender/); assert.equal(f.calls.length, 0); assert.equal(result.manifestPath, null);
   const journal = JSON.parse(await readFile(join(job.directory, 'job.json'), 'utf8')); assert.deepEqual(journal.workers, []);
   assert.deepEqual((await f.pipeline.recover(job.directory)).result.error, result.error);
+});
+
+test('malformed or duplicate captured parent bytes refuse before allocating a conversion or output directory', async t => {
+  const f = await fixture(t);
+  for (const mode of ['duplicate', 'utf8', 'shape', 'hash'] as const) {
+    const value = input();
+    if (mode === 'duplicate') value.parentManifest = Buffer.from(value.parentManifest.toString().replace('"schemaVersion":1', '"schemaVersion":1,"schemaVersion":1'));
+    else if (mode === 'utf8') value.parentManifest = Buffer.from([0xff, 0xfe, 0x7b]);
+    else if (mode === 'shape') value.parentManifest = Buffer.from('{"schemaVersion":1,"jobId":"not-an-adopted-manifest"}');
+    value.parentManifestSha256 = mode === 'hash' ? '0'.repeat(64) : sha(value.parentManifest);
+    assert.throws(() => f.pipeline.startConversion(value), { code: 'ASSET_CONVERSION_INPUT' });
+  }
+  assert.equal(f.calls.length, 0); assert.deepEqual(await readdir(f.root), ['workers']);
+});
+
+test('immutable creation is returned immediately and the durable first journal stays request-null before actual source inspection', async t => {
+  const f = await fixture(t), original = input(), parent = JSON.parse(original.parentManifest.toString());
+  parent.validation.metadata.nodeCount++;
+  original.parentManifest = Buffer.from(JSON.stringify(parent)); original.parentManifestSha256 = sha(original.parentManifest);
+  let pending: Record<string, unknown> | undefined, readError: unknown;
+  const job = f.pipeline.startConversion(original, { onEvent: event => {
+    if (event.stage !== 'input') return;
+    try { pending = JSON.parse(readFileSync(join(f.root, 'assets', 'converted-' + event.jobId, 'job.json'), 'utf8')) as Record<string, unknown>; }
+    catch (error) { readError = error; }
+  } });
+  assert.ok(Object.isFrozen(job) && Object.isFrozen(job.creation));
+  assert.equal(job.creation.jobId, job.id); assert.equal(job.creation.parentJobId, parent.jobId);
+  assert.equal(job.creation.parentManifestSha256, sha(original.parentManifest)); assert.equal(f.calls.length, 0);
+  original.parentManifest.fill(0); original.sourceGlb.fill(0);
+  const result = await job.completion;
+  assert.equal(readError, undefined); assert.ok(pending);
+  assert.equal(pending.request, null); assert.deepEqual(pending.creation, job.creation); assert.deepEqual(pending.workers, []);
+  assert.equal(result.state, 'failed'); assert.equal(result.error?.code, 'ASSET_CONVERSION_INPUT'); assert.equal(f.calls.length, 0);
+  const terminal = JSON.parse(await readFile(join(job.directory, 'job.json'), 'utf8')) as Record<string, unknown>;
+  assert.equal(terminal.request, null); assert.deepEqual(terminal.creation, job.creation);
+  assert.equal(parseConvertedGlbJobMetadata(terminal).form, 'new-pending');
+  assert.equal((await f.pipeline.recover(job.directory)).result.state, 'failed');
+});
+
+test('cancellation at the saved null-request boundary preserves creation and never grants worker closure', async t => {
+  const f = await fixture(t); let pending: Record<string, unknown> | undefined, readError: unknown;
+  const controller = new AbortController();
+  const job = f.pipeline.startConversion(input(), { signal: controller.signal, onEvent: event => {
+    if (event.stage !== 'input') return;
+    try { pending = JSON.parse(readFileSync(join(f.root, 'assets', 'converted-' + event.jobId, 'job.json'), 'utf8')) as Record<string, unknown>; }
+    catch (error) { readError = error; }
+    controller.abort();
+  } });
+  const result = await job.completion;
+  assert.equal(readError, undefined); assert.ok(pending); assert.equal(pending.request, null);
+  assert.deepEqual(pending.creation, job.creation); assert.deepEqual(pending.workers, []);
+  assert.equal(result.state, 'cancelled'); assert.equal(result.error?.code, 'CANCELLED'); assert.equal(f.calls.length, 0);
+  const raw = await readFile(join(job.directory, 'job.json')), saved = JSON.parse(raw.toString());
+  assert.equal(saved.request, null); assert.deepEqual(saved.creation, job.creation); assert.deepEqual(saved.workers, []);
+  assert.equal('ownedProcessClosed' in saved, false);
+  assert.equal((await f.pipeline.recover(job.directory)).result.state, 'cancelled');
+  assert.deepEqual(await readFile(join(job.directory, 'job.json')), raw);
+});
+
+test('prepared request, actual worker-journal rewrites and terminal failure keep one creation identity', async t => {
+  const f = await fixture(t), observed: Record<string, unknown>[] = []; let readError: unknown;
+  const job = f.pipeline.startConversion(input(), { onEvent: event => {
+    if (!['input', 'probe', 'source-import'].includes(event.stage)) return;
+    try { observed.push(JSON.parse(readFileSync(join(f.root, 'assets', 'converted-' + event.jobId, 'job.json'), 'utf8')) as Record<string, unknown>); }
+    catch (error) { readError = error; }
+  } });
+  const result = await job.completion, terminal = JSON.parse(await readFile(join(job.directory, 'job.json'), 'utf8')) as Record<string, unknown>;
+  assert.equal(readError, undefined); assert.equal(result.state, 'failed'); assert.equal(f.calls.length, 2);
+  assert.ok(observed.length >= 3); assert.equal(observed[0]!.request, null);
+  for (const row of [...observed, terminal]) assert.deepEqual(row.creation, job.creation);
+  for (const row of [...observed.slice(1), terminal]) assert.equal(parseConvertedGlbJobMetadata(row).form, 'new-prepared');
+  assert.ok((terminal.workers as { state: string }[]).every(worker => worker.state === 'closed'));
+  assert.equal((await f.pipeline.recover(job.directory)).result.state, 'failed');
+});
+
+test('a returned creation descriptor does not claim the first journal was published when output preparation fails', async t => {
+  const f = await fixture(t); await writeFile(join(f.root, 'assets'), 'ordinary file blocks the output directory');
+  const job = f.pipeline.startConversion(input()), result = await job.completion;
+  assert.equal(job.creation.jobId, job.id); assert.ok(Object.isFrozen(job.creation));
+  assert.equal(result.state, 'failed'); assert.equal(result.error?.code, 'OUTPUT_PATH'); assert.equal(f.calls.length, 0);
+  await assert.rejects(readFile(join(job.directory, 'job.json')), (error: unknown) => error instanceof Error &&
+    ['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? ''));
+});
+
+test('recovery preserves new pending and legacy null/prepared metadata without backfill or invented closure', async t => {
+  const f = await fixture(t), job = f.pipeline.startConversion(input()); await job.completion;
+  const path = join(job.directory, 'job.json'), original = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
+  const calls = f.calls.length;
+  for (const legacy of [false, true]) {
+    for (const prepared of [false, true]) {
+      const row: Record<string, unknown> = { ...original, request: prepared ? original.request : null, state: 'failed' };
+      if (legacy) delete row.creation;
+      const raw = Buffer.from(JSON.stringify(row)); await writeFile(path, raw);
+      assert.equal((await f.pipeline.recover(job.directory)).result.state, 'failed');
+      assert.deepEqual(await readFile(path), raw);
+      const metadata = parseConvertedGlbJobMetadata(row);
+      assert.equal(metadata.form, (legacy ? 'legacy-' : 'new-') + (prepared ? 'prepared' : 'pending'));
+    }
+  }
+  const reserved = [{ schemaVersion: 1, role: 'generate', state: 'reserved', reservationId: '44444444-4444-4444-8444-444444444444', reservedAt: '2026-10-27T00:00:00.000Z' }];
+  const row: Record<string, unknown> = { ...original, request: null, state: 'running', workers: reserved }; delete row.creation;
+  await writeFile(path, JSON.stringify(row));
+  assert.equal((await f.pipeline.recover(job.directory)).result.state, 'interrupted');
+  const saved = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
+  assert.equal(Object.hasOwn(saved, 'creation'), false); assert.equal(saved.request, null); assert.deepEqual(saved.workers, reserved);
+  assert.equal('ownedProcessClosed' in saved, false); assert.equal(f.calls.length, calls);
+});
+
+test('malformed present creation, request disagreement and succeeded/null evidence fail recovery without rewriting files', async t => {
+  const f = await fixture(t), job = f.pipeline.startConversion(input()); await job.completion;
+  const path = join(job.directory, 'job.json'), original = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
+  const created = job.creation;
+  for (const change of [{ creation: null }, { creation: { ...created, schemaVersion: 2 } },
+    { creation: { ...created, name: 'other-name' } }, { state: 'succeeded', request: null }, { kind: 'generated' }]) {
+    const raw = Buffer.from(JSON.stringify({ ...original, ...change })); await writeFile(path, raw);
+    await assert.rejects(f.pipeline.recover(job.directory), { code: 'ASSET_CONVERSION_CREATION' });
+    assert.deepEqual(await readFile(path), raw);
+  }
+  const raw = Buffer.from(JSON.stringify(original).replace('"creation":', '"creation":null,"creation":'));
+  await writeFile(path, raw); await assert.rejects(f.pipeline.recover(job.directory), AssetError);
+  assert.deepEqual(await readFile(path), raw); assert.equal(f.calls.length, 2);
 });

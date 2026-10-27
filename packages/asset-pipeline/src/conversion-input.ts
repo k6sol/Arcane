@@ -55,8 +55,10 @@ export function snapshotGlbConversionInput(input: unknown) {
   const name = assetName(data.name), collision = data.collision, resolution = data.renderResolution, samples = data.renderSamples;
   if (name.trim() !== name || (collision !== 'none' && collision !== 'convex-hull') || typeof resolution !== 'number' || !Number.isInteger(resolution) || resolution < 128 || resolution > 1024 ||
       typeof samples !== 'number' || !Number.isInteger(samples) || samples < 1 || samples > 64) fail();
-  return { sourceGlb, parentManifest, parentManifestSha256: data.parentManifestSha256,
-    name, collision, renderResolution: resolution, renderSamples: samples };
+  let parentJobId: string;
+  try { parentJobId = parseAdoptedGlbManifest(parseConvertedGlbJson(parentManifest)).jobId; } catch { fail(); }
+  return Object.freeze({ sourceGlb, parentManifest, parentManifestSha256: data.parentManifestSha256, parentJobId,
+    name, collision, renderResolution: resolution, renderSamples: samples });
 }
 
 /** Actual source inspection belongs to the asynchronous job, after its handle is
@@ -65,7 +67,7 @@ export function prepareRetainedGlbConversionInput(input: ReturnType<typeof snaps
   const { sourceGlb, parentManifest, collision } = input;
   if (sha256(parentManifest) !== input.parentManifestSha256) fail();
   const parent = parseAdoptedGlbManifest(parseConvertedGlbJson(parentManifest));
-  if (parent.provenance.sourceSha256 !== sha256(sourceGlb) || parent.provenance.sourceBytes !== sourceGlb.length) fail();
+  if (parent.jobId !== input.parentJobId || parent.provenance.sourceSha256 !== sha256(sourceGlb) || parent.provenance.sourceBytes !== sourceGlb.length) fail();
   let metadata: ReturnType<typeof validateGlb>;
   try { metadata = validateGlb(Uint8Array.from(sourceGlb).buffer); } catch { fail(); }
   if (!isDeepStrictEqual(metadata, parent.validation.metadata)) fail();

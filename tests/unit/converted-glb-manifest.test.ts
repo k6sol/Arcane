@@ -213,7 +213,7 @@ test('conversion Python-style audit negative zero survives repeated retained val
   assert.deepEqual(await pipeline.validateConversion(manifestPath), manifest);
   // A synthetic succeeded journal exercises only the retained recovery reader;
   // absent legacy worker evidence stays absent and grants no closure authority.
-  const journal = json({ schemaVersion: 1, kind: 'converted-glb', jobId: JOB, state: 'succeeded', error: null });
+  const journal = json({ schemaVersion: 1, kind: 'converted-glb', jobId: JOB, state: 'succeeded', error: null, request: manifest.request });
   await writeFile(join(f.directory, 'job.json'), journal);
   const recovered = await pipeline.recover(f.directory);
   assert.equal(recovered.result.state, 'succeeded'); assert.equal(recovered.result.jobId, JOB);
@@ -224,6 +224,15 @@ test('conversion Python-style audit negative zero survives repeated retained val
   assert.deepEqual(await readFile(join(f.directory, 'source.glb')), source);
   assert.equal(manifest.artifacts.find(artifact => artifact.path === 'conversion-audit.json')!.sha256, sha(auditRaw));
   assert.equal('ownedProcessClosed' in manifest, false); assert.equal('approved' in manifest, false);
+  const changedJournal = json({ ...JSON.parse(journal.toString('utf8')), request: { ...manifest.request, sourceSha256: '0'.repeat(64) } });
+  const jobPath = join(f.directory, 'job.json'); await writeFile(jobPath, changedJournal);
+  await assert.rejects(pipeline.recover(f.directory), { code: 'RECOVERY' });
+  assert.deepEqual(await readFile(jobPath), changedJournal);
+  assert.deepEqual(await readFile(join(f.directory, 'source.glb')), source); assert.equal(nativeCalls, 0);
+  // Explicit fixture restoration is not a pipeline repair or native replay.
+  await writeFile(jobPath, journal);
+  assert.equal((await pipeline.recover(f.directory)).result.state, 'succeeded');
+  assert.deepEqual(await readFile(jobPath), journal); assert.equal(nativeCalls, 0);
 });
 test('conversion manifest refuses proxies/getters/unknown fields and escaped byte amplification without invoking code', async t => {
   const f = await fixture(t); let invoked = 0;

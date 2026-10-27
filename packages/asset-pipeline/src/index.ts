@@ -21,8 +21,11 @@ import type { AssetFailureDiagnostic, Artifact, AssetInput, AssetJob, AssetJobEv
 import { snapshotGlbConversionInput, prepareRetainedGlbConversionInput, type GlbConversionInput } from './conversion-input.js';
 import { GLB_CONVERSION_LIMITS, GLB_CONVERSION_WORKERS, parseConvertedGlbRequest, parseConvertedGlbSourceMap, parseConvertedGlbAudit, type ConvertedGlbRequest } from './converted-glb.js';
 import { CONVERTED_GLB_ARTIFACT_LIMITS, parseConvertedGlbJson, validateConvertedGlbManifestFiles, type ConvertedGlbManifest } from './converted-glb-manifest.js';
+import { makeConvertedGlbCreation, parseConvertedGlbJobMetadata, type ConvertedGlbCreation, type ConvertedGlbJob } from './converted-glb-creation.js';
 export type { GlbConversionInput } from './conversion-input.js';
 export type { ConvertedGlbManifest } from './converted-glb-manifest.js';
+export { parseConvertedGlbCreation, makeConvertedGlbCreation, parseConvertedGlbJobMetadata } from './converted-glb-creation.js';
+export type { ConvertedGlbCreation, ConvertedGlbJob, ConvertedGlbJobMetadata } from './converted-glb-creation.js';
 export * from './types.js';
 export { discoverExecutables } from './discovery.js';
 export { normalizeRecipe, preflightRecipe, RECIPE_LIMITS, CUSTOM_REQUEST_BYTES } from './recipe.js';
@@ -336,9 +339,12 @@ export class AssetPipeline {
   }
   /** Start a distinct supervised conversion of a retained adopted source. The
    * parent remains preview-only; this handle grants no review/import authority. */
-  startConversion(input: GlbConversionInput, options: JobOptions = {}): AssetJob {
+  startConversion(input: GlbConversionInput, options: JobOptions = {}): ConvertedGlbJob {
     const captured = snapshotGlbConversionInput(input), end = deadline(options, 180000);
-    const id = randomUUID(), directory = join(this.outputRoot, captured.name + '-' + id), controller = new AbortController();
+    const id = randomUUID(), creation = makeConvertedGlbCreation(id, { parentJobId: captured.parentJobId,
+      parentManifestSha256: captured.parentManifestSha256, name: captured.name, collision: captured.collision,
+      renderResolution: captured.renderResolution, renderSamples: captured.renderSamples });
+    const directory = join(this.outputRoot, captured.name + '-' + id), controller = new AbortController();
     const operation = claim(false, () => activeDirectories.delete(directoryKey(directory)));
     const abort = () => controller.abort(); options.signal?.addEventListener('abort', abort, { once: true });
     if (options.signal?.aborted) controller.abort();
@@ -346,18 +352,20 @@ export class AssetPipeline {
       try { options.onEvent?.({ jobId: id, at: new Date().toISOString(), stage, state }); } catch { /* observer only */ }
     };
     activeDirectories.add(directoryKey(directory));
-    const completion = this.convert(id, directory, captured, end, controller.signal, emit, operation).finally(() => {
+    const completion = this.convert(id, directory, captured, creation, end, controller.signal, emit, operation).finally(() => {
       options.signal?.removeEventListener('abort', abort); operation.finish();
     });
-    return { id, directory, completion, cancel: abort };
+    return Object.freeze({ id, directory, creation, completion, cancel: abort });
   }
-  private async convert(id: string, directory: string, captured: ReturnType<typeof snapshotGlbConversionInput>, end: number,
+  private async convert(id: string, directory: string, captured: ReturnType<typeof snapshotGlbConversionInput>, creation: ConvertedGlbCreation, end: number,
     signal: AbortSignal, emit: (stage: string, state?: AssetJobEvent['state']) => void, operation: OperationClaim): Promise<AssetJobResult> {
     let created = false, stage = 'prepare-output', workerOutput: CommandResult | undefined;
     let request: ConvertedGlbRequest | null = null;
     const progress = (next: string) => { stage = failureStage(next); emit(stage); };
     const startedAt = new Date().toISOString(), base = { jobId: id, directory, manifestPath: null, error: null };
-    const journal = () => ({ schemaVersion: 1, kind: 'converted-glb', ...base, state: 'running', request, startedAt });
+    const journal = (completed?: AssetJobResult) => ({ schemaVersion: 1, kind: 'converted-glb',
+      ...(completed ?? { ...base, state: 'running' }), creation, request, startedAt,
+      ...(completed ? { finishedAt: new Date().toISOString() } : {}) });
     const supervision = new WorkerSupervision({ ...(this.queryHost ? { host: this.queryHost } : {}),
       persist: workers => atomicJson(directory, 'job.json', { ...journal(), workers }) });
     try {
@@ -371,10 +379,12 @@ export class AssetPipeline {
         sourceSceneIndex: source.sourceSceneIndex, declaredSceneCount: source.declaredSceneCount, parts: source.parts, nodes: source.nodes };
       const mapBytes = Buffer.from(JSON.stringify(sourceMap) + '\n');
       if (mapBytes.length > GLB_CONVERSION_LIMITS.jsonBytes) throw new AssetError('ASSET_CONVERSION_INPUT', 'Conversion source map exceeds its bound.');
-      request = parseConvertedGlbRequest({ schemaVersion: 2, fidelityPolicy: 'arcane-static-fidelity-v1', kind: 'converted-glb', jobId: id, parentJobId: prepared.parent.jobId,
+      const preparedRequest = parseConvertedGlbRequest({ schemaVersion: 2, fidelityPolicy: 'arcane-static-fidelity-v1', kind: 'converted-glb', jobId: id, parentJobId: prepared.parent.jobId,
         parentManifestSha256: prepared.parentManifestSha256, name: prepared.name, sourceSha256: source.sourceSha256,
         sourceBytes: captured.sourceGlb.length, importSha256: source.importSha256, importBytes: source.importBytes.length,
         sourceMapSha256: sha256(mapBytes), collision: prepared.collision, renderResolution: prepared.renderResolution, renderSamples: prepared.renderSamples });
+      parseConvertedGlbJobMetadata({ ...journal(), request: preparedRequest });
+      request = preparedRequest;
       const checkedMap = parseConvertedGlbSourceMap(sourceMap, request), requestBytes = Buffer.from(JSON.stringify(request) + '\n');
       const requestHash = sha256(requestBytes);
       await atomicJson(directory, 'job.json', { ...journal(), workers: supervision.records });
@@ -452,7 +462,7 @@ export class AssetPipeline {
       await validateConvertedGlbManifestFiles(directory, manifest); remaining(end, signal);
       await atomicJson(directory, 'manifest.json', manifest);
       const completed: AssetJobResult = { ...base, state: 'succeeded', manifestPath: artifactPath(directory, 'manifest.json') };
-      await atomicJson(directory, 'job.json', { schemaVersion: 1, kind: 'converted-glb', ...completed, request, startedAt, finishedAt: new Date().toISOString(), workers: supervision.records });
+      await atomicJson(directory, 'job.json', { ...journal(completed), workers: supervision.records });
       emit('complete', 'succeeded'); return completed;
     } catch (error) {
       const unresolved = supervision.records.some(worker => worker.state !== 'closed');
@@ -472,7 +482,7 @@ export class AssetPipeline {
       }
       const completed: AssetJobResult = { ...base, state, error: { code, message: failureMessage(message, diagnostic), diagnostic } };
       if (created) {
-        try { await atomicJson(directory, 'job.json', { schemaVersion: 1, kind: 'converted-glb', ...completed, request, startedAt, finishedAt: new Date().toISOString(), workers: supervision.records }); }
+        try { await atomicJson(directory, 'job.json', { ...journal(completed), workers: supervision.records }); }
         catch { completed.error = { code: 'RECOVERY_STATE', message: 'Conversion failed and its terminal journal could not be saved; inspect the job directory.' }; }
       }
       emit('complete', state); return completed;
@@ -524,7 +534,14 @@ export class AssetPipeline {
   async recover(directory: string): Promise<{ result: AssetJobResult; checkpointPath: string | null }> {
     const target = await this.jobDirectory(directory);
     if (activeDirectories.has(directoryKey(target))) throw new AssetError('BUSY', 'This job is still supervised.');
-    const journal = record(await readJson(artifactPath(target, 'job.json'), JOB_JOURNAL_BYTES), 'job journal');
+    let journal = record(await readJson(artifactPath(target, 'job.json'), JOB_JOURNAL_BYTES), 'job journal');
+    // Converted metadata is strict and duplicate-key-safe. Generated/adopted
+    // recovery keeps its existing reader and supervision rules unchanged.
+    let converted: ReturnType<typeof parseConvertedGlbJobMetadata> | null = null;
+    if (journal.kind === 'converted-glb' || Object.hasOwn(journal, 'creation')) {
+      journal = record(parseConvertedGlbJson(await readRegularFile(artifactPath(target, 'job.json'), JOB_JOURNAL_BYTES)), 'conversion journal');
+      converted = parseConvertedGlbJobMetadata(journal);
+    }
     if (journal.schemaVersion !== 1 || typeof journal.jobId !== 'string' || !['running', 'succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted'].includes(String(journal.state))) throw new AssetError('RECOVERY', 'Invalid recovery journal.');
     if (!/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(journal.jobId)) throw new AssetError('RECOVERY', 'Invalid recovery job identity.');
     const state = journal.state === 'running' ? 'interrupted' : journal.state as AssetJobResult['state'];
@@ -535,7 +552,12 @@ export class AssetPipeline {
     if (state === 'succeeded' && savedError) throw new AssetError('RECOVERY', 'A succeeded journal cannot carry a failure.');
     const result: AssetJobResult = { jobId: journal.jobId, directory: target, state, manifestPath: null,
       error: state === 'interrupted' ? { code: 'SUPERVISION_LOST', message: 'Previous supervision ended. The old worker may still be alive; no automatic retry or overwrite is permitted.' } : savedError };
-    if (state === 'succeeded') { const manifest = journal.kind === 'converted-glb' ? await this.validateConversion(artifactPath(target, 'manifest.json')) : await this.validate(artifactPath(target, 'manifest.json')); if (manifest.jobId !== journal.jobId) throw new AssetError('RECOVERY', 'Manifest job identity differs from the journal.'); result.manifestPath = artifactPath(target, 'manifest.json'); }
+    if (state === 'succeeded') {
+      const manifest = converted ? await this.validateConversion(artifactPath(target, 'manifest.json')) : await this.validate(artifactPath(target, 'manifest.json'));
+      if (manifest.jobId !== journal.jobId) throw new AssetError('RECOVERY', 'Manifest job identity differs from the journal.');
+      if (converted && !same(manifest.request, converted.request)) throw new AssetError('RECOVERY', 'Converted manifest request differs from the journal.');
+      result.manifestPath = artifactPath(target, 'manifest.json');
+    }
     // The spread retains `workers` exactly as saved (valid, invalid or absent for legacy jobs); recovery never
     // rewrites, resolves or drops supervision evidence, and invalid/absent records stay unknown/fenced.
     if (journal.state === 'running') await atomicJson(target, 'job.json', { ...journal, schemaVersion: 1, ...result, recoveredAt: new Date().toISOString() });
