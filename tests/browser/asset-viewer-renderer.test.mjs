@@ -267,9 +267,19 @@ async function fixture(browser, t, sources, options = {}) {
 }
 const stats = page => page.evaluate(() => viewer.stats());
 async function idleFrames(page) {
-  await page.waitForTimeout(100);
-  const before = await stats(page);
-  const animation = await page.evaluate(() => viewer.animationState());
+  // Loading, observer delivery and fitting may leave one-shot redraws queued.
+  // Cross two real frames before sampling; keep the original 100 ms readiness
+  // budget and refuse any remaining RAF rather than waiting a loop out.
+  const ready = await page.evaluate(() => new Promise(resolve => {
+    let frame;
+    const deadline = setTimeout(() => { cancelAnimationFrame(frame); resolve(false); }, 100);
+    frame = requestAnimationFrame(() => {
+      frame = requestAnimationFrame(() => { clearTimeout(deadline); resolve(true); });
+    });
+  }));
+  assert.equal(ready, true, 'idle readiness crosses two browser frames within 100 ms');
+  const { before, animation, pending } = await page.evaluate(() => ({ before: viewer.stats(), animation: viewer.animationState(), pending: meter.pendingFrames.size }));
+  assert.equal(pending, 0, 'idle readiness has no pending RAF');
   await page.waitForTimeout(200);
   assert.equal((await stats(page)).renderFrames, before.renderFrames, 'no idle render loop');
   assert.deepEqual(await page.evaluate(() => viewer.animationState()), animation, 'suspended animation time does not advance');
@@ -297,6 +307,22 @@ test('real Three.js GLB renderer in isolated headless WebGL2', { timeout: 120_00
   const proof = { browser: await browser.version(), fixture: 'owned GLBs / generated local vendor / nonpersistent headless WebGL2', checks: [] };
   const proofDir = process.env.ARCANE_VIEWER_PROOF_DIR ? resolve(process.env.ARCANE_VIEWER_PROOF_DIR) : null;
   if (proofDir) await mkdir(proofDir, { recursive: true });
+
+  await t.test('idle verification refuses a controlled recursive RAF', async t => {
+    const { page, errors } = await fixture(browser, t, sources);
+    await page.evaluate(data => start(data), glb());
+    await idleFrames(page);
+    await page.evaluate(() => {
+      window.syntheticIdleLoop = () => { window.syntheticIdleFrame = requestAnimationFrame(syntheticIdleLoop); };
+      syntheticIdleLoop();
+    });
+    try {
+      await assert.rejects(() => idleFrames(page), error => error.code === 'ERR_ASSERTION' && error.actual === 1 && error.expected === 0 && error.message.startsWith('idle readiness has no pending RAF'));
+    } finally {
+      await page.evaluate(() => { cancelAnimationFrame(syntheticIdleFrame); viewer.dispose(); });
+    }
+    await clean(page); assert.deepEqual(errors, []);
+  });
 
   await t.test('lazy context, visible PBR pixels, orbit, zoom, keyboard, wireframe, idle and disposal', async t => {
     const { page, requests, errors } = await fixture(browser, t, sources);
