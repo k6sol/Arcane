@@ -144,7 +144,7 @@ local function add(role: string,key: any,transform: any,points: any,faces: any):
  local p=buffer.create(#points*12);for i,v in ipairs(points) do for axis=1,3 do buffer.writef32(p,(i-1)*12+(axis-1)*4,v[axis]) end end
  local indices=buffer.create(#faces*2);for i,v in ipairs(faces) do buffer.writeu16(indices,(i-1)*2,v) end
  local data={primitives={{mode=4,vertexCount=#points,triangleCount=#faces/3,attributes={POSITION={semantic='POSITION',componentType=5126,type='VEC3',count=#points,normalized=false,byteLength=buffer.len(p),bytes=p}},
-  indices={semantic='INDICES',componentType=5123,type='SCALAR',count=#faces,normalized=false,byteLength=buffer.len(indices),bytes=indices}}}}
+  indices={semantic='indices',componentType=5123,type='SCALAR',count=#faces,normalized=false,byteLength=buffer.len(indices),bytes=indices}}}}
  local plan=AssetTransfer.meshPartPlan(object,source.conversion,2)
  seeds[#seeds+1]={formatVersion=2,association=association,object=object,nativePlan=plan,data=data,conversion=source.conversion}
  source.graph.meshes[#source.graph.meshes+1]=association

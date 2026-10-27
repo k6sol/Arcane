@@ -119,7 +119,7 @@ function resealed(transfer,change){
   for(let i=0;i<bodies.length;i++){
     const body=bodies[i];body.ordinal=i;
     if(body.kind==='seal')Object.assign(body,{precedingPacketCount:i,precedingByteLength:bytes,contentDigest:sha(packets.map(p=>[p.ordinal,p.kind,p.byteLength,p.sha256].join(':')).join('\n'))});
-    const json=JSON.stringify(body),byteLength=Buffer.byteLength(json);packets.push({json,byteLength,sha256:sha(json)});bytes+=byteLength;
+    const json=JSON.stringify(body),byteLength=Buffer.byteLength(json);packets.push({ordinal:i,kind:body.kind,json,byteLength,sha256:sha(json)});bytes+=byteLength;
   }
   return {...transfer,packets,digest:sha(packets.map(p=>p.sha256).join('\n'))};
 }
@@ -268,12 +268,14 @@ assert(r:status().state=='cancelled' and creates==2 and destroyed==1)
 });
 test('converted all numeric geometry is checked before the first allocation',options,async t=>{
   await run(t,`local r=receiver();feed(r)
--- The SECOND object's resealed actual index bytes contain degenerate faces.
--- Its refusal must precede allocation for the otherwise valid first object.
+-- The SECOND object's resealed positions contain a degenerate first face.
+-- Original indices/ID correspondence stay intact. Refusal must precede
+-- allocation for the otherwise valid first object.
 rejects(function() r:reconstruct(service) end,'INPUT');assert(creates==0)
 `,{change:b=>{
-    const object=b.filter(p=>p.kind==='object')[1],descriptor=object.primitives[0].indices;
-    const chunk=b.find(p=>p.kind==='chunk'&&p.streamId===descriptor.streamId),bytes=Buffer.from(chunk.data,'base64');bytes.fill(0);
+    const object=b.filter(p=>p.kind==='object')[1],descriptor=object.primitives[0].attributes.POSITION;
+    const chunk=b.find(p=>p.kind==='chunk'&&p.streamId===descriptor.streamId),bytes=Buffer.from(chunk.data,'base64');
+    bytes.copy(bytes,12,0,12);bytes.copy(bytes,24,0,12);
     chunk.data=bytes.toString('base64');chunk.sha256=sha(bytes);chunk.bufferSha256=chunk.sha256;
     descriptor.sha256=chunk.sha256;descriptor.chunks[0].sha256=chunk.sha256;
   }});
