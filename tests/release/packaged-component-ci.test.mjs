@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
 import { ELECTRON, ARTIFACT_FILES, packagedNodeVersionMatches, assertHostedEnvironment, assertSourceIdentity,
-  acquisitionEnvironment, validateElectronMetadata, selectElectronArchive } from '../../scripts/check-packaged-component-ci.mjs';
+  acquisitionEnvironment, validateElectronMetadata, selectElectronArchive, packagedGitOutcome, packagedChangedPaths } from '../../scripts/check-packaged-component-ci.mjs';
 
 const hosted = () => ({ platform: 'win32', arch: 'x64', nodeVersion: '24.19.0', electronVersion: undefined,
   env: { CI: 'true', GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted', RUNNER_OS: 'Windows', RUNNER_ARCH: 'X64',
@@ -123,4 +123,31 @@ test('packaged Node version matches the canonical v-prefixed package receipt exa
     assert.equal(packagedNodeVersionMatches(value, '24.22.1'), false);
   for (const value of ['v24.22.1', '22.22.1', '24.22.1-rc.1', null])
     assert.equal(packagedNodeVersionMatches('v24.22.1', value), false);
+});
+
+
+test('source preflight diagnostics retain exit and captured-text hash without output or environment', () => {
+  const text = 'private diagnostic content';
+  const projected = packagedGitOutcome({ code: 1, signal: null, outputBytes: Buffer.byteLength(text), output: text, env: 'secret' });
+  assert.deepEqual(projected, { state: 'reported', code: 1, signal: null, outputBytes: Buffer.byteLength(text),
+    outputTextSha256: createHash('sha256').update(text).digest('hex') });
+  assert.ok(!JSON.stringify(projected).includes(text)); assert.ok(!JSON.stringify(projected).includes('secret'));
+  assert.deepEqual(packagedGitOutcome({ code: null, signal: 'SIGTERM', outputBytes: 2000 }),
+    { state: 'reported', code: null, signal: 'SIGTERM', outputBytes: 2000, outputTextSha256: null });
+  for (const value of [null, {}, { code: 1, signal: 'private diagnostic', outputBytes: 1 }, { code: 1, signal: null, outputBytes: -1 }])
+    assert.deepEqual(packagedGitOutcome(value), { state: 'unavailable', code: null, signal: null, outputBytes: null, outputTextSha256: null });
+  assert.equal(packagedGitOutcome({ code: 1, signal: null, outputBytes: 98305, output: 'x'.repeat(98305) }).outputTextSha256, null);
+});
+
+test('changed-path diagnostics accept only complete bounded relative NUL-delimited names, never source or partial output', () => {
+  const result = output => ({ code: 0, signal: null, outputBytes: Buffer.byteLength(output), output });
+  const names = ['plugin/build/manifest.json', 'plugin/build/ArcaneLocalBridge.rbxmx'];
+  assert.deepEqual(packagedChangedPaths(result(names.join('\0') + '\0')), { state: 'complete', paths: names });
+  assert.deepEqual(packagedChangedPaths(result('')), { state: 'complete', paths: [] });
+  for (const output of ['../source\0', '/absolute\0', 'C:/private\0', 'plugin\\source\0', '.git/config\0',
+    'source with spaces\0', 'source\ncontent\0', 'unterminated', 'same\0same\0', '\0', 'part//file\0', 'x'.repeat(513) + '\0',
+    Array.from({ length: 65 }, (_, i) => 'file' + i).join('\0') + '\0', 'x'.repeat(32769)])
+    assert.deepEqual(packagedChangedPaths(result(output)), { state: 'unavailable', paths: [] });
+  for (const patch of [{ code: 1 }, { signal: 'SIGTERM' }, { outputBytes: 1 }, { outputBytes: 32769 }])
+    assert.deepEqual(packagedChangedPaths({ ...result('file\0'), ...patch }), { state: 'unavailable', paths: [] });
 });

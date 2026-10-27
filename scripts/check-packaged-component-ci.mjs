@@ -60,6 +60,27 @@ export function assertSourceIdentity(head, expected) {
   requireThat(typeof head === 'string' && /^[a-f0-9]{40}$/.test(head) && head === expected, 'SOURCE_SHA_MISMATCH');
 }
 
+// Detached diagnostics only. Hash the captured decoded text, never label it a raw-byte hash.
+export function packagedGitOutcome(value) {
+  const valid = object(value) && (value.code === null || Number.isInteger(value.code) && value.code >= 0 && value.code <= 2147483647) &&
+    (value.signal === null || typeof value.signal === 'string' && /^SIG[A-Z0-9]{1,16}$/.test(value.signal)) &&
+    Number.isSafeInteger(value.outputBytes) && value.outputBytes >= 0;
+  return Object.freeze({ state: valid ? 'reported' : 'unavailable', code: valid ? value.code : null,
+    signal: valid ? value.signal : null, outputBytes: valid ? value.outputBytes : null,
+    outputTextSha256: valid && typeof value.output === 'string' && Buffer.byteLength(value.output) <= 98304 ? sha(value.output) : null });
+}
+
+export function packagedChangedPaths(value) {
+  const unavailable = () => Object.freeze({ state: 'unavailable', paths: Object.freeze([]) });
+  if (!object(value) || value.code !== 0 || value.signal !== null || !Number.isSafeInteger(value.outputBytes) ||
+      value.outputBytes < 0 || value.outputBytes > 32768 || typeof value.output !== 'string' || value.output.length > 32768 ||
+      Buffer.byteLength(value.output) !== value.outputBytes || value.output && !value.output.endsWith('\0')) return unavailable();
+  const paths = value.output === '' ? [] : value.output.slice(0, -1).split('\0');
+  if (paths.length > 64 || new Set(paths).size !== paths.length || paths.some(path =>
+      !/^[A-Za-z0-9._/-]{1,512}$/.test(path) || path.split('/').some(part => !part || part === '.' || part === '..' || part === '.git'))) return unavailable();
+  return Object.freeze({ state: 'complete', paths: Object.freeze(paths) });
+}
+
 export function acquisitionEnvironment(source, cache) {
   const approved = new Set(['path', 'pathext', 'systemroot', 'windir', 'comspec', 'temp', 'tmp', 'userprofile',
     'localappdata', 'appdata', 'homedrive', 'homepath', 'number_of_processors', 'processor_architecture']);
@@ -182,7 +203,7 @@ export async function checkPackagedComponentCi() {
   const run = await mkdtemp(join(runtime, 'ci-component-')); await direct(run, true);
   const cache = join(run, 'electron-cache'); await mkdir(cache);
   let phase = 'preflight', reportDirectory = null, bundle = null, head = null, beforeReports = null, artifactBytes = 0;
-  let nativeProgress = null, installerOutcome = null;
+  let nativeProgress = null, installerOutcome = null, sourcePreflight = null;
   const copied = new Set(), artifactHashes = {};
   const verificationRoot = join(runtime, 'verification');
   async function receipt(name, value) {
@@ -238,8 +259,25 @@ export async function checkPackagedComponentCi() {
     const git = await runBoundedChild('git', ['rev-parse', '--verify', 'HEAD'], { cwd: REPOSITORY, env: childEnv, deadlineMs: 10000, maxOutputBytes: 1024 });
     requireThat(git.code === 0 && git.signal === null, 'SOURCE_HEAD_UNAVAILABLE');
     head = git.output.trim(); assertSourceIdentity(head, process.env.GITHUB_SHA);
-    const clean = await runBoundedChild('git', ['diff', '--no-ext-diff', '--quiet', 'HEAD', '--', '.'],
-      { cwd: REPOSITORY, env: childEnv, deadlineMs: 10000, maxOutputBytes: 1024 });
+    let clean;
+    try {
+      clean = await runBoundedChild('git', ['diff', '--no-ext-diff', '--quiet', 'HEAD', '--', '.'],
+        { cwd: REPOSITORY, env: childEnv, deadlineMs: 10000, maxOutputBytes: 1024 });
+    } catch (error) {
+      sourcePreflight = { clean: packagedGitOutcome(error?.outcome), changedPaths: null };
+      throw error; // Preserve the original bounded-child failure; no diagnostic retry.
+    }
+    if (!(clean.code === 0 && clean.signal === null && clean.outputBytes === 0)) {
+      let changedPaths;
+      try {
+        const names = await runBoundedChild('git', ['diff', '--no-ext-diff', '--name-only', '--no-renames', '-z', 'HEAD', '--', '.'],
+          { cwd: REPOSITORY, env: childEnv, deadlineMs: 10000, maxOutputBytes: 32768 });
+        changedPaths = { outcome: packagedGitOutcome(names), ...packagedChangedPaths(names) };
+      } catch (error) {
+        changedPaths = { outcome: packagedGitOutcome(error?.outcome), state: 'unavailable', paths: [] };
+      }
+      sourcePreflight = { clean: packagedGitOutcome(clean), changedPaths };
+    }
     requireThat(clean.code === 0 && clean.signal === null && clean.outputBytes === 0, 'TRACKED_SOURCE_NOT_CLEAN');
     phase = 'toolchain'; await progress('running');
     const electronRoot = join(REPOSITORY, 'node_modules', 'electron'); await direct(electronRoot, true);
@@ -352,7 +390,7 @@ export async function checkPackagedComponentCi() {
       phase === 'verify' ? 'EXECUTABLE_VERIFIER_FAILED' : phase === 'package' ? 'WINDOWS_PACKAGER_FAILED' : 'COMPONENT_SMOKE_FAILED';
     try { await receipt('failure.json', { schemaVersion: 1, kind: 'arcane-packaged-component-ci-failure', status: 'failed', phase,
       code, gitSha: head, artifactCollectionComplete: collectionComplete,
-      installerOutcome, nativeProgress,
+      installerOutcome, nativeProgress, sourcePreflight,
       processClosure: 'only-canonical-success-receipts-establish-owned-shutdown', ...BOUNDARIES }); } catch { /* Fixed stderr remains authoritative. */ }
     try { await progress('failed'); } catch { /* No diagnostic replay or cleanup is attempted. */ }
     throw new Error('Packaged component CI failed; inspect the fixed metadata artifacts. No automatic retry was attempted.');
