@@ -98,11 +98,13 @@ export class NativeTestAdapter implements TestAdapter {
   #assertTool(name: string): void {
     if (this.#generation !== this.#loadedGeneration || !this.#tools.some(tool => tool.name === name)) fail('UNSUPPORTED_TOOL');
   }
-  async #call(name: string, args: Record<string, unknown>, signal: AbortSignal, mutation = false): Promise<CallToolResult> {
+  async #call(name: string, args: Record<string, unknown>, signal: AbortSignal, mutation = false, beforeDispatch?: () => void): Promise<CallToolResult> {
     this.#assertTool(name);
-    const result = await this.#request(signal, local => this.#options.client.callTool({ name, arguments: args }, CallToolResultSchema, {
+    const result = await this.#request(signal, local => {
+      beforeDispatch?.();
+      return this.#options.client.callTool({ name, arguments: args }, CallToolResultSchema, {
       ...(mutation ? {} : { signal: local }), timeout: this.#timeout, maxTotalTimeout: this.#timeout, resetTimeoutOnProgress: false,
-    }));
+    });});
     const parsed = parse(CallToolResultSchema, result, 'BAD_NATIVE_RESPONSE');
     if (parsed.isError || parsed.content.some(item => item.type !== 'text')) fail(mutation ? 'EFFECT_UNKNOWN' : 'BAD_NATIVE_RESPONSE');
     return parsed;
@@ -152,12 +154,15 @@ export class NativeTestAdapter implements TestAdapter {
       // After dispatch, caller cancellation does not prove physical cancellation.
       // Keep the whole ACK/postcheck path alive; settle waits for this original work.
       const independent = new AbortController().signal;
+      let dispatched = false;
       try {
-        await this.#call('start_stop_play', { studio_id: binding.nativeStudioId, is_start: true }, independent, true);
+        await this.#call('start_stop_play', { studio_id: binding.nativeStudioId, is_start: true }, independent, true, () => {
+          this.#options.admissionGuard?.();dispatched = true;
+        });
         const after = await this.#observe(binding, independent, true);
         if (after.mode !== 'Play' || after.playEpoch !== before.playEpoch + 1 || !sameBinding(after.binding, binding, true)) fail('EFFECT_UNKNOWN');
         this.#owned = freeze({ runId, binding, epoch: after.playEpoch });
-      } catch (error) { this.#effectUnknown = true; throw error; }
+      } catch (error) { if (dispatched) this.#effectUnknown = true; throw error; }
     });
   }
   stop(binding: TestBinding, runId: string, deadline: number, signal: AbortSignal): Promise<void> {
@@ -217,7 +222,7 @@ export class NativeTestAdapter implements TestAdapter {
       const independent=new AbortController().signal;
       this.#options.admissionGuard?.();
       this.#scenarioConsumed.add(runId);
-      const result=await this.#call('execute_luau',{studio_id:binding.nativeStudioId,datamodel_type:'Client',code:buildScenarioProgram(plan,runId,scenarioDigest)},independent,true);
+      const result=await this.#call('execute_luau',{studio_id:binding.nativeStudioId,datamodel_type:'Client',code:buildScenarioProgram(plan,runId,scenarioDigest)},independent,true,()=>this.#options.admissionGuard?.());
       if(result.content.length!==1||result.content[0]?.type!=='text')fail('BAD_NATIVE_RESPONSE');
       let value:unknown;try{value=JSON.parse(result.content[0].text);}catch{fail('BAD_NATIVE_RESPONSE');}
       const report=parse(scenarioRuntimeReportSchema,value,'BAD_NATIVE_RESPONSE');
@@ -239,7 +244,10 @@ export class NativeTestAdapter implements TestAdapter {
       this.#assertTool('screen_capture');
       this.#options.admissionGuard?.();
       this.#captureConsumed.add(runId);
-      const result=parse(CallToolResultSchema,await this.#request(signal,local=>this.#options.client.callTool({name:'screen_capture',arguments:{studio_id:binding.nativeStudioId,capture_id:'Arcane_'+runId}},CallToolResultSchema,{signal:local,timeout:this.#timeout,maxTotalTimeout:this.#timeout,resetTimeoutOnProgress:false}),SCENARIO_LIMITS.wireBytes),'BAD_NATIVE_RESPONSE');
+      const result=parse(CallToolResultSchema,await this.#request(signal,local=>{
+        this.#options.admissionGuard?.();
+        return this.#options.client.callTool({name:'screen_capture',arguments:{studio_id:binding.nativeStudioId,capture_id:'Arcane_'+runId}},CallToolResultSchema,{signal:local,timeout:this.#timeout,maxTotalTimeout:this.#timeout,resetTimeoutOnProgress:false});
+      },SCENARIO_LIMITS.wireBytes),'BAD_NATIVE_RESPONSE');
       const image=result.content[0];
       if(result.isError||result.content.length!==1||image?.type!=='image'||image.mimeType!=='image/png')fail('BAD_NATIVE_RESPONSE');
       const bytes=Buffer.from(image.data,'base64');
