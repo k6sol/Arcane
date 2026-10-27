@@ -186,7 +186,9 @@ export function verifyGlbConversionFidelity(sourceBytes: Buffer, renderedBytes: 
   if(exported.doc.nodes.filter((node:Doc)=>node.mesh!==undefined).length!==map.parts.length)refused('Export includes unmapped mesh nodes.');
   return Object.freeze(map.parts.map(part=>{
     const node=source.doc.nodes[part.sourceNodeIndex],primitive=source.doc.meshes[part.sourceMeshIndex]?.primitives[part.sourcePrimitiveIndex];
-    if(node.mesh!==part.sourceMeshIndex||!primitive||(primitive.material??null)!==part.sourceMaterialIndex||!isDeepStrictEqual(sourceWorld.get(part.sourceNodeIndex),part.worldMatrix))refused('Conversion lineage disagrees with actual original node ancestry.');
+    // Compare the same exact zero representation as the persisted source map.
+    const originalWorld=sourceWorld.get(part.sourceNodeIndex)?.map(value=>value===0?0:value);
+    if(node.mesh!==part.sourceMeshIndex||!primitive||(primitive.material??null)!==part.sourceMaterialIndex||!isDeepStrictEqual(originalWorld,part.worldMatrix))refused('Conversion lineage disagrees with actual original node ancestry.');
     const object=model.objects.find(object=>object.sourceKey===part.sourceKey)!,out=exported.doc.nodes[object.nodeIndex],extra=out?.extras;
     if(!extra||out.mesh===undefined||extra.arcane_identity_scheme!==audit.identityScheme||extra.arcane_source_object_id!==object.sourceObjectId||
       extra.arcane_source_key!==part.sourceKey||extra.arcane_conversion_origin_v1!==part.originMarker||extra.arcane_role!=='render'||

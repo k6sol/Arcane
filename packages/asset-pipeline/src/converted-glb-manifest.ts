@@ -38,7 +38,8 @@ function snapshot(input: unknown): unknown {
       if (value.length > CONVERTED_GLB_ARTIFACT_LIMITS.jsonBytes || Buffer.from(value).toString('utf8') !== value) fail();
       charge(Buffer.byteLength(JSON.stringify(value))); return value;
     }
-    if (typeof value === 'number') { if (!Number.isFinite(value)) fail(); charge(JSON.stringify(value).length); return value; }
+    // Raw Python JSON may retain -0.0 while a later JS manifest writes 0.
+    if (typeof value === 'number') { if (!Number.isFinite(value)) fail(); charge(JSON.stringify(value).length); return value === 0 ? 0 : value; }
     if (!value || typeof value !== 'object' || types.isProxy(value)) fail();
     const array = Array.isArray(value), proto: unknown = Object.getPrototypeOf(value);
     if ((!array && proto !== Object.prototype && proto !== null) || Object.getOwnPropertySymbols(value).length) fail();

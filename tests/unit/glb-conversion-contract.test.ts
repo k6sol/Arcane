@@ -6,6 +6,7 @@ import { prepareGlbConversionSource } from '../../packages/asset-pipeline/src/gl
 import { parseConvertedGlbRequest, parseConvertedGlbSourceMap, parseConvertedGlbAudit, convertedGlbObjectId, convertedGlbAssetId,
   type ConvertedGlbRequest, type ConvertedGlbAudit } from '../../packages/asset-pipeline/src/converted-glb.js';
 import { verifyGlbConversionFidelity, conversionMillionths } from '../../packages/asset-pipeline/src/glb-conversion-fidelity.js';
+import { parseConvertedGlbJson } from '../../packages/asset-pipeline/src/converted-glb-manifest.js';
 import { CONVERSION_FIDELITY_POLICY, CONVERSION_VERTEX_ID, CONVERSION_NODE_KEY, conversionCorrespondenceSha256 } from '../../packages/asset-pipeline/src/conversion-fidelity-policy.js';
 import { AssetError } from '../../packages/asset-pipeline/src/types.js';
 
@@ -111,6 +112,58 @@ test('conversion contracts copy/freeze exact derived lineage without granting na
 test('conversion precision is explicit half away from zero, including negative ties and zero',()=>{
   assert.equal(conversionMillionths(0.0000005),1);assert.equal(conversionMillionths(-0.0000005),-1);
   assert.equal(Object.is(conversionMillionths(-0),-0),false);assert.throws(()=>conversionMillionths(Infinity),fidelityError);
+});
+test('conversion source-map parsing canonicalizes typed and raw JSON signed zeros without rounding nonzero matrices',()=>{
+  const f=fixture(),tiny=2**-80,value=structuredClone(f.map);
+  value.sourceSceneIndex=-0;value.nodes[0]!.importNodeIndex=-0;
+  value.nodes[0]!.localMatrix[1]=-0;value.nodes[0]!.localMatrix[2]=-0;
+  value.nodes[0]!.localMatrix[12]=tiny;value.nodes[0]!.localMatrix[13]=-tiny;
+  value.parts[0]!.sourceMeshIndex=-0;value.parts[0]!.sourcePrimitiveIndex=-0;value.parts[0]!.sourceMaterialIndex=-0;
+  value.parts[0]!.worldMatrix[2]=-0;value.parts[0]!.worldMatrix[12]=tiny;value.parts[0]!.worldMatrix[13]=-tiny;
+  const parsed=parseConvertedGlbSourceMap(value,f.request);
+  assert.ok(!Object.is(parsed.sourceSceneIndex,-0)&&!Object.is(parsed.nodes[0]!.importNodeIndex,-0));
+  for(const index of [parsed.parts[0]!.sourceMeshIndex,parsed.parts[0]!.sourcePrimitiveIndex,parsed.parts[0]!.sourceMaterialIndex])
+    assert.equal(Object.is(index,-0),false);
+  for(const matrix of [...parsed.parts.map(part=>part.worldMatrix),...parsed.nodes.map(node=>node.localMatrix)]){
+    assert.ok(Object.isFrozen(matrix));assert.ok(matrix.every(number=>!Object.is(number,-0)));
+  }
+  for(const matrix of [parsed.nodes[0]!.localMatrix,parsed.parts[0]!.worldMatrix]){
+    assert.equal(matrix[12],tiny);assert.equal(matrix[13],-tiny);
+  }
+  assert.ok(Object.is(value.nodes[0]!.localMatrix[1],-0),'Parsing does not mutate typed input.');
+  assert.deepEqual(parseConvertedGlbSourceMap(JSON.parse(JSON.stringify(parsed)),f.request),parsed);
+  const raw=JSON.stringify(value).replace('"sourceSceneIndex":0','"sourceSceneIndex":-0')
+    .replace('"sourceMeshIndex":0','"sourceMeshIndex":-0.0').replace('"localMatrix":[1,0,0,0','"localMatrix":[1,-0.0,-0,0');
+  const rawValue=JSON.parse(raw) as Doc;
+  assert.ok(Object.is(rawValue.sourceSceneIndex,-0)&&Object.is(rawValue.parts[0].sourceMeshIndex,-0));
+  assert.ok(Object.is(rawValue.nodes[0].localMatrix[1],-0)&&Object.is(rawValue.nodes[0].localMatrix[2],-0));
+  assert.deepEqual(parseConvertedGlbSourceMap(rawValue,f.request),parsed);
+  const bytes=Buffer.from(raw),before=Buffer.from(bytes),hash=sha(bytes);
+  assert.deepEqual(parseConvertedGlbSourceMap(parseConvertedGlbJson(bytes),f.request),parsed);
+  assert.deepEqual(bytes,before);assert.equal(sha(bytes),hash,'Retained raw JSON bytes are not normalized in place.');
+});
+test('conversion audit parsing survives Python-style -0.0 and host JSON serialization without weakening finite bounds',()=>{
+  const f=fixture(),tiny=2**-80,value=structuredClone(f.audit(f.output()));
+  value.importedParts[0]!.looseVertices=-0;value.reopenedParts[0]!.looseVertices=-0;
+  value.models[0]!.objects[0]!.pivot=[-0,-0,-0];
+  value.renders[0]!.minLuminance=-0;value.renders[0]!.meanLuminance=tiny;
+  const parse=(input:unknown)=>parseConvertedGlbAudit(input,f.request,f.map,f.requestHash),parsed=parse(value);
+  assert.equal(Object.is(parsed.importedParts[0]!.looseVertices,-0),false);
+  assert.equal(Object.is(parsed.reopenedParts[0]!.looseVertices,-0),false);
+  assert.ok(parsed.models[0]!.objects[0]!.pivot.every(number=>Object.is(number,0)));
+  assert.equal(Object.is(parsed.renders[0]!.minLuminance,-0),false);assert.equal(parsed.renders[0]!.meanLuminance,tiny);
+  assert.ok(Object.isFrozen(parsed.models[0]!.objects[0]!.pivot));
+  assert.deepEqual(parse(JSON.parse(JSON.stringify(parsed))),parsed);
+  const raw=JSON.stringify(value).replace('"looseVertices":0','"looseVertices":-0')
+    .replace('"pivot":[0,0,0]','"pivot":[-0.0,-0,0]').replace('"minLuminance":0','"minLuminance":-0.0');
+  const rawValue=JSON.parse(raw) as Doc;
+  assert.ok(Object.is(rawValue.importedParts[0].looseVertices,-0)&&Object.is(rawValue.renders[0].minLuminance,-0));
+  assert.ok(Object.is(rawValue.models[0].objects[0].pivot[0],-0));assert.deepEqual(parse(rawValue),parsed);
+  const bytes=Buffer.from(raw),before=Buffer.from(bytes),hash=sha(bytes),retained=parse(parseConvertedGlbJson(bytes));
+  assert.deepEqual(retained,parsed);assert.deepEqual(parse(JSON.parse(JSON.stringify(retained))),parsed);
+  assert.deepEqual(bytes,before);assert.equal(sha(bytes),hash);
+  const negative=structuredClone(value);negative.renders[0]!.minLuminance=-tiny;
+  assert.throws(()=>parse(negative),schemaError,'A tiny negative luminance stays invalid rather than becoming zero.');
 });
 test('conversion JSON refuses getters, proxies, unknown fields and same parent ID without invoking code',()=>{
   const f=fixture();let calls=0;

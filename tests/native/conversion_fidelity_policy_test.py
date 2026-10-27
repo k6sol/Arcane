@@ -220,6 +220,90 @@ class ControlledViewObjects(dict):
     active = None
 
 
+class CollisionVector:
+    def __init__(self, values):
+        self.x, self.y, self.z = values
+
+    def __iter__(self):
+        return iter((self.x, self.y, self.z))
+
+
+class CollisionWorld:
+    def __matmul__(self, vector):
+        return vector
+
+
+class CollisionVertex:
+    def __init__(self, values):
+        self.co = CollisionVector(values)
+
+
+class ControlledCollisionBmesh:
+    """Disposable topology double; does not implement or prove native welding."""
+    def __init__(self, mode):
+        self.mode = mode; self.freed = False; self.joined = False
+
+    def from_mesh(self, mesh):
+        self.verts = [CollisionVertex(row) for row in mesh.positions]
+        self.faces = [SimpleNamespace(verts=[self.verts[index] for index in face]) for face in mesh.triangles]
+        self.loose_edge = getattr(mesh, "loose_edge", False)
+
+    @property
+    def edges(self):
+        found = {}
+        for face in self.faces:
+            for first, second in zip(face.verts, face.verts[1:]+face.verts[:1]):
+                key = frozenset((first, second)); found.setdefault(key, []).append(face)
+        result = [SimpleNamespace(link_faces=faces, is_manifold=len(faces) == 2) for faces in found.values()]
+        if self.loose_edge: result.append(SimpleNamespace(link_faces=[], is_manifold=False))
+        return result
+
+    def normal_update(self):
+        pass
+
+    def calc_volume(self, signed):
+        if not signed: raise AssertionError("Signed volume observation required")
+        if self.joined and self.mode == "zero-volume": return 0
+        if self.joined and self.mode == "nonfinite-volume": return math.nan
+        total = 0
+        for face in self.faces:
+            if len(face.verts) != 3: raise AssertionError("Raw polygon must refuse before volume")
+            a, b, c = (list(vertex.co) for vertex in face.verts)
+            total += audit.policy_dot(a, audit.policy_cross(b, c))/6
+        return total
+
+    def to_mesh(self, _mesh):
+        raise AssertionError("Collision audit must not write a model mesh")
+
+    def free(self):
+        self.freed = True
+
+
+def collision_fixture(split=True):
+    positions = [(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)]
+    triangles = [(0, 2, 1), (0, 1, 3), (0, 3, 2), (1, 2, 3)]
+    if split:
+        positions = [positions[index] for face in triangles for index in face]
+        triangles = [(index, index+1, index+2) for index in range(0, 12, 3)]
+    mesh = SimpleNamespace(positions=list(positions), triangles=list(triangles))
+    return SimpleNamespace(data=mesh, matrix_world=CollisionWorld())
+
+
+def collision_module(mode="ordinary"):
+    created, calls = [], []
+    def new():
+        bm = ControlledCollisionBmesh(mode); created.append(bm); return bm
+    def weld(bm, *, targetmap, use_centroid, average_vert_data):
+        calls.append({"pairs": [(tuple(source.co), tuple(target.co)) for source, target in targetmap.items()],
+                      "use_centroid": use_centroid, "average_vert_data": average_vert_data})
+        if mode == "raises": raise RuntimeError("controlled audit weld failure")
+        for face in bm.faces: face.verts = [targetmap.get(vertex, vertex) for vertex in face.verts]
+        bm.verts = [vertex for vertex in bm.verts if vertex not in targetmap]; bm.joined = True
+        if mode == "drop-face": bm.faces.pop()
+        elif mode == "move-position": bm.verts[1].co.x += 1e-8
+    return SimpleNamespace(new=new, ops=SimpleNamespace(weld_verts=weld)), created, calls
+
+
 class ConversionFidelityPolicyTests(unittest.TestCase):
     def refused(self, reason, callback):
         with self.assertRaises(audit.ConversionFailure) as failure: callback()
@@ -691,6 +775,72 @@ class ConversionFidelityPolicyTests(unittest.TestCase):
                 for key in ("export_apply", "export_animations", "export_skins", "export_morph", "export_cameras", "export_lights", "export_gpu_instances", "export_draco_mesh_compression_enable", "export_use_gltfpack"):
                     self.assertIs(arguments[key], False)
                 self.assertFalse((directory / "asset.glb").exists())
+
+    def test_collision_position_targets_use_exact_finite_values_without_distance_or_centroid(self):
+        vertices = [CollisionVertex(value) for value in ((0, 0, 0), (-0.0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1), (2**-30, 0, 0))]
+        targets, unique = worker._collision_position_targets(vertices)
+        self.assertEqual(unique, 5)
+        self.assertEqual(targets, {vertices[1]: vertices[0]})
+        self.assertNotIn(vertices[-1], targets)
+        for value in (math.nan, math.inf, -math.inf):
+            self.refused("COLLISION", lambda: worker._collision_position_targets([CollisionVertex((value, 0, 0))]))
+
+    def test_collision_normal_seam_copy_has_original_position_hash_and_no_model_mutation(self):
+        results = []
+        for split in (False, True):
+            obj = collision_fixture(split); before = deepcopy(vars(obj.data))
+            module, created, calls = collision_module()
+            with patch.dict(sys.modules, {"bmesh": module}): results.append(worker.proxy_geometry(obj, None))
+            self.assertEqual(vars(obj.data), before)
+            self.assertEqual(len(created), 1); self.assertTrue(created[0].freed)
+            self.assertEqual(len(calls), int(split))
+            if split:
+                self.assertEqual(len(calls[0]["pairs"]), 8)
+                self.assertTrue(all(source == target for source, target in calls[0]["pairs"]))
+                self.assertIs(calls[0]["use_centroid"], False); self.assertIs(calls[0]["average_vert_data"], False)
+        self.assertEqual(results[0], results[1]); self.assertEqual(results[0][1], 4)
+
+    def test_collision_near_position_cracks_remain_open_instead_of_using_a_tolerance(self):
+        obj = collision_fixture(); obj.data.positions[3] = (2**-30, 0, 0)
+        before = deepcopy(vars(obj.data)); module, created, calls = collision_module()
+        with patch.dict(sys.modules, {"bmesh": module}):
+            self.refused("COLLISION", lambda: worker.proxy_geometry(obj, None))
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(all(source == target for source, target in calls[0]["pairs"]))
+        self.assertTrue(created[0].freed); self.assertEqual(vars(obj.data), before)
+
+    def test_collision_raw_area_volume_face_and_loose_edge_guards_precede_audit_weld(self):
+        for mode in ("area", "planar", "polygon", "loose-edge"):
+            with self.subTest(mode=mode):
+                obj = collision_fixture()
+                if mode == "area": obj.data.positions[1] = obj.data.positions[0]
+                elif mode == "planar": obj.data.positions = [(x, y, 0) for x, y, _z in obj.data.positions]
+                elif mode == "polygon": obj.data.triangles[0] = (0, 1, 2, 3)
+                else: obj.data.loose_edge = True
+                before = deepcopy(vars(obj.data)); module, created, calls = collision_module()
+                with patch.dict(sys.modules, {"bmesh": module}):
+                    self.refused("COLLISION", lambda: worker.proxy_geometry(obj, None))
+                self.assertEqual(calls, []); self.assertTrue(created[0].freed)
+                self.assertEqual(vars(obj.data), before)
+
+    def test_collision_audit_weld_cannot_drop_faces_move_positions_or_erase_positive_volume(self):
+        for mode in ("drop-face", "move-position", "zero-volume", "nonfinite-volume"):
+            with self.subTest(mode=mode):
+                obj = collision_fixture(); before = deepcopy(vars(obj.data))
+                module, created, calls = collision_module(mode)
+                with patch.dict(sys.modules, {"bmesh": module}):
+                    self.refused("COLLISION", lambda: worker.proxy_geometry(obj, None))
+                self.assertEqual(len(calls), 1); self.assertTrue(created[0].freed)
+                self.assertEqual(vars(obj.data), before)
+
+    def test_collision_audit_copy_is_freed_after_native_weld_exception(self):
+        obj = collision_fixture(); before = deepcopy(vars(obj.data))
+        module, created, calls = collision_module("raises")
+        with patch.dict(sys.modules, {"bmesh": module}):
+            with self.assertRaisesRegex(RuntimeError, "^controlled audit weld failure$"):
+                worker.proxy_geometry(obj, None)
+        self.assertEqual(len(calls), 1); self.assertTrue(created[0].freed)
+        self.assertEqual(vars(obj.data), before)
 
     def test_strict_v2_inputs_refuse_prototype_or_caller_policy_and_keep_real_source_bytes(self):
         _d, _b, raw, _m, _mb, marked_raw, _p, mapping, request = fixture()

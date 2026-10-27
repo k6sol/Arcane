@@ -284,30 +284,64 @@ def render_ancestors(scene, objects):
     return sorted(result, key=lambda obj: obj.as_pointer())  # Order never supplies identity.
 
 
+def _collision_position_targets(vertices):
+    positions, targets = {}, {}
+    for vertex in vertices:
+        key = tuple(float(value) for value in vertex.co)
+        audit.require(len(key) == 3 and all(math.isfinite(value) for value in key), "COLLISION")
+        if key in positions:
+            targets[vertex] = positions[key]
+        else:
+            positions[key] = vertex
+    return targets, len(positions)
+
+
+def _collision_measurement(obj, bm):
+    rows, exact_faces = [], []
+    for face in bm.faces:
+        corners = []
+        points = []
+        for vertex in face.verts:
+            p = obj.matrix_world @ vertex.co
+            value = [float(p.x), float(p.z), -float(p.y)]
+            points.append(value)
+            corners.append({"POSITION": [audit.quantize(n) for n in value]})
+        a,b,c = points
+        u=[b[k]-a[k] for k in range(3)]; v=[c[k]-a[k] for k in range(3)]
+        audit.require(math.hypot(u[1]*v[2]-u[2]*v[1], u[2]*v[0]-u[0]*v[2], u[0]*v[1]-u[1]*v[0]) > 1e-10, "COLLISION")
+        rows.append(audit.triangle_key(corners))
+        face_values = tuple(tuple(point) for point in points)
+        exact_faces.append(min(face_values, face_values[1:]+face_values[:1], face_values[2:]+face_values[:2]))
+    return audit.geometry_hash(rows), sorted(exact_faces)
+
+
 def proxy_geometry(obj, bpy):
     import bmesh
     bm = bmesh.new()
     try:
         bm.from_mesh(obj.data)
-        audit.require(4 <= len(bm.verts) <= 60000 and 4 <= len(bm.faces) <= 20000 and
-            all(edge.is_manifold for edge in bm.edges) and all(len(face.verts) == 3 for face in bm.faces), "COLLISION")
+        raw_faces = len(bm.faces)
+        audit.require(4 <= len(bm.verts) <= 60000 and 4 <= raw_faces <= 20000 and
+            all(len(face.verts) == 3 for face in bm.faces) and all(edge.link_faces for edge in bm.edges), "COLLISION")
         bm.normal_update()
         volume = abs(bm.calc_volume(signed=True))
         audit.require(math.isfinite(volume) and volume > 1e-12, "COLLISION")
-        rows = []
-        for face in bm.faces:
-            corners = []
-            points = []
-            for vertex in face.verts:
-                p = obj.matrix_world @ vertex.co
-                value = [float(p.x), float(p.z), -float(p.y)]
-                points.append(value)
-                corners.append({"POSITION": [audit.quantize(n) for n in value]})
-            a,b,c = points
-            u=[b[k]-a[k] for k in range(3)]; v=[c[k]-a[k] for k in range(3)]
-            audit.require(math.hypot(u[1]*v[2]-u[2]*v[1], u[2]*v[0]-u[0]*v[2], u[0]*v[1]-u[1]*v[0]) > 1e-10, "COLLISION")
-            rows.append(audit.triangle_key(corners))
-        return audit.geometry_hash(rows), len(bm.faces)
+        digest, exact_faces = _collision_measurement(obj, bm)
+        targets, unique = _collision_position_targets(bm.verts)
+        audit.require(unique >= 4, "COLLISION")
+        if targets:
+            # Only this disposable audit copy is joined, at exactly equal local
+            # POSITION values. No centroid, data averaging or distance tolerance.
+            bmesh.ops.weld_verts(bm, targetmap=targets, use_centroid=False, average_vert_data=False)
+        remaining, unique = _collision_position_targets(bm.verts)
+        audit.require(not remaining and unique >= 4 and len(bm.faces) == raw_faces and
+            all(len(face.verts) == 3 for face in bm.faces) and all(edge.is_manifold for edge in bm.edges), "COLLISION")
+        bm.normal_update()
+        volume = abs(bm.calc_volume(signed=True))
+        audit.require(math.isfinite(volume) and volume > 1e-12, "COLLISION")
+        joined_digest, joined_faces = _collision_measurement(obj, bm)
+        audit.require(joined_digest == digest and joined_faces == exact_faces, "COLLISION")
+        return digest, raw_faces
     finally:
         bm.free()
 

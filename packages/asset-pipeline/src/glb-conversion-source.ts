@@ -146,7 +146,8 @@ export function prepareGlbConversionSource(bytes: Buffer, expectedSha256: string
       parent.children = [...(parent.children ?? []), importNodeIndex];
       parts.push(Object.freeze({ sourceNodeIndex: index, sourceMeshIndex: original.mesh, sourcePrimitiveIndex: primitiveIndex,
         sourceMaterialIndex: primitive.material ?? null, sourceKey, importNodeIndex, originMarker,
-        worldMatrix: Object.freeze([...world.get(index)!]), triangles, vertexCount }));
+        // JSON persists both zero signs as 0; publish that same exact numeric view.
+        worldMatrix: Object.freeze(world.get(index)!.map(value => value === 0 ? 0 : value)), triangles, vertexCount }));
     }
   }
   if (!parts.length) refused('ASSET_CONVERSION_EMPTY', 'The selected scene contains no mesh primitives to convert.');
@@ -163,7 +164,7 @@ export function prepareGlbConversionSource(bytes: Buffer, expectedSha256: string
     node.extras = { ...((node.extras as Data | undefined) ?? {}), [CONVERSION_NODE_KEY]: nodeKeys[index]! };
     return Object.freeze({ nodeKey: nodeKeys[index]!, importNodeIndex: index,
       parentKey: parents.has(index) ? nodeKeys[parents.get(index)!]! : null,
-      localMatrix: Object.freeze([...(node.matrix ?? matrixFromTrs(node.translation, node.rotation, node.scale))]) });
+      localMatrix: Object.freeze((node.matrix ?? matrixFromTrs(node.translation, node.rotation, node.scale)).map(value => value === 0 ? 0 : value)) });
   });
   doc.nodes = nodes; doc.meshes = meshes;
   doc.scenes = [{ nodes: (selected.nodes ?? []).map(index => remap.get(index)!) }]; doc.scene = 0;

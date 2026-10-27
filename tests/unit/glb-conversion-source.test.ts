@@ -37,8 +37,8 @@ function jpeg():Buffer {
     ...segment(0xda,[1,1,0,0,63,0]),0x3f,255,217]);
 }
 
-function glb(doc:Doc,bin:Buffer):Buffer {
-  const text=Buffer.from(JSON.stringify(doc)),jsonBytes=(text.length+3)&~3,binBytes=(bin.length+3)&~3;
+function glb(doc:Doc,bin:Buffer,rawJson=JSON.stringify(doc)):Buffer {
+  const text=Buffer.from(rawJson),jsonBytes=(text.length+3)&~3,binBytes=(bin.length+3)&~3;
   const bytes=Buffer.alloc(28+jsonBytes+binBytes);
   bytes.writeUInt32LE(0x46546c67,0);bytes.writeUInt32LE(2,4);bytes.writeUInt32LE(bytes.length,8);
   bytes.writeUInt32LE(jsonBytes,12);bytes.writeUInt32LE(0x4e4f534a,16);bytes.fill(32,20,20+jsonBytes);text.copy(bytes,20);
@@ -181,6 +181,53 @@ test('conversion source retains ancestry and literal measured world corresponden
     assert.equal(child.rotation,undefined);assert.equal(child.scale,undefined,'Split parts inherit, rather than apply the source transform a second time.');
     const binding=result.nodes[part.importNodeIndex]!;assert.equal(binding.nodeKey,part.sourceKey);assert.equal(binding.parentKey,`node${part.sourceNodeIndex}`);
     close(binding.localMatrix,[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]);}
+});
+
+test('conversion source publishes JSON-stable zero matrices for negative-Z rotation without rounding tiny translations',()=>{
+  const f=fixture(),angle=-Math.PI/6,tiny=2**-80;
+  f.doc.nodes=[{name:'negative-Z root',translation:[tiny,-tiny,0],rotation:[0,0,Math.sin(angle/2),Math.cos(angle/2)],
+    scale:[1.5,.75,1.25],children:[1,2]},{name:'render child',mesh:0},{name:'empty child'}];
+  const source=f.finish(),before=Buffer.from(source),hash=digest(source),result=prepareGlbConversionSource(source,hash),root=result.nodes[0]!;
+  assert.equal(result.sourceSha256,hash);assert.deepEqual(source,before);
+  assert.ok(Object.isFrozen(result)&&Object.isFrozen(result.parts)&&Object.isFrozen(result.nodes));
+  for(const part of result.parts){
+    assert.ok(Object.isFrozen(part)&&Object.isFrozen(part.worldMatrix));
+    assert.ok(part.worldMatrix.every(value=>!Object.is(value,-0)),'Published world matrices use positive zero.');
+    assert.deepEqual(part.worldMatrix,root.localMatrix,'Identity primitive children inherit the exact root transform.');
+    assert.equal(part.worldMatrix[12],tiny);assert.equal(part.worldMatrix[13],-tiny);
+  }
+  for(const node of result.nodes){
+    assert.ok(Object.isFrozen(node)&&Object.isFrozen(node.localMatrix));
+    assert.ok(node.localMatrix.every(value=>!Object.is(value,-0)),'Published local matrices use positive zero.');
+  }
+  assert.equal(root.localMatrix[12],tiny);assert.equal(root.localMatrix[13],-tiny);
+  assert.ok(root.localMatrix[1]!<0&&root.localMatrix[4]!>0,'The fixture retains its negative-Z rotation.');
+  for(const [column,scale]of [[0,1.5],[4,.75],[8,1.25]] as const)
+    assert.ok(Math.abs(Math.hypot(...root.localMatrix.slice(column,column+3))-scale)<1e-12);
+  assert.deepEqual(JSON.parse(JSON.stringify(result.parts)),result.parts);
+  assert.deepEqual(JSON.parse(JSON.stringify(result.nodes)),result.nodes);
+  const prepared=read(result.importBytes);originalBinPrefix(read(source),prepared);
+  assert.deepEqual(prepared.doc.nodes[0]!.rotation,f.doc.nodes[0]!.rotation);
+  assert.deepEqual(prepared.doc.nodes[0]!.scale,[1.5,.75,1.25]);
+});
+
+test('conversion source canonicalizes raw JSON -0 and -0.0 matrices while retaining the original container and BIN prefix',()=>{
+  const f=fixture(),tiny=2**-80;
+  f.doc.nodes[0]!.matrix=[1,0,0,0,0,1,0,0,0,0,1,0,tiny,-tiny,0,1];
+  const baseline=read(f.finish()),json=JSON.stringify(baseline.doc),rawJson=json.replace('"matrix":[1,0,0,0','"matrix":[1,-0,-0.0,0');
+  assert.notEqual(rawJson,json,'The fixture must contain literal signed-zero JSON tokens.');
+  const source=glb(baseline.doc,baseline.bin,rawJson),before=Buffer.from(source),original=read(source),hash=digest(source);
+  assert.ok(Object.is(original.doc.nodes[0]!.matrix![1],-0)&&Object.is(original.doc.nodes[0]!.matrix![2],-0));
+  const result=prepareGlbConversionSource(source,hash);
+  assert.deepEqual(source,before);assert.equal(result.sourceSha256,hash);
+  for(const matrix of [...result.parts.map(part=>part.worldMatrix),...result.nodes.map(node=>node.localMatrix)]){
+    assert.ok(Object.isFrozen(matrix));assert.ok(matrix.every(value=>!Object.is(value,-0)));
+  }
+  assert.equal(result.nodes[0]!.localMatrix[12],tiny);assert.equal(result.nodes[0]!.localMatrix[13],-tiny);
+  assert.equal(result.parts[0]!.worldMatrix[12],tiny);assert.equal(result.parts[0]!.worldMatrix[13],-tiny);
+  assert.deepEqual(JSON.parse(JSON.stringify(result.nodes)),result.nodes);
+  assert.deepEqual(JSON.parse(JSON.stringify(result.parts)),result.parts);
+  originalBinPrefix(original,read(result.importBytes));
 });
 
 test('conversion source selects the declared scene and preserves original indices while remapping only selected hierarchy',()=>{

@@ -2,7 +2,7 @@ import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdtemp, writeFile, readFile, rm, link, symlink } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { deflateSync } from 'node:zlib';
 import { validateGlb } from '../../apps/desktop/src/glb-preflight.js';
@@ -11,6 +11,7 @@ import { convertedGlbObjectId, convertedGlbAssetId, GLB_CONVERSION_WORKERS } fro
 import { CONVERSION_FIDELITY_POLICY, CONVERSION_NODE_KEY, CONVERSION_VERTEX_ID, conversionCorrespondenceSha256 } from '../../packages/asset-pipeline/src/conversion-fidelity-policy.js';
 import { parseConvertedGlbManifest, parseConvertedGlbJson, validateConvertedGlbManifestFiles, CONVERTED_GLB_ARTIFACT_LIMITS } from '../../packages/asset-pipeline/src/converted-glb-manifest.js';
 import { AssetError, type Artifact } from '../../packages/asset-pipeline/src/types.js';
+import { AssetPipeline } from '../../packages/asset-pipeline/src/index.js';
 
 // These genuine constructed GLB/PNG/file bytes test retained-data admission.
 // The audit/runtime/scene/script fixtures are explicitly synthetic, do not run
@@ -56,11 +57,16 @@ function png(size = 128, uniform = false): Buffer {
   return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', header), chunk('IDAT', deflateSync(pixels)), chunk('IEND', Buffer.alloc(0))]);
 }
 type CollisionKind = 'valid' | 'seams' | 'open' | 'flipped' | 'inward' | 'planar' | 'duplicate' | 'cracked' | 'disconnected';
-async function fixture(t: TestContext, collision = false) {
+async function fixture(t: TestContext, collision = false, negativeRotation = false) {
   const directory = await mkdtemp(join(tmpdir(), 'arcane-conversion-files-')); t.after(() => rm(directory, { recursive: true, force: true }));
   // Two real adjacent faces with duplicated seam positions, two materials, two
   // shared instances and an empty leaf; no closed-solid assumption for foliage.
   const original = geometry([[0, 0, 0], [2, 0, 0], [0, 1, 0], [2, 0, 0], [2, 1, 0], [0, 1, 0]], [0, 1, 2, 3, 4, 5], true);
+  if (negativeRotation) {
+    // Same negative-Z quaternion and nonuniform scale as the native different-mesh fixture.
+    original.doc.nodes[1].rotation = [0, 0, Math.sin(-Math.PI / 12), Math.cos(-Math.PI / 12)];
+    original.doc.nodes[1].scale = [1.25, .75, 1];
+  }
   const source = pack(original.doc, original.bin), prepared = prepareGlbConversionSource(source, sha(source));
   const files = new Map<string, Buffer>([['source.glb', source], ['import-source.glb', prepared.importBytes], ['asset.blend', Buffer.from('BLENDER-v300 synthetic retained bytes; no native process ran')],
     ['preview-hero.png', png()], ['preview-side.png', png()]]);
@@ -155,6 +161,69 @@ test('conversion retained files validate actual multimesh/material/seam/open sur
   assert.equal('engineImport' in manifest, false); assert.equal(manifest.runtime.executable.endsWith('never-launched-fixture.exe'), true);
   await assert.rejects(readFile(manifest.runtime.executable), { code: 'ENOENT' });
   assert.deepEqual(await validateConvertedGlbManifestFiles(f.directory, structuredClone(manifest)), manifest);
+});
+test('conversion negative-Z TRS retains exact lineage through actual manifest JSON persistence', async t => {
+  const f = await fixture(t, false, true), source = Buffer.from(f.files.get('source.glb')!);
+  const manifest = await validateConvertedGlbManifestFiles(f.directory, f.value);
+  const rotated = manifest.sourceMap.nodes.find(node => node.nodeKey === 'node1')!;
+  assert.ok(rotated.localMatrix.some(value => value !== 0 && value !== 1));
+  for (const matrix of [...manifest.sourceMap.nodes.map(node => node.localMatrix), ...manifest.sourceMap.parts.map(part => part.worldMatrix)]) {
+    assert.ok(Object.isFrozen(matrix)); assert.equal(matrix.some(value => Object.is(value, -0)), false);
+    assert.deepEqual(JSON.parse(JSON.stringify(matrix)) as unknown, matrix);
+  }
+  const manifestPath = join(f.directory, 'manifest.json'); await writeFile(manifestPath, json(manifest));
+  const persisted = parseConvertedGlbJson(await readFile(manifestPath));
+  assert.deepEqual(await validateConvertedGlbManifestFiles(f.directory, persisted), manifest);
+  assert.deepEqual(await readFile(join(f.directory, 'source.glb')), source);
+  assert.equal(manifest.request.sourceSha256, sha(source)); assert.equal(manifest.sourceMap.parts.length, 4);
+  assert.equal(manifest.sourceMap.nodes.length, f.outputDoc.nodes.length);
+});
+test('conversion raw signed-zero map values agree with regenerated matrices without rewriting retained bytes', async t => {
+  const f = await fixture(t, false, true), source = Buffer.from(f.files.get('source.glb')!);
+  const mapRaw = Buffer.from(json(f.map).toString('utf8').replace('"sourceSceneIndex":0', '"sourceSceneIndex":-0.0')
+    .replace(/"(localMatrix|worldMatrix)":\[([^\]]+)\]/g, (_match: string, key: string, values: string) =>
+      '"' + key + '":[' + values.split(',').map(value => value === '0' ? '-0' : value).join(',') + ']'));
+  assert.match(mapRaw.toString('utf8'), /"sourceSceneIndex":-0\.0/); assert.match(mapRaw.toString('utf8'), /,-0[,\]]/);
+  await f.seal({ mapRaw });
+  const manifest = await validateConvertedGlbManifestFiles(f.directory, f.value);
+  assert.equal(Object.is(manifest.sourceMap.sourceSceneIndex, -0), false);
+  for (const matrix of [...manifest.sourceMap.nodes.map(node => node.localMatrix), ...manifest.sourceMap.parts.map(part => part.worldMatrix)])
+    assert.equal(matrix.some(value => Object.is(value, -0)), false);
+  const manifestPath = join(f.directory, 'manifest.json'); await writeFile(manifestPath, json(manifest));
+  assert.deepEqual(await validateConvertedGlbManifestFiles(f.directory, parseConvertedGlbJson(await readFile(manifestPath))), manifest);
+  assert.deepEqual(await readFile(join(f.directory, 'source-map.json')), mapRaw);
+  assert.deepEqual(await readFile(join(f.directory, 'source.glb')), source);
+  assert.equal(manifest.request.sourceMapSha256, sha(mapRaw));
+});
+test('conversion Python-style audit negative zero survives repeated retained validation and recovery readers', async t => {
+  const f = await fixture(t), source = Buffer.from(f.files.get('source.glb')!);
+  f.audit.renders[0].minLuminance = -0;
+  const auditRaw = Buffer.from(json(f.audit).toString('utf8').replace('"minLuminance":0', '"minLuminance":-0.0'));
+  assert.match(auditRaw.toString('utf8'), /"minLuminance":-0\.0/);
+  await f.seal({ auditRaw });
+  const manifest = await validateConvertedGlbManifestFiles(f.directory, f.value);
+  assert.equal(manifest.validation.renders[0]!.minLuminance, 0);
+  assert.equal(Object.is(manifest.validation.renders[0]!.minLuminance, -0), false);
+  const manifestPath = join(f.directory, 'manifest.json'); await writeFile(manifestPath, json(manifest));
+  assert.deepEqual(await validateConvertedGlbManifestFiles(f.directory, parseConvertedGlbJson(await readFile(manifestPath))), manifest);
+  let nativeCalls = 0;
+  const forbiddenNative = async (): Promise<never> => { nativeCalls++; throw new Error('Retained validation must not launch or discover a runtime.'); };
+  const pipeline = new AssetPipeline({ workspaceRoot: dirname(f.directory), outputRoot: dirname(f.directory) },
+    { run: forbiddenNative, discover: forbiddenNative });
+  assert.deepEqual(await pipeline.validateConversion(manifestPath), manifest);
+  // A synthetic succeeded journal exercises only the retained recovery reader;
+  // absent legacy worker evidence stays absent and grants no closure authority.
+  const journal = json({ schemaVersion: 1, kind: 'converted-glb', jobId: JOB, state: 'succeeded', error: null });
+  await writeFile(join(f.directory, 'job.json'), journal);
+  const recovered = await pipeline.recover(f.directory);
+  assert.equal(recovered.result.state, 'succeeded'); assert.equal(recovered.result.jobId, JOB);
+  assert.equal(recovered.result.manifestPath, manifestPath); assert.equal(recovered.result.error, null);
+  assert.equal(recovered.checkpointPath, null); assert.equal(nativeCalls, 0);
+  assert.deepEqual(await readFile(join(f.directory, 'job.json')), journal);
+  assert.deepEqual(await readFile(join(f.directory, 'conversion-audit.json')), auditRaw);
+  assert.deepEqual(await readFile(join(f.directory, 'source.glb')), source);
+  assert.equal(manifest.artifacts.find(artifact => artifact.path === 'conversion-audit.json')!.sha256, sha(auditRaw));
+  assert.equal('ownedProcessClosed' in manifest, false); assert.equal('approved' in manifest, false);
 });
 test('conversion manifest refuses proxies/getters/unknown fields and escaped byte amplification without invoking code', async t => {
   const f = await fixture(t); let invoked = 0;

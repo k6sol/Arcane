@@ -30,7 +30,8 @@ function snapshot(input: unknown): unknown {
     if (++nodes > 100000 || depth > 16) failed('Conversion JSON exceeds its structural bound.');
     if (value === null || typeof value === 'boolean') { charge(JSON.stringify(value).length); return value; }
     if (typeof value === 'string') { if (value.length > GLB_CONVERSION_LIMITS.jsonBytes) failed('Conversion string exceeds its bound.'); charge(Buffer.byteLength(JSON.stringify(value))); return value; }
-    if (typeof value === 'number') { if (!Number.isFinite(value)) failed('Conversion numbers must be finite.'); charge(JSON.stringify(value).length); return value; }
+    // Match persisted JSON's zero representation without changing any nonzero value.
+    if (typeof value === 'number') { if (!Number.isFinite(value)) failed('Conversion numbers must be finite.'); charge(JSON.stringify(value).length); return value === 0 ? 0 : value; }
     if (!value || typeof value !== 'object' || types.isProxy(value)) failed('Conversion requires plain JSON data.');
     const array = Array.isArray(value);
     if (!array && Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) failed('Conversion requires plain records.');
