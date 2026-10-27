@@ -55,7 +55,7 @@ async function fixture(t: TestContext) {
   const proposalWorker: ChatTaskProposalFactory = async () => ({
     propose: async () => { proposals++; return { threadId: 'worker.thread', sessionId: null, turnId: 'worker.turn:' + proposals, text: 'Suggestion ' + proposals + ': keep the change bounded.' }; },
     close: async () => {} });
-  const lab = await createConnectionLab({ cwd: process.cwd(), stateDirectory: join(root, 'lab'), projectPath: project, studioStore: studio, workStore: work, assetService: assets,
+  const lab = await createConnectionLab({ cwd: process.cwd(), stateDirectory: join(root, 'studio', 'lab'), projectPath: project, studioStore: studio, workStore: work, assetService: assets,
     codexProposalWorker: proposalWorker, codexAutomaticTaskPlanning: true,
     codexConnect: async hooks => {
       assert.ok(hooks); tokens.push(hooks.finalCredential()); const index = providers.length;
@@ -88,6 +88,9 @@ async function fixture(t: TestContext) {
     });
     req.setTimeout(15000, () => req.destroy(new Error('timeout'))); req.on('error', reject); req.end();
   });
+  const playtests = await raw('/v1/playtests');
+  assert.equal(playtests.status, 200, playtests.text);
+  assert.deepEqual(playtests.body.jobs, [], 'the actual owned verification service is attached before managed planning');
   const query = (scope: Record<string, string>) => '/v1/codex/task-plan?' + new URLSearchParams(scope).toString();
   const action = async (name: string, fields: Record<string, unknown> = {}) => human('/v1/codex/action', { requestId: randomUUID(), connectionId: name === 'connect' ? null : providers.at(-1)!.snapshot().connectionId, action: name, ...fields });
   const wire = async (file = audit) => existsSync(file) ? (await readFile(file, 'utf8')).trim().split('\n').map(line => JSON.parse(line) as { method: string; text?: string }) : [];

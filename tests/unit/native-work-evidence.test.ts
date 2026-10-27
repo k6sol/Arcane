@@ -53,7 +53,7 @@ async function fixture(t: TestContext) {
   const proposalWorker: ChatTaskProposalFactory = async () => ({
     propose: async () => { proposals++; return { threadId: 'worker.thread', sessionId: null, turnId: 'worker.turn:' + proposals, text: 'Suggestion ' + proposals + ': keep the change bounded.' }; },
     close: async () => {} });
-  const lab = await createConnectionLab({ cwd: process.cwd(), stateDirectory: join(root, 'lab'), projectPath: project, studioStore: studio, workStore: work, assetService: assets,
+  const lab = await createConnectionLab({ cwd: process.cwd(), stateDirectory: join(root, 'studio', 'lab'), projectPath: project, studioStore: studio, workStore: work, assetService: assets,
     codexProposalWorker: proposalWorker, codexAutomaticTaskPlanning: true,
     codexConnect: async hooks => {
       assert.ok(hooks); tokens.push(hooks.finalCredential()); const index = providers.length;
@@ -75,6 +75,9 @@ async function fixture(t: TestContext) {
     const response = await fetch(lab.origin + path, { method: body === undefined ? 'GET' : 'POST', headers: { Authorization: 'Bearer ' + token, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(15000) });
     return { status: response.status, body: await response.json() as Record<string, any> };
   };
+  const playtests = await bearer(lab.token, '/v1/playtests');
+  assert.equal(playtests.status, 200, JSON.stringify(playtests.body));
+  assert.deepEqual(playtests.body.jobs, [], 'the actual owned verification service is attached before managed planning');
   const action = async (name: string, fields: Record<string, unknown> = {}) => human('/v1/codex/action', { requestId: randomUUID(), connectionId: name === 'connect' ? null : providers.at(-1)!.snapshot().connectionId, action: name, ...fields });
   const wire = async () => existsSync(audit) ? (await readFile(audit, 'utf8')).trim().split('\n').map(line => JSON.parse(line) as { method: string; text?: string }) : [];
   const turnStarts = async () => (await wire()).filter(row => row.method === 'turn/start');
