@@ -79,8 +79,9 @@ function validateLegacyMeshKeepReceipt(args: Record<string, Json>, value: unknow
   return { state: expectedState, meshes, uploadsStarted: r.uploadsStarted as number, swapped, persistence: r.persistence as LegacyMeshKeepReceipt['persistence'], creatorId: r.creatorId as number, ref: r.ref as Json | null };
 }
 
-export interface ConvertedMeshKeepNodeObservation { readonly nodeKey:string; readonly instanceRef:string; readonly ownedStateSha256:string; readonly authoredChildren:readonly [] }
-export interface ConvertedMeshKeepObjectObservation { readonly sourceObjectId:string; readonly instanceRef:string; readonly ownedStateSha256:string; readonly authoredChildren:readonly []; readonly meshAssetId:string }
+export interface ConvertedMeshKeepChildObservation { readonly instanceRef:string; readonly kind:'script'|'attachment'|'constraint'; readonly stateSha256:string }
+export interface ConvertedMeshKeepNodeObservation { readonly nodeKey:string; readonly instanceRef:string; readonly ownedStateSha256:string; readonly authoredChildren:readonly ConvertedMeshKeepChildObservation[] }
+export interface ConvertedMeshKeepObjectObservation { readonly sourceObjectId:string; readonly instanceRef:string; readonly ownedStateSha256:string; readonly authoredChildren:readonly ConvertedMeshKeepChildObservation[]; readonly meshAssetId:string }
 export interface ConvertedMeshKeepObservation {
   readonly formatVersion:2; readonly receiptScope:'studio-session-observation'; readonly imported:false; readonly engineVerification:'pending';
   readonly graphDigest:string; readonly conversionRequestDigest:string;
@@ -102,7 +103,7 @@ function convertedKeepFailure():never {throw new ArcaneError('RECEIPT','Converte
 function convertedKeepData(value:unknown):unknown {
   let values=0,bytes=0;const seen=new Set<object>();
   const walk=(v:unknown,depth:number):unknown=>{
-    if(++values>5000||depth>8)convertedKeepFailure();
+    if(++values>30000||depth>8)convertedKeepFailure();
     if(v===null||typeof v==='boolean')return v;
     if(typeof v==='number'){if(!Number.isFinite(v))convertedKeepFailure();return v;}
     if(typeof v==='string'){bytes+=Buffer.byteLength(v);if(bytes>256*1024)convertedKeepFailure();return v;}
@@ -123,7 +124,7 @@ function convertedKeepData(value:unknown):unknown {
       for(const key of keys){if(typeof key!=='string')convertedKeepFailure();const d=Object.getOwnPropertyDescriptor(v,key);if(!d||!d.enumerable||!Object.hasOwn(d,'value'))convertedKeepFailure();result[key]=walk(d.value,depth+1);}
       return Object.freeze(result);
     }finally{seen.delete(v);}
-  };return walk(value,0);
+  };const result=walk(value,0);if(Buffer.byteLength(JSON.stringify(result))>256*1024)convertedKeepFailure();return result;
 }
 function keepFields(value:unknown,fields:readonly string[]):Record<string,unknown>{
   if(!value||typeof value!=='object'||Array.isArray(value))convertedKeepFailure();
@@ -137,8 +138,15 @@ export function snapshotConvertedMeshKeepObservation(value:unknown,meshes:readon
     ||!Array.isArray(r.objects)||r.objects.length!==meshes.length||meshes.length<1||meshes.length>MESH_KEEP_LIMITS.meshes||meshes.some(m=>!m.swapped||m.assetId===null))convertedKeepFailure();
   const nodeKeys=new Set<string>(),nodeRefs=new Set<string>(),objectIds=new Set<string>(),objectRefs=new Set<string>();
   const observation=(raw:Record<string,unknown>)=>{
-    if(typeof raw.instanceRef!=='string'||!KEEP_INSTANCE.test(raw.instanceRef)||typeof raw.ownedStateSha256!=='string'||!DIGEST.test(raw.ownedStateSha256)||!Array.isArray(raw.authoredChildren)||raw.authoredChildren.length!==0)convertedKeepFailure();
-    return {instanceRef:raw.instanceRef,ownedStateSha256:raw.ownedStateSha256,authoredChildren:Object.freeze([]) as readonly []};
+    if(typeof raw.instanceRef!=='string'||raw.instanceRef.length!==36||!KEEP_INSTANCE.test(raw.instanceRef)||typeof raw.ownedStateSha256!=='string'||raw.ownedStateSha256.length!==64||!DIGEST.test(raw.ownedStateSha256)||!Array.isArray(raw.authoredChildren)||raw.authoredChildren.length>128)convertedKeepFailure();
+    const childRefs=new Set<string>();
+    const authoredChildren:ConvertedMeshKeepChildObservation[]=raw.authoredChildren.map(value=>{
+      const child=keepFields(value,['instanceRef','kind','stateSha256']);
+      if(typeof child.instanceRef!=='string'||child.instanceRef.length!==36||!KEEP_INSTANCE.test(child.instanceRef)||childRefs.has(child.instanceRef)||
+        child.kind!=='script'&&child.kind!=='attachment'&&child.kind!=='constraint'||typeof child.stateSha256!=='string'||child.stateSha256.length!==64||!DIGEST.test(child.stateSha256))convertedKeepFailure();
+      childRefs.add(child.instanceRef);return Object.freeze({instanceRef:child.instanceRef,kind:child.kind,stateSha256:child.stateSha256});
+    });
+    return {instanceRef:raw.instanceRef,ownedStateSha256:raw.ownedStateSha256,authoredChildren:Object.freeze(authoredChildren)};
   };
   const nodes=r.nodes.map(raw=>{
     const n=keepFields(raw,['nodeKey','instanceRef','ownedStateSha256','authoredChildren']);
@@ -151,7 +159,13 @@ export function snapshotConvertedMeshKeepObservation(value:unknown,meshes:readon
     const observed=observation(o);if(objectRefs.has(observed.instanceRef))convertedKeepFailure();objectIds.add(o.sourceObjectId);objectRefs.add(observed.instanceRef);return Object.freeze({sourceObjectId:o.sourceObjectId,...observed,meshAssetId:o.meshAssetId as string});
   });
   if(new Set([...nodeRefs,...objectRefs]).size>128)convertedKeepFailure();
-  for(const object of objects){const node=nodes.find(n=>n.instanceRef===object.instanceRef);if(node&&node.ownedStateSha256!==object.ownedStateSha256)convertedKeepFailure();}
+  const sameChildren=(a:readonly ConvertedMeshKeepChildObservation[],b:readonly ConvertedMeshKeepChildObservation[])=>a.length===b.length&&a.every((child,i)=>child.instanceRef===b[i]!.instanceRef&&child.kind===b[i]!.kind&&child.stateSha256===b[i]!.stateSha256);
+  for(const object of objects){const node=nodes.find(n=>n.instanceRef===object.instanceRef);if(node&&(node.ownedStateSha256!==object.ownedStateSha256||!sameChildren(node.authoredChildren,object.authoredChildren)))convertedKeepFailure();}
+  const managedRefs=new Set([...nodeRefs,...objectRefs]),owners=new Set<string>(),childRefs=new Set<string>();
+  for(const owner of [...nodes,...objects]){
+    if(owners.has(owner.instanceRef))continue;owners.add(owner.instanceRef);
+    for(const child of owner.authoredChildren){if(managedRefs.has(child.instanceRef)||childRefs.has(child.instanceRef))convertedKeepFailure();childRefs.add(child.instanceRef);}
+  }
   if(expected){
     if(r.graphDigest!==expected.graphDigest||r.conversionRequestDigest!==expected.conversionRequestDigest||nodes.length!==expected.nodes.length||objects.length!==expected.meshes.length)convertedKeepFailure();
     const seen=new Set<string>();

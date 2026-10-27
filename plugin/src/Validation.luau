@@ -11,12 +11,13 @@ Validation.MAX_CACHE_BYTES = 16 * 1024 * 1024
 Validation.NULL = table.freeze({})
 local ARRAY = table.freeze({})
 Validation.ROOTS = table.freeze({"Workspace", "ReplicatedStorage", "ServerScriptService", "ServerStorage", "StarterGui", "StarterPlayer", "Lighting"})
-Validation.READ_METHODS = table.freeze({"scene.children", "scene.inspect", "scene.search", "selection.read", "script.read", "script.search", "scene.import_context", "scene.upload_context", "scene.asset_watch", "output.read"})
+Validation.READ_METHODS = table.freeze({"scene.children", "scene.inspect", "scene.search", "selection.read", "script.read", "script.search", "scene.import_context", "scene.observe_import", "scene.upload_context", "scene.asset_watch", "output.read"})
 Validation.WRITE_METHODS = table.freeze({"scene.create", "scene.update", "script.update", "script.set_enabled", "scene.restore", "scene.remove", "scene.build", "environment.apply", "scene.place_asset", "scene.apply_material", "terrain.generate"})
 Validation.REMOVE_LIMITS = table.freeze({targets = 64, topLevel = 10000, descendants = 100000})
 Validation.BUILD_LIMITS = table.freeze({items = 2000, prototypes = 32, prototypeParts = 64, instances = 4000, keys = 32})
 Validation.BUILD_PART_CLASSES = table.freeze({"Part", "WedgePart", "CornerWedgePart", "SpawnLocation"})
 Validation.ASSET_STAGE_METHODS = table.freeze({"asset.stage_packet", "asset.reconstruct"})
+Validation.ASSET_REVISION_METHODS = table.freeze({"asset.apply_revision"})
 -- Keep this mesh: host-only upload + swap; advertised only when the Studio upload API probe passes (AssetPlacement.keepSupported).
 Validation.MESH_KEEP_METHODS = table.freeze({"asset.keep_mesh"})
 -- Non-method feature capabilities (effects classes, environment extras, inspect bounds; GUI classes and ScreenGui builds;
@@ -304,6 +305,39 @@ function Validation.equal(left: any, right: any): boolean
 	for key, item in pairs(left) do if not Validation.equal(item, right[key]) then return false end end
 	for key, item in pairs(right) do if not Validation.equal(item, left[key]) then return false end end
 	return true
+end
+
+-- Only for comparing the sealed native JSON receiver with strict protocol data:
+-- HttpService erases null fields/array markers. Closed converted shapes are
+-- checked separately; this never replaces the ordinary protocol equality.
+function Validation.convertedEqual(left: any, right: any, depth: number?): boolean
+	local level=depth or 0
+	if level>64 then return false end
+	if left==Validation.NULL then left=nil end
+	if right==Validation.NULL then right=nil end
+	if type(left)~=type(right) then return false end
+	if type(left)~="table" then return left==right end
+	for key,value in pairs(left) do if not Validation.convertedEqual(value,right[key],level+1) then return false end end
+	for key,value in pairs(right) do if not Validation.convertedEqual(value,left[key],level+1) then return false end end
+	return true
+end
+function Validation.convertedSource(value: any): any
+	local fields={"projectId","jobId","assetId","sourceSha256","preparedDigest","manifestDigest","payloadDigest","transferDigest","graphDigest","conversionRequestDigest"}
+	local source=Validation.fields(value,fields,"converted source")
+	for _,key in ipairs(fields) do
+		local text=Validation.string(source[key],key,if key=="assetId" then 71 else 64)
+		if key=="jobId" then
+			if #text~=36 or not string.match(text,"^[a-f0-9]+%-[a-f0-9]+%-[a-f0-9]+%-[a-f0-9]+%-[a-f0-9]+$") or string.sub(text,9,9)~="-" or string.sub(text,14,14)~="-" or string.sub(text,19,19)~="-" or string.sub(text,24,24)~="-" then Validation.fail("INPUT","Expected canonical converted job UUID.") end
+		elseif key=="assetId" then
+			if #text~=71 or not string.match(text,"^arcane_[a-f0-9]+$") then Validation.fail("INPUT","Expected converted asset identity.") end
+		elseif #text~=64 or not string.match(text,"^[a-f0-9]+$") then Validation.fail("INPUT","Expected converted source digest.") end
+	end
+	return source
+end
+function Validation.convertedUuid(value: any,label: string): string
+	local text=Validation.string(value,label,36)
+	if #text~=36 or not string.match(text,"^[a-f0-9]+%-[a-f0-9]+%-[a-f0-9]+%-[a-f0-9]+%-[a-f0-9]+$") or string.sub(text,9,9)~="-" or string.sub(text,14,14)~="-" or string.sub(text,19,19)~="-" or string.sub(text,24,24)~="-" then Validation.fail("INPUT","Expected canonical "..label.." UUID.") end
+	return text
 end
 
 function Validation.immutable(value: any): any

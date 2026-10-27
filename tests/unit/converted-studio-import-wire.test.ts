@@ -1,3 +1,4 @@
+import type {StudioImportObservationReceipt} from '../../packages/protocol/src/studio.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
@@ -5,7 +6,7 @@ import {buildConvertedGraph,convertedGraphDigest,type ConvertedGraphSourceBytes}
 import {prepareGlbConversionSource} from '../../packages/asset-pipeline/src/glb-conversion-source.js';
 import {convertedGlbObjectId,convertedGlbAssetId,parseConvertedGlbRequest} from '../../packages/asset-pipeline/src/converted-glb.js';
 import {CONVERSION_FIDELITY_POLICY,CONVERSION_NODE_KEY,CONVERSION_VERTEX_ID,conversionCorrespondenceSha256} from '../../packages/asset-pipeline/src/conversion-fidelity-policy.js';
-import {createStudioImportManifestAuthority,parseConvertedStudioImportManifest,snapshotConvertedStudioImportBaseline,StudioImportManifestError,
+import {createStudioImportManifestAuthority,parseConvertedStudioImportManifest,snapshotConvertedStudioImportBaseline,studioImportObservationReceiptDigest,StudioImportManifestError,
   type HostConvertedStudioImportV2,type HostGeneratedStudioImportV1,type ConvertedPreparedStudioImportV2,type GeneratedPreparedStudioImportV1,
   type ConvertedStudioImportBaselineV2,type HostStudioImport} from '../../packages/asset-pipeline/src/studio-import-manifest.js';
 import {parseNativeStudioImportResponse} from '../../packages/asset-pipeline/src/studio-import-wire.js';
@@ -96,13 +97,21 @@ function hostFixture(collision=false,affine:'rigid'|'scale'|'shear'|'reflection'
 }
 async function prepare(input:HostStudioImport){const authority=createStudioImportManifestAuthority({loadGeneratedFiles:async()=>input});try{return authority.prepare(await authority.admit(input.revisionId));}finally{authority.close();}}
 async function converted(input:HostConvertedStudioImportV2):Promise<ConvertedPreparedStudioImportV2>{const result=await prepare(input);assert.equal(result.manifest.schemaVersion,2);return result as ConvertedPreparedStudioImportV2;}
-function baseline(prepared:ConvertedPreparedStudioImportV2):ConvertedStudioImportBaselineV2 {
-  const objects=prepared.manifest.objects.map((o,i)=>({sourceObjectId:o.sourceObjectId,instanceRef:'mesh-'+i,meshAssetId:String(100+i),ownedStateSha256:sha('mesh-state-'+i),
+function baseline(prepared:ConvertedPreparedStudioImportV2,live=false):ConvertedStudioImportBaselineV2 {
+  const objects=prepared.manifest.objects.map((o,i)=>({sourceObjectId:o.sourceObjectId,instanceRef:'mesh-'+i,meshAssetId:live?null:String(100+i),ownedStateSha256:sha('mesh-state-'+i),
     authoredChildren:[{instanceRef:'script-'+i,kind:'script' as const,stateSha256:sha('script-state-'+i)}]}));
-  return{manifest:prepared.manifest,receipt:{manifestDigest:prepared.manifest.digest,graphDigest:prepared.manifest.graph.digest,receiptSha256:sha('synthetic observed receipt'),modelRef:'model-root',modelAssetId:'999',objects,
+  // Synthetic read metadata exercises schema/delta custody only, never a native witness.
+  const observation:StudioImportObservationReceipt={formatVersion:2,observationId:'55555555-5555-4555-8555-555555555555',
+    source:{projectId:prepared.manifest.projectId,jobId:prepared.manifest.revisionId,assetId:prepared.manifest.assetId,sourceSha256:prepared.manifest.sourceSha256,
+      preparedDigest:prepared.digest,manifestDigest:prepared.manifest.digest,payloadDigest:sha('synthetic previous payload'),transferDigest:sha('synthetic previous transfer'),graphDigest:prepared.manifest.graph.digest,conversionRequestDigest:digest(prepared.manifest.conversionRequest)},
+    target:structuredClone(prepared.manifest.target),continuity:{clientLifetimeId:'fixture-plugin',pluginArtifactHash:sha('synthetic plugin'),playEpoch:0},
+    modelRef:{instanceId:'model-root',sessionId:prepared.manifest.target.sessionId,root:'Workspace',pathSegments:['Observed model'],className:'Model'},modelOwnedStateSha256:sha('synthetic model state'),objects,
     nodes:prepared.manifest.graph.nodes.map((n,i)=>{const mesh=prepared.manifest.graph.meshes.find(m=>m.nodeKey===n.nodeKey),object=mesh?objects.find(o=>o.sourceObjectId===mesh.sourceObjectId):undefined;
-      return{nodeKey:n.nodeKey,instanceRef:object?.instanceRef??'group-'+i,ownedStateSha256:object?.ownedStateSha256??sha('group-state-'+i),authoredChildren:object?.authoredChildren??[]};})}};
+      return {nodeKey:n.nodeKey,instanceRef:object?.instanceRef??'group-'+i,ownedStateSha256:object?.ownedStateSha256??sha('group-state-'+i),authoredChildren:object?.authoredChildren??[]};}),
+    receiptScope:'live-import-observation',imported:false,engineVerification:'pending'};
+  return {manifest:prepared.manifest,receipt:{commandId:'66666666-6666-4666-8666-666666666666',receiptSha256:studioImportObservationReceiptDigest(observation),observation}};
 }
+
 function mutateModel(input:HostConvertedStudioImportV2,mutate:(doc:Doc,bin:Buffer)=>void,fileId='asset-glb'):void {
   const file=input.files.find(f=>f.fileId===fileId)!,bytes=Buffer.from(file.bytes),size=bytes.readUInt32LE(12),doc=JSON.parse(bytes.subarray(20,20+size).toString('utf8')) as Doc,bin=Buffer.from(bytes.subarray(28+size));
   mutate(doc,bin);const changed=pack(doc,bin);file.bytes=changed;file.sha256=sha(changed);

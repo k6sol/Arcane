@@ -170,13 +170,58 @@ local resources={}
 local assetService={}
 function assetService:CreateEditableMesh()
  creates+=1
- local mesh={next=0,vertices={},destroyed=false}
- function mesh:AddVertex(value: any): number self.next+=1;self.vertices[self.next]=value;return self.next end
- function mesh:AddNormal(_value: any): number self.next+=1;return self.next end
- function mesh:AddUV(_value: any): number self.next+=1;return self.next end
- function mesh:AddTriangle(_a: any,_b: any,_c: any): number self.next+=1;return self.next end
- function mesh:SetFaceNormals(_face: any,_ids: any): () end
- function mesh:SetFaceUVs(_face: any,_ids: any): () end
+ -- Stateful synthetic EditableMesh: inventories/readbacks preserve allocated
+ -- IDs, actual geometry and face-corner associations. Default per-vertex UVs
+ -- are (0,0), colors white/alpha1; geometric normals are computed from faces.
+ -- This double supplies no native acceptance or rendering evidence.
+ local mesh={next=0,vertices={},faces={},normals={},uvs={},colors={},alphas={},faceNormals={},faceUVs={},faceColors={},defaults={},destroyed=false}
+ local function ids(values: any): any local out={};for id in pairs(values) do out[#out+1]=id end;table.sort(out);return out end
+ local function allocate(self: any): number self.next+=1;return self.next end
+ local function triangleNormal(self: any,vertices: any): any
+  local a,b,c=self.vertices[vertices[1]],self.vertices[vertices[2]],self.vertices[vertices[3]]
+  local ux,uy,uz=b.X-a.X,b.Y-a.Y,b.Z-a.Z;local vx,vy,vz=c.X-a.X,c.Y-a.Y,c.Z-a.Z
+  return {X=uy*vz-uz*vy,Y=uz*vx-ux*vz,Z=ux*vy-uy*vx}
+ end
+ local function updateDefaults(self: any): ()
+  for vertex,d in pairs(self.defaults) do
+   local x,y,z=0,0,0
+   for _,face in pairs(self.faces) do if table.find(face,vertex) then local n=triangleNormal(self,face);x+=n.X;y+=n.Y;z+=n.Z end end
+   local length=math.sqrt(x*x+y*y+z*z)
+   self.normals[d.normal]=if length>0 then Vector3.new(x/length,y/length,z/length) else Vector3.new(0,1,0)
+  end
+ end
+ function mesh:AddVertex(value: any): number local id=allocate(self);self.vertices[id]=value;return id end
+ function mesh:AddNormal(value: any): number local id=allocate(self);self.normals[id]=value;return id end
+ function mesh:AddUV(value: any): number local id=allocate(self);self.uvs[id]=value;return id end
+ function mesh:AddColor(value: any,alpha: number?): number local id=allocate(self);self.colors[id]=value;self.alphas[id]=if alpha==nil then 1 else alpha;return id end
+ function mesh:AddTriangle(a: number,b: number,c: number): number
+  assert(self.vertices[a] and self.vertices[b] and self.vertices[c],'triangle uses actual allocated vertices')
+  local face=allocate(self);self.faces[face]={a,b,c};local normals,uvs,colors={}, {}, {}
+  for _,vertex in ipairs(self.faces[face]) do
+   local d=self.defaults[vertex]
+   if not d then d={normal=self:AddNormal(Vector3.new(0,1,0)),uv=self:AddUV(Vector2.new(0,0)),color=self:AddColor(Color3.new(1,1,1),1)};self.defaults[vertex]=d end
+   normals[#normals+1]=d.normal;uvs[#uvs+1]=d.uv;colors[#colors+1]=d.color
+  end
+  self.faceNormals[face]=normals;self.faceUVs[face]=uvs;self.faceColors[face]=colors;updateDefaults(self);return face
+ end
+ function mesh:SetFaceNormals(face: number,values: any): () assert(self.faces[face] and #values==3);for _,id in ipairs(values) do assert(self.normals[id],'actual normal ID') end;self.faceNormals[face]=table.clone(values) end
+ function mesh:SetFaceUVs(face: number,values: any): () assert(self.faces[face] and #values==3);for _,id in ipairs(values) do assert(self.uvs[id],'actual UV ID') end;self.faceUVs[face]=table.clone(values) end
+ function mesh:SetFaceColors(face: number,values: any): () assert(self.faces[face] and #values==3);for _,id in ipairs(values) do assert(self.colors[id],'actual color ID') end;self.faceColors[face]=table.clone(values) end
+ function mesh:GetVertices(): any return ids(self.vertices) end
+ function mesh:GetFaces(): any return ids(self.faces) end
+ function mesh:GetBones(): any return {} end -- The fixture creates no bones.
+ function mesh:GetPosition(id: number): any assert(self.vertices[id]);return self.vertices[id] end
+ function mesh:GetFaceVertices(id: number): any assert(self.faces[id]);return table.clone(self.faces[id]) end
+ function mesh:GetFaceNormals(id: number): any assert(self.faceNormals[id]);return table.clone(self.faceNormals[id]) end
+ function mesh:GetFaceUVs(id: number): any assert(self.faceUVs[id]);return table.clone(self.faceUVs[id]) end
+ function mesh:GetFaceColors(id: number): any assert(self.faceColors[id]);return table.clone(self.faceColors[id]) end
+ function mesh:GetNormals(): any return ids(self.normals) end
+ function mesh:GetNormal(id: number): any assert(self.normals[id]);return self.normals[id] end
+ function mesh:GetUVs(): any return ids(self.uvs) end
+ function mesh:GetUV(id: number): any assert(self.uvs[id]);return self.uvs[id] end
+ function mesh:GetColors(): any return ids(self.colors) end
+ function mesh:GetColor(id: number): any assert(self.colors[id]);return self.colors[id] end
+ function mesh:GetColorAlpha(id: number): number assert(self.alphas[id]~=nil);return self.alphas[id] end
  function mesh:Destroy(): () assert(not self.destroyed,'resource must be released once');self.destroyed=true;destroyed+=1 end
  resources[#resources+1]=mesh
  return mesh

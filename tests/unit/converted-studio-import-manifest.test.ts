@@ -1,3 +1,4 @@
+import type {StudioImportObservationReceipt} from '../../packages/protocol/src/studio.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
@@ -5,7 +6,7 @@ import {buildConvertedGraph,convertedGraphDigest,type ConvertedGraphSourceBytes}
 import {prepareGlbConversionSource} from '../../packages/asset-pipeline/src/glb-conversion-source.js';
 import {convertedGlbObjectId,convertedGlbAssetId,parseConvertedGlbRequest} from '../../packages/asset-pipeline/src/converted-glb.js';
 import {CONVERSION_FIDELITY_POLICY,CONVERSION_NODE_KEY,CONVERSION_VERTEX_ID,conversionCorrespondenceSha256} from '../../packages/asset-pipeline/src/conversion-fidelity-policy.js';
-import {createStudioImportManifestAuthority,parseConvertedStudioImportManifest,snapshotConvertedStudioImportBaseline,StudioImportManifestError,
+import {createStudioImportManifestAuthority,parseConvertedStudioImportManifest,snapshotConvertedStudioImportBaseline,studioImportObservationReceiptDigest,StudioImportManifestError,
   type HostConvertedStudioImportV2,type HostGeneratedStudioImportV1,type ConvertedPreparedStudioImportV2,type GeneratedPreparedStudioImportV1,
   type ConvertedStudioImportBaselineV2,type HostStudioImport} from '../../packages/asset-pipeline/src/studio-import-manifest.js';
 import {parseNativeStudioImportResponse} from '../../packages/asset-pipeline/src/studio-import-wire.js';
@@ -96,13 +97,21 @@ function hostFixture(collision=false,affine:'rigid'|'scale'|'shear'|'reflection'
 }
 async function prepare(input:HostStudioImport){const authority=createStudioImportManifestAuthority({loadGeneratedFiles:async()=>input});try{return authority.prepare(await authority.admit(input.revisionId));}finally{authority.close();}}
 async function converted(input:HostConvertedStudioImportV2):Promise<ConvertedPreparedStudioImportV2>{const result=await prepare(input);assert.equal(result.manifest.schemaVersion,2);return result as ConvertedPreparedStudioImportV2;}
-function baseline(prepared:ConvertedPreparedStudioImportV2):ConvertedStudioImportBaselineV2 {
-  const objects=prepared.manifest.objects.map((o,i)=>({sourceObjectId:o.sourceObjectId,instanceRef:'mesh-'+i,meshAssetId:String(100+i),ownedStateSha256:sha('mesh-state-'+i),
+function baseline(prepared:ConvertedPreparedStudioImportV2,live=false):ConvertedStudioImportBaselineV2 {
+  const objects=prepared.manifest.objects.map((o,i)=>({sourceObjectId:o.sourceObjectId,instanceRef:'mesh-'+i,meshAssetId:live?null:String(100+i),ownedStateSha256:sha('mesh-state-'+i),
     authoredChildren:[{instanceRef:'script-'+i,kind:'script' as const,stateSha256:sha('script-state-'+i)}]}));
-  return{manifest:prepared.manifest,receipt:{manifestDigest:prepared.manifest.digest,graphDigest:prepared.manifest.graph.digest,receiptSha256:sha('synthetic observed receipt'),modelRef:'model-root',modelAssetId:'999',objects,
+  // Synthetic read metadata exercises schema/delta custody only, never a native witness.
+  const observation:StudioImportObservationReceipt={formatVersion:2,observationId:'55555555-5555-4555-8555-555555555555',
+    source:{projectId:prepared.manifest.projectId,jobId:prepared.manifest.revisionId,assetId:prepared.manifest.assetId,sourceSha256:prepared.manifest.sourceSha256,
+      preparedDigest:prepared.digest,manifestDigest:prepared.manifest.digest,payloadDigest:sha('synthetic previous payload'),transferDigest:sha('synthetic previous transfer'),graphDigest:prepared.manifest.graph.digest,conversionRequestDigest:digest(prepared.manifest.conversionRequest)},
+    target:structuredClone(prepared.manifest.target),continuity:{clientLifetimeId:'fixture-plugin',pluginArtifactHash:sha('synthetic plugin'),playEpoch:0},
+    modelRef:{instanceId:'model-root',sessionId:prepared.manifest.target.sessionId,root:'Workspace',pathSegments:['Observed model'],className:'Model'},modelOwnedStateSha256:sha('synthetic model state'),objects,
     nodes:prepared.manifest.graph.nodes.map((n,i)=>{const mesh=prepared.manifest.graph.meshes.find(m=>m.nodeKey===n.nodeKey),object=mesh?objects.find(o=>o.sourceObjectId===mesh.sourceObjectId):undefined;
-      return{nodeKey:n.nodeKey,instanceRef:object?.instanceRef??'group-'+i,ownedStateSha256:object?.ownedStateSha256??sha('group-state-'+i),authoredChildren:object?.authoredChildren??[]};})}};
+      return {nodeKey:n.nodeKey,instanceRef:object?.instanceRef??'group-'+i,ownedStateSha256:object?.ownedStateSha256??sha('group-state-'+i),authoredChildren:object?.authoredChildren??[]};}),
+    receiptScope:'live-import-observation',imported:false,engineVerification:'pending'};
+  return {manifest:prepared.manifest,receipt:{commandId:'66666666-6666-4666-8666-666666666666',receiptSha256:studioImportObservationReceiptDigest(observation),observation}};
 }
+
 function mutateModel(input:HostConvertedStudioImportV2,mutate:(doc:Doc,bin:Buffer)=>void,fileId='asset-glb'):void {
   const file=input.files.find(f=>f.fileId===fileId)!,bytes=Buffer.from(file.bytes),size=bytes.readUInt32LE(12),doc=JSON.parse(bytes.subarray(20,20+size).toString('utf8')) as Doc,bin=Buffer.from(bytes.subarray(28+size));
   mutate(doc,bin);const changed=pack(doc,bin);file.bytes=changed;file.sha256=sha(changed);
@@ -155,6 +164,15 @@ test('complete observed v2 node mappings support exact reuse and preserve author
   assert.deepEqual(parseNativeStudioImportResponse({prepared:p},NEXT,next.projectId).prepared,p);
 });
 
+test('live converted session baselines retain actual nullable mesh IDs without inventing a cloud Model ID',async()=>{
+  const first=await converted(hostFixture().host()),next=hostFixture().host(NEXT);next.baseline=baseline(first,true);const p=await converted(next);
+  assert.equal(p.delta.modelAssetId,null);assert.equal(p.delta.modelRef,'model-root');assert.ok(p.delta.objects.every(object=>object.action==='reuse'&&object.meshAssetId===null));
+  assert.deepEqual(p.delta.observation,next.baseline.receipt);assert.deepEqual(snapshotConvertedStudioImportBaseline(next.baseline),next.baseline);
+  assert.deepEqual(parseNativeStudioImportResponse({prepared:p},NEXT,next.projectId).prepared,p);
+  const bad={...next.baseline,receipt:{...next.baseline.receipt,receiptSha256:sha('forged receipt checksum')}};assert.throws(()=>snapshotConvertedStudioImportBaseline(bad),refused);
+  assert.throws(()=>snapshotConvertedStudioImportBaseline({...next.baseline,receipt:{...next.baseline.receipt,modelAssetId:'999'}}),refused,'A mesh upload cannot acquire a fictitious Model asset ID through baseline metadata.');
+});
+
 test('actual EMPTY name and inherited tiny transform edits update affected nodes and cannot reuse the prior sealed graph',async()=>{
   const first=await converted(hostFixture().host()),f=hostFixture();f.byKey('node1').name='Renamed empty';f.byKey('node1').matrix[12]=1e-6;
   const next=f.host(NEXT);next.baseline=baseline(first);const p=await converted(next);
@@ -190,12 +208,12 @@ test('the compiler independently checks actual export markers, IDs, topology, ge
 
 test('converted baselines refuse graphless/version1, incomplete, duplicate, stale or conflicting instance mappings',async()=>{
   const first=await converted(hostFixture().host());
-  for(const mutate of [(v:Doc)=>{delete v.receipt.graphDigest;},(v:Doc)=>{v.manifest.schemaVersion=1;},
-    (v:Doc)=>{v.receipt.nodes.pop();},(v:Doc)=>{v.receipt.nodes.push(v.receipt.nodes[0]);},
-    (v:Doc)=>{v.receipt.graphDigest=sha('stale graph');},(v:Doc)=>{v.receipt.nodes[0].instanceRef=v.receipt.modelRef;},
-    (v:Doc)=>{v.receipt.nodes.find((n:Doc)=>n.nodeKey==='node2_primitive0').instanceRef='foreign-mesh';},
+  for(const mutate of [(v:Doc)=>{delete v.receipt.observation.source.graphDigest;},(v:Doc)=>{v.manifest.schemaVersion=1;},
+    (v:Doc)=>{v.receipt.observation.nodes.pop();},(v:Doc)=>{v.receipt.observation.nodes.push(v.receipt.observation.nodes[0]);},
+    (v:Doc)=>{v.receipt.observation.source.graphDigest=sha('stale graph');},(v:Doc)=>{v.receipt.observation.nodes[0].instanceRef=v.receipt.observation.modelRef.instanceId;},
+    (v:Doc)=>{v.receipt.observation.nodes.find((n:Doc)=>n.nodeKey==='node2_primitive0').instanceRef='foreign-mesh';},
     (v:Doc)=>{v.manifest.graph.nodes[0].name='stale name';}]){
-    const input=hostFixture().host(NEXT),observed=structuredClone(baseline(first)) as unknown as Doc;mutate(observed);input.baseline=observed as ConvertedStudioImportBaselineV2;
+    const input=hostFixture().host(NEXT),observed=structuredClone(baseline(first)) as unknown as Doc;mutate(observed);observed.receipt.receiptSha256=digest(observed.receipt.observation);input.baseline=observed as ConvertedStudioImportBaselineV2;
     await assert.rejects(prepare(input),refused);assert.throws(()=>snapshotConvertedStudioImportBaseline(observed),refused);
   }
 });

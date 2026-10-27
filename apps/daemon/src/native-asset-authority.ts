@@ -8,7 +8,7 @@ import type { AppAssetConversationBinding } from '../../../packages/protocol/src
 export type NativeAssetOperation = 'read' | 'mutate';
 /** Opaque host-only capability. A structurally identical JSON object grants nothing. */
 export interface NativeAssetActor { readonly kind: 'native-asset-actor' }
-export type NativeAssetWorkKind = 'generation' | 'preparation' | 'stage' | 'reconstruction';
+export type NativeAssetWorkKind = 'generation' | 'preparation' | 'stage' | 'reconstruction' | 'revision';
 /** Host-owned lifetime only. This is never dispatch, write or continuation authority. */
 export interface NativeAssetWorkLease {
   readonly signal: AbortSignal;
@@ -79,6 +79,7 @@ interface WorkLeaseState {
 const workLeases = new WeakMap<object, WorkLeaseState>();
 const actors = new WeakMap<object, Admission>();
 const stagedOperations = new WeakMap<Entry, Set<string>>();
+const revisedOperations = new WeakMap<Entry, Set<string>>();
 function fail(): never {throw new ArcaneError('NATIVE_ASSET_AUTHORITY', 'Native asset authority is unavailable or changed.');}
 function data(value: unknown, keys: readonly string[]): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value) || types.isProxy(value)) fail();
@@ -102,7 +103,7 @@ function compact(entry: Entry): void {
   // actor or callback can reach claims, secrets or a newly allocated entry.
   entry.cell.retired = true; entry.cell.released = true; entry.cell.entry = null;
   entry.credential = ''; entry.binding = null; entry.sealed = null;
-  entry.intents.clear(); entry.work.clear(); stagedOperations.delete(entry);
+  entry.intents.clear(); entry.work.clear(); stagedOperations.delete(entry); revisedOperations.delete(entry);
   const reclaim = entry.reclaim; entry.reclaim = () => {}; reclaim();
 }
 function retireEntry(entry: Entry): void {
@@ -124,7 +125,7 @@ export function assertNativeAssetWorkLease(value: NativeAssetWorkLease): void {
   if (!state || state.finished || state.released || !state.cell.entry) fail();
 }
 export function acquireNativeAssetWork(actor: NativeAssetActor, kind: NativeAssetWorkKind): NativeAssetWorkLease {
-  if (!['generation', 'preparation', 'stage', 'reconstruction'].includes(kind)) fail();
+  if (!['generation', 'preparation', 'stage', 'reconstruction', 'revision'].includes(kind)) fail();
   assertNativeAssetActor(actor, 'mutate');
   const admission = actors.get(actor)!, entry = allocated(admission.cell), operationId = entry.active!;
   const controller = entry.work.get(operationId);
@@ -211,6 +212,25 @@ export function assertNativeAssetStageOperationAvailable(actor: NativeAssetActor
 export function claimNativeAssetStageOperation(actor: NativeAssetActor, jobId: string): void {
   const {entry, key, consumed} = stageClaim(actor, jobId);
   consumed.add(key); stagedOperations.set(entry, consumed);
+}
+/** Revision claims have their own bounded namespace, so staging this same
+ * owned job cannot consume its later apply operation. Metadata grants nothing. */
+function revisionClaim(actor: NativeAssetActor, jobId: string): {entry: Entry; key: string; consumed: Set<string>} {
+  assertNativeAssetActor(actor, 'mutate');
+  if (typeof jobId !== 'string' || !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}(?![\s\S])/.test(jobId)) fail();
+  const admission = actors.get(actor)!;
+  const entry = allocated(admission.cell), operation = entry.active!;
+  const key = JSON.stringify([operation, admission.scope.projectId, jobId]);
+  const consumed = revisedOperations.get(entry) ?? new Set<string>();
+  if (consumed.has(key) || consumed.size >= MAX_STAGE_CLAIMS) fail();
+  return {entry, key, consumed};
+}
+export function assertNativeAssetRevisionOperationAvailable(actor:NativeAssetActor,jobId:string):void {
+  revisionClaim(actor,jobId);
+}
+export function claimNativeAssetRevisionOperation(actor:NativeAssetActor,jobId:string):void {
+  const {entry,key,consumed}=revisionClaim(actor,jobId);
+  consumed.add(key);revisedOperations.set(entry,consumed);
 }
 /** Volatile host authority only. It never reads provider auth/config or persists secrets.
  * Registry lifetime is one daemon/project. Restart retires every credential/intent;

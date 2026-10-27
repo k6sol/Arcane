@@ -1,3 +1,5 @@
+import {types as observationTypes} from 'node:util';
+import {STUDIO_IMPORT_OBSERVATION_LIMITS,type StudioAssetStageArgs,type InstanceRef,type StudioImportObservationSource,type StudioImportObservedChild,type StudioImportObservedNode,type StudioImportObservedObject,type StudioImportObservationArgs,type StudioImportObservationReceipt,type StudioImportObservationWitness,type StudioImportRevisionArgs,type StudioImportRevisionReceipt} from '../../protocol/src/studio.js';
 import { ArcaneError } from '../../protocol/src/providers.js';
 import { isAssetMethod, validateAssetCommand, validateBuildClone, validateBuildTemplates } from './studio-asset-policy.js';
 import { validateTerrainGenerate } from './terrain-policy.js';
@@ -990,6 +992,8 @@ function convertedReconstruction(a:Record<string,Json>):void {
 }
 
 export function validateCommandArgs(method: StudioMethod, value: unknown, session: StudioSession, internalRestore = false): Record<string, Json> {
+  if(method==='scene.observe_import')return validateStudioImportObservationArgs(value,session);
+  if(method==='asset.apply_revision')return validateStudioImportRevisionArgs(value,session);
   if (method === 'scene.import_context' || method === 'scene.upload_context') {
     const input = object(value), prototype = Object.getPrototypeOf(input);
     if ((prototype !== Object.prototype && prototype !== null) || Reflect.ownKeys(input).length !== 0) throw new ArcaneError('INPUT', 'Import context arguments must be an empty JSON object.');
@@ -1172,4 +1176,115 @@ export function validateStudioImportContextReceipt(command: StudioCommand, sessi
     throw new ArcaneError('SCOPE', 'Import context identity differs from the paired Studio session.');
   }
   return observation;
+}
+
+const OBS_HASH=/^[a-f0-9]{64}$/;
+const OBS_UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
+const OBS_ID=/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+const OBS_NODE=/^node[0-9]{1,4}(?:_primitive[0-9]{1,4})?$/;
+const OBS_OBJECT=/^arcane_[a-f0-9]{64}$/;
+function observationFailure():never {throw new ArcaneError('STUDIO_IMPORT_OBSERVATION','Converted observation or revision metadata is incomplete, changed or outside its exact scope.');}
+function freezeObservation<T>(value:T):T {if(value&&typeof value==='object'){for(const child of Object.values(value))freezeObservation(child);Object.freeze(value);}return value;}
+function observationCanonical(value:unknown):string {return Array.isArray(value)?'['+value.map(observationCanonical).join(',')+']':value&&typeof value==='object'?'{'+Object.keys(value).sort().map(key=>JSON.stringify(key)+':'+observationCanonical(Object.getOwnPropertyDescriptor(value,key)!.value)).join(',')+'}':JSON.stringify(value);}
+/** No getter, proxy trap, iterator or serializer is consulted before snapshot. */
+function observationSnapshot(value:unknown):Json {
+  let count=0,bytes=0;const seen=new Set<object>();
+  const walk=(v:unknown,depth:number):Json=>{
+    if(++count>STUDIO_IMPORT_OBSERVATION_LIMITS.values||depth>STUDIO_IMPORT_OBSERVATION_LIMITS.depth)observationFailure();
+    if(v===null||typeof v==='boolean')return v;
+    if(typeof v==='number'){if(!Number.isFinite(v))observationFailure();return Object.is(v,-0)?0:v;}
+    if(typeof v==='string'){bytes+=Buffer.byteLength(v);if(v.length>4096||bytes>STUDIO_IMPORT_OBSERVATION_LIMITS.argumentBytes)observationFailure();return v;}
+    if(!v||typeof v!=='object'||observationTypes.isProxy(v)||seen.has(v))observationFailure();seen.add(v);
+    try{
+      const array=Array.isArray(v),prototype=Object.getPrototypeOf(v),own=Reflect.ownKeys(v);
+      if(array?prototype!==Array.prototype:prototype!==Object.prototype&&prototype!==null)observationFailure();
+      if(array){const descriptor=Object.getOwnPropertyDescriptor(v,'length'),length:unknown=descriptor?.value;
+        if(typeof length!=='number'||!Number.isSafeInteger(length)||length<0||length>128||own.length!==length+1)observationFailure();
+        const out:Json[]=[];for(let at=0;at<length;at++){const d=Object.getOwnPropertyDescriptor(v,String(at));if(!d||!d.enumerable||!Object.hasOwn(d,'value'))observationFailure();const child:unknown=d.value;out.push(walk(child,depth+1));}return out;
+      }
+      if(own.length>32)observationFailure();const out:Record<string,Json>=Object.create(null);
+      for(const key of own){if(typeof key!=='string')observationFailure();const d=Object.getOwnPropertyDescriptor(v,key);if(!d||!d.enumerable||!Object.hasOwn(d,'value'))observationFailure();const child:unknown=d.value;out[key]=walk(child,depth+1);}return out;
+    }finally{seen.delete(v);}
+  };
+  const result=walk(value,0);if(Buffer.byteLength(JSON.stringify(result))>STUDIO_IMPORT_OBSERVATION_LIMITS.argumentBytes)observationFailure();return result;
+}
+function observationFields(value:Json|undefined,fields:readonly string[]):Record<string,Json>{
+  if(!value||typeof value!=='object'||Array.isArray(value)||Object.keys(value).length!==fields.length||fields.some(key=>!Object.hasOwn(value,key)))observationFailure();return value;
+}
+function observationString(value:Json|undefined,pattern:RegExp):string {if(typeof value!=='string'||/[\r\n\u2028\u2029]/.test(value)||!pattern.test(value))observationFailure();return value;}
+function observationList(value:Json|undefined,min:number,max:number):Json[]{if(!Array.isArray(value)||value.length<min||value.length>max)observationFailure();return value;}
+function observationInteger(value:Json|undefined,min:number,max:number):number {if(typeof value!=='number'||!Number.isSafeInteger(value)||value<min||value>max)observationFailure();return value;}
+function observationSource(value:Json|undefined):StudioImportObservationSource {
+  const a=observationFields(value,['projectId','jobId','assetId','sourceSha256','preparedDigest','manifestDigest','payloadDigest','transferDigest','graphDigest','conversionRequestDigest']);
+  return {projectId:observationString(a.projectId,OBS_HASH),jobId:observationString(a.jobId,OBS_UUID),assetId:observationString(a.assetId,OBS_OBJECT),sourceSha256:observationString(a.sourceSha256,OBS_HASH),preparedDigest:observationString(a.preparedDigest,OBS_HASH),manifestDigest:observationString(a.manifestDigest,OBS_HASH),payloadDigest:observationString(a.payloadDigest,OBS_HASH),transferDigest:observationString(a.transferDigest,OBS_HASH),graphDigest:observationString(a.graphDigest,OBS_HASH),conversionRequestDigest:observationString(a.conversionRequestDigest,OBS_HASH)};
+}
+function observationTarget(value:Json|undefined):StudioAssetStageArgs['target'] {
+  const a=observationFields(value,['sessionId','placeId','universeId','root','parentRef','creator']),creator=observationFields(a.creator,['kind','id']);
+  if(a.root!=='Workspace'||creator.kind!=='user'&&creator.kind!=='group')observationFailure();
+  return {sessionId:observationString(a.sessionId,OBS_ID),placeId:observationInteger(a.placeId,0,Number.MAX_SAFE_INTEGER),universeId:observationInteger(a.universeId,0,Number.MAX_SAFE_INTEGER),root:'Workspace',parentRef:observationString(a.parentRef,OBS_ID),creator:{kind:creator.kind,id:observationString(creator.id,/^[1-9][0-9]{0,19}$/)}};
+}
+function observationContinuity(value:Json|undefined):StudioAssetStageArgs['continuity'] {
+  const a=observationFields(value,['clientLifetimeId','pluginArtifactHash','playEpoch']);return {clientLifetimeId:observationString(a.clientLifetimeId,/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/),pluginArtifactHash:observationString(a.pluginArtifactHash,OBS_HASH),playEpoch:observationInteger(a.playEpoch,0,Number.MAX_SAFE_INTEGER)};
+}
+function observationModelRef(value:Json|undefined):InstanceRef {
+  const a=observationFields(value,['instanceId','sessionId','root','pathSegments','className']);if(a.root!=='Workspace'||a.className!=='Model')observationFailure();
+  const pathSegments=observationList(a.pathSegments,1,63).map(part=>{if(typeof part!=='string'||part.length>256||part.includes('\0'))observationFailure();return part;});
+  return {instanceId:observationString(a.instanceId,OBS_ID),sessionId:observationString(a.sessionId,OBS_ID),root:'Workspace',pathSegments,className:'Model'};
+}
+function observationArgsBody(a:Record<string,Json>):StudioImportObservationArgs {
+  if(a.formatVersion!==2)observationFailure();const target=observationTarget(a.target),modelRef=observationModelRef(a.modelRef);if(modelRef.sessionId!==target.sessionId||modelRef.instanceId===target.parentRef)observationFailure();
+  return {formatVersion:2,observationId:observationString(a.observationId,OBS_UUID),source:observationSource(a.source),target,continuity:observationContinuity(a.continuity),modelRef};
+}
+export function parseStudioImportObservationArgs(value:unknown):StudioImportObservationArgs {return freezeObservation(observationArgsBody(observationFields(observationSnapshot(value),['formatVersion','observationId','source','target','continuity','modelRef'])));}
+function observationChildren(value:Json|undefined):StudioImportObservedChild[]{
+  const seen=new Set<string>();return observationList(value,0,STUDIO_IMPORT_OBSERVATION_LIMITS.preservedChildren).map(raw=>{const a=observationFields(raw,['instanceRef','kind','stateSha256']);if(a.kind!=='script'&&a.kind!=='attachment'&&a.kind!=='constraint')observationFailure();const instanceRef=observationString(a.instanceRef,OBS_ID);if(seen.has(instanceRef))observationFailure();seen.add(instanceRef);return {instanceRef,kind:a.kind,stateSha256:observationString(a.stateSha256,OBS_HASH)};});
+}
+function observationState(a:Record<string,Json>):Pick<StudioImportObservationReceipt,'modelOwnedStateSha256'|'nodes'|'objects'> {
+  const nodeKeys=new Set<string>(),nodeRefs=new Set<string>(),objectIds=new Set<string>(),objectRefs=new Set<string>();
+  const nodes:StudioImportObservedNode[]=observationList(a.nodes,1,STUDIO_IMPORT_OBSERVATION_LIMITS.nodes).map(raw=>{const n=observationFields(raw,['nodeKey','instanceRef','ownedStateSha256','authoredChildren']),nodeKey=observationString(n.nodeKey,OBS_NODE),instanceRef=observationString(n.instanceRef,OBS_ID);if(nodeKeys.has(nodeKey)||nodeRefs.has(instanceRef))observationFailure();nodeKeys.add(nodeKey);nodeRefs.add(instanceRef);return {nodeKey,instanceRef,ownedStateSha256:observationString(n.ownedStateSha256,OBS_HASH),authoredChildren:observationChildren(n.authoredChildren)};});
+  const objects:StudioImportObservedObject[]=observationList(a.objects,1,STUDIO_IMPORT_OBSERVATION_LIMITS.objects).map(raw=>{const o=observationFields(raw,['sourceObjectId','instanceRef','ownedStateSha256','authoredChildren','meshAssetId']),sourceObjectId=observationString(o.sourceObjectId,OBS_OBJECT),instanceRef=observationString(o.instanceRef,OBS_ID);if(objectIds.has(sourceObjectId)||objectRefs.has(instanceRef))observationFailure();objectIds.add(sourceObjectId);objectRefs.add(instanceRef);return {sourceObjectId,instanceRef,ownedStateSha256:observationString(o.ownedStateSha256,OBS_HASH),authoredChildren:observationChildren(o.authoredChildren),meshAssetId:o.meshAssetId===null?null:observationString(o.meshAssetId,/^[1-9][0-9]{0,19}$/)};});
+  const refs=new Set([...nodeRefs,...objectRefs]);if(refs.size+1>STUDIO_RECONSTRUCTION_LIMITS.objects)observationFailure();
+  const model=observationModelRef(a.modelRef);if(refs.has(model.instanceId))observationFailure();refs.add(model.instanceId);const children=new Set<string>();
+  for(const owner of [...nodes,...objects]){
+    const node='sourceObjectId'in owner?nodes.find(n=>n.instanceRef===owner.instanceRef):undefined;
+    if(node&&(node.ownedStateSha256!==owner.ownedStateSha256||observationCanonical(node.authoredChildren)!==observationCanonical(owner.authoredChildren)))observationFailure();
+    if(node)continue;
+    for(const child of owner.authoredChildren){if(refs.has(child.instanceRef)||children.has(child.instanceRef))observationFailure();children.add(child.instanceRef);}
+  }
+  return {modelOwnedStateSha256:observationString(a.modelOwnedStateSha256,OBS_HASH),nodes,objects};
+}
+const OBS_RECEIPT_FIELDS=['formatVersion','observationId','source','target','continuity','modelRef','modelOwnedStateSha256','nodes','objects','receiptScope','imported','engineVerification'] as const;
+export function parseStudioImportObservationReceipt(value:unknown):StudioImportObservationReceipt {
+  const a=observationFields(observationSnapshot(value),OBS_RECEIPT_FIELDS);if(a.receiptScope!=='live-import-observation'||a.imported!==false||a.engineVerification!=='pending')observationFailure();return freezeObservation({...observationArgsBody(a),...observationState(a),receiptScope:'live-import-observation',imported:false,engineVerification:'pending'});
+}
+export function parseStudioImportObservationWitness(value:unknown):StudioImportObservationWitness {
+  const a=observationFields(observationSnapshot(value),['commandId','receiptSha256','observation']);return freezeObservation({commandId:observationString(a.commandId,OBS_UUID),receiptSha256:observationString(a.receiptSha256,OBS_HASH),observation:parseStudioImportObservationReceipt(a.observation)});
+}
+function observationSession(a:Pick<StudioImportObservationArgs,'target'|'continuity'>,session:StudioSession,method:string):void {
+  const proof=session.proof;if(!session.capabilities.includes(method)||!session.allowedRoots.includes('Workspace')||session.revokedAt!==null||a.target.sessionId!==session.id||a.target.placeId!==session.placeId||a.target.universeId!==session.universeId||!proof||proof.sessionId!==session.id||proof.placeId!==session.placeId||proof.universeId!==session.universeId||proof.clientLifetimeId!==session.clientSessionId||!proof.connected||!proof.continuitySupported||proof.mode!=='Edit'||proof.clientLifetimeId!==a.continuity.clientLifetimeId||proof.pluginArtifactHash!==a.continuity.pluginArtifactHash||proof.playEpoch!==a.continuity.playEpoch)observationFailure();
+}
+export function validateStudioImportObservationArgs(value:unknown,session:StudioSession):Record<string,Json>{const a=parseStudioImportObservationArgs(value);observationSession(a,session,'scene.observe_import');return jsonObject(a);}
+export function validateStudioImportObservationReceipt(args:unknown,value:unknown):StudioImportObservationReceipt {
+  const a=parseStudioImportObservationArgs(args),r=parseStudioImportObservationReceipt(value);for(const key of ['formatVersion','observationId','source','target','continuity','modelRef'] as const)if(observationCanonical(a[key])!==observationCanonical(r[key]))observationFailure();return r;
+}
+export function parseStudioImportRevisionArgs(value:unknown):StudioImportRevisionArgs {
+  const a=observationFields(observationSnapshot(value),['formatVersion','runId','expected','packetCount','byteLength','source','target','continuity','observation','currentObservation']);if(a.formatVersion!==2)observationFailure();
+  const source=observationSource(a.source),target=observationTarget(a.target),continuity=observationContinuity(a.continuity),expected=observationFields(a.expected,['digest','payloadDigest','manifestDigest']);
+  const observation=parseStudioImportObservationWitness(a.observation),currentObservation=parseStudioImportObservationWitness(a.currentObservation),old=observation.observation,current=currentObservation.observation;
+  if(observation.commandId===currentObservation.commandId||old.observationId===current.observationId)observationFailure();
+  const {observationId:_oldId,...oldState}=old,{observationId:_currentId,...currentState}=current;
+  if(observationCanonical(oldState)!==observationCanonical(currentState)||observationCanonical(target)!==observationCanonical(old.target)||observationCanonical(continuity)!==observationCanonical(old.continuity)||source.projectId!==old.source.projectId||source.assetId!==old.source.assetId||source.sourceSha256!==old.source.sourceSha256)observationFailure();
+  const triple={digest:observationString(expected.digest,OBS_HASH),payloadDigest:observationString(expected.payloadDigest,OBS_HASH),manifestDigest:observationString(expected.manifestDigest,OBS_HASH)};if(triple.digest!==source.transferDigest||triple.payloadDigest!==source.payloadDigest||triple.manifestDigest!==source.manifestDigest)observationFailure();
+  return freezeObservation({formatVersion:2,runId:observationString(a.runId,OBS_UUID),expected:triple,packetCount:observationInteger(a.packetCount,1,STUDIO_ASSET_TRANSFER_LIMITS.packets),byteLength:observationInteger(a.byteLength,1,STUDIO_ASSET_TRANSFER_LIMITS.rawBytes),source,target,continuity,observation,currentObservation});
+}
+export function validateStudioImportRevisionArgs(value:unknown,session:StudioSession):Record<string,Json>{const a=parseStudioImportRevisionArgs(value);observationSession(a,session,'asset.apply_revision');if(!session.allowWrites)observationFailure();return jsonObject(a);}
+/** Detached historical metadata only; this does not validate a current actor or graph. */
+export function parseStudioImportRevisionReceipt(value:unknown):StudioImportRevisionReceipt {
+  const a=observationFields(observationSnapshot(value),[...OBS_RECEIPT_FIELDS,'runId','state']);if(a.receiptScope!=='live-import-revision'||a.state!=='applied'||a.imported!==false||a.engineVerification!=='pending')observationFailure();
+  const r:StudioImportRevisionReceipt={...observationArgsBody(a),...observationState(a),receiptScope:'live-import-revision',state:'applied',runId:observationString(a.runId,OBS_UUID),imported:false,engineVerification:'pending'};
+  return freezeObservation(r);
+}
+export function validateStudioImportRevisionReceipt(args:unknown,value:unknown):StudioImportRevisionReceipt {
+  const expected=parseStudioImportRevisionArgs(args),r=parseStudioImportRevisionReceipt(value);
+  if(r.runId!==expected.runId||r.observationId!==expected.currentObservation.observation.observationId||observationCanonical(r.source)!==observationCanonical(expected.source)||observationCanonical(r.target)!==observationCanonical(expected.target)||observationCanonical(r.continuity)!==observationCanonical(expected.continuity)||observationCanonical(r.modelRef)!==observationCanonical(expected.observation.observation.modelRef))observationFailure();return freezeObservation(r);
 }

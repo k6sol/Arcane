@@ -239,7 +239,8 @@ function Operations:reconstructAsset(args: any, guard: () -> ()): any
 	end
 	current()
 	owners.consumed[runId] = true; owners.count += 1 -- BEFORE resolving/allocating an engine service.
-	local owner: any = {runId = runId, meshes = {}, retired = false, finished = false, materials = {}, target = owned.target, continuity = owned.continuity, service = nil, graphPlan=graphPlan}
+	local owner: any = {runId = runId, meshes = {}, retired = false, finished = false, materials = {}, target = owned.target, continuity = owned.continuity, service = nil, graphPlan=graphPlan,
+		expected=owned.expected,packetCount=status.packetCount,byteLength=status.byteLength}
 	owners.resources[identity.digest] = owner
 	owned.guard = function(): ()
 		current()
@@ -256,6 +257,9 @@ function Operations:reconstructAsset(args: any, guard: () -> ()): any
 			formatVersion=entry.formatVersion,association=entry.association,nativePlan=entry.nativePlan,
 			coordinateSpace=entry.mesh.coordinateSpace,sourceLocalCentre=entry.mesh.sourceLocalCentre} end
 		owner.service = service -- Retained for materialization; never re-acquired elsewhere.
+		if graphPlan and graphPlan.source then
+			for _,resource in ipairs(owner.meshes) do resource.meshProof=AssetPlacement.meshProof(resource.mesh,function(): any return Sha256Stream.new() end,owned.guard) end
+		end
 		owned.guard()
 		local summary = {}
 		for _, entry in ipairs(entries) do
@@ -464,6 +468,118 @@ function Operations:keepReconstruction(args: any, guard: () -> ()): any
 	owner.keeping = false
 	if not ok then error(result, 0) end
 	if #V.encode(result, self.http) > V.RESULT_BYTES then V.fail("BODY_LIMIT", "Keep receipt exceeds its bound.") end
+	return V.immutable(result)
+end
+
+local function observationWitness(value: any): any
+	local witness=V.fields(value,{"commandId","receiptSha256","observation"},"import observation witness")
+	local commandId=V.convertedUuid(witness.commandId,"observation command")
+	local digest=V.string(witness.receiptSha256,"observation digest",64)
+	if #commandId~=36 or #digest~=64 or not string.match(digest,"^[a-f0-9]+$") then V.fail("INPUT","Invalid observation witness identity.") end
+	V.object(witness.observation,"original import observation")
+	return witness
+end
+local function sameObservation(a: any,b: any): boolean
+	local left,right=table.clone(a),table.clone(b);left.observationId=nil;right.observationId=nil
+	return V.convertedEqual(left,right)
+end
+local function importReceipt(args: any,root: any,captured: any,ops: any,scope: string): any
+	return {formatVersion=2,observationId=args.observationId,source=V.immutable(args.source),target=V.immutable(args.target),continuity=V.immutable(args.continuity),
+		modelRef=ops.registry:ref(root),modelOwnedStateSha256=captured.modelOwnedStateSha256,nodes=captured.nodes,objects=captured.objects,
+		receiptScope=scope,imported=false,engineVerification="pending"}
+end
+-- Fixed read: an actual retained root/owner and fresh authenticated context are
+-- required. Attributes or historical receipts cannot recreate this private cache.
+function Operations:observeImport(command: any,args: any,guard: any): any
+	V.fields(args,{"formatVersion","observationId","source","target","continuity","modelRef"},"import observation")
+	if args.formatVersion~=2 then V.fail("INPUT","Converted observation version is required.") end
+	local source=V.convertedSource(args.source);local id=V.convertedUuid(args.observationId,"observation")
+	V.convertedUuid(command.id,"observation command")
+	local owners=assetOwners[self];local owner=owners and owners.resources[source.transferDigest]
+	if not owner or owner.retired or not owner.finished or not owner.graph or owner.graphUncertain or not owner.placed then V.fail("STATE","Original private imported resources are unavailable.") end
+	if not V.convertedEqual(source,owner.graphPlan.source) or not V.equal(args.target,owner.target) or not V.equal(args.continuity,owner.continuity) then V.fail("SCOPE","Observed source or original context differs.") end
+	local root=self.registry:resolve(args.modelRef)
+	if root~=owner.placed or not root:IsA("Model") then V.fail("REF","Observation must name the actual private root Model.") end
+	local target=self:assetTargetGuard(owner.target,guard)
+	local function current(): () target();if owner.retired or owner.graphUncertain or owner.placed~=root then V.fail("SCOPE","Observed original owner was retired.") end end
+	current()
+	self.assetObservationIds=self.assetObservationIds or {};self.assetObservationCount=self.assetObservationCount or 0
+	if self.assetObservationIds[id] or self.assetObservationCount>=V.MAX_RECEIPTS then V.fail("STATE","Observation identity was already used or its bounded history is full.") end
+	self.assetObservationIds[id]=true;self.assetObservationCount+=1
+	local captured=AssetPlacement.liveObservation(root,self,current)
+	local result=importReceipt(args,root,captured,self,"live-import-observation")
+	if #V.encode(result,self.http)>V.RESULT_BYTES then V.fail("BODY_LIMIT","Import observation exceeds its receipt bound.") end
+	current();AssetPlacement.checkObservation(root,self,current,captured)
+	local frozen=V.immutable(result)
+	owner.observation={id=id,commandId=command.id,body=frozen,capture=captured,consumed=false,root=root}
+	return frozen
+end
+
+function Operations:applyImportRevision(command: any,args: any,guard: any): any
+	V.fields(args,{"formatVersion","runId","expected","packetCount","byteLength","source","target","continuity","observation","currentObservation"},"import revision")
+	if args.formatVersion~=2 then V.fail("INPUT","Converted revision version is required.") end
+	V.convertedUuid(args.runId,"revision run");V.convertedUuid(command.id,"revision command")
+	V.fields(args.expected,{"digest","payloadDigest","manifestDigest"},"revision transfer identity")
+	V.integer(args.packetCount,1,512,"revision packet count");V.integer(args.byteLength,1,48*1024*1024,"revision byte count")
+	local source=V.convertedSource(args.source);local previous=observationWitness(args.observation);local fresh=observationWitness(args.currentObservation)
+	local owners=assetOwners[self];local nextOwner=owners and owners.resources[source.transferDigest]
+	local oldSource=V.convertedSource(previous.observation.source);local oldOwner=owners and owners.resources[oldSource.transferDigest]
+	if not oldOwner or not nextOwner or oldOwner==nextOwner or oldOwner.retired or nextOwner.retired or not nextOwner.finished or not oldOwner.finished or not oldOwner.placed or not nextOwner.graph or oldOwner.graphUncertain or nextOwner.graphUncertain or oldOwner.keeping or nextOwner.keeping or oldOwner.materializing or nextOwner.materializing then V.fail("STATE","Actual original and next converted resources are unavailable.") end
+	if not V.convertedEqual(oldSource,oldOwner.graphPlan.source) or not V.convertedEqual(source,nextOwner.graphPlan.source)
+		or source.projectId~=oldSource.projectId or source.assetId~=oldSource.assetId or source.sourceSha256~=oldSource.sourceSha256
+		or source.transferDigest~=args.expected.digest or source.payloadDigest~=args.expected.payloadDigest or source.manifestDigest~=args.expected.manifestDigest
+		or not V.equal(args.expected,nextOwner.expected) or args.runId~=nextOwner.runId or args.packetCount~=nextOwner.packetCount or args.byteLength~=nextOwner.byteLength
+		or not V.equal(args.target,nextOwner.target) or not V.equal(args.target,oldOwner.target) or not V.equal(args.continuity,nextOwner.continuity) or not V.equal(args.continuity,oldOwner.continuity)
+		or not V.convertedEqual(previous,nextOwner.graphPlan.delta and nextOwner.graphPlan.delta.observation) then V.fail("SCOPE","Revision does not bind the actual sealed original and next sources.") end
+	if fresh.commandId==previous.commandId or fresh.observation.observationId==previous.observation.observationId or not sameObservation(previous.observation,fresh.observation) then V.fail("CONFLICT","Revision requires a new read of the exact sealed old state.") end
+	local cached=oldOwner.observation
+	if not cached or cached.consumed or cached.id~=fresh.observation.observationId or cached.commandId~=fresh.commandId or not V.convertedEqual(cached.body,fresh.observation) then V.fail("STATE","The new observation is not the actual private current read.") end
+	local root=self.registry:resolve(fresh.observation.modelRef)
+	if root~=oldOwner.placed or root~=cached.root then V.fail("REF","Revision root changed.") end
+	local target=self:assetTargetGuard(args.target,guard)
+	local function scope(): () target();if oldOwner.retired or nextOwner.retired or oldOwner.observation~=cached or oldOwner.placed~=root then V.fail("SCOPE","Revision owner or current witness was retired.") end end
+	local function current(): () scope();AssetPlacement.checkObservation(root,self,scope,cached.capture,true) end
+	current();AssetPlacement.checkObservation(root,self,scope,cached.capture)
+	for _,resource in ipairs(nextOwner.meshes) do
+		if resource.disposed or not resource.mesh or resource.coordinateSpace~="centered-carrier-meters" then V.fail("STATE","Next original centered mesh resources are absent.") end
+		if resource.object.role~="collision" and not AssetMaterials.plan(resource.material,resource.textures).supported then V.fail("UNSUPPORTED_MATERIAL","Unsupported revised material refuses before allocation.") end
+		if not resource.meshProof then V.fail("STATE","Original next mesh readback proof is absent.") end
+		resource.meshProof.assertCurrent(scope)
+	end
+	cached.consumed=true -- Exact operation witness is never refunded or replayed.
+	local function preparePart(resource: any,own: any): (any,any)
+		current();local collision=resource.object.role=="collision"
+		local part=nextOwner.service:CreateMeshPartAsync(Content.fromObject(resource.mesh),{CollisionFidelity=if collision then Enum.CollisionFidelity.Hull else Enum.CollisionFidelity.Box,RenderFidelity=Enum.RenderFidelity.Precise})
+		own(part);current()
+		if not part or not part:IsA("MeshPart") or part.Parent~=nil or #part:GetChildren()~=0 then V.fail("ENGINE","Expected an empty detached revision carrier.") end
+		AssetPlacement.verifyCarrier(part,resource.object)
+		part.Anchored=oldOwner.meshes[1].part.Anchored
+		local appearance: any=nil
+		if collision then part.Transparency,part.CanCollide,part.CastShadow,part.CanQuery=1,true,false,false
+		else
+			local key=if resource.material==nil then "default" else resource.material.sha256;local material=nextOwner.materials[key]
+			if not material then
+				material=AssetMaterials.create(resource.material,{createEditableImage=function(options: any): any return nextOwner.service:CreateEditableImage(options) end,
+					createSurfaceAppearanceAsync=function(maps: any): any return nextOwner.service:CreateSurfaceAppearanceAsync(maps) end,contentFromObject=function(image: any): any return Content.fromObject(image) end,
+					vector2=function(x: number,y: number): any return Vector2.new(x,y) end,colorFromLinear=function(r: number,g: number,b: number): any return Color3.new(srgb(r),srgb(g),srgb(b)) end},current,resource.textures)
+				nextOwner.materials[key]=material
+			end
+			current();part.CanCollide=false;part.Material=Enum.Material.SmoothPlastic
+			part.Color,part.Transparency,part.DoubleSided=material.meshPartProperties.Color,material.meshPartProperties.Transparency,material.meshPartProperties.DoubleSided
+			appearance=material.surfaceAppearance:Clone();own(appearance);current()
+			if not appearance or not appearance:IsA("SurfaceAppearance") or appearance.Parent~=nil then V.fail("ENGINE","Expected a detached revised material.") end
+			appearance.Parent=part
+		end
+		return part,appearance
+	end
+	local captured=AssetPlacement.applyConvertedRevision(self,oldOwner,nextOwner,previous,preparePart,current,scope,command)
+	-- Same actual root, now owned by the exact new source. Old resources stay
+	-- privately retained until ordinary lifetime cleanup; no upload is invented.
+	nextOwner.placed=root;oldOwner.placed=nil;oldOwner.superseded=true;oldOwner.retired=true;oldOwner.observation=nil
+	local result=importReceipt({observationId=fresh.observation.observationId,source=source,target=args.target,continuity=args.continuity},root,captured,self,"live-import-revision")
+	result.runId=args.runId;result.state="applied"
+	if self.assetCleanupFailed then cleanupFailure() end
+	if #V.encode(result,self.http)>V.RESULT_BYTES then V.fail("BODY_LIMIT","Converted revision receipt exceeds its bound.") end
 	return V.immutable(result)
 end
 function Operations.meshKeepSupported(gameModel: any): boolean return AssetPlacement.keepSupported(gameModel) end
@@ -1936,6 +2052,8 @@ function Operations:execute(command: any, guard: () -> ()): any
 	elseif method == "asset.stage_packet" then result = self:stageAssetPacket(args, guard)
 	elseif method == "asset.reconstruct" then return self:reconstructAsset(args, guard)
 	elseif method == "asset.keep_mesh" then return self:keepReconstruction(args, guard)
+	elseif method == "asset.apply_revision" then return self:applyImportRevision(command,args,guard)
+	elseif method == "scene.observe_import" then return self:observeImport(command,args,guard)
 	elseif method == "scene.import_context" then result = self:importContext(args)
 	elseif method == "scene.upload_context" then result = self:uploadContext(args)
 	elseif method == "scene.search" then result = self:search(args)

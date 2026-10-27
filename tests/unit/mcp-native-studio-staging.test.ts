@@ -310,6 +310,7 @@ test('definite daemon preflight refusals stay unknown/no-retry but keep their re
   for (const [path, run, tool] of [
     [PATH, () => f.daemon.assetsStageStudioImport(JOB), TOOL],
     ['/v1/assets/native/reconstruct-studio-import', () => f.daemon.assetsReconstructStudioImport(JOB), 'assets_reconstruct_studio_import'],
+    ['/v1/assets/native/apply-studio-revision', () => f.daemon.assetsApplyStudioRevision(JOB), 'assets_apply_studio_revision'],
   ] as const) {
     for (const code of ['STUDIO_IMPORT_TARGET', 'STUDIO_IMPORT_AMBIGUOUS', 'STUDIO_IMPORT_CONTINUITY', 'STUDIO_STAGE_CAPABILITY', 'STUDIO_RECONSTRUCT_STATE']) {
       f.setResponder(request => {

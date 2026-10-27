@@ -14,6 +14,7 @@ import { NATIVE_STUDIO_IMPORT_RESPONSE_BYTES, parseNativeStudioImportResponse } 
 import { NATIVE_STUDIO_STAGING_RESPONSE_BYTES, nativeStudioStagingResponse } from '../../../packages/asset-pipeline/src/studio-staging-wire.js';
 import { parseNativeStudioStagingStatusResponse } from '../../../packages/asset-pipeline/src/studio-staging-status-wire.js';
 import {nativeStudioReconstructionResponse,parseNativeStudioReconstructionStatusResponse} from '../../../packages/asset-pipeline/src/studio-reconstruction-wire.js';
+import {nativeStudioRevisionResponse,parseNativeStudioRevisionStatusResponse} from '../../../packages/asset-pipeline/src/studio-revision-wire.js';
 import { playtestJobResponse, playtestListResponse, playtestPreparedResponse, playtestRequestInput, type PlaytestRequest } from './playtest-schemas.js';
 import { viewportCaptureInput, viewportCaptureResponse, type ViewportCaptureInput } from './viewport-tool.js';
 
@@ -417,6 +418,23 @@ export class DaemonClient {
     try {
       const value=await this.http('/v1/assets/native/studio-reconstruction-status?jobId='+encodeURIComponent(jobId),deadline.signal,undefined,false,true);
       try{return parseNativeStudioReconstructionStatusResponse(value,jobId);}catch{throw new BridgeError('PROTOCOL','Daemon returned invalid historical reconstruction evidence.');}
+    }finally{deadline.dispose();}
+  }
+
+  async assetsApplyStudioRevision(jobId:string,options:WaitOptions={}) {
+    if(this.assetAudience!=='native-session')throw new BridgeError('ASSET_AUDIENCE','Model revision requires the dedicated native-session audience.');
+    nativeAssetJobId.parse(jobId);
+    const schema=nativeStudioRevisionResponse.refine(value=>value.jobId===jobId,'Wrong revised asset job.');
+    return this.postOnce('/v1/assets/native/apply-studio-revision',{jobId},schema,{jobId,retry:false},
+      'Inspect assets_studio_revision_status for this original jobId in the same project and conversation. The update may be running or unknown; never apply it again automatically. Historical receipts do not grant current resource access or confirm upload, publication or native acceptance.',options,true);
+  }
+
+  async assetsStudioRevisionStatus(jobId:string,options:WaitOptions={}) {
+    if(this.assetAudience!=='native-session')throw new BridgeError('ASSET_AUDIENCE','Model revision status requires the dedicated native-session audience.');
+    nativeAssetJobId.parse(jobId);const deadline=this.deadline(options);
+    try {
+      const value=await this.http('/v1/assets/native/studio-revision-status?jobId='+encodeURIComponent(jobId),deadline.signal,undefined,false,true);
+      try{return parseNativeStudioRevisionStatusResponse(value,jobId);}catch{throw new BridgeError('PROTOCOL','Daemon returned invalid historical revision evidence.');}
     }finally{deadline.dispose();}
   }
 

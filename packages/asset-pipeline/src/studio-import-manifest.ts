@@ -1,3 +1,5 @@
+import {parseStudioImportObservationReceipt,parseStudioImportObservationWitness} from '../../core/src/studio-policy.js';
+import type {StudioImportObservationWitness,StudioImportObservedObject} from '../../protocol/src/studio.js';
 import { SpatialMathError, matrixFromTrs, multiplyMatrix4 } from '../../core/src/spatial-math.js';
 import { createHash } from 'node:crypto';
 import { types } from 'node:util';
@@ -120,8 +122,8 @@ const convertedManifestContent = manifestContent.extend({schemaVersion:z.literal
   textures:z.array(convertedTextureManifest).max(64),anchors:z.array(z.never()).max(0)});
 const convertedManifestSchema = convertedManifestContent.extend({digest:hash});
 const nodeMapping = z.strictObject({nodeKey,instanceRef:id,ownedStateSha256:hash,authoredChildren:z.array(preservedChild).max(128)});
-const convertedBaselineSchema = baselineSchema.extend({manifest:convertedManifestSchema,
-  receipt:baselineSchema.shape.receipt.extend({graphDigest:hash,nodes:z.array(nodeMapping).min(1).max(4096)})});
+const convertedObservationWitness=z.unknown().transform(value=>{try{return parseStudioImportObservationWitness(value);}catch{fail('BASELINE','Expected an exact converted observation witness.');}});
+const convertedBaselineSchema=z.strictObject({manifest:convertedManifestSchema,receipt:convertedObservationWitness});
 const convertedInputSchema = inputSchema.extend({schemaVersion:z.literal(2),origin:z.literal('converted-glb'),identityScheme:z.literal('arcane-converted-v2'),
   producer:convertedProducer,conversionRequest:convertedRequest,graph:convertedGraph,models:z.array(convertedSourceModel).min(1).max(2),anchors:z.array(z.never()).max(0),baseline:convertedBaselineSchema.nullable()});
 
@@ -159,7 +161,9 @@ export interface GeneratedStudioImportRevisionDeltaV1 {
   readonly textures: Readonly<{ prepare: readonly string[]; reuse: readonly string[] }>;
   readonly preservation: 'preserve-all-scripts-attachments-constraints';
 }
-export interface ConvertedStudioImportRevisionDeltaV2 extends GeneratedStudioImportRevisionDeltaV1 {
+export interface ConvertedStudioImportRevisionDeltaV2 extends Omit<GeneratedStudioImportRevisionDeltaV1,'reviewRemovals'> {
+  readonly observation:DeepReadonly<StudioImportObservationWitness>|null;
+  readonly reviewRemovals:readonly DeepReadonly<StudioImportObservedObject&{action:'retain-for-review'}>[];
   readonly graph:Readonly<{previousDigest:string|null;nextDigest:string;changed:boolean}>;
   readonly nodes:readonly DeepReadonly<{nodeKey:string;action:'create'|'update-in-place'|'reuse';changed:('parent'|'matrix'|'name'|'mesh'|'pivot')[];
     instanceRef:string|null;expectedOwnedStateSha256:string|null;preserveChildren:z.infer<typeof preservedChild>[];replaceInstance:false;deleteInstance:false}>[];
@@ -606,6 +610,10 @@ export function parseConvertedStudioImportManifest(value:unknown):ConvertedStudi
   if(digest(body)!==actual)fail('SCHEMA','Converted manifest digest differs.');convertedManifestChecks(manifest);return freeze(manifest);
 }
 /** Detached observed-baseline data, not a receipt attestation or permission. */
+/** Digest of strictly parsed actual observation metadata, not an authority token. */
+export function studioImportObservationReceiptDigest(value:unknown):string {
+  try{return digest(parseStudioImportObservationReceipt(value));}catch{fail('BASELINE','Invalid converted observation receipt.');}
+}
 export function snapshotConvertedStudioImportBaseline(value:unknown):ConvertedStudioImportBaselineV2 {
   const baseline=parse(convertedBaselineSchema,snapshot(value,{...STUDIO_IMPORT_LIMITS},true));
   bound(Buffer.byteLength(canonical(baseline)),STUDIO_IMPORT_LIMITS.manifestBytes,'Converted baseline bytes');
@@ -656,22 +664,25 @@ function convertedRevision(next:ConvertedManifest,baseline:z.infer<typeof conver
   const previous=baseline?.manifest??null;
   if(previous){
     parseConvertedStudioImportManifest(previous);
-    if(baseline!.receipt.manifestDigest!==previous.digest||baseline!.receipt.graphDigest!==previous.graph.digest||
+    const witness=baseline!.receipt,observed=witness.observation,source=observed.source;
+    if(witness.receiptSha256!==studioImportObservationReceiptDigest(observed)||source.manifestDigest!==previous.digest||source.graphDigest!==previous.graph.digest||
+      source.projectId!==previous.projectId||source.jobId!==previous.revisionId||source.assetId!==previous.assetId||source.sourceSha256!==previous.sourceSha256||
+      source.conversionRequestDigest!==digest(previous.conversionRequest)||canonical(observed.target)!==canonical(previous.target)||
       previous.projectId!==next.projectId||previous.assetId!==next.assetId||previous.sourceSha256!==next.sourceSha256||canonical(previous.target)!==canonical(next.target))
-      fail('BASELINE','Converted baseline belongs to another manifest, graph, source or target.');
-    const receipt=baseline!.receipt;unique(receipt.objects.map(o=>o.sourceObjectId),'converted baseline object','BASELINE');
+      fail('BASELINE','Converted baseline belongs to another observed source, manifest, graph or target.');
+    const receipt=baseline!.receipt.observation;unique(receipt.objects.map(o=>o.sourceObjectId),'converted baseline object','BASELINE');
     unique(receipt.nodes.map(n=>n.nodeKey),'converted baseline node','BASELINE');
     if(receipt.objects.length!==previous.objects.length||previous.objects.some(o=>!receipt.objects.some(m=>m.sourceObjectId===o.sourceObjectId))||
       receipt.nodes.length!==previous.graph.nodes.length||previous.graph.nodes.some(n=>!receipt.nodes.some(m=>m.nodeKey===n.nodeKey)))
       fail('BASELINE','Converted receipt must map every prior mesh and graph node.');
-    const references=[receipt.modelRef];
+    const references=[receipt.modelRef.instanceId];
     for(const o of receipt.objects){references.push(o.instanceRef,...o.authoredChildren.map(c=>c.instanceRef));}
     for(const n of receipt.nodes){const mesh=previous.graph.meshes.find(m=>m.nodeKey===n.nodeKey),object=mesh?receipt.objects.find(o=>o.sourceObjectId===mesh.sourceObjectId):undefined;
       if(object){if(n.instanceRef!==object.instanceRef||n.ownedStateSha256!==object.ownedStateSha256||canonical(n.authoredChildren)!==canonical(object.authoredChildren))fail('BASELINE','Converted mesh/node receipt mappings disagree.');}
       else references.push(n.instanceRef,...n.authoredChildren.map(c=>c.instanceRef));
     }unique(references,'converted baseline owned instance','BASELINE');
   }
-  const oldObjects=new Map(previous?.objects.map(o=>[o.sourceObjectId,o])??[]),mapped=new Map(baseline?.receipt.objects.map(o=>[o.sourceObjectId,o])??[]);
+  const oldObjects=new Map(previous?.objects.map(o=>[o.sourceObjectId,o])??[]),mapped=new Map(baseline?.receipt.observation.objects.map(o=>[o.sourceObjectId,o])??[]);
   const placementChanged=previous!==null&&(canonical(previous.placement)!==canonical(next.placement)||canonical(previous.conversion)!==canonical(next.conversion));
   const objects=next.objects.map(o=>{const old=oldObjects.get(o.sourceObjectId),m=mapped.get(o.sourceObjectId),changed:string[]=[];
     if(old){if(o.role!==old.role)fail('BASELINE','Converted mapped object role changes require conflict review.');
@@ -682,7 +693,7 @@ function convertedRevision(next:ConvertedManifest,baseline:z.infer<typeof conver
     }return{sourceObjectId:o.sourceObjectId,action:!old?'create' as const:changed.length?'update-in-place' as const:'reuse' as const,changed,
       instanceRef:m?.instanceRef??null,meshAssetId:m?.meshAssetId??null,expectedOwnedStateSha256:m?.ownedStateSha256??null,
       preserveChildren:[...(m?.authoredChildren??[])].sort((a,b)=>compare(a.instanceRef,b.instanceRef)),replaceInstance:false as const,deleteInstance:false as const};});
-  const oldNodes=new Map(previous?.graph.nodes.map(n=>[n.nodeKey,n])??[]),nodeMap=new Map(baseline?.receipt.nodes.map(n=>[n.nodeKey,n])??[]);
+  const oldNodes=new Map(previous?.graph.nodes.map(n=>[n.nodeKey,n])??[]),nodeMap=new Map(baseline?.receipt.observation.nodes.map(n=>[n.nodeKey,n])??[]);
   const nextWorlds=graphWorlds(next.graph),oldWorlds=previous?graphWorlds(previous.graph):new Map<string,number[]>();
   const nodes=next.graph.nodes.map(n=>{const old=oldNodes.get(n.nodeKey),m=nodeMap.get(n.nodeKey),changed:('parent'|'matrix'|'name'|'mesh'|'pivot')[]=[];
     const before=previous?.graph.meshes.find(mesh=>mesh.nodeKey===n.nodeKey),after=next.graph.meshes.find(mesh=>mesh.nodeKey===n.nodeKey);
@@ -694,14 +705,14 @@ function convertedRevision(next:ConvertedManifest,baseline:z.infer<typeof conver
     }return{nodeKey:n.nodeKey,action:!old?'create' as const:changed.length?'update-in-place' as const:'reuse' as const,changed,instanceRef:m?.instanceRef??null,
       expectedOwnedStateSha256:m?.ownedStateSha256??null,preserveChildren:[...(m?.authoredChildren??[])].sort((a,b)=>compare(a.instanceRef,b.instanceRef)),replaceInstance:false as const,deleteInstance:false as const};});
   const resources=(current:string[],old:string[])=>({prepare:sorted(current.filter(h=>!old.includes(h))),reuse:sorted(current.filter(h=>old.includes(h)))});
-  return freeze({previousDigest:previous?.digest??null,nextDigest:next.digest,receiptSha256:baseline?.receipt.receiptSha256??null,modelRef:baseline?.receipt.modelRef??null,
-    modelAssetId:baseline?.receipt.modelAssetId??null,placementChanged,objects,
-    reviewRemovals:(baseline?.receipt.objects??[]).filter(m=>!next.objects.some(o=>o.sourceObjectId===m.sourceObjectId)).map(m=>({...m,
+  return freeze({previousDigest:previous?.digest??null,nextDigest:next.digest,receiptSha256:baseline?.receipt.receiptSha256??null,modelRef:baseline?.receipt.observation.modelRef.instanceId??null,
+    modelAssetId:null,observation:baseline?.receipt??null,placementChanged,objects,
+    reviewRemovals:(baseline?.receipt.observation.objects??[]).filter(m=>!next.objects.some(o=>o.sourceObjectId===m.sourceObjectId)).map(m=>({...m,
       authoredChildren:[...m.authoredChildren].sort((a,b)=>compare(a.instanceRef,b.instanceRef)),action:'retain-for-review' as const})).sort((a,b)=>compare(a.sourceObjectId,b.sourceObjectId)),
     reviewAnchors:[],geometry:resources(next.objects.map(o=>o.meshExportSha256),previous?.objects.map(o=>o.meshExportSha256)??[]),
     textures:resources(next.textures.map(t=>t.sha256),previous?.textures.map(t=>t.sha256)??[]),preservation:'preserve-all-scripts-attachments-constraints' as const,
     graph:{previousDigest:previous?.graph.digest??null,nextDigest:next.graph.digest,changed:previous===null||previous.graph.digest!==next.graph.digest},nodes,
-    reviewNodeRemovals:(baseline?.receipt.nodes??[]).filter(m=>!next.graph.nodes.some(n=>n.nodeKey===m.nodeKey)).map(m=>({...m,
+    reviewNodeRemovals:(baseline?.receipt.observation.nodes??[]).filter(m=>!next.graph.nodes.some(n=>n.nodeKey===m.nodeKey)).map(m=>({...m,
       authoredChildren:[...m.authoredChildren].sort((a,b)=>compare(a.instanceRef,b.instanceRef)),action:'retain-for-review' as const})).sort((a,b)=>compare(a.nodeKey,b.nodeKey))});
 }
 

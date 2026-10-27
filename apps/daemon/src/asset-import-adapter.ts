@@ -7,6 +7,7 @@ import { STUDIO_IMPORT_LIMITS, type HostGeneratedStudioImport, type StudioImport
 import { ConversationWorkStore,type ConversationWorkBindingWitness } from '../../../packages/storage/src/conversation-work-store.js';
 import { ArcaneError } from '../../../packages/protocol/src/providers.js';
 import { assertNativeAssetActor, nativeAssetActorScope, type NativeAssetActor, type NativeAssetScope } from './native-asset-authority.js';
+import type {StudioImportObservationWitness} from '../../../packages/protocol/src/studio.js';
 
 export interface StudioImportHostOptions {
   /** Borrowed canonical project store. No generic bearer or request identity can substitute. */
@@ -20,7 +21,12 @@ export interface StudioImportHostOptions {
   validateTarget?(scope: NativeAssetScope, jobId: string, target: StudioImportSelection): void;
   /** Optional HOST ONLY durable, observed engine receipt lookup. No request-body baseline.
    * Absence means an initial preparation, never an invented prior mapping. */
-  loadObservedBaseline?(scope: NativeAssetScope, assetId: string, target: StudioImportSelection['target']): StudioImportBaseline | null | Promise<StudioImportBaseline | null>;
+  loadObservedBaseline?(scope: NativeAssetScope, assetId: string, target: StudioImportSelection['target'],
+    context:{jobId:string;actor:NativeAssetActor;guard:()=>void}): StudioImportBaseline | null | Promise<StudioImportBaseline | null>;
+  /** HOST ONLY: known original preparation/run witness, never serialized permission. */
+  validateRevisionObservation?(scope:NativeAssetScope,jobId:string,actor:NativeAssetActor,observation:unknown,guard:()=>void):void;
+  /** A distinct current-operation read; the original sealed baseline remains unchanged. */
+  refreshRevisionObservation?(scope:NativeAssetScope,jobId:string,actor:NativeAssetActor,observation:unknown,guard:()=>void):Promise<StudioImportObservationWitness>;
   /** Commit pending metadata only, never import authority or an engine baseline. */
   recordPrepared?(scope: NativeAssetScope, jobId: string, prepared: import('../../../packages/asset-pipeline/src/studio-import-manifest.js').PreparedStudioImport,
     actor: NativeAssetActor, guard: () => void, attempt?: StudioImportPreparationAttempt): void | Promise<void>;

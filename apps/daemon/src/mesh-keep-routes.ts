@@ -1,3 +1,4 @@
+import {validateStudioImportRevisionReceipt} from '../../../packages/core/src/studio-policy.js';
 /**
  * "Keep this mesh" (docs/build/MESH_KEEP.md). Procedural Blender meshes placed through assets_place_studio_import are
  * MeshParts backed by in-memory EditableMeshes: they vanish on reconnect, Play or reopening. Keeping one uploads its
@@ -227,6 +228,11 @@ export function createMeshKeep(options: MeshKeepOptions) {
     const out: ReturnType<typeof placements> = [];
     for (const session of store.activeSessions()) {
       const commands = store.commands(session.id);
+      const revisions=commands.flatMap(command=>{
+        if(command.method!=='asset.apply_revision'||command.state!=='succeeded')return [];
+        try{return[{command,receipt:validateStudioImportRevisionReceipt(command.args,command.result)}];}catch{return [];}
+      });
+      const superseded=new Set(revisions.map(({command})=>object(object(object(command.args.observation).observation).source).transferDigest));
       const reconstructions = new Map<string, StudioCommand>();
       for (const c of commands) if (c.method === 'asset.reconstruct' && c.state === 'succeeded' && c.result && typeof c.result === 'object' && !Array.isArray(c.result)
         && typeof (c.result as Record<string, Json>).transferDigest === 'string') reconstructions.set((c.result as Record<string, Json>).transferDigest as string, c);
@@ -234,10 +240,17 @@ export function createMeshKeep(options: MeshKeepOptions) {
       for (const c of commands) {
         const watch = c.method === 'scene.place_asset' && c.state === 'succeeded' ? c.args.watch : null;
         if (typeof watch !== 'string' || !watch.startsWith('editable-') || !DIGEST.test(watch.slice(9))) continue;
-        const digest = watch.slice(9); if (seen.has(digest)) continue; seen.add(digest);
+        const digest = watch.slice(9); if (superseded.has(digest)||seen.has(digest)) continue; seen.add(digest);
         const r = reconstructions.get(digest), objects = r ? (r.result as Record<string, Json>).objects : null;
         out.push({ session, digest, name: typeof c.args.name === 'string' ? c.args.name : 'Procedural mesh', placedAt: c.finishedAt,
           jobId: r ? store.stageJobForReconstruction(r.id) : null, meshCount: Array.isArray(objects) ? objects.length : null });
+      }
+      for(const {receipt}of revisions){
+        const digest=receipt.source.transferDigest;if(superseded.has(digest)||seen.has(digest))continue;
+        const source=store.readStageKeepSource(session.id,digest);if(!source||source.run.intent.jobId!==receipt.source.jobId||source.run.intent.manifestDigest!==receipt.source.manifestDigest)continue;
+        const begin=object(JSON.parse(source.run.commands[0]!.command.args.packet as string)),request=object(begin.conversionRequest);
+        seen.add(digest);out.push({session,digest,name:typeof request.name==='string'?request.name:'Converted mesh',placedAt:source.reconstruction.command.finishedAt,
+          jobId:source.run.intent.jobId,meshCount:receipt.objects.length});
       }
     }
     return out;

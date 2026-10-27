@@ -19,7 +19,7 @@ export interface StudioContinuityProof {
   mode: 'Edit' | 'Play'; playEpoch: number; continuitySupported: boolean;
   connected: boolean; observedAt: string; expiresAt: string;
 }
-export const READ_METHODS = ['scene.children', 'scene.inspect', 'scene.search', 'selection.read', 'script.read', 'script.search', 'scene.import_context', 'scene.upload_context', 'scene.asset_watch', 'output.read'] as const;
+export const READ_METHODS = ['scene.children', 'scene.inspect', 'scene.search', 'selection.read', 'script.read', 'script.search', 'scene.import_context', 'scene.observe_import', 'scene.upload_context', 'scene.asset_watch', 'output.read'] as const;
 /** output.read: the plugin keeps a bounded ring of this Studio's Output lines (seeded from LogService history, then
  * MessageOut), numbered by a per-pairing sequence so `after` is an exact cursor. Place-wide, read-only, untrusted text. */
 export const OUTPUT_READ_LIMITS = Object.freeze({ buffer: 500, entries: 100, messageBytes: 1024, queryBytes: 100, cursor: 2_147_483_647 });
@@ -73,7 +73,7 @@ export const STUDIO_FEATURE_CAPABILITIES: readonly string[] = Object.freeze([STU
 export const GUI_LIMITS = Object.freeze({ textBytes: 2000, udimScale: 10, udimOffset: 10000 });
 /** Host-owned intake and detached reconstruction. Neither is a generic agent
  * scene command or reversible mutation. */
-export const ASSET_STAGE_METHODS = ['asset.stage_packet', 'asset.reconstruct'] as const;
+export const ASSET_STAGE_METHODS = ['asset.stage_packet', 'asset.reconstruct', 'asset.apply_revision'] as const;
 /** Raw serialized sender packets and COMPLETE staging arguments are independent
  * budgets. The envelope allowance uses 4096 bytes per possible packet, matching
  * the chunk encoder's reserve; metadata/escaping still requires actual measured
@@ -126,6 +126,34 @@ export interface ConvertedStudioAssetReconstructReceiptV2 extends GeneratedStudi
 }
 export type StudioAssetReconstructArgs=GeneratedStudioAssetReconstructArgsV1|ConvertedStudioAssetReconstructArgsV2;
 export type StudioAssetReconstructReceipt=GeneratedStudioAssetReconstructReceiptV1|ConvertedStudioAssetReconstructReceiptV2;
+/** Exact converted source and current observations. Metadata is not a live
+ * plugin witness, native actor, human approval, cloud Model ID or replay permit. */
+export interface StudioImportObservationSource {
+  projectId:string;jobId:string;assetId:string;sourceSha256:string;preparedDigest:string;
+  manifestDigest:string;payloadDigest:string;transferDigest:string;graphDigest:string;conversionRequestDigest:string;
+}
+export interface StudioImportObservedChild {instanceRef:string;kind:'script'|'attachment'|'constraint';stateSha256:string}
+export interface StudioImportObservedNode {nodeKey:string;instanceRef:string;ownedStateSha256:string;authoredChildren:StudioImportObservedChild[]}
+export interface StudioImportObservedObject {sourceObjectId:string;instanceRef:string;ownedStateSha256:string;authoredChildren:StudioImportObservedChild[];meshAssetId:string|null}
+export interface StudioImportObservationArgs {
+  formatVersion:2;observationId:string;source:StudioImportObservationSource;
+  target:StudioAssetStageArgs['target'];continuity:StudioAssetStageArgs['continuity'];modelRef:InstanceRef;
+}
+export interface StudioImportObservationReceipt extends StudioImportObservationArgs {
+  modelOwnedStateSha256:string;nodes:StudioImportObservedNode[];objects:StudioImportObservedObject[];
+  receiptScope:'live-import-observation';imported:false;engineVerification:'pending';
+}
+export interface StudioImportObservationWitness {commandId:string;receiptSha256:string;observation:StudioImportObservationReceipt}
+export interface StudioImportRevisionArgs {
+  formatVersion:2;runId:string;expected:StudioAssetStageArgs['expected'];packetCount:number;byteLength:number;
+  source:StudioImportObservationSource;target:StudioAssetStageArgs['target'];continuity:StudioAssetStageArgs['continuity'];
+  observation:StudioImportObservationWitness;currentObservation:StudioImportObservationWitness;
+}
+export interface StudioImportRevisionReceipt extends Omit<StudioImportObservationReceipt,'receiptScope'> {
+  runId:string;state:'applied';receiptScope:'live-import-revision';
+}
+export const STUDIO_IMPORT_OBSERVATION_LIMITS=Object.freeze({nodes:127,objects:127,preservedChildren:128,values:30000,depth:16,argumentBytes:256*1024-4096});
+
 export type CommandState = 'queued' | 'dispatched' | 'succeeded' | 'failed' | 'cancelled' | 'needs_reconciliation';
 export interface StudioCommand {
   protocolVersion: 1; id: string; requestId: string; sessionId: string; clientSessionId: string;

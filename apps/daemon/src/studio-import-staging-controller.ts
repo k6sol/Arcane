@@ -1,7 +1,8 @@
 import {createHash,randomUUID} from 'node:crypto';
 import {isDeepStrictEqual} from 'node:util';
+import {parseStudioImportObservationWitness} from '../../../packages/core/src/studio-policy.js';
 import {ArcaneError} from '../../../packages/protocol/src/providers.js';
-import {STUDIO_ASSET_TRANSFER_LIMITS, studioImportContextObservation, type Json, type StudioAssetStageArgs, type StudioAssetStageReceipt, type StudioCommand, type StudioAssetReconstructReceipt} from '../../../packages/protocol/src/studio.js';
+import {STUDIO_ASSET_TRANSFER_LIMITS, object, studioImportContextObservation, type Json, type StudioAssetStageArgs, type StudioAssetStageReceipt, type StudioCommand, type StudioAssetReconstructReceipt,type StudioImportRevisionReceipt} from '../../../packages/protocol/src/studio.js';
 import {StudioStore, type StageRunHandle} from '../../../packages/storage/src/studio-store.js';
 import {ConversationWorkStore} from '../../../packages/storage/src/conversation-work-store.js';
 import {snapshotStudioImportSelection} from '../../../packages/asset-pipeline/src/studio-import-manifest.js';
@@ -10,7 +11,7 @@ import {createStudioImportTransfer,inspectConvertedStudioImportTransfer,measureS
 import type {AssetService} from './asset-service.js';
 import {assertStudioImportJobScope} from './asset-import-adapter.js';
 import type {StudioImportHostOptions} from './asset-import-adapter.js';
-import {assertNativeAssetActor,nativeAssetActorScope,assertNativeAssetStageOperationAvailable,claimNativeAssetStageOperation,acquireNativeAssetWork,type NativeAssetActor} from './native-asset-authority.js';
+import {assertNativeAssetActor,nativeAssetActorScope,assertNativeAssetStageOperationAvailable,claimNativeAssetStageOperation,assertNativeAssetRevisionOperationAvailable,claimNativeAssetRevisionOperation,acquireNativeAssetWork,type NativeAssetActor} from './native-asset-authority.js';
 
 export interface StudioImportStagingConfiguration {
   projectPath: string;
@@ -50,9 +51,10 @@ export function createStudioImportStagingController(config: StudioImportStagingC
   let busy = false, closed = false;
   // This owns lifetime only. Every original actor/review/target/packet fence below
   // still decides admission. A timed-out or lost receipt never proves closure.
-  function commandWork(actor:NativeAssetActor,kind:'stage'|'reconstruction') {
+  function commandWork(actor:NativeAssetActor,kind:'stage'|'reconstruction'|'revision') {
     const work=acquireNativeAssetWork(actor,kind);
     const commands=new Map<string,Pick<StudioCommand,'id'|'requestId'|'sessionId'|'clientSessionId'|'method'|'leaseEpoch'>>();
+    const revisionHashes=kind==='revision'?new Map<string,string>():null;
     let uncertain=false;
     return {
       run<T>(start:()=>T|Promise<T>):Promise<T>{return work.run(start);},
@@ -60,13 +62,14 @@ export function createStudioImportStagingController(config: StudioImportStagingC
         uncertain=true;const command=start();
         commands.set(command.id,{id:command.id,requestId:command.requestId,sessionId:command.sessionId,
           clientSessionId:command.clientSessionId,method:command.method,leaseEpoch:command.leaseEpoch});
+        revisionHashes?.set(command.id,sha(JSON.stringify(command.args)));
         uncertain=false;return command;
       },
       finish(cleaned:boolean):void {
         let complete=cleaned&&!uncertain;
         try{for(const [id,identity]of commands){
           const actual=studio.command(id);
-          if(Object.entries(identity).some(([key,value])=>actual[key as keyof StudioCommand]!==value)||
+          if(Object.entries(identity).some(([key,value])=>actual[key as keyof StudioCommand]!==value)||revisionHashes!==null&&revisionHashes.get(id)!==sha(JSON.stringify(actual.args))||
             !['succeeded','failed','cancelled'].includes(actual.state))complete=false;
         }}catch{complete=false;}
         work.finish(complete?'closed':'unresolved');
@@ -102,6 +105,59 @@ export function createStudioImportStagingController(config: StudioImportStagingC
       const record=run?studio.readStageReconstruction(scope.projectId,jobId,run.runId):null;check();
       return {jobId,projectId:scope.projectId,reconstruction:record?{runId:record.runId,commandId:record.command.id,state:record.command.state,
         receipt:record.receipt,receiptScope:'historical-reconstruction',currentResources:'unobserved',imported:false,engineVerification:'pending',retry:false}:null};
+    },
+    async revisionStatus(jobId:string,actor:NativeAssetActor,guard:()=>void=()=>{}) {
+      const check=()=>{guard();assertNativeAssetActor(actor,'read');const scope=nativeAssetActorScope(actor);
+        if(closed||scope.projectPath!==projectPath||scope.projectId!==workAssociations.projectId)fail('STUDIO_STAGE_SCOPE');
+        const binding=workAssociations.binding('asset-job',jobId);if(!binding||!isDeepStrictEqual(binding.conversation,scope.conversation))fail('NOT_FOUND');return scope;};
+      const scope=check(),run=studio.readStageRun(scope.projectId,jobId);check();
+      if(run&&!isDeepStrictEqual(run.intent.conversation,scope.conversation))fail('NOT_FOUND');
+      const record=run?studio.readStageRevision(scope.projectId,jobId,run.runId):null;check();
+      return{jobId,projectId:scope.projectId,revision:record?{runId:run!.runId,commandId:record.command.id,state:record.command.state,receipt:record.receipt,
+        receiptScope:'historical-revision' as const,currentResources:'unobserved' as const,imported:false as const,engineVerification:'pending' as const,retry:false as const}:null};
+    },
+    async applyRevision(jobId:string,actor:NativeAssetActor,guard:()=>void=()=>{}):Promise<StudioImportRevisionReceipt&{commandId:string}> {
+      const scope=assertStudioImportJobScope(projectPath,workAssociations,actor,jobId);guard();
+      if(closed||busy)fail(closed?'STUDIO_STAGE_CLOSED':'STUDIO_STAGE_BUSY');
+      if(!host.validateRevisionObservation||!host.refreshRevisionObservation)fail('STUDIO_REVISE_UNAVAILABLE');
+      const run=studio.readStageRun(scope.projectId,jobId);
+      if(!run||run.phase!=='cpu-staged'||run.closedAt===null||!run.receipt||!isDeepStrictEqual(run.intent.conversation,scope.conversation)
+        ||!run.intent.modelReview)fail('STUDIO_REVISE_STATE');
+      const reconstruction=studio.readStageReconstruction(scope.projectId,jobId,run.runId);
+      if(!reconstruction?.receipt||reconstruction.command.state!=='succeeded'||reconstruction.command.args.formatVersion!==2)fail('STUDIO_REVISE_STATE');
+      if(studio.readStageRevision(scope.projectId,jobId,run.runId))fail('STUDIO_REVISE_EXISTS');
+      const begin=object(JSON.parse(run.commands[0]!.command.args.packet as string));
+      const observation=parseStudioImportObservationWitness(object(begin.delta).observation);
+      assertNativeAssetRevisionOperationAvailable(actor,jobId);
+      const work=commandWork(actor,'revision'),expires=now()+STUDIO_STAGING_LIMITS.totalDeadlineMs;
+      let reviewCheck:(()=>void)|undefined,queued:StudioCommand|undefined;busy=true;
+      const base=()=>{guard();reviewCheck?.();if(closed||now()>=expires||!isDeepStrictEqual(assertStudioImportJobScope(projectPath,workAssociations,actor,jobId),scope))fail('STUDIO_STAGE_SCOPE');
+        const session=studio.session(run.intent.target.sessionId),proof=session.proof;
+        if(session.revokedAt||!session.allowWrites||!session.capabilities.includes('asset.apply_revision')||!proof||proof.mode!=='Edit'||!proof.connected||!proof.continuitySupported
+          ||proof.clientLifetimeId!==run.intent.continuity.clientLifetimeId||session.clientSessionId!==proof.clientLifetimeId||proof.pluginArtifactHash!==pluginArtifactHash
+          ||proof.playEpoch!==run.intent.continuity.playEpoch||!Number.isFinite(Date.parse(proof.expiresAt))||Date.parse(proof.expiresAt)<=now())fail('STUDIO_STAGE_CONTINUITY');};
+      const boundary=()=>{base();host.validateRevisionObservation!(scope,jobId,actor,observation,base);};
+      try{
+        const review=await work.run(()=>assets.reviewImport(jobId,actor,run.intent.modelReview!,guard));reviewCheck=()=>review.assertCurrent();boundary();
+        // A later tool call owns a NEW native actor. Obtain a NEW plugin-private
+        // observation, while the original sealed baseline/delta remains exact.
+        const currentObservation=await work.run(()=>host.refreshRevisionObservation!(scope,jobId,actor,observation,base));boundary();
+        const current=studio.readStageRun(scope.projectId,jobId,run.runId);
+        if(!current||current.intentSha256!==run.intentSha256||current.phase!=='cpu-staged'||!studio.readStageReconstruction(scope.projectId,jobId,run.runId)?.receipt)fail('STUDIO_REVISE_SOURCE');
+        boundary();claimNativeAssetRevisionOperation(actor,jobId);
+        queued=work.enqueue(()=>studio.enqueueStageRevision(scope.projectId,jobId,run.runId,observation,currentObservation,boundary));
+        while(true){
+          boundary();const record=studio.readStageRevision(scope.projectId,jobId,run.runId);
+          if(!record||record.command.id!==queued.id)fail('STUDIO_REVISE_RECEIPT');
+          if(record.receipt){boundary();return{...record.receipt,commandId:queued.id};}
+          if(['failed','cancelled','needs_reconciliation'].includes(record.command.state))fail('STUDIO_REVISE_RECEIPT');
+          await studio.waitForCommandResult(queued.id,Math.min(25,Math.max(1,expires-now())));
+        }
+      }finally{
+        let cleaned=false;
+        try{if(queued)studio.abandonImportCommand(queued.id);cleaned=true;}
+        finally{busy=false;work.finish(cleaned);}
+      }
     },
     async reconstruct(jobId:string,actor:NativeAssetActor,guard:()=>void=()=>{}):Promise<StudioAssetReconstructReceipt & {commandId:string}> {
       const scope=assertStudioImportJobScope(projectPath,workAssociations,actor,jobId);
@@ -174,9 +230,9 @@ export function createStudioImportStagingController(config: StudioImportStagingC
       const work=commandWork(actor,'stage');
       busy = true;
       const expires = now() + STUDIO_STAGING_LIMITS.totalDeadlineMs;
-      let reviewCheck:(()=>void)|undefined;
+      let reviewCheck:(()=>void)|undefined,observationCheck:(()=>void)|undefined;
       const base = () => {
-        guard();reviewCheck?.();
+        guard();reviewCheck?.();observationCheck?.();
         const current = assertStudioImportJobScope(projectPath, workAssociations, actor, jobId);
         if (closed || !isDeepStrictEqual(current, scope)) fail('STUDIO_STAGE_SCOPE');
         if (now() >= expires) fail('STUDIO_STAGE_TIMEOUT');
@@ -187,6 +243,11 @@ export function createStudioImportStagingController(config: StudioImportStagingC
         const preparationAttempt = host.beginPreparationAttempt!(scope,jobId,actor,base);
         const data = await work.run(()=>assets.prepareStudioImportPayload(jobId, actor, preparationAttempt));
         reviewCheck=()=>data.review.assertCurrent();base(); assertDecodedStudioImportPayload(data.payload);
+        if(data.prepared.manifest.schemaVersion===2&&'observation'in data.prepared.delta&&data.prepared.delta.observation!==null){
+          if(!host.validateRevisionObservation)fail('STUDIO_REVISE_UNAVAILABLE');
+          const observation=data.prepared.delta.observation;
+          observationCheck=()=>host.validateRevisionObservation!(scope,jobId,actor,observation,guard);base();
+        }
         // Rebuild from process-branded immutable decoded chunks. Serialized
         // lookalikes and caller-mutated convenience buffers grant nothing.
         const transfer = createStudioImportTransfer(data.prepared, data.payload);

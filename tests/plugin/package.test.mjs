@@ -228,7 +228,7 @@ test('packaged source confines asset APIs to reviewed bindings and excludes arbi
   // reconstruction, reached only through guarded scene.place_asset adoption (no upload).
   const meshParts=/:CreateMeshPartAsync\s*\(/g;
   // Persistent parts from confirmed upload IDs use the generated keep branch or its private converted keep helper.
-  assert.deepEqual(files.flatMap(file=>[...file.source.matchAll(meshParts)].map(()=>file.filename)).sort(),['AssetPlacement.luau','AssetPlacement.luau','Operations.luau']);
+  assert.deepEqual(files.flatMap(file=>[...file.source.matchAll(meshParts)].map(()=>file.filename)).sort(),['AssetPlacement.luau','AssetPlacement.luau','Operations.luau','Operations.luau']);
   const placement=byFile['AssetPlacement.luau'],kStart=placement.indexOf('function AssetPlacement.keep('),kEnd=placement.indexOf('return table.freeze(AssetPlacement)',kStart);
   assert.ok(kStart>=0&&kEnd>kStart);assert.equal([...placement.slice(kStart,kEnd).matchAll(meshParts)].length,1);
   const convertedStart=placement.indexOf('local function keepConverted(');
@@ -243,6 +243,17 @@ test('packaged source confines asset APIs to reviewed bindings and excludes arbi
   const mStart=operations.indexOf('function Operations:materializeReconstruction('),mEnd=operations.indexOf('function Operations:keepReconstruction(',mStart);
   assert.ok(mStart>=0&&mEnd>mStart);assert.equal([...operations.slice(mStart,mEnd).matchAll(meshParts)].length,1);
   assert.doesNotMatch(operations.slice(mStart,mEnd),/GetService|CreateAssetAsync|Upload|Publish/);
+  const revisionStart=operations.indexOf('function Operations:applyImportRevision('),revisionEnd=operations.indexOf('function Operations:source(',revisionStart);
+  assert.ok(revisionStart>=mEnd&&revisionEnd>revisionStart);
+  const revision=operations.slice(revisionStart,revisionEnd);
+  assert.equal([...revision.matchAll(meshParts)].length,1);
+  assert.match(revision,/nextOwner\.service:CreateMeshPartAsync\(Content\.fromObject\(resource\.mesh\)/);
+  assert.doesNotMatch(revision,/GetService|CreateAssetAsync|Upload|Publish/);
+  assert.doesNotMatch(operations.slice(0,mStart)+operations.slice(mEnd,revisionStart)+operations.slice(revisionEnd),meshParts);
+  const applyStart=placement.indexOf('function AssetPlacement.applyConvertedRevision('),applyEnd=placement.indexOf('\nfunction AssetPlacement.',applyStart+1);
+  assert.ok(applyStart>=0&&applyEnd>applyStart);
+  assert.equal([...placement.slice(applyStart,applyEnd).matchAll(/:ApplyMesh\s*\(/g)].length,2);
+  assert.doesNotMatch(placement.slice(0,applyStart)+placement.slice(applyEnd),/:ApplyMesh\s*\(/);
   // Converted keep preserves existing user-authored attributes/tags on the
   // replacement part. It cannot create caller-supplied metadata elsewhere.
   const preserveMetadata='for key,value in pairs(old:GetAttributes()) do part:SetAttribute(key,value) end\n\t\t\t\tfor _,tag in ipairs(ops.collection:GetTags(old)) do ops.collection:AddTag(part,tag) end';

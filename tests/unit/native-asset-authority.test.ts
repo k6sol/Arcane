@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {mkdtempSync,lstatSync,realpathSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join,resolve,relative,isAbsolute,sep} from 'node:path';
-import {createNativeAssetRegistry,assertNativeAssetActor,nativeAssetActorScope,nativeAssetOperationSignal,assertNativeAssetStageOperationAvailable,claimNativeAssetStageOperation,type NativeAssetActor} from '../../apps/daemon/src/native-asset-authority.js';
+import {createNativeAssetRegistry,assertNativeAssetActor,nativeAssetActorScope,nativeAssetOperationSignal,assertNativeAssetStageOperationAvailable,claimNativeAssetStageOperation,assertNativeAssetRevisionOperationAvailable,claimNativeAssetRevisionOperation,acquireNativeAssetWork,type NativeAssetActor} from '../../apps/daemon/src/native-asset-authority.js';
 import type {AppAssetConversationBinding} from '../../packages/protocol/src/asset-conversation.js';
 const refused={code:'NATIVE_ASSET_AUTHORITY'};
 function fixture(t:test.TestContext) {
@@ -203,4 +203,15 @@ test('close fences all entries when the first epoch is saturated',t=>{
  assert.throws(()=>assertNativeAssetActor(saturated,'read'),refused);
  assert.throws(()=>assertNativeAssetActor(other,'read'),refused);
  assert.equal(f.registry.recognizes(token),false);
+});
+
+test('revision claim is once per original operation and independent of its completed CPU stage',async t=>{
+  const f=fixture(t);f.ready();const actor=f.registry.capture(f.token,'mutate'),job='22222222-2222-4222-8222-222222222222';
+  claimNativeAssetStageOperation(actor,job);assert.doesNotThrow(()=>assertNativeAssetRevisionOperationAvailable(actor,job));claimNativeAssetRevisionOperation(actor,job);
+  assert.throws(()=>claimNativeAssetRevisionOperation(actor,job),refused);assert.throws(()=>assertNativeAssetRevisionOperationAvailable(actor,job),refused);
+  const lease=acquireNativeAssetWork(actor,'revision');let work=0;await lease.run(()=>{work++;});assert.equal(work,1);lease.finish('closed');
+  f.incarnation.ended('intent-a');f.incarnation.dispatched({...f.bound,operationId:'intent-b'});
+  assert.throws(()=>claimNativeAssetRevisionOperation(actor,job),refused);
+  const fresh=f.registry.capture(f.token,'mutate');assert.doesNotThrow(()=>claimNativeAssetRevisionOperation(fresh,job));
+  for(const malformed of [job+'\n','not-a-job'])assert.throws(()=>claimNativeAssetRevisionOperation(fresh,malformed),refused);
 });

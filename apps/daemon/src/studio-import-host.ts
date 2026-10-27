@@ -7,6 +7,8 @@ import { ConversationWorkStore } from '../../../packages/storage/src/conversatio
 import { snapshotStudioImportSelection, type PreparedStudioImport, type StudioImportSelection } from '../../../packages/asset-pipeline/src/studio-import-manifest.js';
 import { assertStudioImportJobScope, type StudioImportHostOptions } from './asset-import-adapter.js';
 import { acquireNativeAssetWork, type NativeAssetActor, type NativeAssetScope } from './native-asset-authority.js';
+import {createStudioImportObservedBaselineStore} from './studio-import-observed-baseline-store.js';
+import type {StudioImportPreparationStore} from './studio-import-preparation-store.js';
 import type { StudioImportPreparationAttempt } from './asset-import-adapter.js';
 
 export interface ImportContextReceiptWitness {
@@ -24,6 +26,8 @@ export interface StudioImportHostConfiguration {
   /** Owned host persistence. JSON claims and receipts never grant engine access. */
   persistPreparation(actor: NativeAssetActor, jobId: string, prepared: PreparedStudioImport,
     witness: ImportContextReceiptWitness, guard: () => void, attemptId?: string): Promise<void>;
+  /** Exact retained preparation reader, never a caller baseline or display history. */
+  readPreparation?:StudioImportPreparationStore['get'];
   now?: () => number;
 }
 const CONTEXT_DEADLINE_MS = 10_000;
@@ -55,6 +59,7 @@ export function createStudioImportHost(configuration: StudioImportHostConfigurat
     projectPath !== workAssociations.projectPath || !/^[a-f0-9]{64}$/.test(pluginArtifactHash) ||
     typeof configuration.persistPreparation !== 'function') fail('STUDIO_IMPORT_CONFIGURATION');
   const now = configuration.now ?? Date.now;
+  const observed=configuration.readPreparation?createStudioImportObservedBaselineStore({projectPath,workAssociations,studio,pluginArtifactHash,readPreparation:configuration.readPreparation,now}):null;
   const captures = new Map<string, Capture>();
   const attempts = new WeakMap<StudioImportPreparationAttempt, { actor: NativeAssetActor; jobId: string; scope: string; used: boolean }>();
   let closed = false;
@@ -174,10 +179,23 @@ export function createStudioImportHost(configuration: StudioImportHostConfigurat
         confirmedContextReceiptId: confirmed.receiptId, pluginArtifactHash, clientLifetimeId: proof.clientLifetimeId,
         playEpoch: proof.playEpoch }, guard, attempt?.id);
       check(actor, scope, jobId, guard); validate(scope, jobId, captured.selection);
+      observed?.record(scope,jobId,actor,prepared,guard);
     },
     releaseTarget(scope, jobId) {
       if (captures.get(jobId)?.scopeKey === scopeKey(scope)) captures.delete(jobId);
     },
   };
-  return Object.freeze({ hooks: Object.freeze(hooks),hasCapturedJob(jobId:string){if(closed)fail('STUDIO_IMPORT_SCOPE');return captures.has(jobId);}, close() { closed = true; captures.clear(); } });
+  if(observed){
+    hooks.loadObservedBaseline=async(scope,assetId,target,context)=>{
+      check(context.actor,scope,context.jobId,context.guard);
+      const captured=captures.get(context.jobId);
+      if(!captured||!isDeepStrictEqual(captured.selection.target,target))fail('STUDIO_IMPORT_SCOPE');
+      validate(scope,context.jobId,captured.selection);
+      const guard=()=>{check(context.actor,scope,context.jobId,context.guard);validate(scope,context.jobId,captured.selection);};
+      const result=await observed.load(scope,assetId,target,{...context,guard});guard();return result;
+    };
+    hooks.validateRevisionObservation=(scope,jobId,actor,observation,guard)=>observed.validate(scope,jobId,actor,observation,guard);
+    hooks.refreshRevisionObservation=(scope,jobId,actor,observation,guard)=>observed.refresh(scope,jobId,actor,observation,guard);
+  }
+  return Object.freeze({ hooks: Object.freeze(hooks),hasCapturedJob(jobId:string){if(closed)fail('STUDIO_IMPORT_SCOPE');return captures.has(jobId);}, close() { closed = true; captures.clear();observed?.close(); } });
 }

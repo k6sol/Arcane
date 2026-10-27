@@ -237,6 +237,7 @@ local function observed(instance: any, collection: any): any
 		state.flags={instance.Anchored,instance.CanCollide,instance.CanQuery,instance.CanTouch,instance.CastShadow,instance.Transparency,instance.DoubleSided}
 		state.material={tostring(instance.Material),instance.Color.R,instance.Color.G,instance.Color.B}
 		state.extra={tostring(instance.MaterialVariant),tostring(instance.Reflectance),tostring(instance.Massless),tostring(instance.CollisionGroup),tostring(instance.CustomPhysicalProperties),tostring(instance.Locked),tostring(instance.RootPriority)}
+		if instance:IsA("MeshPart") then state.mesh={tostring(instance.MeshId),tostring(instance.MeshContent),tostring(instance.TextureContent),tostring(instance.RenderFidelity),tostring(instance.CollisionFidelity),tostring(instance.FluidFidelity),instance.MeshSize.X,instance.MeshSize.Y,instance.MeshSize.Z} end
 	elseif instance:IsA("Model") then state.pivot=components(instance.WorldPivot);state.primary=instance.PrimaryPart==nil end
 	if instance:IsA("SurfaceAppearance") then
 		state.appearance={tostring(instance.AlphaMode),tostring(instance.Color),tostring(instance.ColorMapContent),tostring(instance.NormalMapContent),tostring(instance.MetalnessMapContent),tostring(instance.RoughnessMapContent)}
@@ -251,16 +252,31 @@ local function stateBytes(value: any): string
 	for _,key in ipairs(keys) do out[#out+1]=scalar(key)..":"..stateBytes(value[key]) end
 	return "{"..table.concat(out,",").."}"
 end
+local function contents(item: any): any
+	local result={}
+	local keys=if item:IsA("MeshPart") then {"MeshContent","TextureContent"} elseif item:IsA("SurfaceAppearance") then {"ColorMapContent","NormalMapContent","MetalnessMapContent","RoughnessMapContent"} else {}
+	for _,key in ipairs(keys) do local value=item[key]
+		if value~=nil then result[key]=if type(value)=="string" then {scalar=value} else {object=value.Object,uri=value.Uri,kind=tostring(value.SourceType)} end
+	end
+	return result
+end
+local function sameContents(a: any,b: any): boolean
+	for key,value in pairs(a) do local other=b[key]
+		if not other or value.object~=other.object or value.uri~=other.uri or value.kind~=other.kind or value.scalar~=other.scalar then return false end
+	end
+	for key in pairs(b) do if not a[key] then return false end end
+	return true
+end
 local function snapshot(root: any, ops: any): any
 	local items = root:GetDescendants();table.insert(items,1,root)
 	local result={}
-	for _,item in ipairs(items) do result[#result+1]={instance=item,parent=item.Parent,children=item:GetChildren(),state=stateBytes(observed(item,ops.collection))} end
+	for _,item in ipairs(items) do result[#result+1]={instance=item,parent=item.Parent,children=item:GetChildren(),state=stateBytes(observed(item,ops.collection)),contents=contents(item)} end
 	return result
 end
 local function unchanged(state: any, ops: any): boolean
 	if not state.baseline then return false end
 	for _,row in ipairs(state.baseline) do
-		if row.instance.Parent~=row.parent or #row.instance:GetChildren()~=#row.children or stateBytes(observed(row.instance,ops.collection))~=row.state then return false end
+		if row.instance.Parent~=row.parent or #row.instance:GetChildren()~=#row.children or stateBytes(observed(row.instance,ops.collection))~=row.state or not sameContents(contents(row.instance),row.contents) then return false end
 		local children=row.instance:GetChildren()
 		for _,child in ipairs(row.children) do if not table.find(children,child) then return false end end
 	end
@@ -279,7 +295,7 @@ function AssetPlacement.preflightConverted(plan: any, maxSize: any, yaw: number,
 	AssetPlacement.convertedScale(plan,maxSize,yaw)
 	for _,row in ipairs(plan.rows) do if depth+1+row.depth>63 then V.fail("BODY_LIMIT","Converted graph exceeds the reference hierarchy depth.") end end
 end
-local function verifyConverted(state: any): ()
+local function verifyConverted(state: any, authored: any?): ()
 	local owned={[state.root]=true}
 	for _,item in pairs(state.instances) do owned[item]=true end
 	for _,item in ipairs(state.parts) do owned[item]=true end
@@ -287,6 +303,8 @@ local function verifyConverted(state: any): ()
 		owned[item]=true
 		if item.Parent~=state.parts[index] then V.fail("VERIFY","Converted appearance ownership changed.") end
 	end
+	for item in pairs(state.retained or {}) do owned[item]=true end
+	for item in pairs(authored or state.authored or {}) do owned[item]=true end
 	for _,item in ipairs(state.root:GetDescendants()) do if not owned[item] then V.fail("CONFLICT","Converted hierarchy gained an unowned child; no child is removed.") end end
 	for _,row in ipairs(state.plan.rows) do
 		local item=state.instances[row.node.nodeKey]
@@ -298,6 +316,7 @@ local function verifyConverted(state: any): ()
 	end
 	for index,resource in ipairs(state.plan.resources) do
 		local part,plan=state.parts[index],resource.nativePlan
+		AssetPlacement.verifyCarrier(part,resource.object)
 		local desired=state.transform*scaledFrame(plan.cframe,state.scale)
 		local size=physicalSize(plan,state.scale)
 		if not sameNumbers(components(part.CFrame),components(desired),1e-4)
@@ -328,11 +347,17 @@ local function transformConverted(state: any, transform: any, scale: number): ()
 	state.scale,state.transform=scale,transform
 	verifyConverted(state)
 end
+local capture: any
 function AssetPlacement.observeConverted(root: any, ops: any): any
 	local state=converted[root]
 	if not state then return nil end
 	verifyConverted(state)
 	local nodes,objects=V.array({}),V.array({})
+	if state.authored and next(state.authored) then
+		local actual=capture(state,ops,function() end)
+		state.baseline=snapshot(root,ops)
+		return {formatVersion=2,receiptScope="studio-session-observation",imported=false,engineVerification="pending",graphDigest=state.plan.source.graph.digest,conversionRequestDigest=state.plan.source.conversionRequestDigest,nodes=actual.nodes,objects=actual.objects}
+	end
 	local function observation(item: any): any
 		local ref=ops.registry:ref(item)
 		local digest=state.hash("arcane-converted-owned-state-v1\n"..stateBytes(observed(item,ops.collection)))
@@ -346,6 +371,384 @@ function AssetPlacement.observeConverted(root: any, ops: any): any
 	end
 	state.baseline=snapshot(root,ops)
 	return {formatVersion=2,receiptScope="studio-session-observation",imported=false,engineVerification="pending",graphDigest=state.plan.source.graph.digest,conversionRequestDigest=state.plan.source.conversionRequestDigest,nodes=nodes,objects=objects}
+end
+
+-- Fresh observations and revision witnesses remain private to the actual root.
+-- Source metadata is the original sealed receiver, never public attributes.
+local function managed(state: any): any
+	local result={[state.root]=true}
+	for _,item in pairs(state.instances) do result[item]=true end
+	for _,item in ipairs(state.parts) do result[item]=true end
+	for _,item in pairs(state.appearances) do result[item]=true end
+	for item in pairs(state.retained or {}) do result[item]=true end
+	return result
+end
+local function childKind(item: any): string
+	if item:IsA("LuaSourceContainer") then return "script" end
+	if item:IsA("Attachment") then return "attachment" end
+	if item:IsA("Constraint") then return "constraint" end
+	V.fail("CONFLICT","Only authored scripts, attachments and constraints can be preserved automatically.")
+end
+local function childState(item: any, ops: any, guard: any): any
+	local result=observed(item,ops.collection)
+	local kind=childKind(item)
+	if kind=="script" then guard();result.source=ops:source(item);guard();if item:IsA("BaseScript") then result.disabled=item.Disabled end
+	elseif kind=="attachment" then result.frame=components(item.CFrame)
+	else
+		result.enabled=item.Enabled;result.visible=item.Visible
+		result.attachments={}
+		for _,key in ipairs({"Attachment0","Attachment1"}) do
+			local attachment=item[key]
+			result.attachments[key]=if attachment then ops.registry:ref(attachment).instanceId else ""
+		end
+	end
+	return result
+end
+local function persistentId(resource: any): any
+	if resource.keptAssetId==nil then
+		if resource.part.MeshContent.Object~=(resource.observedMesh or resource.mesh) then V.fail("CONFLICT","Live mesh content no longer references its actual retained EditableMesh.") end
+		return V.NULL
+	end
+	local text=string.format("%.0f",resource.keptAssetId)
+	if not string.match(text,"^[1-9][0-9]*$") or tostring(resource.part.MeshId)~="rbxassetid://"..text or resource.part.MeshContent.Uri~="rbxassetid://"..text then V.fail("CONFLICT","Persistent mesh content no longer matches its genuine returned ID.") end
+	return text
+end
+capture=function(state: any, ops: any, guard: any, initial: boolean?,quick: boolean?): any
+	guard()
+	if not quick then for _,resources in ipairs({state.plan.resources,state.retainedResources or {}}) do for _,resource in ipairs(resources) do
+		local proof=resource.observedMeshProof or resource.meshProof
+		if not proof then V.fail("STATE","Original native EditableMesh readback proof is absent.") end
+		proof.assertCurrent(guard)
+	end
+	end
+	end
+	local owns=managed(state)
+	-- Human-authored child changes may be freshly observed; managed changes may
+	-- not become a new baseline merely because another read was requested.
+	if initial then
+		if not state.baseline then V.fail("STATE","Placed converted baseline is absent.") end
+		for _,row in ipairs(state.baseline) do if owns[row.instance] and (row.instance.Parent~=row.parent or stateBytes(observed(row.instance,ops.collection))~=row.state or not sameContents(contents(row.instance),row.contents)) then V.fail("CONFLICT","Managed imported state changed before observation.") end end
+	end
+	local all=state.root:GetDescendants();table.insert(all,1,state.root)
+	if #all>2048 then V.fail("BODY_LIMIT","Observed imported hierarchy exceeds its finite resource bound.") end
+	local authored,actual,childStates={},{},{}
+	for _,item in ipairs(all) do
+		actual[item]=true
+		if not owns[item] then authored[item]=true;childStates[item]=childState(item,ops,guard) end
+	end
+	for item in pairs(owns) do if not actual[item] then V.fail("CONFLICT","Managed imported resource disappeared.") end end
+	verifyConverted(state,authored)
+	local rows,hashes,children={},{},{}
+	for _,item in ipairs(all) do
+		local refs=V.array({});local preserved=V.array({})
+		for _,child in ipairs(item:GetChildren()) do
+			local ref=ops.registry:ref(child).instanceId;refs[#refs+1]=ref
+			if authored[child] then
+				local subtree={child};for _,descendant in ipairs(child:GetDescendants()) do subtree[#subtree+1]=descendant end
+				local body={}
+				for _,member in ipairs(subtree) do if owns[member] then V.fail("CONFLICT","An authored child contains managed imported nodes.") end
+					body[#body+1]={ref=ops.registry:ref(member).instanceId,parent=ops.registry:ref(member.Parent).instanceId,state=childStates[member]}
+				end
+				table.sort(body,function(a: any,b: any): boolean return a.ref<b.ref end)
+				preserved[#preserved+1]={instanceRef=ref,kind=childKind(child),stateSha256=state.hash("arcane-import-authored-state-v1\n"..stateBytes(body))}
+			end
+		end
+		table.sort(refs);table.sort(preserved,function(a: any,b: any): boolean return a.instanceRef<b.instanceRef end)
+		if #preserved>128 then V.fail("BODY_LIMIT","Imported authored-child list exceeds its bound.") end
+		local parent=ops.registry:ref(item.Parent).instanceId
+		local value=if authored[item] then childStates[item] else observed(item,ops.collection)
+		local digest=state.hash("arcane-live-import-owned-state-v1\n"..stateBytes({parent=parent,state=value,children=refs,preserved=preserved}))
+		hashes[item]=digest;children[item]=preserved
+		rows[#rows+1]={instance=item,parent=item.Parent,children=item:GetChildren(),state=stateBytes(value),digest=digest,contents=contents(item)}
+	end
+	guard()
+	local nodes,objects=V.array({}),V.array({})
+	for _,row in ipairs(state.plan.rows) do local item=state.instances[row.node.nodeKey];nodes[#nodes+1]={nodeKey=row.node.nodeKey,instanceRef=ops.registry:ref(item).instanceId,ownedStateSha256=hashes[item],authoredChildren=children[item]} end
+	for index,resource in ipairs(state.plan.resources) do local item=state.parts[index];objects[#objects+1]={sourceObjectId=resource.object.sourceObjectId,instanceRef=ops.registry:ref(item).instanceId,ownedStateSha256=hashes[item],authoredChildren=children[item],meshAssetId=persistentId(resource)} end
+	local aggregate={};for _,row in ipairs(rows) do aggregate[#aggregate+1]={ref=ops.registry:ref(row.instance).instanceId,digest=row.digest} end
+	table.sort(aggregate,function(a: any,b: any): boolean return a.ref<b.ref end)
+	return {nodes=nodes,objects=objects,modelOwnedStateSha256=state.hash("arcane-live-import-model-state-v1\n"..stateBytes(aggregate)),rows=rows,authored=authored}
+end
+function AssetPlacement.liveObservation(root: any, ops: any, guard: any): any
+	local state=converted[root]
+	if not state then V.fail("STATE","Actual private converted root is absent.") end
+	return capture(state,ops,guard,true)
+end
+function AssetPlacement.checkObservation(root: any, ops: any, guard: any, prior: any,quick: boolean?): ()
+	local state=converted[root]
+	if not state then V.fail("STATE","Actual private converted root is absent.") end
+	local now=capture(state,ops,guard,nil,quick)
+	if now.modelOwnedStateSha256~=prior.modelOwnedStateSha256 or not V.convertedEqual(now.nodes,prior.nodes) or not V.convertedEqual(now.objects,prior.objects) or #now.rows~=#prior.rows then V.fail("CONFLICT","Fresh imported observation changed before revision.") end
+	local byInstance={};for _,row in ipairs(now.rows) do byInstance[row.instance]=row end
+	for _,row in ipairs(prior.rows) do local current=byInstance[row.instance]
+		if not current then V.fail("CONFLICT","Observed resource disappeared.") end
+		if current.instance~=row.instance or current.parent~=row.parent or current.state~=row.state or #current.children~=#row.children or not sameContents(current.contents,row.contents) then V.fail("CONFLICT","Observed resource identity or state changed.") end
+		for _,child in ipairs(row.children) do if not table.find(current.children,child) then V.fail("CONFLICT","Observed child identity changed.") end end
+	end
+end
+
+local function sealedList(value: any,maximum: number,label: string): any
+	-- Only original sealed receiver metadata: native JSONDecode erases the
+	-- empty-array marker. Public protocol lists still use V.list unchanged.
+	if type(value)~="table" or value==V.NULL or #value>maximum then V.fail("INPUT","Invalid sealed "..label..".") end
+	local count=0;for key in pairs(value) do count+=1;if type(key)~="number" or key%1~=0 or key<1 or key>#value then V.fail("INPUT","Invalid sealed "..label..".") end end
+	if count~=#value then V.fail("INPUT","Incomplete sealed "..label..".") end
+	return value
+end
+-- Snapshot the actual private native mesh before any part exposes its Content.
+-- Stable engine IDs are sparse; inventories and per-corner associations are
+-- independently read and bounded, never assumed contiguous or metadata proof.
+function AssetPlacement.meshProof(mesh: any,hashFactory: any,guard: any): any
+	local function fingerprint(current: any): string
+		local digest=hashFactory();local steps=0
+		local function emit(value: any): ()
+			digest:update(stateBytes(value).."\n");steps+=1;if steps%256==0 then current() end
+		end
+		local function ids(value: any,maximum: number): any
+			local list=sealedList(value,maximum,"native mesh IDs");local result,seen={},{}
+			for _,id in ipairs(list) do V.integer(id,0,9007199254740991,"native mesh ID");if seen[id] then V.fail("VERIFY","Duplicate native mesh ID.") end;seen[id]=true;result[#result+1]=id end
+			table.sort(result);return result
+		end
+		local function vector(value: any,size: number): any
+			if value==nil then V.fail("VERIFY","Native mesh attribute is absent.") end
+			local row={V.number(value.X,-1000000,1000000,"native mesh attribute"),V.number(value.Y,-1000000,1000000,"native mesh attribute")}
+			if size==3 then row[3]=V.number(value.Z,-1000000,1000000,"native mesh attribute") end
+			return row
+		end
+		current()
+		local vertices,faces=ids(mesh:GetVertices(),60000),ids(mesh:GetFaces(),20000)
+		if #vertices<3 or #faces<1 or #sealedList(mesh:GetBones(),0,"native bones")~=0 then V.fail("VERIFY","Native mesh inventory is unsupported.") end
+		emit({"vertices",vertices});for _,id in ipairs(vertices) do emit({id,vector(mesh:GetPosition(id),3)}) end
+		emit({"faces",faces})
+		for _,id in ipairs(faces) do
+			local v=sealedList(mesh:GetFaceVertices(id),3,"native triangle")
+			if #v~=3 then V.fail("VERIFY","Native source triangle changed.") end
+			local normals,uvs,colors=sealedList(mesh:GetFaceNormals(id),3,"native face normals"),sealedList(mesh:GetFaceUVs(id),3,"native face UVs"),sealedList(mesh:GetFaceColors(id),3,"native face colors")
+			if #normals~=3 or #uvs~=3 or #colors~=3 then V.fail("VERIFY","Native triangle corner attributes are incomplete.") end
+			emit({id,v,normals,uvs,colors})
+		end
+		local normals=ids(mesh:GetNormals(),120000);emit({"normals",normals});for _,id in ipairs(normals) do emit({id,vector(mesh:GetNormal(id),3)}) end
+		local uvs=ids(mesh:GetUVs(),120000);emit({"uvs",uvs});for _,id in ipairs(uvs) do emit({id,vector(mesh:GetUV(id),2)}) end
+		local colors=ids(mesh:GetColors(),120000);emit({"colors",colors})
+		for _,id in ipairs(colors) do local value=mesh:GetColor(id);if not value then V.fail("VERIFY","Native color is absent.") end
+			emit({id,V.number(value.R,0,1,"native red"),V.number(value.G,0,1,"native green"),V.number(value.B,0,1,"native blue"),V.number(mesh:GetColorAlpha(id),0,1,"native alpha")})
+		end
+		current();return digest:digest()
+	end
+	local original=fingerprint(guard)
+	return table.freeze({mesh=mesh,assertCurrent=function(current: any): () if fingerprint(current)~=original then V.fail("CONFLICT","Original private EditableMesh geometry or attributes changed.") end end})
+end
+local function indexed(rows: any, key: string): any
+	local result={}
+	for _,row in ipairs(sealedList(rows,128,"converted delta inventory")) do
+		if type(row)~="table" or type(row[key])~="string" or result[row[key]] then V.fail("IDENTITY","Duplicate or invalid converted delta identity.") end
+		result[row[key]]=row
+	end
+	return result
+end
+local function null(value: any): boolean return value==nil or value==V.NULL end
+local function deltaAction(row: any, old: any, mapping: any, changes: any, object: boolean): ()
+	V.fields(row,if object then {"sourceObjectId","action","changed","instanceRef","meshAssetId","expectedOwnedStateSha256","preserveChildren","replaceInstance","deleteInstance"}
+		else {"nodeKey","action","changed","instanceRef","expectedOwnedStateSha256","preserveChildren","replaceInstance","deleteInstance"},"converted delta action")
+	local expected=if not old then "create" elseif #changes>0 then "update-in-place" else "reuse"
+	if row.action~=expected or not V.convertedEqual(row.changed,changes) or row.replaceInstance~=false or row.deleteInstance~=false then V.fail("IDENTITY","Sealed converted delta action differs from actual old/new metadata.") end
+	if old then
+		if not mapping or row.instanceRef~=mapping.instanceRef or row.expectedOwnedStateSha256~=mapping.ownedStateSha256 or not V.convertedEqual(row.preserveChildren,mapping.authoredChildren) or (object and not V.convertedEqual(row.meshAssetId,mapping.meshAssetId)) then V.fail("CONFLICT","Sealed delta does not bind the complete fresh instance state and children.") end
+	elseif not null(row.instanceRef) or not null(row.expectedOwnedStateSha256) or (object and not null(row.meshAssetId)) or #sealedList(row.preserveChildren,128,"created children")~=0 then V.fail("IDENTITY","Create action invented a previous instance or child.") end
+end
+local REVISION_FIELDS={"Name","Size","CFrame","PivotOffset","Color","Material","Transparency","DoubleSided","CanCollide","CanQuery","CanTouch","CastShadow","Anchored"}
+-- ApplyMesh changes only documented mesh/texture/physics fields. Properties,
+-- pivots, parent, material and all authored children are preserved explicitly.
+function AssetPlacement.applyConvertedRevision(ops: any, oldOwner: any, nextOwner: any, witness: any, preparePart: any, current: any, scope: any, command: any): any
+	local root=oldOwner.placed;local state=converted[root]
+	if not state or nextOwner.placed or nextOwner.materializeConsumed or not nextOwner.graph then V.fail("STATE","Original and next converted private owners are required.") end
+	current()
+	local plan,delta=nextOwner.graph,nextOwner.graphPlan.delta
+	V.fields(delta,{"previousDigest","nextDigest","receiptSha256","modelRef","modelAssetId","placementChanged","objects","reviewRemovals","reviewAnchors","geometry","textures","preservation","graph","nodes","reviewNodeRemovals","observation"},"converted revision delta")
+	for _,key in ipairs({"objects","nodes","reviewRemovals","reviewAnchors","reviewNodeRemovals"}) do sealedList(delta[key],128,"converted "..key) end
+	if delta.previousDigest~=witness.observation.source.manifestDigest or delta.nextDigest~=nextOwner.graphPlan.source.manifestDigest or delta.receiptSha256~=witness.receiptSha256
+		or delta.modelRef~=witness.observation.modelRef.instanceId or not null(delta.modelAssetId) or delta.preservation~="preserve-all-scripts-attachments-constraints"
+		or delta.placementChanged~=false or not V.convertedEqual(oldOwner.graphPlan.placement,nextOwner.graphPlan.placement) or not V.convertedEqual(oldOwner.graphPlan.conversion,nextOwner.graphPlan.conversion) then V.fail("CONFLICT","Converted placement, conversion or exact previous receipt differs.") end
+	V.fields(delta.graph,{"previousDigest","nextDigest","changed"},"converted graph delta")
+	if delta.graph.previousDigest~=state.plan.source.graph.digest or delta.graph.nextDigest~=plan.source.graph.digest or delta.graph.changed~=(delta.graph.previousDigest~=delta.graph.nextDigest) then V.fail("IDENTITY","Converted graph revision digests differ.") end
+	local nodeActions,objectActions=indexed(delta.nodes,"nodeKey"),indexed(delta.objects,"sourceObjectId")
+	if #delta.nodes~=#plan.rows or #delta.objects~=#plan.resources then V.fail("IDENTITY","Converted delta coverage differs.") end
+	local oldNodes=state.plan.byKey;local oldObjects={};local oldParts={};local oldAppearances={}
+	for index,resource in ipairs(state.plan.resources) do oldObjects[resource.object.sourceObjectId]=resource;oldParts[resource.object.sourceObjectId]=state.parts[index];oldAppearances[resource.object.sourceObjectId]=state.appearances[index] end
+	local observedNodes,observedObjects=indexed(witness.observation.nodes,"nodeKey"),indexed(witness.observation.objects,"sourceObjectId")
+	local active,retained,instances,parts,appearances={},{},{},{},{}
+	local retainedResources=table.clone(state.retainedResources or {})
+	for item in pairs(state.retained or {}) do retained[item]=true end
+	for _,row in ipairs(plan.rows) do
+		local key=row.node.nodeKey;local before=oldNodes[key];local changes={}
+		if before then
+			if row.node.parentKey~=before.node.parentKey then changes[#changes+1]="parent" end
+			if not V.convertedEqual(row.node.localMatrix,before.node.localMatrix) or not V.convertedEqual(row.world,before.world) then changes[#changes+1]="matrix" end
+			if row.node.name~=before.node.name then changes[#changes+1]="name" end
+			local oldMesh,newMesh=before.resource and before.resource.association,row.resource and row.resource.association
+			if not V.convertedEqual(if oldMesh then {sourceObjectId=oldMesh.sourceObjectId,correspondenceSha256=oldMesh.correspondenceSha256} else nil,if newMesh then {sourceObjectId=newMesh.sourceObjectId,correspondenceSha256=newMesh.correspondenceSha256} else nil) then changes[#changes+1]="mesh" end
+			if not V.convertedEqual(oldMesh and oldMesh.sourcePivot,newMesh and newMesh.sourcePivot) then changes[#changes+1]="pivot" end
+			if (before.resource~=nil)~=(row.resource~=nil) then V.fail("CONFLICT","A converted node class change cannot replace its observed Instance.") end
+			instances[key]=state.instances[key];active[instances[key]]=true
+		end
+		if not nodeActions[key] then V.fail("IDENTITY","Missing converted node action.") end
+		deltaAction(nodeActions[key],before,observedNodes[key],changes,false)
+	end
+	local changedMeshes=0
+	for _,resource in ipairs(plan.resources) do
+		local o=resource.object;local old=oldObjects[o.sourceObjectId];local changes={}
+		if old then local b=old.object
+			if o.role~=b.role then V.fail("CONFLICT","Converted mesh role changed.") end
+			if o.meshExportSha256~=b.meshExportSha256 then changes[#changes+1]="geometry" end
+			if o.materialSha256~=b.materialSha256 then changes[#changes+1]="material" end
+			if not V.convertedEqual(o.textureSha256s,b.textureSha256s) then changes[#changes+1]="textures" end
+			if not V.convertedEqual(o.exportTransform,b.exportTransform) or not V.convertedEqual(o.pivot,b.pivot) or not V.convertedEqual(o.scale,b.scale) then changes[#changes+1]="transform" end
+			if not V.convertedEqual(o.collisionFor,b.collisionFor) then changes[#changes+1]="collision" end
+			if o.name~=b.name or o.sourceKey~=b.sourceKey then changes[#changes+1]="identity" end
+			active[oldParts[o.sourceObjectId]]=true
+		end
+		if not objectActions[o.sourceObjectId] then V.fail("IDENTITY","Missing converted object action.") end
+		deltaAction(objectActions[o.sourceObjectId],old,observedObjects[o.sourceObjectId],changes,true)
+		if not old or #changes>0 then changedMeshes+=1 end
+		physicalSize(resource.nativePlan,state.scale)
+	end
+	local removedNodes,removedObjects=indexed(delta.reviewNodeRemovals,"nodeKey"),indexed(delta.reviewRemovals,"sourceObjectId")
+	local removalCount=0
+	for key,row in pairs(oldNodes) do if not plan.byKey[key] then
+		local removal=removedNodes[key];local mapping=observedNodes[key]
+		if not removal or removal.action~="retain-for-review" then V.fail("IDENTITY","A removed converted node must be retained for review.") end
+		local copy=table.clone(removal);copy.action=nil;if not V.convertedEqual(copy,mapping) then V.fail("CONFLICT","Removed node no longer matches its observation.") end
+		retained[state.instances[key]]=true;removalCount+=1
+	end end
+	if removalCount~=#delta.reviewNodeRemovals then V.fail("IDENTITY","Foreign converted node removal.") end
+	removalCount=0
+	for id in pairs(oldObjects) do if not objectActions[id] then
+		local removal=removedObjects[id];local mapping=observedObjects[id]
+		if not removal or removal.action~="retain-for-review" then V.fail("IDENTITY","A removed mesh must remain for review.") end
+		local copy=table.clone(removal);copy.action=nil;if not V.convertedEqual(copy,mapping) then V.fail("CONFLICT","Removed mesh no longer matches its observation.") end
+		retained[oldParts[id]]=true;if oldAppearances[id] then retained[oldAppearances[id]]=true end;removalCount+=1
+		retainedResources[#retainedResources+1]=oldObjects[id]
+	end end
+	if removalCount~=#delta.reviewRemovals or #delta.reviewAnchors~=0 then V.fail("IDENTITY","Foreign converted removal or anchor delta.") end
+	local finalCount=1+#plan.rows;for _,resource in ipairs(plan.resources) do if resource.object.role=="collision" then finalCount+=1 end end
+	for item in pairs(retained) do if not active[item] and (item:IsA("Model") or item:IsA("MeshPart")) then finalCount+=1 end end
+	if finalCount>128 or changedMeshes>128 or 2*changedMeshes>256 then V.fail("BODY_LIMIT","Final converted graph or bounded revision working set exceeds its budget.") end
+	AssetPlacement.preflightConverted(plan,nil,0,#ops.registry:ref(root.Parent).pathSegments)
+	current()
+	nextOwner.materializeConsumed=true -- BEFORE any allocating API; never replay a failed or uncertain attempt.
+	local carriers,backups,groups,working,oldRows={},{},{},{},{}
+	local allocated={}
+	local function own(item: any): () if item then allocated[item]=true;for _,child in ipairs(item:GetDescendants()) do allocated[child]=true end;working[#working+1]={item=item} end end
+	local function cleanup(): ()
+		for _,entry in ipairs(working) do if entry.item.Parent==nil then
+			for _,child in ipairs(entry.item:GetDescendants()) do if not allocated[child] then ops.assetCleanupFailed=true;V.fail("CLEANUP","A revision working resource gained an unowned child.") end end
+			if not pcall(function() entry.item:Destroy() end) then ops.assetCleanupFailed=true;V.fail("CLEANUP","Revision working resource cleanup failed.") end
+		end end
+	end
+	local saved={plan=state.plan,instances=state.instances,parts=state.parts,appearances=state.appearances,retained=state.retained,retainedResources=state.retainedResources,authored=state.authored,baseline=state.baseline}
+	local committed=false;local recording: any=nil;local result: any=nil
+	local ok,failure=pcall(function()
+		for _,row in ipairs(plan.rows) do if not instances[row.node.nodeKey] and not row.resource then
+			local item=Instance.new("Model");own(item);groups[#groups+1]=item;instances[row.node.nodeKey]=item;current()
+		end end
+		for index,resource in ipairs(plan.resources) do
+			local id=resource.object.sourceObjectId;local action=objectActions[id];local old=oldObjects[id]
+			if action.action=="reuse" then parts[index]=oldParts[id];appearances[index]=oldAppearances[id]
+			else
+				local part,appearance=preparePart(resource,function(item: any): () own(item) end)
+				carriers[index]=part;current()
+				if old then
+					parts[index]=oldParts[id];appearances[index]=appearance
+					if table.find(action.changed,"geometry") then
+						if type(parts[index].ApplyMesh)~="function" then V.fail("CAPABILITY","MeshPart.ApplyMesh is unavailable.") end
+						local backup=parts[index]:Clone();own(backup);backups[index]=backup;current()
+						if not backup or not backup:IsA("MeshPart") or backup.Parent~=nil then V.fail("ENGINE","Detached rollback MeshPart is unavailable.") end
+					end
+				else parts[index]=part;appearances[index]=appearance end
+			end
+			local key=resource.association.nodeKey;if not null(key) then instances[key]=parts[index] end
+		end
+		current()
+		-- Full native geometry readback before the first scene mutation. Cheap
+		-- source/context/property checks protect each earlier yielding step.
+		AssetPlacement.checkObservation(root,ops,scope,oldOwner.observation.capture)
+		for item in pairs(managed(state)) do
+			local fields={};if item:IsA("BasePart") then for _,key in ipairs(REVISION_FIELDS) do fields[key]=item[key] end end
+			oldRows[#oldRows+1]={item=item,parent=item.Parent,name=item.Name,pivot=if item:IsA("Model") then item.WorldPivot else nil,fields=fields,attributes=item:GetAttributes()}
+		end
+		recording=ops.history:TryBeginRecording("Arcane."..command.id,"Arcane converted revision")
+		if not recording then V.fail("HISTORY","Cannot begin converted revision recording.") end
+		local applied,applyError=pcall(function()
+			scope()
+			for index,resource in ipairs(plan.resources) do
+				local id=resource.object.sourceObjectId;local action=objectActions[id];local part=parts[index];local carrier=carriers[index]
+				if carrier and oldObjects[id] then
+					if backups[index] then part:ApplyMesh(carrier);scope() end
+					for _,key in ipairs(REVISION_FIELDS) do if key~="Name" and key~="CFrame" and key~="Size" and key~="PivotOffset" and key~="Anchored" then part[key]=carrier[key] end end
+					if oldAppearances[id] then oldAppearances[id].Parent=nil end
+					if appearances[index] then appearances[index].Parent=part end
+				end
+				local native=resource.nativePlan;part.Size=physicalSize(native,state.scale);part.CFrame=state.transform*scaledFrame(native.cframe,state.scale);part.PivotOffset=scaledFrame(native.pivotOffset,state.scale)
+				resource.part,resource.appearance=part,appearances[index]
+				local previous=oldObjects[id];resource.keptAssetId=if previous and not table.find(action.changed,"geometry") then previous.keptAssetId else nil
+				resource.observedMesh=if previous and not table.find(action.changed,"geometry") then previous.mesh else nil
+				resource.observedMeshProof=if previous and not table.find(action.changed,"geometry") then previous.meshProof else nil
+				part:SetAttribute(OBJECT_ATTRIBUTE,id)
+				if resource.object.role=="collision" then part.Name=resource.object.name;part.Parent=root end
+			end
+			for _,row in ipairs(plan.rows) do
+				local item=instances[row.node.nodeKey];item.Name=if null(row.node.name) then row.node.nodeKey else row.node.name;item:SetAttribute(NODE_ATTRIBUTE,row.node.nodeKey)
+				item.Parent=instances[row.node.parentKey] or root
+				if not row.resource then item.WorldPivot=state.transform*scaledFrame(row.pivot,state.scale) end
+			end
+			state.plan,state.instances,state.parts,state.appearances,state.retained,state.retainedResources,state.authored=plan,instances,parts,appearances,retained,retainedResources,oldOwner.observation.capture.authored
+			verifyConverted(state)
+			result=capture(state,ops,scope)
+			if #V.encode({nodes=result.nodes,objects=result.objects},ops.http)>V.RESULT_BYTES-8192 then V.fail("BODY_LIMIT","Converted revision observation exceeds its finite receipt budget.") end
+			scope()
+			if not pcall(function() ops.history:FinishRecording(recording,Enum.FinishRecordingOperation.Commit) end) then V.fail("HISTORY","Converted revision recording failed.") end
+			committed=true
+		end)
+		if not applied then
+			local restored=pcall(function()
+				for index,backup in pairs(backups) do parts[index]:ApplyMesh(backup) end
+				for _,row in ipairs(oldRows) do row.item.Parent=row.parent;row.item.Name=row.name;for key,value in pairs(row.fields) do row.item[key]=value end;if row.pivot then row.item.WorldPivot=row.pivot end
+					for key in pairs(row.item:GetAttributes()) do if row.attributes[key]==nil then row.item:SetAttribute(key,nil) end end;for key,value in pairs(row.attributes) do row.item:SetAttribute(key,value) end
+				end
+				for index,resource in ipairs(plan.resources) do local id=resource.object.sourceObjectId
+					if carriers[index] then if oldObjects[id] then if appearances[index] then appearances[index].Parent=carriers[index] end;if oldAppearances[id] then oldAppearances[id].Parent=oldParts[id] end else carriers[index].Parent=nil end end
+					resource.part,resource.appearance,resource.keptAssetId,resource.observedMesh,resource.observedMeshProof=nil,nil,nil,nil,nil
+				end
+				for _,group in ipairs(groups) do group.Parent=nil end
+				state.plan,state.instances,state.parts,state.appearances,state.retained,state.retainedResources,state.authored,state.baseline=saved.plan,saved.instances,saved.parts,saved.appearances,saved.retained,saved.retainedResources,saved.authored,saved.baseline
+				AssetPlacement.checkObservation(root,ops,function() end,oldOwner.observation.capture)
+			end)
+			pcall(function() ops.history:FinishRecording(recording,Enum.FinishRecordingOperation.Commit) end)
+			if not restored then ops.assetCleanupFailed=true;oldOwner.graphUncertain=true;nextOwner.graphUncertain=true;V.fail("CLEANUP","Converted revision rollback could not be verified.") end
+			error(applyError,0)
+		end
+	end)
+	if not ok then cleanup();error(failure,0) end
+	if not committed then cleanup();V.fail("STATE","Converted revision did not commit.") end
+	-- Move actual mesh ownership only after the complete same-instance graph and
+	-- its undo recording commit. Unused reconstructed meshes are still owned.
+	for index,resource in ipairs(plan.resources) do
+		local id=resource.object.sourceObjectId;local old=oldObjects[id];local geometry=not old or table.find(objectActions[id].changed,"geometry")~=nil
+		if old and not geometry then
+			local unused=resource.mesh;resource.mesh=old.mesh;old.mesh=nil;old.disposed=true
+			resource.meshProof=old.meshProof
+			if not pcall(function() unused:Destroy() end) then ops.assetCleanupFailed=true end
+			resource.keptAssetId=old.keptAssetId
+		else resource.keptAssetId=nil end
+		resource.part,resource.appearance=parts[index],appearances[index]
+		resource.observedMesh=nil
+		resource.observedMeshProof=nil
+		if old and oldAppearances[id] and oldAppearances[id]~=appearances[index] and oldAppearances[id].Parent==nil then if not pcall(function() oldAppearances[id]:Destroy() end) then ops.assetCleanupFailed=true end end
+	end
+	state.baseline=snapshot(root,ops)
+	local owned=ops.registry.owned[root];if owned and owned.placed then owned.placed.count=#root:GetDescendants() end
+	cleanup()
+	return result
 end
 
 -- One-shot watch: records top-level instances added under Workspace after it is armed.
@@ -821,7 +1224,7 @@ local SWAP_FIELDS = table.freeze({"Name", "Size", "CFrame", "Anchored", "CanColl
 -- without yielding. Returned upload IDs survive every refusal/failure. Private
 -- node pointers change only after the complete graph passes readback.
 local function keepConverted(ops: any, state: any, owner: any, entries: any, guard: any, engine: any, attemptId: string): (number, any)
-	local fresh,copies,oldParts,oldAppearances,oldIds,parents={},{},{},{},{},{}
+	local fresh,copies,oldParts,oldAppearances,oldIds,parents,movedChildren={},{},{},{},{},{},{}
 	local originalBaseline=state.baseline
 	local observation: any=nil
 	local function clean(): ()
@@ -856,7 +1259,11 @@ local function keepConverted(ops: any, state: any, owner: any, entries: any, gua
 					if appearance==nil or not appearance:IsA("SurfaceAppearance") or appearance.Parent~=nil then V.fail("ENGINE","Expected a detached persistent appearance copy.") end
 					appearance.Parent=part
 				end
-				if stateBytes(observed(part,ops.collection))~=stateBytes(observed(old,ops.collection)) then V.fail("VERIFY","Persistent replacement properties differ.") end
+				local beforeState,afterState=observed(old,ops.collection),observed(part,ops.collection)
+				-- This authorized persistent swap intentionally changes mesh content
+				-- identity. Bounds and all other observed properties still match.
+				beforeState.mesh[1],beforeState.mesh[2]="","";afterState.mesh[1],afterState.mesh[2]="",""
+				if stateBytes(afterState)~=stateBytes(beforeState) then V.fail("VERIFY","Persistent replacement properties differ.") end
 			end
 		end
 		guard()
@@ -867,6 +1274,11 @@ local function keepConverted(ops: any, state: any, owner: any, entries: any, gua
 			for index,resource in ipairs(owner.meshes) do
 				local part=fresh[index]
 				if part then
+					movedChildren[index]={}
+					for _,child in ipairs(oldParts[index]:GetChildren()) do if child~=oldAppearances[index] then
+						if not (state.authored and state.authored[child]) then V.fail("CONFLICT","Persistent swap found an unobserved child.") end
+						movedChildren[index][#movedChildren[index]+1]=child;child.Parent=part
+					end end
 					part.Parent=parents[index];oldParts[index].Parent=nil
 					resource.part,resource.appearance,resource.keptAssetId=part,copies[index],entries[index].assetId
 					state.parts[index],state.appearances[index]=part,copies[index]
@@ -889,7 +1301,8 @@ local function keepConverted(ops: any, state: any, owner: any, entries: any, gua
 				for index,resource in ipairs(owner.meshes) do
 					local part=fresh[index]
 					if part then
-						for _,child in ipairs(part:GetChildren()) do if child~=copies[index] then V.fail("CONFLICT","Persistent replacement gained an authored child.") end end
+						for _,child in ipairs(part:GetChildren()) do if child~=copies[index] and not table.find(movedChildren[index] or {},child) then V.fail("CONFLICT","Persistent replacement gained an authored child.") end end
+						for _,child in ipairs(movedChildren[index] or {}) do if child.Parent~=part then V.fail("CONFLICT","Preserved child moved during persistent swap.") end;child.Parent=oldParts[index] end
 						part.Parent=nil;oldParts[index].Parent=parents[index]
 						resource.part,resource.appearance,resource.keptAssetId=oldParts[index],oldAppearances[index],oldIds[index]
 						state.parts[index],state.appearances[index]=oldParts[index],oldAppearances[index]

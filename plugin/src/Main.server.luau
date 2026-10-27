@@ -583,7 +583,7 @@ end
 local ACTIVITY: {[string]: string} = {["scene.create"] = "Created an object", ["environment.apply"] = "Updated lighting",
 	["terrain.generate"] = "Generated terrain", ["scene.update"] = "Updated properties", ["script.update"] = "Edited a script",
 	["script.set_enabled"] = "Toggled a script", ["scene.restore"] = "Restored a change", ["scene.place_asset"] = "Placed an asset",
-	["scene.apply_material"] = "Applied a material"}
+	["scene.apply_material"] = "Applied a material",["asset.apply_revision"]="Updated an imported model"}
 transport.onActivity = function(method: any, count: any): ()
 	local summary = if method == "scene.build" and type(count) == "number" then "Built " .. commas(count) .. (if count == 1 then " part" else " parts")
 		elseif method == "scene.build" then "Built a scene" else ACTIVITY[method]

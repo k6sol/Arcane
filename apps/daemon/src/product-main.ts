@@ -75,7 +75,8 @@ try {
     directory: join(directory, 'studio-import-preparations'), workAssociations: associations, studio: store });
   try {
     importHost = createStudioImportHost({ projectPath: associations.projectPath, workAssociations: associations, studio: store,
-      pluginArtifactHash, persistPreparation: (...args) => preparations.save(...args) });
+      pluginArtifactHash, persistPreparation: (...args) => preparations.save(...args),
+      readPreparation:(actor,jobId,guard,attemptId)=>preparations.get(actor,jobId,guard,attemptId) });
   } catch (error) { await cleanupStartup([() => preparations.close()]); throw error; }
 } catch (error) { await startupFailed('services', error, [() => associations.close(), () => work.close(), () => store.close()]); throw error; }
 try {assets=await createAssetService({reportFailure:diagnosticReporter.report,cwd:runtimeRoot,workerRoot:join(cwd,'workers','blender'),projectPath:associations.projectPath,modelReview,modelReviewAssociations:associations,studioImport:importHost.hooks,retentionPins:{preparationRecord:jobId=>preparations.hasRecordForJob(jobId),pendingStage:jobId=>store.hasPendingStageWork(associations.projectId,jobId),importCaptured:jobId=>importHost.hasCapturedJob(jobId)},...((stateOverride === undefined && resourceOverride === undefined) ? {} : {outputRoot:join(directory,'assets')})});}catch(error){await startupFailed('services', error, [() => importHost.close(), () => preparations.close(), () => associations.close(), () => work.close(), () => store.close()]);throw error;}

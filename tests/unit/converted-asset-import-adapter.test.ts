@@ -1,3 +1,4 @@
+import type {StudioImportObservationReceipt} from '../../packages/protocol/src/studio.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
@@ -8,7 +9,7 @@ import {buildConvertedGraph,type ConvertedGraphSourceBytes} from '../../packages
 import {prepareGlbConversionSource} from '../../packages/asset-pipeline/src/glb-conversion-source.js';
 import {CONVERSION_FIDELITY_POLICY,CONVERSION_NODE_KEY,conversionCorrespondenceSha256} from '../../packages/asset-pipeline/src/conversion-fidelity-policy.js';
 import {AssetError,type Artifact} from '../../packages/asset-pipeline/src/types.js';
-import {createStudioImportManifestAuthority,type StudioImportSelection,type ConvertedStudioImportBaselineV2} from '../../packages/asset-pipeline/src/studio-import-manifest.js';
+import {createStudioImportManifestAuthority,studioImportObservationReceiptDigest,type StudioImportSelection,type ConvertedStudioImportBaselineV2} from '../../packages/asset-pipeline/src/studio-import-manifest.js';
 
 // The fixed byte constructor below is borrowed from frozen C114. Its audit and
 // runtime statements are synthetic metadata, never worker or authority proof.
@@ -18,6 +19,7 @@ type Doc=Record<string,any>;
 const JOB='11111111-1111-4111-8111-111111111111',PARENT='22222222-2222-4222-8222-222222222222';
 const sha=(value:string|Uint8Array)=>createHash('sha256').update(value).digest('hex');
 const json=(value:unknown)=>Buffer.from(JSON.stringify(value));
+const canonical=(value:unknown):string=>Array.isArray(value)?'['+value.map(canonical).join(',')+']':value!==null&&typeof value==='object'?'{'+Object.entries(value).sort(([a],[b])=>a<b?-1:a>b?1:0).map(([key,child])=>JSON.stringify(key)+':'+canonical(child)).join(',')+'}':JSON.stringify(value);
 const identity=()=>[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1];
 function pack(doc:Doc,bin:Buffer):Buffer {
   doc.buffers[0].byteLength=bin.length;const text=json(doc),j=(text.length+3)&~3,b=(bin.length+3)&~3,out=Buffer.alloc(28+j+b);
@@ -235,16 +237,24 @@ test('converted baseline and selection are detached metadata only, with matching
     assert.equal(prepared.manifest.conversion.sourceUp,'Y');assert.equal(prepared.manifest.conversion.exportUp,'Y');
     const manifest=prepared.manifest;
     // Synthetic observed mappings test the closed metadata handoff, not Studio.
-    const raw={manifest,receipt:{manifestDigest:manifest.digest,receiptSha256:sha('synthetic observed receipt'),modelRef:'fixture-model',modelAssetId:'900',
+    const observation:StudioImportObservationReceipt={formatVersion:2,observationId:'55555555-5555-4555-8555-555555555555',
+      source:{projectId:manifest.projectId,jobId:manifest.revisionId,assetId:manifest.assetId,sourceSha256:manifest.sourceSha256,preparedDigest:prepared.digest,
+        manifestDigest:manifest.digest,payloadDigest:sha('synthetic previous payload'),transferDigest:sha('synthetic previous transfer'),graphDigest:manifest.graph.digest,conversionRequestDigest:sha(canonical(manifest.conversionRequest))},
+      target:structuredClone(manifest.target),continuity:{clientLifetimeId:'fixture-plugin',pluginArtifactHash:sha('synthetic plugin'),playEpoch:0},
+      modelRef:{instanceId:'fixture-model',sessionId:manifest.target.sessionId,root:'Workspace',pathSegments:['Observed model'],className:'Model'},modelOwnedStateSha256:sha('synthetic model state'),
       objects:manifest.objects.map((object,i)=>({sourceObjectId:object.sourceObjectId,instanceRef:'mesh-'+i,meshAssetId:String(100+i),ownedStateSha256:sha('mesh-'+i),authoredChildren:[]})),
-      graphDigest:manifest.graph.digest,nodes:manifest.graph.nodes.map((node,i)=>({nodeKey:node.nodeKey,instanceRef:'node-'+i,ownedStateSha256:sha('node-'+i),authoredChildren:[]}))}};
+      nodes:manifest.graph.nodes.map((node,i)=>({nodeKey:node.nodeKey,instanceRef:'node-'+i,ownedStateSha256:sha('node-'+i),authoredChildren:[]})),
+      receiptScope:'live-import-observation',imported:false,engineVerification:'pending'};
     // Mesh nodes and object mappings refer to the SAME observed instance.
-    for(const object of raw.receipt.objects){const association=manifest.graph.meshes.find(mesh=>mesh.sourceObjectId===object.sourceObjectId)!;
-      const mapped=raw.receipt.nodes.find(node=>node.nodeKey===association.nodeKey)!;mapped.instanceRef=object.instanceRef;mapped.ownedStateSha256=object.ownedStateSha256;}
+    for(const object of observation.objects){const association=manifest.graph.meshes.find(mesh=>mesh.sourceObjectId===object.sourceObjectId)!;
+      const mapped=observation.nodes.find(node=>node.nodeKey===association.nodeKey)!;mapped.instanceRef=object.instanceRef;mapped.ownedStateSha256=object.ownedStateSha256;}
+    const raw={manifest,receipt:{commandId:'66666666-6666-4666-8666-666666666666',receiptSha256:studioImportObservationReceiptDigest(observation),observation}};
     const baseline:ConvertedStudioImportBaselineV2=raw;
     const next=adaptCompletedConvertedStudioImport(f.manifest,f.files,PROJECT,host,baseline);
-    assert.deepEqual(next.baseline,baseline);assert.notEqual(next.baseline,baseline);assert.ok(Object.isFrozen(next.baseline!.receipt.nodes));
-    raw.receipt.nodes[0]!.ownedStateSha256=sha('later caller mutation');assert.notDeepEqual(next.baseline,raw);
+    assert.deepEqual(next.baseline,baseline);assert.notEqual(next.baseline,baseline);assert.ok(Object.isFrozen(next.baseline!.receipt.observation.nodes));
+    raw.receipt.observation.nodes[0]!.ownedStateSha256=sha('later caller mutation');assert.notDeepEqual(next.baseline,raw);
+    // Reseal only synthetic metadata so following scope assertions reach their original checks.
+    raw.receipt.receiptSha256=studioImportObservationReceiptDigest(raw.receipt.observation);
     assert.throws(()=>adaptCompletedConvertedStudioImport(f.manifest,f.files,'b'.repeat(64),host,baseline));
     const elsewhere=selection();elsewhere.target.parentRef='elsewhere';assert.throws(()=>adaptCompletedConvertedStudioImport(f.manifest,f.files,PROJECT,elsewhere,baseline));
     assert.throws(()=>adaptCompletedConvertedStudioImport(f.manifest,f.files,PROJECT,host,{...baseline,manifest:{...manifest,schemaVersion:1}} as unknown as ConvertedStudioImportBaselineV2));

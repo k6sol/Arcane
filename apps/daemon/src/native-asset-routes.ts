@@ -14,10 +14,11 @@ import {parseNativeStudioImportResponse} from '../../../packages/asset-pipeline/
 import {parseNativeStudioStagingResponse} from '../../../packages/asset-pipeline/src/studio-staging-wire.js';
 import {parseNativeStudioStagingStatusResponse} from '../../../packages/asset-pipeline/src/studio-staging-status-wire.js';
 import {parseNativeStudioReconstructionResponse,parseNativeStudioReconstructionStatusResponse} from '../../../packages/asset-pipeline/src/studio-reconstruction-wire.js';
+import {parseNativeStudioRevisionResponse,parseNativeStudioRevisionStatusResponse} from '../../../packages/asset-pipeline/src/studio-revision-wire.js';
 export {NATIVE_STUDIO_IMPORT_RESPONSE_BYTES,parseNativeStudioImportResponse} from '../../../packages/asset-pipeline/src/studio-import-wire.js';
 import {readAssetJson,discardRejectedAssetBody} from './asset-routes.js';
 const PREFIX='/v1/assets/native/';
-const METHODS=new Map([['start','POST'],['adopt-glb','POST'],['convert-glb','POST'],['cancel','POST'],['prepare-studio-import','POST'],['stage-studio-import','POST'],['studio-staging-status','GET'],['reconstruct-studio-import','POST'],['studio-reconstruction-status','GET'],['probe','POST'],['jobs','GET'],['manifest','GET'],['preview','GET']]);
+const METHODS=new Map([['start','POST'],['adopt-glb','POST'],['convert-glb','POST'],['cancel','POST'],['prepare-studio-import','POST'],['stage-studio-import','POST'],['studio-staging-status','GET'],['reconstruct-studio-import','POST'],['studio-reconstruction-status','GET'],['apply-studio-revision','POST'],['studio-revision-status','GET'],['probe','POST'],['jobs','GET'],['manifest','GET'],['preview','GET']]);
 const UUID=/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}(?![\s\S])/;
 function fail(code:string):never {throw new ArcaneError(code,'Native chat asset request refused.');}
 function jobId(value:unknown):string {if(typeof value!=='string'||!UUID.test(value))fail('INPUT');return value;}
@@ -40,7 +41,7 @@ function ingress(request:IncomingMessage,url:URL,origin:string):string {
 }
 /** Dedicated native audience. Generic/human bearers cannot acquire registry captures.
  * Caller payloads contain bounded recipe/job/page data only, never authority. */
-export function nativeAssetRoutes(service:AssetService,host:NativeAssetConversationHost,registry:NativeAssetRegistry,staging?: Pick<ReturnType<typeof createStudioImportStagingController>, 'stage'> & Partial<Pick<ReturnType<typeof createStudioImportStagingController>, 'status'|'reconstruct'|'reconstructionStatus'>>) {
+export function nativeAssetRoutes(service:AssetService,host:NativeAssetConversationHost,registry:NativeAssetRegistry,staging?: Pick<ReturnType<typeof createStudioImportStagingController>, 'stage'> & Partial<Pick<ReturnType<typeof createStudioImportStagingController>, 'status'|'reconstruct'|'reconstructionStatus'|'applyRevision'|'revisionStatus'>>) {
  return async(request:IncomingMessage,response:ServerResponse,url:URL,origin:string):Promise<boolean>=>{
   if(!url.pathname.startsWith(PREFIX))return false;
   const send=async(status:number,payload:unknown,serialized?:string)=>{
@@ -51,10 +52,10 @@ export function nativeAssetRoutes(service:AssetService,host:NativeAssetConversat
    const credential=ingress(request,url,origin),route=url.pathname.slice(PREFIX.length),method=METHODS.get(route);
    if(!method){await send(404,{error:'NOT_FOUND',message:'Unknown native asset route.'});return true;}
    if(request.method!==method){response.setHeader('Allow',method);await send(405,{error:'METHOD',message:'Wrong native asset method.'});return true;}
-   const mutation=route==='start'||route==='adopt-glb'||route==='convert-glb'||route==='cancel'||route==='prepare-studio-import'||route==='stage-studio-import'||route==='reconstruct-studio-import';
+   const mutation=route==='start'||route==='adopt-glb'||route==='convert-glb'||route==='cancel'||route==='prepare-studio-import'||route==='stage-studio-import'||route==='reconstruct-studio-import'||route==='apply-studio-revision';
    // Capture BEFORE body reads/queue waits. Never resolve again into a fresh generation.
    const actor=registry.capture(credential,mutation?'mutate':'read');
-   const allowed=route==='manifest'||route==='studio-staging-status'||route==='studio-reconstruction-status'?['jobId']:route==='preview'?['jobId','path']:route==='jobs'?['limit','after']:[];
+   const allowed=route==='manifest'||route==='studio-staging-status'||route==='studio-reconstruction-status'||route==='studio-revision-status'?['jobId']:route==='preview'?['jobId','path']:route==='jobs'?['limit','after']:[];
    const seen=new Set<string>();for(const[key]of url.searchParams){if(!allowed.includes(key)||seen.has(key))fail('INPUT');seen.add(key);}
    if(route==='jobs'){
     const text=url.searchParams.get('limit');if(text!==null&&!/^[1-9][0-9]?$/.test(text))fail('INPUT');const limit=text===null?32:Number(text);
@@ -90,6 +91,16 @@ export function nativeAssetRoutes(service:AssetService,host:NativeAssetConversat
     assertNativeAssetActor(actor,'read');if(!isDeepStrictEqual(binding,host.bindingNative(actor,id)))fail('NOT_FOUND');
     const envelope=parseNativeStudioReconstructionStatusResponse(result,id,scope.projectId),serialized=JSON.stringify(envelope);
     if(serialized.includes(credential))fail('STUDIO_RECONSTRUCT_RESPONSE');
+    assertNativeAssetActor(actor,'read');if(!isDeepStrictEqual(binding,host.bindingNative(actor,id)))fail('NOT_FOUND');
+    await send(200,envelope,serialized);return true;
+   }
+   if(route==='studio-revision-status'){
+    const id=jobId(url.searchParams.get('jobId')),binding=host.bindingNative(actor,id);if(!binding)fail('NOT_FOUND');
+    if(!staging?.revisionStatus)fail('STUDIO_REVISION_UNAVAILABLE');
+    const scope=nativeAssetActorScope(actor),result=await staging.revisionStatus(id,actor);
+    assertNativeAssetActor(actor,'read');if(!isDeepStrictEqual(binding,host.bindingNative(actor,id)))fail('NOT_FOUND');
+    const envelope=parseNativeStudioRevisionStatusResponse(result,id,scope.projectId),serialized=JSON.stringify(envelope);
+    if(serialized.includes(credential))fail('STUDIO_REVISION_RESPONSE');
     assertNativeAssetActor(actor,'read');if(!isDeepStrictEqual(binding,host.bindingNative(actor,id)))fail('NOT_FOUND');
     await send(200,envelope,serialized);return true;
    }
@@ -150,6 +161,16 @@ export function nativeAssetRoutes(service:AssetService,host:NativeAssetConversat
     assertNativeAssetActor(actor,'mutate');if(!isDeepStrictEqual(binding,host.bindingNative(actor,id)))fail('NOT_FOUND');
     const envelope=parseNativeStudioReconstructionResponse({jobId:id,projectId:scope.projectId,reconstructed:result},id,scope.projectId),serialized=JSON.stringify(envelope);
     if(serialized.includes(credential))fail('STUDIO_RECONSTRUCT_RESPONSE');
+    assertNativeAssetActor(actor,'mutate');if(!isDeepStrictEqual(binding,host.bindingNative(actor,id)))fail('NOT_FOUND');
+    await send(200,envelope,serialized);return true;
+   }
+   if(route==='apply-studio-revision'){
+    const id=jobId(body(input,['jobId']).jobId),binding=host.bindingNative(actor,id);if(!binding)fail('NOT_FOUND');
+    if(!staging?.applyRevision)fail('STUDIO_REVISION_UNAVAILABLE');
+    const scope=nativeAssetActorScope(actor),result=await staging.applyRevision(id,actor);
+    assertNativeAssetActor(actor,'mutate');if(!isDeepStrictEqual(binding,host.bindingNative(actor,id)))fail('NOT_FOUND');
+    const envelope=parseNativeStudioRevisionResponse({jobId:id,projectId:scope.projectId,applied:result},id,scope.projectId),serialized=JSON.stringify(envelope);
+    if(serialized.includes(credential))fail('STUDIO_REVISION_RESPONSE');
     assertNativeAssetActor(actor,'mutate');if(!isDeepStrictEqual(binding,host.bindingNative(actor,id)))fail('NOT_FOUND');
     await send(200,envelope,serialized);return true;
    }

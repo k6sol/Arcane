@@ -1,3 +1,4 @@
+import type {StudioImportRevisionReceipt} from '../../packages/protocol/src/studio.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
@@ -76,6 +77,8 @@ async function fixture(t: test.TestContext, configured = true) {
   const routeHost: NativeAssetConversationHost = { ...host, bindingNative: (actor, id) => lookup(actor, id) };
   let stage: ReturnType<typeof createStudioImportStagingController>['stage'] | null = null;
   let status: ReturnType<typeof createStudioImportStagingController>['status'] | null = null;
+  let revision: ReturnType<typeof createStudioImportStagingController>['applyRevision'] | null = null;
+  let revisionStatus: ReturnType<typeof createStudioImportStagingController>['revisionStatus'] | null = null;
   let staged = 0;
   const route = nativeAssetRoutes(routed, routeHost, registry, {stage: (...args) => {
     if (!stage) throw new ArcaneError('STUDIO_STAGE_UNAVAILABLE', 'Synthetic staging controller is not configured.');
@@ -83,6 +86,12 @@ async function fixture(t: test.TestContext, configured = true) {
   }, status: (...args) => {
     if (!status) throw new ArcaneError('STUDIO_STAGE_UNAVAILABLE', 'Synthetic staging status is not configured.');
     return status(...args);
+  }, applyRevision: (...args) => {
+    if (!revision) throw new ArcaneError('STUDIO_REVISION_UNAVAILABLE','Fixture revision controller unavailable.');
+    return revision(...args);
+  }, revisionStatus: (...args) => {
+    if (!revisionStatus) throw new ArcaneError('STUDIO_REVISION_UNAVAILABLE','Fixture revision status unavailable.');
+    return revisionStatus(...args);
   }});
   let origin = '', requests = 0; const failures: unknown[] = [], releases: (() => void)[] = [];
   const server = createServer((request, response) => { requests++; void route(request, response, new URL(request.url ?? '/', origin), origin)
@@ -124,6 +133,8 @@ async function fixture(t: test.TestContext, configured = true) {
   };
   return { origin, credential, service, host, store, registry, incarnation, http,
     setStage(fn: NonNullable<typeof stage>) {stage = fn;}, stageCalls: () => staged,
+    setRevision(fn: NonNullable<typeof revision>) {revision=fn;},
+    setRevisionStatus(fn: NonNullable<typeof revisionStatus>) {revisionStatus=fn;},
     setStatus(fn: NonNullable<typeof status>) {status = fn;}, endMutationWindow() {incarnation.ended(operationId);},
     setPrepare(fn: typeof prepare) { prepare = fn; }, setLookup(fn: typeof lookup) { lookup = fn; },
     setBaseline(value: StudioImportBaseline) { baseline = value; },
@@ -441,4 +452,51 @@ for(const close of [false,true])test('underlying target callback remains leased 
   assert.equal(f.incarnation.status().released,false);assert.equal(f.counts().selections,1);
   held.release();await leaseReleased(f.incarnation);assert.equal(f.counts().selections,1);
   assert.equal(f.counts().preparations,0,'The late target cannot cause another request or accepted preparation.');
+});
+
+const revisionHash=(v:string)=>createHash('sha256').update(v).digest('hex');
+function revisionReceipt(projectId:string){
+  const jobId=JOB,runId='55555555-5555-4555-8555-555555555555';
+  const receipt:StudioImportRevisionReceipt={formatVersion:2,runId,state:'applied',observationId:'44444444-4444-4444-8444-444444444444',
+    source:{projectId,jobId,assetId:'arcane_'+revisionHash('synthetic asset'),sourceSha256:revisionHash('source'),preparedDigest:revisionHash('preparation'),manifestDigest:revisionHash('manifest'),payloadDigest:revisionHash('payload'),transferDigest:revisionHash('transfer'),graphDigest:revisionHash('graph'),conversionRequestDigest:revisionHash('request')},
+    target:{sessionId:'session',placeId:1,universeId:2,root:'Workspace',parentRef:'parent',creator:{kind:'user',id:'123'}},continuity:{clientLifetimeId:'lifetime',pluginArtifactHash:revisionHash('plugin'),playEpoch:0},
+    modelRef:{instanceId:'root',sessionId:'session',root:'Workspace',pathSegments:['Tree'],className:'Model'},modelOwnedStateSha256:revisionHash('root state'),
+    nodes:[{nodeKey:'node0',instanceRef:'group',ownedStateSha256:revisionHash('group'),authoredChildren:[]},{nodeKey:'node0_primitive0',instanceRef:'mesh',ownedStateSha256:revisionHash('mesh'),authoredChildren:[]}],
+    objects:[{sourceObjectId:'arcane_'+revisionHash('synthetic object'),instanceRef:'mesh',ownedStateSha256:revisionHash('mesh'),authoredChildren:[],meshAssetId:null}],
+    receiptScope:'live-import-revision',imported:false,engineVerification:'pending'};
+  return receipt;
+}
+
+// Production SDK -> loopback HTTP -> actual native ingress/registry/bindings.
+// Controller results below are synthetic, not native mesh acceptance evidence.
+test('chat revision crosses actual MCP and HTTP with only an owned job and historical status',async t=>{
+  const f=await fixture(t),receipt=revisionReceipt(f.store.projectId),commandId='66666666-6666-4666-8666-666666666666';let applies=0,reads=0;
+  f.setRevision(async(id,actor)=>{assert.equal(id,JOB);assertNativeAssetActor(actor,'mutate');applies++;return {...receipt,commandId};});
+  f.setRevisionStatus(async(id,actor)=>{assert.equal(id,JOB);assertNativeAssetActor(actor,'read');reads++;return {jobId:JOB,projectId:f.store.projectId,revision:{runId:receipt.runId,commandId,state:'succeeded',receipt,receiptScope:'historical-revision',currentResources:'unobserved',imported:false,engineVerification:'pending',retry:false}};});
+  const sdk=await linked(t,f.origin,f.credential),names=(await sdk.client.listTools()).tools.map(tool=>tool.name);
+  assert.ok(names.includes('assets_apply_studio_revision'));assert.ok(names.includes('assets_studio_revision_status'));
+  const result=CallToolResultSchema.parse(await sdk.client.callTool({name:'assets_apply_studio_revision',arguments:{jobId:JOB}}));
+  assert.notEqual(result.isError,true);assert.deepEqual(result.structuredContent,{jobId:JOB,projectId:f.store.projectId,applied:{...receipt,commandId}});assert.equal(applies,1);
+  for(const extra of [{observation:{}},{currentObservation:{}},{target:{}},{source:{}},{permission:true},{runId:receipt.runId}]){
+    assert.equal((await f.http({jobId:JOB,...extra},{path:'/v1/assets/native/apply-studio-revision'}).result).status,400);
+    assert.equal((await sdk.client.callTool({name:'assets_apply_studio_revision',arguments:{jobId:JOB,...extra}})).isError,true);
+  }
+  assert.equal((await f.http({jobId:'77777777-7777-4777-8777-777777777777'},{path:'/v1/assets/native/apply-studio-revision'}).result).status,404);assert.equal(applies,1);
+  f.endMutationWindow();const status=await sdk.daemon.assetsStudioRevisionStatus(JOB);
+  assert.equal(status.revision?.receiptScope,'historical-revision');assert.equal(status.revision?.currentResources,'unobserved');assert.equal(status.revision?.retry,false);assert.equal(reads,1);assert.equal(applies,1);
+  const generic=await linked(t,f.origin,f.credential,'generic');assert.ok(!(await generic.client.listTools()).tools.some(tool=>tool.name==='assets_apply_studio_revision'));
+  await assert.rejects(generic.daemon.assetsApplyStudioRevision(JOB),{code:'ASSET_AUDIENCE'});await assert.rejects(generic.daemon.assetsStudioRevisionStatus(JOB),{code:'ASSET_AUDIENCE'});
+});
+for(const transition of ['revoke-regrant','new-intent','replacement','close'] as const)test('revision response keeps its original capture after '+transition,async t=>{
+  const f=await fixture(t),entered=gate(),release=gate();t.after(release.release);
+  f.setRevision(async()=>{entered.release();await release.promise;return {...revisionReceipt(f.store.projectId),commandId:'66666666-6666-4666-8666-666666666666'};});
+  const pending=f.http({jobId:JOB},{path:'/v1/assets/native/apply-studio-revision'}).result;await entered.promise;f.transition(transition);release.release();
+  const result=await pending;assert.equal(result.status,403);assert.equal(result.data.error,'NATIVE_ASSET_AUTHORITY');assert.equal(result.data.applied,undefined);
+});
+test('revision status preserves true null and refuses forged current-resource metadata',async t=>{
+  const f=await fixture(t),path='/v1/assets/native/studio-revision-status?jobId='+JOB;
+  f.setRevisionStatus(async()=>({jobId:JOB,projectId:f.store.projectId,revision:null}));
+  const result=await f.http({}, {path,method:'GET'}).result;assert.equal(result.status,200);assert.deepEqual(result.data,{jobId:JOB,projectId:f.store.projectId,revision:null});
+  f.setRevisionStatus(async()=>({jobId:JOB,projectId:f.store.projectId,revision:{runId:'55555555-5555-4555-8555-555555555555',commandId:'66666666-6666-4666-8666-666666666666',state:'succeeded',receipt:revisionReceipt(f.store.projectId),receiptScope:'historical-revision',currentResources:'present',imported:false,engineVerification:'pending',retry:false}} as never));
+  const refused=await f.http({}, {path,method:'GET'}).result;assert.notEqual(refused.status,200);assert.equal(refused.data.revision,undefined);
 });

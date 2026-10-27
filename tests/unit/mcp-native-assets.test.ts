@@ -353,6 +353,7 @@ test('native MCP: fixed descriptions/annotations explain scope, host permission 
     'assets_probe', 'assets_jobs', 'assets_start', 'assets_cancel', 'assets_manifest', 'assets_adopt_glb', 'assets_convert_glb',
     'assets_prepare_studio_import', 'assets_stage_studio_import', 'assets_studio_staging_status',
     'assets_reconstruct_studio_import', 'assets_studio_reconstruction_status',
+    'assets_apply_studio_revision', 'assets_studio_revision_status',
     'assets_procedural', 'assets_preview', 'assets_place_studio_import',
   ].sort());
   for (const tool of tools) {
@@ -361,7 +362,7 @@ test('native MCP: fixed descriptions/annotations explain scope, host permission 
     assert.match(tool.description!, /explicit host asset permission.*open admission window/);
     assert.match(tool.description!, /routing mode grants no authority/);
     assert.match(tool.description!, /no originating-turn provenance/);
-    const mutation = ['assets_start', 'assets_adopt_glb', 'assets_convert_glb', 'assets_cancel', 'assets_prepare_studio_import', 'assets_stage_studio_import', 'assets_reconstruct_studio_import',
+    const mutation = ['assets_start', 'assets_adopt_glb', 'assets_convert_glb', 'assets_cancel', 'assets_prepare_studio_import', 'assets_stage_studio_import', 'assets_reconstruct_studio_import', 'assets_apply_studio_revision',
       'assets_procedural', 'assets_place_studio_import'].includes(tool.name);
     assert.equal(tool.annotations?.readOnlyHint, !mutation); assert.equal(tool.annotations?.idempotentHint, !mutation);
   }

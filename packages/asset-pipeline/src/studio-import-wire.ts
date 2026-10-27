@@ -1,8 +1,9 @@
+import {parseStudioImportObservationWitness} from '../../core/src/studio-policy.js';
 import {createHash} from 'node:crypto';
 import {types} from 'node:util';
 import {z} from 'zod';
 import {ArcaneError} from '../../protocol/src/providers.js';
-import {STUDIO_IMPORT_LIMITS,parseConvertedStudioImportManifest,type PreparedStudioImport,type ConvertedPreparedStudioImportV2} from './studio-import-manifest.js';
+import {STUDIO_IMPORT_LIMITS,parseConvertedStudioImportManifest,studioImportObservationReceiptDigest,type PreparedStudioImport,type ConvertedPreparedStudioImportV2} from './studio-import-manifest.js';
 import {convertedGlbObjectId} from './converted-glb.js';
 const UUID=/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}(?![\s\S])/;
 function fail(code:string):never {throw new ArcaneError(code,'Native chat asset request refused.');}
@@ -69,6 +70,8 @@ const importResponse=z.strictObject({prepared:z.strictObject({status:z.literal('
   geometry:importResources,textures:importResources,preservation:z.literal('preserve-all-scripts-attachments-constraints')})})});
 const importNodeKey=z.string().regex(/^node[0-9]{1,4}(?:_primitive[0-9]{1,4})?(?![\s\S])/);
 const convertedDelta=importResponse.shape.prepared.shape.delta.extend({
+ observation:z.unknown().transform(value=>value===null?null:parseStudioImportObservationWitness(value)),modelAssetId:z.null(),
+ reviewRemovals:z.array(z.strictObject({...importMapping,meshAssetId:importAssetId.nullable(),action:z.literal('retain-for-review')})).max(128),
  graph:z.strictObject({previousDigest:importHash.nullable(),nextDigest:importHash,changed:z.boolean()}),
  nodes:z.array(z.strictObject({nodeKey:importNodeKey,action:z.enum(['create','update-in-place','reuse']),
   changed:z.array(z.enum(['parent','matrix','name','mesh','pivot'])).max(5),instanceRef:importId.nullable(),expectedOwnedStateSha256:importHash.nullable(),
@@ -114,6 +117,22 @@ function importCanonical(value:unknown):string {
 const importDigest=(value:unknown)=>createHash('sha256').update(importCanonical(value)).digest('hex');
 function convertedPreparedChecks(prepared:ConvertedPreparedStudioImportV2):void {
  const {manifest,delta}=prepared,initial=delta.previousDigest===null;
+ if((delta.observation===null)!==initial||delta.modelAssetId!==null)fail('STUDIO_IMPORT_RESPONSE');
+ if(delta.observation){
+  const witness=delta.observation,before=witness.observation,source=before.source;
+  const children=(values:typeof before.nodes[number]['authoredChildren'])=>[...values].sort((a,b)=>a.instanceRef<b.instanceRef?-1:a.instanceRef>b.instanceRef?1:0);
+  if(witness.receiptSha256!==studioImportObservationReceiptDigest(before)||delta.receiptSha256!==witness.receiptSha256||delta.modelRef!==before.modelRef.instanceId||
+   source.manifestDigest!==delta.previousDigest||source.graphDigest!==delta.graph.previousDigest||source.projectId!==manifest.projectId||source.assetId!==manifest.assetId||source.sourceSha256!==manifest.sourceSha256||importCanonical(before.target)!==importCanonical(manifest.target))fail('STUDIO_IMPORT_RESPONSE');
+  for(const object of delta.objects){const mapped=before.objects.find(row=>row.sourceObjectId===object.sourceObjectId);
+   if((mapped===undefined)!==(object.action==='create')||object.instanceRef!==(mapped?.instanceRef??null)||object.meshAssetId!==(mapped?.meshAssetId??null)||object.expectedOwnedStateSha256!==(mapped?.ownedStateSha256??null)||importCanonical(object.preserveChildren)!==importCanonical(children(mapped?.authoredChildren??[])))fail('STUDIO_IMPORT_RESPONSE');
+  }
+  for(const node of delta.nodes){const mapped=before.nodes.find(row=>row.nodeKey===node.nodeKey);
+   if((mapped===undefined)!==(node.action==='create')||node.instanceRef!==(mapped?.instanceRef??null)||node.expectedOwnedStateSha256!==(mapped?.ownedStateSha256??null)||importCanonical(node.preserveChildren)!==importCanonical(children(mapped?.authoredChildren??[])))fail('STUDIO_IMPORT_RESPONSE');
+  }
+  const removedObjects=before.objects.filter(row=>!manifest.objects.some(object=>object.sourceObjectId===row.sourceObjectId)).map(row=>({...row,authoredChildren:children(row.authoredChildren),action:'retain-for-review'})).sort((a,b)=>a.sourceObjectId<b.sourceObjectId?-1:a.sourceObjectId>b.sourceObjectId?1:0);
+  const removedNodes=before.nodes.filter(row=>!manifest.graph.nodes.some(node=>node.nodeKey===row.nodeKey)).map(row=>({...row,authoredChildren:children(row.authoredChildren),action:'retain-for-review'})).sort((a,b)=>a.nodeKey<b.nodeKey?-1:a.nodeKey>b.nodeKey?1:0);
+  if(importCanonical(removedObjects)!==importCanonical(delta.reviewRemovals)||importCanonical(removedNodes)!==importCanonical(delta.reviewNodeRemovals))fail('STUDIO_IMPORT_RESPONSE');
+ }
  const unique=(values:readonly string[])=>new Set(values).size===values.length;
  if(delta.graph.nextDigest!==manifest.graph.digest||(delta.graph.previousDigest===null)!==initial||
   delta.graph.changed!==(initial||delta.graph.previousDigest!==delta.graph.nextDigest)||
@@ -171,12 +190,12 @@ export function parseNativeStudioImportResponse(value:unknown,expectedJobId:stri
   .some(map=>map&&!manifest.textures.some(t=>t.sha256===map.sha256)))fail('STUDIO_IMPORT_RESPONSE');
  if(manifest.placement.mode==='custom-anchor'&&!manifest.anchors.some(a=>a.sourceAnchorId===(manifest.placement as {anchorId:string}).anchorId))fail('STUDIO_IMPORT_RESPONSE');
  const initial=delta.previousDigest===null;
- if([delta.receiptSha256,delta.modelRef,delta.modelAssetId].some(v=>(v===null)!==initial)||
+ if((converted?[delta.receiptSha256,delta.modelRef]:[delta.receiptSha256,delta.modelRef,delta.modelAssetId]).some(v=>(v===null)!==initial)||
   (initial&&(delta.placementChanged||delta.reviewRemovals.length>0))||!unique(delta.reviewAnchors)||
   !unique(delta.reviewRemovals.map(o=>o.sourceObjectId))||delta.reviewRemovals.some(r=>manifest.objects.some(o=>o.sourceObjectId===r.sourceObjectId)))fail('STUDIO_IMPORT_RESPONSE');
  for(const o of delta.objects){
   const create=o.action==='create';
-  if((initial&&!create)||[o.instanceRef,o.meshAssetId,o.expectedOwnedStateSha256].some(v=>(v===null)!==create)||
+  if((initial&&!create)||(converted?[o.instanceRef,o.expectedOwnedStateSha256]:[o.instanceRef,o.meshAssetId,o.expectedOwnedStateSha256]).some(v=>(v===null)!==create)||(create&&o.meshAssetId!==null)||
    !unique(o.changed)||(create&&(o.changed.length>0||o.preserveChildren.length>0))||
    (o.action==='reuse'&&o.changed.length>0)||(o.action==='update-in-place'&&o.changed.length===0)||!unique(o.preserveChildren.map(c=>c.instanceRef)))fail('STUDIO_IMPORT_RESPONSE');
  }

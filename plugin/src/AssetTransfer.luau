@@ -829,7 +829,10 @@ function AssetTransfer.new(expected: any, decodeJson: (string) -> any, guard: ()
 		check()
 		if version ~= 2 then return nil end
 		return freezeData({formatVersion=2,graph=sealedGraph,conversionRequest=begin.conversionRequest,
-			conversionRequestDigest=begin.conversionRequestDigest,conversion=sealedConversion})
+			conversionRequestDigest=begin.conversionRequestDigest,conversion=sealedConversion,placement=begin.placement,delta=begin.delta,
+			source={projectId=begin.projectId,jobId=begin.revisionId,assetId=begin.assetId,sourceSha256=begin.sourceSha256,
+				preparedDigest=begin.preparedDigest,manifestDigest=manifestDigest,payloadDigest=payloadDigest,transferDigest=transferDigest,
+				graphDigest=sealedGraph.digest,conversionRequestDigest=begin.conversionRequestDigest}})
 	end
 	-- Original raw metadata remains retained only for this live receiver; hashes
 	-- authenticate it without claiming a cross-language canonical JSON encoder.

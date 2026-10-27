@@ -7,7 +7,7 @@ import { types } from 'node:util';
 import { z } from 'zod';
 import { ArcaneError } from '../../protocol/src/providers.js';
 import { STUDIO_ASSET_TRANSFER_LIMITS, isWrite, instanceRef, jsonObject, methodField, object, roots, textField, ROOTS, STUDIO_PROTOCOL, STUDIO_FEATURE_CAPABILITIES, STUDIO_PAIRING_CAPABILITY_LIMIT, SCENE_BUILD_LIMITS, type InstanceRef, type Json, type PairingGrant, type PairResult, type StudioCommand, type StudioSession } from '../../protocol/src/studio.js';
-import { canonical, validateCommandArgs, sceneBuildInstanceCount, isGuiClass } from '../../core/src/studio-policy.js';
+import { parseStudioImportRevisionArgs, parseStudioImportObservationArgs, validateStudioImportObservationReceipt, validateStudioImportRevisionReceipt, canonical, validateCommandArgs, sceneBuildInstanceCount, isGuiClass } from '../../core/src/studio-policy.js';
 import { isAssetMethod, validateAssetReceipt } from '../../core/src/studio-asset-policy.js';
 import { terrainVoxelCount } from '../../core/src/terrain-policy.js';
 import { validateMeshKeepReceipt } from '../../core/src/mesh-keep-policy.js';
@@ -15,8 +15,10 @@ import { nativePropertiesMatch } from '../../core/src/native-property-outcomes.j
 import { guiEditReceiptMatches } from '../../core/src/gui-property-outcomes.js';
 import type { ScriptSourceVerifier, ScriptSourceVerification } from '../../core/src/script-source-verifier.js';
 import type { StudioAssetStageArgs, StudioAssetStageReceipt, StudioAssetReconstructArgs, StudioAssetReconstructReceipt } from '../../protocol/src/studio.js';
+import type { StudioImportObservationArgs, StudioImportObservationReceipt, StudioImportObservationSource, StudioImportObservationWitness, StudioImportRevisionArgs, StudioImportRevisionReceipt } from '../../protocol/src/studio.js';
 import type { NativeConversation } from './conversation-work-store.js';
 import {inspectConvertedStudioImportTransfer,parseConvertedStudioImportTransferPacket} from '../../asset-pipeline/src/studio-import-transfer.js';
+import {studioImportObservationReceiptDigest} from '../../asset-pipeline/src/studio-import-manifest.js';
 import { ASSET_CONVERSATION_PROVIDERS } from '../../protocol/src/asset-conversation.js';
 
 type Row = Record<string, string | number | bigint | Uint8Array | null>;
@@ -103,6 +105,15 @@ export interface StageRunRecord {
 export type StageRunBeginResult =
   | {created:true;runId:string;handle:StageRunHandle;record:StageRunRecord}
   | {created:false;runId:string;handle:null;record:StageRunRecord};
+export interface ConvertedImportSourcePin {
+  readonly runId:string;readonly intentSha256:string;readonly source:StudioImportObservationSource;
+  readonly target:StudioAssetStageArgs['target'];readonly continuity:StudioAssetStageArgs['continuity'];
+  readonly placementId:string;readonly placementSha256:string;readonly keeps:readonly {readonly id:string;readonly sha256:string}[];
+}
+export interface ConvertedImportSourceRecord {
+  readonly run:StageRunRecord;readonly reconstruction:StageReconstructionRecord;readonly placement:StudioCommand;
+  readonly source:StudioImportObservationSource;readonly keeps:readonly StudioCommand[];
+}
 export interface StageReconstructionRecord {runId:string;command:StudioCommand;receipt:StudioAssetReconstructReceipt|null}
 /** Process-local host authority. Neither its JSON spelling nor a job ID is a permit. */
 export interface StudioTestReservation {readonly kind:'studio-test-reservation'}
@@ -308,6 +319,9 @@ export class StudioStore {
   #assetDispatchGuards=new Map<string,()=>void>();
   #commandResultWaiters=new Map<string,Set<()=>void>>();
   #commandResultWaiterCount=0;
+  #importObservationClaims=new Set<string>();
+  #importRevisionClaims=new Set<string>();
+  #importRevisionGuards=new Map<string,()=>void>();
   #stageHashRun:string|null=null;
   #stageHashBytes=0;
   #stageHashes=new Map<string,{raw:string;key:string;fingerprint:string;argsSha256:string;bytes:number;packetHeader?:{formatVersion:number;ordinal:unknown;payloadDigest:unknown;manifestDigest:unknown;kind:unknown}}>();
@@ -347,6 +361,11 @@ export class StudioStore {
     this.assertRunModelReview(run.intent);
   }
   private assertCommandModelReview(command:StudioCommand):void {
+    if(command.method==='scene.observe_import'||command.method==='asset.apply_revision'){
+      const guard=this.#importRevisionGuards.get(command.id);
+      if(!guard)throw new ArcaneError('ASSET_STAGE_AUTHORITY','Original native observation authority is unavailable.');
+      this.stageGuard(guard);return;
+    }
     if(command.method==='scene.place_asset')this.assertEditableModelReview(command.sessionId,command.args);
     if(command.method==='asset.stage_packet'||command.method==='asset.reconstruct'){
       const live=this.#assetDispatchGuards.get(command.id);
@@ -461,7 +480,7 @@ export class StudioStore {
     this.db.prepare('INSERT INTO events(occurred_at,kind,entity_id,detail) VALUES(?,?,?,?)').run(this.iso(), kind, entityId, JSON.stringify(detail));
   }
   private saveSession(s: StudioSession): void { this.db.prepare('UPDATE sessions SET payload=? WHERE id=?').run(JSON.stringify(s), s.id); }
-  private saveCommand(c: StudioCommand): void { this.db.prepare('UPDATE commands SET state=?,payload=? WHERE id=?').run(c.state, JSON.stringify(c), c.id); if(c.state!=='queued')this.#assetDispatchGuards.delete(c.id); if(c.state==='needs_reconciliation')this.clearStageContentHashes(); }
+  private saveCommand(c: StudioCommand): void { this.db.prepare('UPDATE commands SET state=?,payload=? WHERE id=?').run(c.state, JSON.stringify(c), c.id); if(c.state!=='queued'){this.#assetDispatchGuards.delete(c.id);this.#importRevisionGuards.delete(c.id);} if(c.state==='needs_reconciliation')this.clearStageContentHashes(); }
   sessions(): ListedStudioSession[] { return (this.db.prepare('SELECT payload FROM sessions ORDER BY rowid DESC LIMIT 100').all() as Row[]).map(r => { const s = JSON.parse(r.payload as string) as StudioSession; return { ...s, live: this.live(s) }; }); }
   /** Unrevoked and heard from recently. The single plugin worker does not poll while it executes a
    * delivered command, so an unexpired dispatched lease also counts as a heartbeat. */
@@ -748,7 +767,7 @@ export class StudioStore {
     this.checkTestQueueAuthority(sessionId,requestId,admission);
     // Before idempotent lookup: a model cannot read/reuse a host staging receipt
     // by guessing its request ID, even if its JSON is structurally identical.
-    if ((method === 'asset.stage_packet'||method==='asset.reconstruct') && (!admission || !this.#assetStageAdmissions.has(admission))) throw new ArcaneError('ASSET_STAGE_AUTHORITY', 'Asset intake and reconstruction require the trusted native import controller.');
+    if ((method === 'asset.stage_packet'||method==='asset.reconstruct'||method==='scene.observe_import'||method==='asset.apply_revision') && (!admission || !this.#assetStageAdmissions.has(admission))) throw new ArcaneError('ASSET_STAGE_AUTHORITY', 'Asset intake and reconstruction require the trusted native import controller.');
     if (method === 'asset.keep_mesh' && (!admission || !this.#meshKeepAdmissions.has(admission))) throw new ArcaneError('MESH_KEEP_AUTHORITY', 'Keep this mesh uploads to the user\'s Roblox account; only the person can start it, with the Keep this mesh button and its Arcane confirmation.');
     const fingerprint = hash(canonical({ sessionId, method, args: a.args }));
     return this.transaction(() => this.enqueueInTransaction(a,sessionId,requestId,method,fingerprint,internalRestore,admission));
@@ -756,7 +775,7 @@ export class StudioStore {
   /** Already inside a transaction. No callback, await or second commit here. */
   private enqueueInTransaction(a:ReturnType<typeof object>,sessionId:string,requestId:string,method:StudioCommand['method'],fingerprint:string,internalRestore:boolean,admission?:object):StudioCommand {
       this.checkTestQueueAuthority(sessionId,requestId,admission);
-      if((method==='asset.stage_packet'||method==='asset.reconstruct')&&(!admission||!this.#assetStageAdmissions.has(admission)))throw new ArcaneError('ASSET_STAGE_AUTHORITY','Asset intake and reconstruction require trusted host admission.');
+      if((method==='asset.stage_packet'||method==='asset.reconstruct'||method==='scene.observe_import'||method==='asset.apply_revision')&&(!admission||!this.#assetStageAdmissions.has(admission)))throw new ArcaneError('ASSET_STAGE_AUTHORITY','Asset intake and reconstruction require trusted host admission.');
       if(method==='asset.keep_mesh'&&(!admission||!this.#meshKeepAdmissions.has(admission)))throw new ArcaneError('MESH_KEEP_AUTHORITY','Keep this mesh requires the person\'s confirmed host admission.');
       const old = this.db.prepare('SELECT fingerprint,payload FROM commands WHERE request_id=?').get(requestId) as Row | undefined;
       if (old) {
@@ -817,7 +836,7 @@ export class StudioStore {
     if (!/^[a-zA-Z0-9_-]{8,128}$/.test(requestId)) throw new ArcaneError('INPUT', 'Request ID must be 8..128 safe characters.');
     const method = methodField(a.method);
     this.checkTestQueueAuthority(sessionId,requestId);
-    if(method==='asset.stage_packet'||method==='asset.reconstruct')throw new ArcaneError('ASSET_STAGE_AUTHORITY','Asset intake and reconstruction require private host admission, including idempotent lookup.');
+    if(method==='asset.stage_packet'||method==='asset.reconstruct'||method==='scene.observe_import'||method==='asset.apply_revision')throw new ArcaneError('ASSET_STAGE_AUTHORITY','Asset intake and reconstruction require private host admission, including idempotent lookup.');
     if(method==='asset.keep_mesh')throw new ArcaneError('MESH_KEEP_AUTHORITY','Keep this mesh uploads to the user\'s Roblox account; only the person can start it, with the Keep this mesh button and its Arcane confirmation.');
     const fingerprint = hash(canonical({ sessionId, method, args: a.args }));
     const old = this.db.prepare('SELECT fingerprint,payload FROM commands WHERE request_id=?').get(requestId) as Row | undefined;
@@ -1315,6 +1334,188 @@ export class StudioStore {
     }catch(error){this.db.exec('ROLLBACK');throw error;}
   }
 
+  private importCommand(id:string):StudioCommand {
+    const command=this.command(id),row=this.db.prepare('SELECT fingerprint,state FROM commands WHERE id=?').get(id) as Row|undefined;
+    if(!row||row.state!==command.state||row.fingerprint!==hash(canonical({sessionId:command.sessionId,method:command.method,args:command.args})))throw new ArcaneError('STUDIO_IMPORT_RECEIPT','Original command identity differs.');return command;
+  }
+  /** Exact bounded historical lineage, never a live engine observation or replay admission. */
+  readConvertedImportSource(projectId:string,conversation:Readonly<NativeConversation>,assetId:string,target:StudioAssetStageArgs['target']):ConvertedImportSourceRecord|null {
+    if(this.closed)throw new ArcaneError('STUDIO_STAGE_CLOSED','Stage journal is closed.');
+    if(!stageHash.safeParse(projectId).success||typeof assetId!=='string'||!/^arcane_[a-f0-9]{64}$/.test(assetId))throw new ArcaneError('STUDIO_STAGE_INPUT','Invalid converted source lookup.');
+    this.db.exec('BEGIN DEFERRED');
+    try{
+      // Join the ORIGINAL begin packet and actual placements/revisions. A display
+      // history window is neither complete discovery nor source authority.
+      const rows=this.db.prepare(`SELECT a.run_id,p.id AS placement_id FROM asset_stage_attempts a
+        JOIN asset_stage_attempt_commands b ON b.run_id=a.run_id AND b.ordinal=0
+        JOIN commands c ON c.id=b.command_id
+        JOIN commands p ON p.session_id=json_extract(a.payload,'$.intent.target.sessionId') AND p.state='succeeded'
+          AND ((json_extract(p.payload,'$.method')='scene.place_asset' AND json_extract(p.payload,'$.args.watch')='editable-'||json_extract(a.payload,'$.intent.transferDigest'))
+            OR (json_extract(p.payload,'$.method')='asset.apply_revision' AND json_extract(p.payload,'$.args.runId')=a.run_id))
+        WHERE a.project_id=? AND json_extract(a.payload,'$.intent.conversation.provider')=?
+          AND json_extract(a.payload,'$.intent.conversation.threadId')=? AND json_extract(a.payload,'$.intent.conversation.sessionId') IS ?
+          AND json_extract(a.payload,'$.intent.target.sessionId')=?
+          AND json_extract(json_extract(c.payload,'$.args.packet'),'$.assetId')=? LIMIT ?`).all(
+            projectId,conversation.provider,conversation.threadId,conversation.sessionId,target.sessionId,assetId,STUDIO_STAGE_RUN_LIMITS.runs+1) as Row[];
+      if(rows.length>STUDIO_STAGE_RUN_LIMITS.runs)throw new ArcaneError('STUDIO_STAGE_BUDGET','Converted source history exceeds its bound.');
+      const candidates:ConvertedImportSourceRecord[]=[],consumed=new Set<string>(),successors=new Set<string>();
+      for(const row of rows){
+        const run=this.stageRunById(row.run_id as string),intent=run.intent;
+        if(intent.projectId!==projectId||canonical(intent.conversation)!==canonical(conversation)||canonical(intent.target)!==canonical(target))throw new ArcaneError('STUDIO_IMPORT_SOURCE','Original converted scope differs.');
+        const reconstruction=this.readStageReconstruction(projectId,intent.jobId,run.runId),placement=this.importCommand(row.placement_id as string);
+        if(!intent.modelReview||run.phase!=='cpu-staged'||run.closedAt===null||!reconstruction?.receipt||reconstruction.command.state!=='succeeded'||reconstruction.command.args.formatVersion!==2
+          ||placement.state!=='succeeded'||placement.sessionId!==target.sessionId||placement.clientSessionId!==intent.continuity.clientLifetimeId)throw new ArcaneError('STUDIO_IMPORT_SOURCE','Original converted source is incomplete.');
+        const source=this.convertedImportSource(run),keeps:StudioCommand[]=[];
+        if(source.assetId!==assetId)throw new ArcaneError('STUDIO_IMPORT_SOURCE','Original converted asset differs.');
+        if(placement.method==='asset.apply_revision'){
+          const receipt=validateStudioImportRevisionReceipt(placement.args,placement.result);
+          if(canonical(receipt.source)!==canonical(source)||canonical(receipt.target)!==canonical(target)||canonical(receipt.continuity)!==canonical(intent.continuity))throw new ArcaneError('STUDIO_IMPORT_SOURCE','Applied source differs.');
+          const old=object(object(object(placement.args.observation).observation).source).transferDigest;
+          if(typeof old!=='string'||successors.has(old))throw new ArcaneError('STUDIO_IMPORT_SOURCE','Converted revision lineage branches.');
+          successors.add(old);consumed.add(old);
+        }else{
+          const result=object(placement.result),mutation=object(result.mutation),ref=object(mutation.ref);
+          if(placement.method!=='scene.place_asset'||placement.args.watch!=='editable-'+intent.transferDigest||mutation.kind!=='scene.place_asset'
+            ||ref.sessionId!==target.sessionId||ref.root!=='Workspace'||ref.className!=='Model'||!result.converted)throw new ArcaneError('STUDIO_IMPORT_SOURCE','Original placement differs.');
+        }
+        const uploads=this.db.prepare("SELECT id FROM commands WHERE session_id=? AND state='succeeded' AND json_extract(payload,'$.method')='asset.keep_mesh' AND json_extract(payload,'$.args.source')=? LIMIT 65").all(target.sessionId,'editable-'+intent.transferDigest) as Row[];
+        if(uploads.length>STUDIO_STAGE_RUN_LIMITS.runs)throw new ArcaneError('STUDIO_IMPORT_SOURCE','Keep history exceeds its bound.');
+        for(const upload of uploads){const command=this.importCommand(upload.id as string);if(command.clientSessionId!==intent.continuity.clientLifetimeId)throw new ArcaneError('STUDIO_IMPORT_SOURCE','Keep lifetime differs.');validateMeshKeepReceipt(command.args,command.result);keeps.push(command);}
+        candidates.push({run,reconstruction,placement,source,keeps});
+      }
+      const tips=candidates.filter(value=>!consumed.has(value.source.transferDigest));
+      if(candidates.length&&tips.length!==1)throw new ArcaneError('STUDIO_IMPORT_SOURCE','Converted source is ambiguous.');
+      this.db.exec('COMMIT');return tips[0]??null;
+    }catch(error){this.db.exec('ROLLBACK');throw error;}
+  }
+  /** Compact original identifiers/hashes, not retained transfer copies or authority. */
+  captureConvertedImportSource(record:ConvertedImportSourceRecord):ConvertedImportSourcePin {
+    const intent=record.run.intent;
+    const pin:ConvertedImportSourcePin=Object.freeze({runId:record.run.runId,intentSha256:record.run.intentSha256,source:Object.freeze({...record.source}),
+      target:Object.freeze({...intent.target,creator:Object.freeze({...intent.target.creator})}),continuity:Object.freeze({...intent.continuity}),
+      placementId:record.placement.id,placementSha256:hash(canonical(record.placement)),keeps:Object.freeze(record.keeps.map(command=>Object.freeze({id:command.id,sha256:hash(canonical(command))})))});
+    this.assertConvertedImportSource(pin);return pin;
+  }
+  /** Re-read actual source packets at each boundary; a pin is never admission. */
+  assertConvertedImportSource(pin:ConvertedImportSourcePin):void {
+    const source=pin.source,run=this.readStageRun(source.projectId,source.jobId,pin.runId),placement=this.importCommand(pin.placementId);
+    if(!run||run.intentSha256!==pin.intentSha256||run.phase!=='cpu-staged'||run.closedAt===null||canonical(this.convertedImportSource(run))!==canonical(source)
+      ||canonical(run.intent.target)!==canonical(pin.target)||canonical(run.intent.continuity)!==canonical(pin.continuity)
+      ||hash(canonical(placement))!==pin.placementSha256||!this.readStageReconstruction(source.projectId,source.jobId,pin.runId)?.receipt)throw new ArcaneError('STUDIO_IMPORT_SOURCE','Original converted source changed.');
+    for(const command of pin.keeps)if(hash(canonical(this.importCommand(command.id)))!==command.sha256)throw new ArcaneError('STUDIO_IMPORT_SOURCE','Original keep receipt changed.');
+  }
+  convertedImportKeepObjects(pin:ConvertedImportSourcePin):readonly {sourceObjectId:string;instanceRef:string;meshAssetId:string}[] {
+    this.assertConvertedImportSource(pin);const out:{sourceObjectId:string;instanceRef:string;meshAssetId:string}[]=[];
+    // A genuine ID may survive a prior in-place revision without another upload.
+    // Its actual applied command was admitted against the previous fresh read;
+    // the sealed delta independently refuses carrying it across geometry change.
+    const placement=this.importCommand(pin.placementId);
+    if(placement.method==='asset.apply_revision'){
+      const receipt=validateStudioImportRevisionReceipt(placement.args,placement.result);this.assertConvertedReceiptInventory(receipt);
+      for(const row of receipt.objects)if(row.meshAssetId!==null)out.push({sourceObjectId:row.sourceObjectId,instanceRef:row.instanceRef,meshAssetId:row.meshAssetId});
+    }
+    for(const original of pin.keeps){const command=this.importCommand(original.id),receipt=validateMeshKeepReceipt(command.args,command.result);
+      if(receipt.state!=='kept'||!('converted'in receipt)||receipt.converted.graphDigest!==pin.source.graphDigest||receipt.converted.conversionRequestDigest!==pin.source.conversionRequestDigest)continue;
+      for(const row of receipt.converted.objects)out.push({sourceObjectId:row.sourceObjectId,instanceRef:row.instanceRef,meshAssetId:row.meshAssetId});
+    }return out;
+  }
+  /** Derived exclusively from complete, already authenticated original packets. */
+  private convertedImportSource(run:StageRunRecord):StudioImportObservationSource {
+    const checked=this.convertedStageInspection(run.intent,run.commands);
+    if(!checked||run.phase!=='cpu-staged'||!run.receipt)throw new ArcaneError('STUDIO_IMPORT_SOURCE','Original converted transfer is unavailable.');
+    const begin=object(JSON.parse(run.commands[0]!.command.args.packet as string));
+    const source:StudioImportObservationSource={projectId:run.intent.projectId,jobId:run.intent.jobId,
+      assetId:textField(begin.assetId,'converted asset ID',80),sourceSha256:textField(begin.sourceSha256,'source hash',64),
+      preparedDigest:run.intent.preparedDigest,manifestDigest:run.intent.manifestDigest,payloadDigest:run.intent.payloadDigest,
+      transferDigest:run.intent.transferDigest,graphDigest:checked.graph.digest,conversionRequestDigest:textField(begin.conversionRequestDigest,'request digest',64)};
+    return Object.freeze(source);
+  }
+  private assertConvertedReceiptInventory(receipt:StudioImportObservationReceipt|StudioImportRevisionReceipt):void {
+    const source=receipt.source,run=this.readStageRun(source.projectId,source.jobId);
+    if(!run||canonical(this.convertedImportSource(run))!==canonical(source))throw new ArcaneError('STUDIO_IMPORT_RECEIPT','Observed source is not the original sealed run.');
+    const checked=this.convertedStageInspection(run.intent,run.commands);
+    if(!checked||receipt.nodes.length!==checked.graph.nodes.length||receipt.objects.length!==checked.graph.meshes.length
+      ||checked.graph.nodes.some(node=>!receipt.nodes.some(row=>row.nodeKey===node.nodeKey)))throw new ArcaneError('STUDIO_IMPORT_RECEIPT','Observed graph inventory differs.');
+    const actual=new Map(receipt.objects.map(row=>[row.sourceObjectId,row]));
+    if('runId'in receipt){
+      const begin=object(JSON.parse(run.commands[0]!.command.args.packet as string)),delta=object(begin.delta);
+      if(!Array.isArray(delta.objects)||!Array.isArray(delta.nodes))throw new ArcaneError('STUDIO_IMPORT_RECEIPT','Sealed revision actions are unavailable.');
+      for(const row of receipt.objects){
+        const raw=delta.objects.find(value=>object(value).sourceObjectId===row.sourceObjectId);if(!raw)throw new ArcaneError('STUDIO_IMPORT_RECEIPT','Sealed mesh action is unavailable.');
+        const action=object(raw);if(!Array.isArray(action.changed))throw new ArcaneError('STUDIO_IMPORT_RECEIPT','Sealed mesh changes are unavailable.');
+        const expectedId=action.action==='create'||action.changed.includes('geometry')?null:action.meshAssetId;
+        if(row.meshAssetId!==expectedId||action.action!=='create'&&row.instanceRef!==action.instanceRef)throw new ArcaneError('STUDIO_IMPORT_RECEIPT','Applied mesh identity or persistence differs.');
+      }
+      for(const row of receipt.nodes){
+        const raw=delta.nodes.find(value=>object(value).nodeKey===row.nodeKey);if(!raw)throw new ArcaneError('STUDIO_IMPORT_RECEIPT','Sealed node action is unavailable.');
+        const action=object(raw);if(action.action!=='create'&&row.instanceRef!==action.instanceRef)throw new ArcaneError('STUDIO_IMPORT_RECEIPT','Applied node identity differs.');
+      }
+    }
+    for(const mesh of checked.graph.meshes){const row=actual.get(mesh.sourceObjectId);if(!row)throw new ArcaneError('STUDIO_IMPORT_RECEIPT','Observed mesh inventory differs.');
+      if(mesh.nodeKey!==null){const node=receipt.nodes.find(node=>node.nodeKey===mesh.nodeKey);
+        if(!node||node.instanceRef!==row.instanceRef||node.ownedStateSha256!==row.ownedStateSha256||canonical(node.authoredChildren)!==canonical(row.authoredChildren))throw new ArcaneError('STUDIO_IMPORT_RECEIPT','Observed mesh-bearing node differs.');}
+    }
+  }
+  /** Fixed host-only read. Original dispatch guard is retained separately from JSON. */
+  enqueueImportObservation(input:StudioImportObservationArgs,guard:()=>void):StudioCommand {
+    this.stageGuard(guard);const args=parseStudioImportObservationArgs(input);validateCommandArgs('scene.observe_import',args,this.session(args.target.sessionId));
+    const requestId='importobserve_'+args.observationId.replaceAll('-','');
+    if(this.#importObservationClaims.size>=128||this.#importObservationClaims.has(args.observationId)||this.db.prepare('SELECT id FROM commands WHERE request_id=?').get(requestId))throw new ArcaneError('STUDIO_IMPORT_OBSERVATION_EXISTS','Original observation was already attempted.');
+    this.#importObservationClaims.add(args.observationId);
+    const admission=Object.freeze({});this.#assetStageAdmissions.add(admission);
+    try{const command=this.enqueue({sessionId:args.target.sessionId,requestId,method:'scene.observe_import',args},false,admission);
+      this.#importRevisionGuards.set(command.id,guard);this.#importObservationClaims.delete(args.observationId);return command;
+    }finally{this.#assetStageAdmissions.delete(admission);}
+  }
+  /** Read only the one deterministic original revision command, without minting admission. */
+  readStageRevision(projectId:string,jobId:string,runId:string):{command:StudioCommand;receipt:StudioImportRevisionReceipt|null}|null {
+    const run=this.readStageRun(projectId,jobId,runId);if(!run)return null;
+    const requestId='assetrevision_'+hash(canonical({runId,intentSha256:run.intentSha256}));
+    const row=this.db.prepare('SELECT id FROM commands WHERE request_id=?').get(requestId) as Row|undefined;if(!row)return null;
+    if(!run.receipt)throw new ArcaneError('STUDIO_REVISE_STATE','Original stage receipt is unavailable.');
+    const command=this.command(row.id as string),source=this.convertedImportSource(run);
+    const begin=object(JSON.parse(run.commands[0]!.command.args.packet as string)),delta=object(begin.delta);
+    if(command.method!=='asset.apply_revision'||command.sessionId!==run.intent.target.sessionId||command.clientSessionId!==run.intent.continuity.clientLifetimeId
+      ||command.args.runId!==runId||canonical(command.args.source)!==canonical(source)||canonical(command.args.target)!==canonical(run.intent.target)
+      ||canonical(command.args.continuity)!==canonical(run.intent.continuity)||canonical(command.args.expected)!==canonical({digest:run.intent.transferDigest,payloadDigest:run.intent.payloadDigest,manifestDigest:run.intent.manifestDigest})
+      ||command.args.packetCount!==run.receipt?.packetCount||command.args.byteLength!==run.receipt.byteLength||canonical(command.args.observation)!==canonical(delta.observation))throw new ArcaneError('STUDIO_REVISE_RECEIPT','Original revision association differs.');
+    const stored=this.db.prepare('SELECT fingerprint,state FROM commands WHERE id=?').get(command.id) as Row|undefined;
+    if(!stored||stored.state!==command.state||stored.fingerprint!==hash(canonical({sessionId:command.sessionId,method:command.method,args:command.args})))throw new ArcaneError('STUDIO_REVISE_RECEIPT','Original revision command differs.');
+    return{command,receipt:command.state==='succeeded'?validateStudioImportRevisionReceipt(command.args,command.result):null};
+  }
+  /** Stop only the owned queue entry; delivered ambiguity is retained, never replayed. */
+  abandonImportCommand(commandId:string):void {
+    this.transaction(()=>{const command=this.command(commandId);
+      if(command.method!=='scene.observe_import'&&command.method!=='asset.apply_revision')throw new ArcaneError('METHOD','Expected a fixed import operation.');
+      if(command.state!=='queued'&&command.state!=='dispatched')return;
+      command.state=command.state==='queued'?'cancelled':'needs_reconciliation';command.finishedAt=this.iso();
+      command.error='Original native import operation stopped. Inspect its original outcome; never replay.';this.saveCommand(command);
+    });
+  }
+  /** One attempt per original next run; a lost ACK or restart never refunds it. */
+  enqueueStageRevision(projectId:string,jobId:string,runId:string,observation:StudioImportObservationWitness,currentObservation:StudioImportObservationWitness,guard:()=>void):StudioCommand {
+    this.stageGuard(guard);const run=this.readStageRun(projectId,jobId,runId);
+    if(!run||!this.readStageReconstruction(projectId,jobId,runId)?.receipt)throw new ArcaneError('STUDIO_REVISE_STATE','Original next reconstruction is unavailable.');
+    const begin=object(JSON.parse(run.commands[0]!.command.args.packet as string)),delta=object(begin.delta);
+    if(canonical(delta.observation)!==canonical(observation))throw new ArcaneError('STUDIO_REVISE_SOURCE','Sealed original observation differs.');
+    const args:StudioImportRevisionArgs={formatVersion:2,runId,expected:{digest:run.intent.transferDigest,payloadDigest:run.intent.payloadDigest,manifestDigest:run.intent.manifestDigest},
+      packetCount:run.receipt!.packetCount,byteLength:run.receipt!.byteLength,source:this.convertedImportSource(run),target:run.intent.target,continuity:run.intent.continuity,observation,currentObservation};
+    parseStudioImportRevisionArgs(args);
+    for(const witness of [observation,currentObservation]){
+      const read=this.command(witness.commandId);
+      if(read.method!=='scene.observe_import'||read.state!=='succeeded'||read.clientSessionId!==run.intent.continuity.clientLifetimeId
+        ||canonical(validateStudioImportObservationReceipt(read.args,read.result))!==canonical(witness.observation)||studioImportObservationReceiptDigest(witness.observation)!==witness.receiptSha256)throw new ArcaneError('STUDIO_REVISE_RECEIPT','Actual original observation receipt differs.');
+    }
+    validateCommandArgs('asset.apply_revision',args,this.session(run.intent.target.sessionId));this.stageTarget(run.intent);this.assertRunModelReview(run.intent);
+    const requestId='assetrevision_'+hash(canonical({runId,intentSha256:run.intentSha256}));
+    if(this.#importRevisionClaims.has(runId)||this.db.prepare('SELECT id FROM commands WHERE request_id=?').get(requestId))throw new ArcaneError('STUDIO_REVISE_EXISTS','Revision was already attempted; never replay.');
+    this.#importRevisionClaims.add(runId);this.stageGuard(guard);
+    const admission=Object.freeze({});this.#assetStageAdmissions.add(admission);
+    try{const command=this.enqueue({sessionId:run.intent.target.sessionId,requestId,method:'asset.apply_revision',args},false,admission);
+      this.#importRevisionGuards.set(command.id,guard);return command;
+    }finally{this.#assetStageAdmissions.delete(admission);}
+  }
+
   /** The original asset job of a recorded reconstruction command, for display correlation only (never authority). */
   stageJobForReconstruction(commandId: string): string | null {
     const row = this.db.prepare('SELECT a.job_id AS job FROM asset_stage_reconstructions r JOIN asset_stage_attempts a ON a.run_id=r.run_id WHERE r.command_id=?').get(commandId) as Row | undefined;
@@ -1667,7 +1868,9 @@ export class StudioStore {
         if(canonical(result)!==canonical(expected))throw new ArcaneError('RECEIPT','Reconstruction receipt differs from the exact original sources.');
       }
       if (a.state === 'succeeded' && c.method === 'asset.keep_mesh') validateMeshKeepReceipt(c.args, result);
-      if (a.state === 'succeeded' && isWrite(c.method) && c.method !== 'scene.restore' && c.method !== 'asset.stage_packet' && c.method !== 'asset.reconstruct' && c.method !== 'asset.keep_mesh') {
+      if(a.state==='succeeded'&&c.method==='scene.observe_import'){const receipt=validateStudioImportObservationReceipt(c.args,result);this.assertConvertedReceiptInventory(receipt);}
+      if(a.state==='succeeded'&&c.method==='asset.apply_revision'){const receipt=validateStudioImportRevisionReceipt(c.args,result);this.assertConvertedReceiptInventory(receipt);}
+      if (a.state === 'succeeded' && isWrite(c.method) && c.method !== 'scene.restore' && c.method !== 'asset.stage_packet' && c.method !== 'asset.reconstruct' && c.method !== 'asset.keep_mesh' && c.method !== 'asset.apply_revision') {
         const mutation = object(object(result).mutation, 'mutation receipt');
         if (mutation.kind !== c.method) throw new ArcaneError('RECEIPT', 'Mutation receipt kind mismatch.');
         const r = object(mutation.ref);
@@ -1731,5 +1934,5 @@ export class StudioStore {
     const a = resolve(directory), b = this.workspaceDirectory;
     return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
   }
-  close(): void { if (!this.closed) { this.closed = true; this.clearStageContentHashes();this.#convertedStageInspections.clear();this.#assetDispatchGuards.clear(); for(const waiters of this.#commandResultWaiters.values())for(const finish of waiters)finish(); this.db.close(); closeSync(this.lockFd); unlinkSync(this.lockPath); } }
+  close(): void { if (!this.closed) { this.closed = true; this.clearStageContentHashes();this.#convertedStageInspections.clear();this.#assetDispatchGuards.clear();this.#importRevisionGuards.clear();this.#importObservationClaims.clear();this.#importRevisionClaims.clear(); for(const waiters of this.#commandResultWaiters.values())for(const finish of waiters)finish(); this.db.close(); closeSync(this.lockFd); unlinkSync(this.lockPath); } }
 }

@@ -796,7 +796,7 @@ export async function createAssetService(options: AssetServiceOptions) {
         const selection=snapshotStudioImportSelection(await wait(()=>importHost.selectTarget(scope,requested,actor,guard)));
         selected=selection;check();
         const converted=adaptCompletedConvertedStudioImport(manifest,files,scope.projectId,selection,null);
-        const baseline=importHost.loadObservedBaseline?await wait(()=>importHost.loadObservedBaseline!(scope,converted.assetId,selection.target)):null;
+        const baseline=importHost.loadObservedBaseline?await wait(()=>importHost.loadObservedBaseline!(scope,converted.assetId,selection.target,{jobId:requested,actor,guard:()=>{check();}})):null;
         check();
         return {...converted,baseline:baseline===null?null:snapshotConvertedStudioImportBaseline(baseline)};
       }
@@ -816,7 +816,7 @@ export async function createAssetService(options: AssetServiceOptions) {
       }
       // Validate producer IDs BEFORE looking up previous mappings.
       const generated = adaptCompletedStudioImport(manifest, exports, scope.projectId, selection, null);
-      const baseline = importHost.loadObservedBaseline ? await wait(() => importHost.loadObservedBaseline!(scope, generated.assetId, selection.target)) : null;
+      const baseline = importHost.loadObservedBaseline ? await wait(() => importHost.loadObservedBaseline!(scope,generated.assetId,selection.target,{jobId:requested,actor,guard:()=>{check();}})) : null;
       check();
       const isGeneratedBaseline=(value:StudioImportBaseline|null):value is GeneratedStudioImportBaselineV1|null=>value===null||value.manifest.schemaVersion===1;
       if(!isGeneratedBaseline(baseline))throw new AssetError('STUDIO_IMPORT_BASELINE','Generated import requires an observed generated baseline.');
