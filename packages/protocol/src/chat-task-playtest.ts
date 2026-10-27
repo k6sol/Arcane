@@ -34,11 +34,27 @@ export interface StudioTestTaskSettled extends StudioTestTaskPrepared {
 }
 
 /** Private host wiring, never a route/MCP input or caller-selected callback. */
+export interface StudioTestTaskWork {
+  readonly kind: 'studio-test-task-work';
+  readonly signal: AbortSignal;
+  /** Admission for new effects only; original cleanup remains usable after retirement. */
+  assertActive(): void;
+}
+
+/** Original service lifetime and compensation, registered before allocation.
+ * Promise completion is a join observation, never independent physical proof. */
+export type StudioTestTaskWorkRegistration =
+  | Readonly<{ kind: 'prepare'; completion: Promise<void>; cancel: () => Promise<void> }>
+  | Readonly<{ kind: 'revalidate'; jobId: string; reportDigest: string;
+      completion: Promise<void>; cancel: () => Promise<void> }>;
+
+/** Private host wiring; exact issuing object identities never survive JSON. */
 export interface StudioTestTaskPort {
   capture(actorId: string): StudioTestTaskOrigin | null;
   assert(origin: StudioTestTaskOrigin): void;
-  prepared(origin: StudioTestTaskOrigin, value: StudioTestTaskPrepared): void;
-  terminal(origin: StudioTestTaskOrigin, value: StudioTestTaskSettled): Promise<void> | void;
+  registerWork(origin: StudioTestTaskOrigin, registration: StudioTestTaskWorkRegistration): StudioTestTaskWork;
+  prepared(origin: StudioTestTaskOrigin, value: StudioTestTaskPrepared, work: StudioTestTaskWork): void;
+  terminal(origin: StudioTestTaskOrigin, value: StudioTestTaskSettled, work: StudioTestTaskWork): Promise<void> | void;
 }
 
 export interface StudioTestTaskCancellation {

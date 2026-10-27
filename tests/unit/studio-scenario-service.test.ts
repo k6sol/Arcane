@@ -21,7 +21,7 @@ import {makeFixtureDirectory,fixtureTempDirectory} from './windows-fixture-paths
 import {playtestJob} from '../../apps/mcp/src/playtest-schemas.js';
 import {studioTestRoutes} from '../../apps/daemon/src/studio-test-routes.js';
 import {StudioTestError} from '../../packages/studio-test-controller/src/contracts.js';
-import type {StudioTestTaskPort,StudioTestTaskOrigin,StudioTestTaskSettled,StudioTestTaskPrepared} from '../../packages/protocol/src/chat-task-playtest.js';
+import type {StudioTestTaskPort,StudioTestTaskOrigin,StudioTestTaskSettled,StudioTestTaskPrepared,StudioTestTaskWork,StudioTestTaskWorkRegistration} from '../../packages/protocol/src/chat-task-playtest.js';
 
 // Actual service/controller/native SDK adapter, authenticated SQLite queue and
 // fsynced ledger. Native peers/physics/image bytes are fixtures. The exact Client
@@ -315,11 +315,20 @@ test('restoration conflict preserves original measured scenario evidence and ret
 function taskFixture(){
   const root=makeFixtureDirectory('arcane-scenario-service-'),projectId=workflowProjectIdentity(root).projectId;
   const origin:StudioTestTaskOrigin=Object.freeze({kind:'studio-test-task-origin',taskId:'fixture-task',projectId,provider:'codex',threadId:'fixture-thread',sessionId:'fixture-session',incarnationId:'fixture-incarnation'});
-  let revoked=false;const prepared:StudioTestTaskPrepared[]=[],packets:StudioTestTaskSettled[]=[],settled=gate();
+  let revoked=false;const prepared:StudioTestTaskPrepared[]=[],packets:StudioTestTaskSettled[]=[],settled=gate(),controller=new AbortController();
+  // Observe the real service lifetime; this port never invents SDK closure proof.
+  const workRecords=new WeakMap<StudioTestTaskWork,{registration:StudioTestTaskWorkRegistration;jobId:string|null;finished:boolean}>();
   const port:StudioTestTaskPort=Object.freeze({capture(actor:string){assert.equal(actor,ACTOR);return origin;},assert(value:StudioTestTaskOrigin){if(value!==origin||revoked)throw new StudioTestError('HUMAN_AUTH_REQUIRED');},
-    prepared(value:StudioTestTaskOrigin,packet:StudioTestTaskPrepared){assert.equal(value,origin);prepared.push(structuredClone(packet));},
-    terminal(value:StudioTestTaskOrigin,packet:StudioTestTaskSettled){assert.equal(value,origin);packets.push(structuredClone(packet));settled.release();}});
-  return{root,origin,port,prepared,packets,settled:settled.promise,revoke(){revoked=true;}};
+    registerWork(value:StudioTestTaskOrigin,registration:StudioTestTaskWorkRegistration){
+      assert.equal(value,origin);if(revoked)throw new StudioTestError('HUMAN_AUTH_REQUIRED');
+      if(registration.kind==='revalidate')assert.ok(packets.some(packet=>packet.jobId===registration.jobId&&packet.reportDigest===registration.reportDigest));
+      const work:StudioTestTaskWork=Object.freeze({kind:'studio-test-task-work',signal:controller.signal,assertActive(){if(value!==origin||revoked)throw new StudioTestError('HUMAN_AUTH_REQUIRED');}});
+      const record:{registration:StudioTestTaskWorkRegistration;jobId:string|null;finished:boolean}={registration,jobId:null,finished:false};workRecords.set(work,record);
+      void registration.completion.then(()=>{record.finished=true;},()=>{record.finished=true;});return work;
+    },
+    prepared(value:StudioTestTaskOrigin,packet:StudioTestTaskPrepared,work:StudioTestTaskWork){assert.equal(value,origin);const record=workRecords.get(work);assert.ok(record);assert.equal(record.registration.kind,'prepare');assert.equal(record.finished,false);assert.equal(record.jobId,null);work.assertActive();record.jobId=packet.jobId;prepared.push(structuredClone(packet));},
+    terminal(value:StudioTestTaskOrigin,packet:StudioTestTaskSettled,work:StudioTestTaskWork){assert.equal(value,origin);const record=workRecords.get(work);assert.ok(record);assert.equal(record.jobId,packet.jobId);packets.push(structuredClone(packet));settled.release();}});
+  return{root,origin,port,prepared,packets,settled:settled.promise,revoke(){revoked=true;controller.abort();}};
 }
 
 test('private task evidence is settled once and revalidated from a fresh read-only connection after the requesting turn',{timeout:15000},async t=>{

@@ -1,12 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { isDeepStrictEqual } from 'node:util';
+import { isDeepStrictEqual, types } from 'node:util';
 import type { WorkTaskBinding } from '../../../packages/storage/src/work-store.js';
 import { z } from 'zod';
 import { ChatTaskStore, ChatTaskProposalLimitError, CHAT_TASK_PROPOSAL_LIMITS, type ChatTaskPlanRecord, type ChatTaskPlanReason, type ChatTaskProposalReason, type ChatTaskProposalRecord, type ChatTaskProposalResult, type ChatTaskRecord } from '../../../packages/storage/src/chat-task-store.js';
 import { startChatTaskPlan, CHAT_TASK_PLAN_WORKER_CONCURRENCY } from './chat-task-plan-runner.js';
 import type { Snapshot } from '../../../packages/codex-client/src/types.js';
 import type { StudioTestTaskCancellation, StudioTestTaskOrigin, StudioTestTaskPort, StudioTestTaskPrepared,
-  StudioTestTaskSettled } from '../../../packages/protocol/src/chat-task-playtest.js';
+  StudioTestTaskSettled, StudioTestTaskWork, StudioTestTaskWorkRegistration } from '../../../packages/protocol/src/chat-task-playtest.js';
 
 const ACTIVE = new Set(['working','awaiting_verification','repair_queued','repairing']);
 const hash = z.string().regex(/^[a-f0-9]{64}(?![\s\S])/);
@@ -69,7 +69,36 @@ interface OwnedTask { origin: StudioTestTaskOrigin; admission: StudioTestTaskOri
   controller: AbortController;
   /** Exact original account captured at begin; never recaptured later. */
   accountIdentity: string | null;
-  proposal: Promise<void> | null; planProposals: Set<Promise<void>>; planController: AbortController | null; planDispatch: string | null; planCompletion: Promise<ChatTaskPlanRecord> | null }
+  proposal: Promise<void> | null; planProposals: Set<Promise<void>>; planController: AbortController | null; planDispatch: string | null; planCompletion: Promise<ChatTaskPlanRecord> | null;
+  work: Set<TaskWorkRecord>; jobWork: Map<string,TaskWorkRecord>; joins: Map<Promise<unknown>,{order:number;joined:Promise<JoinOutcome>}>; generation: number; order:number }
+type JoinOutcome = { readonly ok: true } | { readonly ok: false; readonly error: unknown };
+interface TaskWorkRecord {
+  entry: OwnedTask; origin: StudioTestTaskOrigin; identity: StudioTestTaskWork;
+  kind: 'prepare'|'revalidate'; jobId: string|null; reportDigest: string|null;
+  completion: Promise<void>; joined: Promise<JoinOutcome>; outcome: JoinOutcome|null;
+  cancel: () => Promise<void>; compensation: Promise<JoinOutcome>|null;
+  job: StudioTestTaskPrepared|null; terminal: string|null;
+  order:number;
+}
+interface TaskFinalizer {
+  promise: Promise<void>; resolve: () => void; reject: (error:unknown) => void;
+  requested:boolean; started: boolean; failed: boolean; failure: unknown;
+}
+const WORK_LIMIT=64;
+const NativePromise=Promise, promisePrototype=Promise.prototype, promiseThen=Promise.prototype.then;
+const promiseConstructor=Object.getOwnPropertyDescriptor(promisePrototype,'constructor');
+const promiseSpecies=Object.getOwnPropertyDescriptor(NativePromise,Symbol.species);
+function sameDescriptor(a:PropertyDescriptor|undefined,b:PropertyDescriptor|undefined):boolean {
+  return !!a&&!!b&&a.value===b.value&&a.get===b.get&&a.set===b.set&&a.writable===b.writable&&a.enumerable===b.enumerable&&a.configurable===b.configurable;
+}
+function ordinaryCompletion(value:unknown):value is Promise<void> {
+  return !!value&&typeof value==='object'&&!types.isProxy(value)&&types.isPromise(value)&&Object.getPrototypeOf(value)===promisePrototype&&
+    Reflect.ownKeys(value).length===0&&sameDescriptor(Object.getOwnPropertyDescriptor(promisePrototype,'constructor'),promiseConstructor)&&
+    promiseConstructor?.value===NativePromise&&sameDescriptor(Object.getOwnPropertyDescriptor(NativePromise,Symbol.species),promiseSpecies);
+}
+function observe<T>(promise:Promise<T>):Promise<JoinOutcome> {
+  return promise.then<JoinOutcome,JoinOutcome>(()=>({ok:true}),error=>({ok:false,error}));
+}
 const PROPOSAL_ACCOUNT = /^[a-f0-9]{64}$/;
 const errorCode = (error: unknown) => error && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string' ? (error as { code: string }).code : null;
 const wellFormedText = (value: string) => !/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(value);
@@ -95,7 +124,11 @@ export class ChatTaskCoordinator {
   readonly #actors = new Map<string, OwnedTask>();
   readonly #origins = new WeakMap<object, OwnedTask>();
   readonly #pending = new Set<Promise<unknown>>();
-  readonly #stopping = new Map<string, Promise<void>>();
+  readonly #stopping = new Map<string, TaskFinalizer>();
+  readonly #work = new WeakMap<object,TaskWorkRecord>();
+  readonly #completions = new WeakSet<Promise<void>>();
+  readonly #charged = new Set<TaskWorkRecord>();
+  #closing: Promise<void>|null=null;
   #cancellation: StudioTestTaskCancellation | null = null;
   #closed = false;
   #fenced = false;
@@ -108,8 +141,9 @@ export class ChatTaskCoordinator {
     this.#store = new ChatTaskStore({ directory: options.directory, projectPath: options.projectPath });
     this.playtests = Object.freeze({ capture: (actorId: string) => this.#capture(actorId),
       assert: (origin: StudioTestTaskOrigin) => { this.#assert(origin); },
-      prepared: (origin: StudioTestTaskOrigin, value: StudioTestTaskPrepared) => this.#prepared(origin, value),
-      terminal: (origin: StudioTestTaskOrigin, value: StudioTestTaskSettled) => this.#terminal(origin, value) });
+      registerWork: (origin: StudioTestTaskOrigin, registration: StudioTestTaskWorkRegistration) => this.#registerWork(origin,registration),
+      prepared: (origin: StudioTestTaskOrigin, value: StudioTestTaskPrepared, work: StudioTestTaskWork) => this.#prepared(origin, value,work),
+      terminal: (origin: StudioTestTaskOrigin, value: StudioTestTaskSettled, work: StudioTestTaskWork) => this.#terminal(origin, value,work) });
   }
   attachCancellation(port: StudioTestTaskCancellation): void {
     if (this.#closed || this.#cancellation || !Object.isFrozen(port) ||
@@ -146,7 +180,8 @@ export class ChatTaskCoordinator {
     const origin = Object.freeze({ kind: 'studio-test-task-origin' as const, taskId: task.id, projectId: task.projectId, provider: 'codex' as const,
       threadId: task.threadId, sessionId: task.sessionId, incarnationId });
     const entry: OwnedTask = { origin, admission:null, admissionOperation:null, jobOrigins:new Map(),currentJob:null,settledJobs:new Set(), actorId: input.actorId, owner: input.owner, revoked: false, advancing: false, unstartedRetried: false,
-      controller: new AbortController(), accountIdentity: input.accountIdentity ?? null, proposal: null, planProposals: new Set(), planController: null, planDispatch: null, planCompletion: null };
+      controller: new AbortController(), accountIdentity: input.accountIdentity ?? null, proposal: null, planProposals: new Set(), planController: null, planDispatch: null, planCompletion: null,
+      work:new Set(),jobWork:new Map(),joins:new Map(),generation:0,order:0 };
     this.#owners.set(task.id, entry); this.#actors.set(input.actorId, entry); this.#origins.set(origin, entry);
     return origin;
   }
@@ -172,6 +207,71 @@ export class ChatTaskCoordinator {
         thread.threadId !== task.threadId || thread.sessionId !== task.sessionId || thread.selection.model !== task.model || thread.selection.effort !== task.effort) {
       throw new Error('The original task incarnation is unavailable.');
     }
+  }
+  #workActive(entry:OwnedTask,origin:StudioTestTaskOrigin,kind:'prepare'|'revalidate'):void {
+    if(kind==='prepare')this.#assert(origin);else this.#assertTask(entry);
+    if(entry.controller.signal.aborted||entry.accountIdentity!==null&&entry.owner.accountIdentity?.()!==entry.accountIdentity)
+      throw new Error('The original task work account or lifetime is unavailable.');
+  }
+  #registerWork(origin:StudioTestTaskOrigin,registration:StudioTestTaskWorkRegistration):StudioTestTaskWork {
+    if(!registration||typeof registration!=='object'||types.isProxy(registration)||
+      ![Object.prototype,null].includes(Object.getPrototypeOf(registration))||!Object.isFrozen(registration))throw new Error('Expected a fixed task work registration.');
+    const descriptors=new Map<string,PropertyDescriptor>();
+    for(const key of Reflect.ownKeys(registration)){
+      if(typeof key!=='string')throw new Error('Task work registration has an unexpected field.');
+      const field=Object.getOwnPropertyDescriptor(registration,key);
+      if(!field||!Object.hasOwn(field,'value')||!field.enumerable)throw new Error('Task work fields must be enumerable own data.');
+      descriptors.set(key,field);
+    }
+    const kind:unknown=descriptors.get('kind')?.value;
+    if(kind!=='prepare'&&kind!=='revalidate')throw new Error('Unknown task work registration.');
+    const keys=kind==='prepare'?['kind','completion','cancel']:['kind','jobId','reportDigest','completion','cancel'];
+    if(descriptors.size!==keys.length||keys.some(key=>!descriptors.has(key)))throw new Error('Task work registration has missing or extra fields.');
+    const completion:unknown=descriptors.get('completion')?.value,cancel:unknown=descriptors.get('cancel')?.value;
+    if(!ordinaryCompletion(completion)||typeof cancel!=='function'||types.isProxy(cancel))throw new Error('Expected an original ordinary completion Promise and fixed cancellation callback.');
+    const entry=this.#owned(origin);this.#workActive(entry,origin,kind);
+    let jobId:string|null=null,reportDigest:string|null=null;
+    if(kind==='revalidate'){
+      const job:unknown=descriptors.get('jobId')?.value,report:unknown=descriptors.get('reportDigest')?.value;
+      if(typeof job!=='string'||typeof report!=='string'||!hash.safeParse(report).success)throw new Error('Expected exact retained verification identity.');
+      const original=entry.jobWork.get(job);
+      if(!original||original.origin!==origin||original.job?.jobId!==job||original.reportDigest!==report||original.terminal===null)
+        throw new Error('Revalidation has no original published report.');
+      jobId=job;reportDigest=report;
+    }
+    if(this.#completions.has(completion))throw new Error('An original task work lifetime cannot be registered twice.');
+    if(this.#charged.size>=WORK_LIMIT)throw new Error('Task work accounting is full; no new allocation was admitted.');
+    let resolve!: (outcome:JoinOutcome)=>void;
+    const joined=new NativePromise<JoinOutcome>(done=>{resolve=done;});
+    let record:TaskWorkRecord;
+    const identity=Object.freeze({kind:'studio-test-task-work' as const,signal:entry.controller.signal,assertActive:()=>{
+      this.#workActive(entry,origin,kind);
+      if(record.outcome!==null)throw new Error('The original task work already completed.');
+    }});
+    record={entry,origin,identity,kind,jobId,reportDigest,completion,joined,outcome:null,cancel:registration.cancel,compensation:null,job:null,terminal:null,order:++entry.order};
+    this.#work.set(identity,record);this.#completions.add(completion);this.#charged.add(record);entry.work.add(record);entry.generation++;
+    const completed=(outcome:JoinOutcome)=>{
+      record.outcome=outcome;resolve(outcome);
+      if(outcome.ok&&record.job===null&&record.compensation===null)this.#releaseWork(record);
+    };
+    // The descriptor checks above also protect the constructor/species lookup
+    // performed by the captured intrinsic; no caller then/getter is evaluated.
+    void promiseThen.call(completion,()=>completed({ok:true}),error=>completed({ok:false,error}));
+    return identity;
+  }
+  #releaseWork(record:TaskWorkRecord):void {
+    this.#charged.delete(record);record.entry.work.delete(record);record.entry.generation++;
+    if(record.job&&record.entry.revoked){record.entry.jobWork.delete(record.job.jobId);record.entry.jobOrigins.delete(record.job.jobId);}
+  }
+  #originalWork(origin:StudioTestTaskOrigin,identity:StudioTestTaskWork):TaskWorkRecord {
+    const record=identity&&typeof identity==='object'&&!types.isProxy(identity)?this.#work.get(identity):undefined;
+    if(!record||record.origin!==origin||record.kind!=='prepare')throw new Error('Foreign task work capability.');
+    return record;
+  }
+  #trackJoin<T>(entry:OwnedTask,promise:Promise<T>):void {
+    if(entry.joins.has(promise))return;
+    const joined=observe(promise);entry.joins.set(promise,{order:++entry.order,joined});entry.generation++;
+    void joined.then(outcome=>{if(outcome.ok&&!entry.revoked){entry.joins.delete(promise);entry.generation++;}});
   }
   dispatched(id: string, operationId: string): void {
     const entry = this.#owners.get(id); if (!entry) throw new Error('Unknown owned task.'); this.#assertTask(entry);
@@ -206,26 +306,44 @@ export class ChatTaskCoordinator {
   }
   uncertain(id: string, reason: string, unknown = true): void {
     const entry = this.#owners.get(id); if (!entry || entry.revoked) return;
-    this.#retire(entry);
+    const slot=this.#reserveFinalizer(entry);
+    if(slot.requested)return;slot.requested=true;
+    try{this.#retire(entry);}catch(error){this.#keepFailure(slot,error);}
     try{this.#store.update(id, task => { if (ACTIVE.has(task.state)) task.state = unknown ? 'unknown' : 'paused'; task.reason = reason;
-      if (task.repairDispatch === 'reserved') task.repairDispatch = 'unknown'; });}
-    finally{const pending=this.#cleanup(entry).catch(()=>{}).finally(()=>this.#pending.delete(pending));this.#pending.add(pending);}
+      if (task.repairDispatch === 'reserved') task.repairDispatch = 'unknown'; });}catch(error){this.#keepFailure(slot,error);}
+    void this.#cleanup(entry).catch(()=>{});
+    if(slot.failed)throw slot.failure;
   }
-  #prepared(origin: StudioTestTaskOrigin, input: StudioTestTaskPrepared): void {
-    const entry=this.#assert(origin); const value = preparedSchema.parse(input);
+  #prepared(origin: StudioTestTaskOrigin, input: StudioTestTaskPrepared,identity:StudioTestTaskWork): void {
+    const entry=this.#assert(origin),record=this.#originalWork(origin,identity);const value=preparedSchema.parse(input);
+    if(record.entry!==entry||record.outcome!==null||record.job!==null||entry.jobWork.has(value.jobId))throw new Error('Task work cannot acquire a late or repeated job.');
     this.#store.update(origin.taskId, task => {
       if (!['working','repairing'].includes(task.state) || task.prepared) throw new Error('Verification was already prepared.');
       if (task.round === 1 && task.evidence[0]?.scenarioDigest !== value.scenarioDigest) throw new Error('Repair must reverify the same bounded scenario.');
       task.prepared = value; task.state = 'awaiting_verification';
     });
     entry.jobOrigins.set(value.jobId,origin);
+    record.job=value;record.jobId=value.jobId;entry.jobWork.set(value.jobId,record);
     entry.currentJob=value;
   }
-  #terminal(origin: StudioTestTaskOrigin, input: StudioTestTaskSettled): void {
-    const entry = this.#owned(origin);
+  #terminal(origin: StudioTestTaskOrigin, input: StudioTestTaskSettled,identity:StudioTestTaskWork): void {
+    const entry = this.#owned(origin),record=this.#originalWork(origin,identity);
     if (Buffer.byteLength(JSON.stringify(input)) > 128 * 1024) throw new Error('Verification evidence exceeds its bound.');
     terminalSchema.parse(input); const value = structuredClone(input);
-    if(entry.jobOrigins.get(value.jobId)!==origin)throw new Error('Foreign verification job capability.');
+    if(record.entry!==entry||record.job?.jobId!==value.jobId)throw new Error('Foreign verification job capability.');
+    const packet=JSON.stringify(value);
+    if(record.terminal!==null){
+      if(record.terminal!==packet)throw new Error('Verification terminal changed.');
+      const task=this.#store.get(origin.taskId),existing=task.evidence.find(report=>report.jobId===value.jobId),expected=task.prepared;
+      if(existing){if(existing.reportDigest!==value.reportDigest)throw new Error('Verification terminal changed.');return;}
+      // An unstarted result consumes no evidence slot. It cannot be replayed
+      // across the original one-time re-request or a different preparation.
+      if(!expected||expected.jobId!==value.jobId||expected.displayDigest!==value.displayDigest||
+        expected.scenarioDigest!==value.scenarioDigest||expected.subjectDigest!==value.subjectDigest)throw new Error('Verification scope changed.');
+      return;
+    }
+    if(entry.jobOrigins.get(value.jobId)!==origin||entry.jobWork.get(value.jobId)!==record)throw new Error('Foreign verification job capability.');
+    if(record.outcome!==null)throw new Error('Verification terminal arrived after its lifetime completed.');
     // A job whose consent expired or was cancelled before start() never claimed a
     // run: no Studio effect, nothing to review and no evidence slot is consumed.
     const review = value.review as typeof value.review & { runId?: unknown };
@@ -256,13 +374,16 @@ export class ChatTaskCoordinator {
       task.state = 'awaiting_verification'; task.reason = 'settled_evidence_waiting_for_native_terminal';
     });
     if (retried) entry.unstartedRetried = true;
+    record.terminal=packet;record.reportDigest=value.reportDigest;
     entry.settledJobs.add(value.jobId);
     this.#schedule(entry);
   }
   #schedule(entry: OwnedTask): void {
     if (entry.advancing || this.#closed || this.#fenced || entry.revoked) return;
     entry.advancing = true;
-    const pending = Promise.resolve().then(() => this.#advance(entry)).catch(() => {
+    const advancing=Promise.resolve().then(() => this.#advance(entry));
+    this.#trackJoin(entry,advancing);
+    const pending = advancing.catch(() => {
       try{this.uncertain(entry.origin.taskId, 'task_coordination_failed_no_replay');}catch{/* Cleanup still runs if the task journal fails. */}
     }).finally(() => {
       entry.advancing = false; this.#pending.delete(pending);
@@ -299,40 +420,85 @@ export class ChatTaskCoordinator {
       value.prepared = null; value.operationId = null; value.turnId = null; value.nativeSettled = false; value.acknowledged = false; });
     try { await entry.owner.repair(report); this.acknowledged(id); }
     catch (error) {
-      if (entry.revoked) return;
+      if (entry.revoked) throw error;
       const dispatched = error instanceof Error && 'dispatched' in error && error.dispatched === true;
       this.#store.update(id, value => { value.state = dispatched ? 'unknown' : 'paused'; value.reason = 'repair_dispatch_not_replayed';
         if (dispatched) value.repairDispatch = 'unknown'; });
-      this.#retire(entry);
-      await this.#cleanup(entry).catch(()=>{});
+      const slot=this.#reserveFinalizer(entry);
+      try{this.#retire(entry);}catch(retirement){this.#keepFailure(slot,retirement);}
+      // This advancing promise is joined by finalization; never await that
+      // finalizer from inside the work it is closing.
+      void this.#cleanup(entry).catch(()=>{});
+      throw error;
     }
   }
   async cancel(id: string, reason: string): Promise<void> {
     const entry = this.#owners.get(id); if (!entry) throw new Error('Task has no live owned incarnation.');
-    let failed=false,failure:unknown;
-    const keep=(error:unknown)=>{if(!failed){failed=true;failure=error;}};
-    try{this.#retire(entry);}catch(error){keep(error);}
-    try{this.#store.update(id, value => { if (ACTIVE.has(value.state)) value.state = 'cancelled'; value.reason = reason; });}catch(error){keep(error);}
-    try{await this.#cleanup(entry);}catch(error){keep(error);}
-    if(failed)throw failure;
+    const slot=this.#reserveFinalizer(entry);if(slot.requested)return slot.promise;slot.requested=true;
+    try{this.#retire(entry);}catch(error){this.#keepFailure(slot,error);}
+    try{this.#store.update(id, value => { if (ACTIVE.has(value.state)) value.state = 'cancelled'; value.reason = reason; });}catch(error){this.#keepFailure(slot,error);}
+    return this.#cleanup(entry);
+  }
+  #reserveFinalizer(entry:OwnedTask):TaskFinalizer {
+    const id=entry.origin.taskId,existing=this.#stopping.get(id);if(existing)return existing;
+    let resolve!:()=>void,reject!:(error:unknown)=>void;
+    const promise=new NativePromise<void>((yes,no)=>{resolve=yes;reject=no;});
+    const slot:TaskFinalizer={promise,resolve,reject,requested:false,started:false,failed:false,failure:undefined};
+    this.#stopping.set(id,slot);void promise.catch(()=>{});return slot;
+  }
+  #keepFailure(slot:TaskFinalizer,error:unknown):void {if(!slot.failed){slot.failed=true;slot.failure=error;}}
+  #callCleanup(callback:()=>Promise<void>):Promise<JoinOutcome> {
+    try{
+      const completion=callback();
+      if(!ordinaryCompletion(completion))throw new Error('Owned cleanup did not return an ordinary completion Promise.');
+      return observe(completion);
+    }catch(error){const outcome:JoinOutcome={ok:false,error};return NativePromise.resolve(outcome);}
+  }
+  #compensate(record:TaskWorkRecord):Promise<JoinOutcome> {
+    if(record.compensation)return record.compensation;
+    // Install the placeholder before invoking a possibly reentrant callback.
+    let resolve!:(outcome:JoinOutcome)=>void;
+    record.compensation=new NativePromise<JoinOutcome>(done=>{resolve=done;});
+    if(record.outcome?.ok&&(record.job===null||record.terminal!==null)){
+      // Successful terminal work may release its service handle on signal
+      // retirement. It has no remaining operation to compensate.
+      resolve({ok:true});return record.compensation;
+    }
+    const result=this.#callCleanup(()=>{
+      if(record.job){
+        if(!this.#cancellation)throw new Error('Owned verification cancellation is unavailable.');
+        return this.#cancellation.cancelExact(record.job.jobId,record.origin);
+      }
+      return record.cancel();
+    });
+    void result.then(resolve);return record.compensation;
   }
   #cleanup(entry: OwnedTask): Promise<void> {
-    const id=entry.origin.taskId,existing=this.#stopping.get(id);if(existing)return existing;
-    const pending=(async()=>{
-      let failed=false,failure:unknown;
-      const keep=(error:unknown)=>{if(!failed){failed=true;failure=error;}};
-      try {
-        if(entry.currentJob&&!entry.settledJobs.has(entry.currentJob.jobId)){
-          if(!this.#cancellation)throw new Error('Owned verification cancellation is unavailable.');
-          await this.#cancellation.cancelExact(entry.currentJob.jobId,entry.jobOrigins.get(entry.currentJob.jobId)!);
-        }
-      }catch(error){keep(error);}
-      try{await entry.owner.cancel();}catch(error){keep(error);}
-      const results=await Promise.allSettled([...(entry.proposal?[entry.proposal]:[]),...entry.planProposals]);
-      const rejected=results.find(result=>result.status==='rejected');if(rejected?.status==='rejected')keep(rejected.reason);
-      if(failed)throw failure;
-    })();
-    this.#stopping.set(id,pending);return pending;
+    const slot=this.#reserveFinalizer(entry);if(slot.started)return slot.promise;
+    slot.requested=true;slot.started=true;this.#pending.add(slot.promise);
+    void slot.promise.then(()=>this.#pending.delete(slot.promise),()=>this.#pending.delete(slot.promise));
+    const finalizing=Promise.resolve().then(async()=>{
+      const records=[...entry.work];
+      const compensation=records.map(record=>this.#compensate(record));
+      // Start the original owner before joining anything that may need its
+      // disconnect/terminal, including native incorporation and repair work.
+      const owner=this.#callCleanup(()=>entry.owner.cancel());
+      for(const joined of [...compensation,owner]){const outcome=await joined;if(!outcome.ok)this.#keepFailure(slot,outcome.error);}
+      const seen=new Set<Promise<JoinOutcome>>();
+      for(;;){
+        const generation=entry.generation;
+        const captured=[...[...entry.work].map(record=>({order:record.order,joined:record.joined})),...entry.joins.values()].sort((a,b)=>a.order-b.order);
+        const pending=captured.map(record=>record.joined).filter(joined=>!seen.has(joined));
+        for(const joined of pending){seen.add(joined);const outcome=await joined;if(!outcome.ok)this.#keepFailure(slot,outcome.error);}
+        if(generation===entry.generation&&[...[...entry.work].map(record=>record.joined),...[...entry.joins.values()].map(record=>record.joined)].every(joined=>seen.has(joined)))break;
+      }
+      for(const record of records){
+        const compensated=record.compensation?await record.compensation:null;
+        if(record.outcome?.ok&&compensated?.ok)this.#releaseWork(record);
+      }
+      if(slot.failed)throw slot.failure;
+    });
+    void finalizing.then(slot.resolve,slot.reject);return slot.promise;
   }
   /** Host-private synchronous parent owner; never exported to routes, tools or proposal text. */
   #proposalOwner(entry: OwnedTask): ChatTaskProposalWorkerInput['owner'] {
@@ -410,6 +576,7 @@ export class ChatTaskCoordinator {
             const tracked = this.#runProposal(entry, record, text, input.factory, workerInput).finally(() => {
               entry.planProposals.delete(tracked); this.#pending.delete(tracked);
             });
+            this.#trackJoin(entry,tracked);
             entry.planProposals.add(tracked); this.#pending.add(tracked); void tracked.catch(() => {}); await tracked;
           },
           incorporate: async (text: string, acknowledge: (value: { operationId: string; turnId: string }) => void) => {
@@ -431,6 +598,7 @@ export class ChatTaskCoordinator {
         return value;
       }).finally(() => { this.#pending.delete(tracked); });
       entry.planCompletion = tracked; this.#pending.add(tracked); void tracked.catch(() => { try { this.uncertain(input.taskId, 'task_plan_journal_failed_no_replay'); } catch { /* The owner is still fenced. */ } });
+      this.#trackJoin(entry,tracked);
       return started.plan;
     } catch (error) { controller.abort(); throw error; }
   }
@@ -466,7 +634,8 @@ export class ChatTaskCoordinator {
     this.#budget.acquire();
     const workerInput: ChatTaskProposalWorkerInput = Object.freeze({ accountIdentity: entry.accountIdentity,
       selection: Object.freeze({ model: task.model, effort: task.effort }), owner: this.#proposalOwner(entry) });
-    const tracked: Promise<void> = this.#runProposal(entry, record, input.text, input.factory, workerInput).catch(() => {})
+    const running=this.#runProposal(entry,record,input.text,input.factory,workerInput);this.#trackJoin(entry,running);
+    const tracked: Promise<void> = running.catch(() => {})
       .finally(() => { if (entry.proposal === tracked) entry.proposal = null; this.#pending.delete(tracked); });
     entry.proposal = tracked; this.#pending.add(tracked);
     return record;
@@ -474,6 +643,8 @@ export class ChatTaskCoordinator {
   async #runProposal(entry: OwnedTask, record: ChatTaskProposalRecord, text: string, factory: ChatTaskProposalFactory, input: ChatTaskProposalWorkerInput): Promise<void> {
     type Outcome = { state: 'proposed'; result: ChatTaskProposalResult } | { state: 'failed' | 'unknown'; reason: ChatTaskProposalReason };
     let closed = true;
+    let closeFailed=false,closeFailure:unknown;
+    const keepClose=(error:unknown)=>{if(!closeFailed){closeFailed=true;closeFailure=error;}};
     const retired = () => entry.controller.signal.aborted || entry.revoked || this.#closed || this.#fenced;
     const outcome = await (async (): Promise<Outcome> => {
       await Promise.resolve(); // Never spawn inside the reserving call stack.
@@ -481,16 +652,16 @@ export class ChatTaskCoordinator {
       let worker: ChatTaskProposalWorker;
       try { worker = await factory(input); }
       catch (error) {
-        if (errorCode(error) === 'PROCESS_EXIT_UNCONFIRMED') { closed = false; return { state: 'failed', reason: 'worker_close_unconfirmed' }; }
+        if (errorCode(error) === 'PROCESS_EXIT_UNCONFIRMED') { closed = false;keepClose(error);return { state: 'failed', reason: 'worker_close_unconfirmed' }; }
         if (retired() || errorCode(error) === 'PARENT_SCOPE') return { state: 'failed', reason: 'parent_retired' };
         return { state: 'failed', reason: ['CLI_MISSING', 'PROCESS_PATH'].includes(errorCode(error) ?? '') ? 'worker_unavailable' : 'worker_failed_before_dispatch' };
       }
       let dispatched = false, threw = false, failure: unknown, value: unknown;
       try { input.owner.assertActive(); dispatched = true; value = await worker.propose(text); }
       catch (error) { threw = true; failure = error; }
+      if (errorCode(failure) === 'PROCESS_EXIT_UNCONFIRMED') {closed = false;keepClose(failure);}
       // propose() closes its own worker; this joins that retained closure and reports it.
-      try { await worker.close(); } catch { closed = false; }
-      if (errorCode(failure) === 'PROCESS_EXIT_UNCONFIRMED') closed = false;
+      try { const closing=worker.close();this.#trackJoin(entry,closing);await closing; } catch(error) { closed = false;keepClose(error); }
       if (!closed) return { state: dispatched ? 'unknown' : 'failed', reason: 'worker_close_unconfirmed' };
       if (!dispatched) return { state: 'failed', reason: 'parent_retired' };
       if (threw) return errorCode(failure) === 'PROPOSAL_OUTPUT' ? { state: 'failed', reason: 'output_rejected' }
@@ -508,7 +679,15 @@ export class ChatTaskCoordinator {
         this.#store.settleProposal(record.id, { state: 'failed', reason: 'output_rejected' });
       }
     } catch { /* Remains reserved; restart records unknown and never replays it. */ }
-    finally { this.#budget.release(closed); }
+    finally {
+      try{this.#budget.release(closed);}catch(error){
+        if(!closeFailed)throw error;
+        // Keep the later budget fault observable, without replacing the
+        // original owned worker's earlier close/allocation failure.
+        this.#trackJoin(entry,NativePromise.reject<void>(error));
+      }
+    }
+    if(closeFailed)throw closeFailure;
   }
   async drain(): Promise<void> { while (this.#pending.size) await Promise.allSettled([...this.#pending]); }
   /** Synchronous host shutdown boundary; callbacks cannot queue another repair. */
@@ -518,22 +697,45 @@ export class ChatTaskCoordinator {
   }
   /** Abort owned proposal work BEFORE the revoke callback can run or throw. */
   #retire(entry: OwnedTask): void {
+    const slot=this.#reserveFinalizer(entry);if(entry.revoked)return;
     entry.revoked = true; entry.admission = null;
-    try { entry.controller.abort(); this.#stopPlan(entry, 'parent_retired'); } finally { entry.owner.revoke(); }
+    let failed=false,failure:unknown;
+    const keep=(error:unknown)=>{if(!failed){failed=true;failure=error;}this.#keepFailure(slot,error);};
+    try{entry.controller.abort();}catch(error){keep(error);}
+    try{this.#stopPlan(entry,'parent_retired');}catch(error){keep(error);}
+    try{entry.owner.revoke();}catch(error){keep(error);}
+    if(failed)throw failure;
   }
   async stopAll(reason: string): Promise<void> {
-    this.fence();const cleanups:Promise<void>[]=[],failures:unknown[]=[];
+    this.fence();const cleanups:Promise<void>[]= [];let failed=false,failure:unknown;
+    const keep=(error:unknown)=>{if(!failed){failed=true;failure=error;}};
     for(const[id,entry]of this.#owners){
-      try{this.#store.update(id,task=>{if(ACTIVE.has(task.state))task.state='unknown';task.reason=reason;if(task.repairDispatch==='reserved')task.repairDispatch='unknown';});}catch(error){failures.push(error);}
+      const slot=this.#reserveFinalizer(entry);
+      try{this.#store.update(id,task=>{if(ACTIVE.has(task.state))task.state='unknown';task.reason=reason;if(task.repairDispatch==='reserved')task.repairDispatch='unknown';});}catch(error){this.#keepFailure(slot,error);}
+      if(slot.failed)keep(slot.failure);
       cleanups.push(this.#cleanup(entry));
     }
     const settled=await Promise.allSettled(cleanups);await this.drain();
-    for(const result of settled)if(result.status==='rejected')failures.push(result.reason);
-    if(failures.length)throw failures[0];
+    for(const result of settled)if(result.status==='rejected')keep(result.reason);
+    if(failed)throw failure;
   }
-  async close(): Promise<void> {
-    if (this.#closed) return; this.fence();this.#closed = true;
-    try { await Promise.allSettled([...this.#owners.keys()].map(id => this.cancel(id, 'application_closed'))); await this.drain(); }
-    finally { this.#store.close(); }
+  close(): Promise<void> {
+    if(this.#closing)return this.#closing;
+    let resolve!:()=>void,reject!:(error:unknown)=>void;
+    this.#closing=new NativePromise<void>((yes,no)=>{resolve=yes;reject=no;});void this.#closing.catch(()=>{});
+    this.#closed=true;this.fence();
+    const closing=Promise.resolve().then(async()=>{
+      let failed=false,failure:unknown;
+      const keep=(error:unknown)=>{if(!failed){failed=true;failure=error;}};
+      try{
+        const pending:Promise<void>[]=[];
+        for(const[id,entry]of this.#owners){pending.push(this.cancel(id,'application_closed'));const slot=this.#reserveFinalizer(entry);if(slot.failed)keep(slot.failure);}
+        const settled=await Promise.allSettled(pending);await this.drain();
+        for(const result of settled)if(result.status==='rejected')keep(result.reason);
+      }catch(error){keep(error);}
+      try{this.#store.close();}catch(error){keep(error);}
+      if(failed)throw failure;
+    });
+    void closing.then(resolve,reject);return this.#closing;
   }
 }

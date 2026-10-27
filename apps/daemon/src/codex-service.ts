@@ -202,6 +202,7 @@ export function createCodexService(options: CodexServiceOptions) {
   submitted.recoverPending(new Date().toISOString());
   let client: CodexHostClient | null = null, lastSnapshot: Snapshot | null = null;
   let connecting = false, closing = false, busy = false, closed = false, generation = 0;
+  let shutdown: Promise<void> | null = null;
   let pendingTaskBinding=false;
   const planInputs = new Map<string,{objective:string;inputSha256:string}>();
   let pendingConnect: Promise<CodexHostClient> | null = null;
@@ -835,14 +836,36 @@ export function createCodexService(options: CodexServiceOptions) {
   return { state, action, refreshUsage, proposals, taskPlan,
     authorizeBoundWork(actorId:string,binding:WorkTaskBinding){if(!tasks)throw new Error('Native work authority is unavailable.');tasks.authorizeBoundWork(actorId,binding);},
     playtestTasks:tasks?.playtests??null,
-    attachPlaytestCancellation(port:StudioTestTaskCancellation){if(!tasks)throw new Error('Native task authority is unavailable.');tasks.attachCancellation(port);}, async close() {
-    if (closed) return; generation++; closed = true;tasks?.fence();
-    try{retireAssets();}catch{/* Native task closure must still run after registry retirement. */}
-    try {
-      if (pendingConnect) { try { await (await pendingConnect).close(); } catch { /* Init failure already closed its native child. */ } }
-      try{await tasks?.close();}finally{if(client)await client.close();}
-      if (journalFault) await journalFault;
-    } finally { client = null; planInputs.clear();await Promise.allSettled([...inFlight,...usageReads,...taskPlanReads]); db.close(); }
+    attachPlaytestCancellation(port:StudioTestTaskCancellation){if(!tasks)throw new Error('Native task authority is unavailable.');tasks.attachCancellation(port);}, close(): Promise<void> {
+    if (shutdown) return shutdown;
+    let resolveShutdown!: () => void, rejectShutdown!: (error: unknown) => void;
+    shutdown = new Promise<void>((resolve, reject) => { resolveShutdown = resolve; rejectShutdown = reject; });
+    void shutdown.catch(() => {});
+    generation++; closed = true;
+    let failed = false, failure: unknown;
+    const keep = (error: unknown) => { if (!failed) { failed = true; failure = error; } };
+    try { tasks?.fence(); } catch (error) { keep(error); }
+    try { retireAssets(); } catch (error) { keep(error); }
+    const finish = async () => {
+      try {
+        if (pendingConnect) {
+          let pending: CodexHostClient | null = null;
+          try { pending = await pendingConnect; } catch { /* Original initialization failure owns its child cleanup. */ }
+          if (pending) try { await pending.close(); } catch (error) { keep(error); }
+        }
+        try { await tasks?.close(); } catch (error) { keep(error); }
+        if (client) try { await client.close(); } catch (error) { keep(error); }
+        if (journalFault) try { await journalFault; } catch (error) { keep(error); }
+      } finally {
+        client = null; planInputs.clear();
+        // Request failures retain their own receipts; shutdown joins their tails.
+        await Promise.allSettled([...inFlight, ...usageReads, ...taskPlanReads]);
+        try { db.close(); } catch (error) { keep(error); }
+      }
+      if (failed) throw failure;
+    };
+    void finish().then(resolveShutdown, rejectShutdown);
+    return shutdown;
   },fenceTaskAdmission(){generation++;tasks?.fence();} };
 }
 export type CodexService = Pick<ReturnType<typeof createCodexService>, 'state'|'action'|'close'> &

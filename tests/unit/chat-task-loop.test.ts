@@ -13,7 +13,7 @@ import { CodexSession } from '../../packages/codex-client/src/session.js';
 import { nativeEnvironment } from '../../packages/codex-client/src/transport.js';
 import { limits } from '../../packages/codex-client/src/validation.js';
 import { ARCANE_NATIVE_TOOL_NAMES } from '../../packages/protocol/src/arcane-tools.js';
-import type { StudioTestTaskOrigin, StudioTestTaskSettled } from '../../packages/protocol/src/chat-task-playtest.js';
+import type { StudioTestTaskOrigin, StudioTestTaskSettled, StudioTestTaskWork } from '../../packages/protocol/src/chat-task-playtest.js';
 import { ChatTaskStore } from '../../packages/storage/src/chat-task-store.js';
 import { DatabaseSync } from 'node:sqlite';
 import { sqliteTransportPath } from '../../packages/storage/src/sqlite-path.js';
@@ -82,6 +82,11 @@ async function fixture(t:test.TestContext,options:{mode?:string;email?:(index:nu
  const boundary=await realpath(tmpdir()),root=await realpath(await mkdtemp(join(boundary,'arcane-managed-task-'))),project=join(root,'project');await mkdir(project);
  const registry=createNativeAssetRegistry({projectPath:await realpath(project)}),clients:CodexSession[]=[],tokens:string[]=[],audit=join(root,'wire.jsonl');
  const cancelled:{jobId:string;origin:StudioTestTaskOrigin}[]=[],validated:string[]=[];
+ let expectedCloseFailure=false,originalCloseFailure:unknown;
+ // Manual task packets below are controlled fixture jobs, not Play/native proof.
+ // Their lifetime ends only at the original terminal callback or exact cancellation.
+ const jobs=new Map<string,{origin:StudioTestTaskOrigin;report:StudioTestTaskSettled;work:StudioTestTaskWork;complete:()=>void;fail:(error:unknown)=>void}>();
+ const cancelControlledJob=async(jobId:string,origin:StudioTestTaskOrigin)=>{cancelled.push({jobId,origin});const job=jobs.get(jobId);assert.ok(job);assert.equal(job.origin,origin);await terminal(origin,job.report);};
  let service=createCodexService({directory:join(root,'journal'),projectPath:project,assetRegistry:registry,connect:async hooks=>{
    assert.ok(hooks);tokens.push(hooks.finalCredential());const index=clients.length;
    const client=new CodexSession({command:process.execPath,args:['-e',PEER,JSON.stringify({index,mode:options.mode??'held',email:options.email?options.email(index):'fixture@example.invalid',modalities:options.modalities?.(index),session:SESSION,newThread:options.newThread?.(index)??THREAD,gate:join(root,'finish-'+index),tools:ARCANE_NATIVE_TOOL_NAMES}),audit],cwd:project,env:nativeEnvironment()},limits({requestTimeoutMs:1500}),'spawned-node-fixture','arcane-only',hooks);
@@ -90,12 +95,12 @@ async function fixture(t:test.TestContext,options:{mode?:string;email?:(index:nu
      return Object.fromEntries(methods.map(name=>[name,(Reflect.get(client,name)as Function).bind(client)]))as CodexHostClient;}
    return client;
  }});
- service.attachPlaytestCancellation(Object.freeze({async cancelExact(jobId:string,origin:StudioTestTaskOrigin){cancelled.push({jobId,origin});},
+ service.attachPlaytestCancellation(Object.freeze({cancelExact:cancelControlledJob,
    async revalidateExact(jobId:string,_origin:StudioTestTaskOrigin,_digest:string){validated.push(jobId);return options.revalidation??'current';}}));
  const control='human-'+randomUUID(),generic='agent-'+randomUUID(),route=codexRoutes(service);let origin='';
  const server=createServer(async(request,response)=>{if(!await route(request,response,new URL(request.url??'/',origin),control,origin,generic)){response.writeHead(404);response.end();}});
  await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));origin='http://127.0.0.1:'+(server.address() as {port:number}).port;
- t.after(async()=>{await service.close();registry.close();server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));
+ t.after(async()=>{if(expectedCloseFailure)await assert.rejects(service.close(),error=>error===originalCloseFailure);else await service.close();registry.close();server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));
    const part=relative(boundary,root);assert.ok(part.startsWith('arcane-managed-task-')&&!isAbsolute(part)&&!part.includes(sep));await rm(root,{recursive:true,force:true});});
  const post=async(input:unknown,bearer=control,requestOrigin=origin,path=!!input&&typeof input==='object'&&Object.hasOwn(input,'references')?'/v1/codex/reference-turn':'/v1/codex/action')=>{const response=await fetch(origin+path,{method:'POST',headers:{Authorization:'Bearer '+bearer,Origin:requestOrigin,'Content-Type':'application/json'},body:JSON.stringify(input),signal:AbortSignal.timeout(10000)});return {status:response.status,data:await response.json() as CodexActionOutcome};};
  const excessiveReferenceBody=()=>new Promise<{status:number;error:string}>((resolve,reject)=>{
@@ -112,9 +117,26 @@ async function fixture(t:test.TestContext,options:{mode?:string;email?:(index:nu
  const send=(text='Synthetic human task')=>action('turn-start',{threadId:service.state().snapshot!.thread!.threadId,text,allowWorkspaceWrites:true,allowAssets:true});
  const task=()=>service.state().chatTasks!.at(-1)!;
  const taskOrigin=(index=0)=>service.playtestTasks!.capture('agent-'+createHash('sha256').update(tokens[index]!).digest('hex'))!;
- const prepare=(binding:StudioTestTaskOrigin,report:StudioTestTaskSettled)=>service.playtestTasks!.prepared(binding,{jobId:report.jobId,displayDigest:report.displayDigest,scenarioDigest:report.scenarioDigest,subjectDigest:report.subjectDigest});
+ const prepare=(binding:StudioTestTaskOrigin,report:StudioTestTaskSettled)=>{
+   let complete!:()=>void,fail!:(error:unknown)=>void;const completion=new Promise<void>((resolve,reject)=>{complete=resolve;fail=reject;});
+   const work=service.playtestTasks!.registerWork(binding,Object.freeze({kind:'prepare',completion,cancel:()=>cancelControlledJob(report.jobId,binding)}));
+   jobs.set(report.jobId,{origin:binding,report:structuredClone(report),work,complete,fail});
+   try{return service.playtestTasks!.prepared(binding,{jobId:report.jobId,displayDigest:report.displayDigest,scenarioDigest:report.scenarioDigest,subjectDigest:report.subjectDigest},work);}
+   catch(error){complete();throw error;}
+ };
+ const terminal=(binding:StudioTestTaskOrigin,report:StudioTestTaskSettled)=>{
+   const job=jobs.get(report.jobId);assert.ok(job);assert.equal(job.origin,binding);
+   try{
+     const result=service.playtestTasks!.terminal(binding,report,job.work);
+     if(result instanceof Promise)return result.then(()=>{job.complete();},error=>{job.fail(error);throw error;});
+     job.complete();return result;
+   }catch(error){job.fail(error);throw error;}
+ };
+ const expectCloseFailure=async(message:RegExp)=>{
+   await assert.rejects(service.close(),error=>{assert.ok(error instanceof Error);assert.match(error.message,message);expectedCloseFailure=true;originalCloseFailure=error;return true;});
+ };
  const wire=async():Promise<Wire[]>=>completedFixtureWire(await readFile(audit,'utf8'));
- return {service,registry,clients,tokens,cancelled,validated,root,project,post,excessiveReferenceBody,action,ready,send,task,taskOrigin,prepare,wire,
+ return {service,registry,clients,tokens,cancelled,validated,root,project,post,excessiveReferenceBody,action,ready,send,task,taskOrigin,prepare,terminal,expectCloseFailure,wire,
    finish:(process=0,turn=1)=>writeFile(join(root,'finish-'+process+'-'+turn),'complete',{flag:'wx'}),
    releasePreflight:(process=0)=>writeFile(join(root,'finish-'+process+'-preflight'),'release',{flag:'wx'}),control,generic};
 }
@@ -129,7 +151,7 @@ test('actual image HTTP Send reaches only its owned initial native turn; repair 
  const journal=new DatabaseSync(sqliteTransportPath(join(f.root,'journal','codex-actions.sqlite')),{readOnly:true});
  try{const rows=journal.prepare('SELECT payload FROM actions').all()as {payload:string}[];assert.ok(rows.length);assert.ok(rows.every(row=>!row.payload.includes('data:image/')));}
  finally{journal.close();}
- const origin=f.taskOrigin(),report=packet();f.prepare(origin,report);await f.finish();await f.service.playtestTasks!.terminal(origin,report);
+ const origin=f.taskOrigin(),report=packet();f.prepare(origin,report);await f.finish();await f.terminal(origin,report);
  await until(async()=>(await f.wire()).filter(row=>row.method==='turn/start').length===2);
  const repair=(await f.wire()).filter(row=>row.method==='turn/start')[1]!.params!.input as {type:string}[];
  assert.equal(repair.length,1);assert.equal(repair[0]!.type,'text');
@@ -171,7 +193,7 @@ test('actual human Send retains one private same-thread repair and one reverify 
  const f=await fixture(t);await f.ready();assert.equal((await f.send()).data.record.state,'acknowledged');
  const origin=f.taskOrigin(),report=packet();assert.ok(origin);assert.throws(()=>f.service.playtestTasks!.assert(structuredClone(origin)),/Foreign/);
  let releaseHeld!:()=>void;const held=new Promise<void>(resolve=>{releaseHeld=resolve;}).then(()=>{f.service.playtestTasks!.assert(origin);f.prepare(origin,packet());});void held.catch(()=>{});
- f.prepare(origin,report);await f.service.playtestTasks!.terminal(origin,report);await delay(20);
+ f.prepare(origin,report);await f.terminal(origin,report);await delay(20);
  assert.equal(f.clients.length,1);assert.equal((await f.wire()).filter(row=>row.method==='turn/start').length,1);assert.deepEqual(f.validated,[]);
  await f.finish();await until(()=>f.task().round===1&&f.clients[0]!.snapshot().operations.filter(op=>op.method==='turn/start'&&op.state==='acknowledged').length===2);assert.deepEqual(f.validated,[report.jobId]);
  const turns=(await f.wire()).filter(row=>row.method==='turn/start');assert.equal(turns.length,2);assert.equal(turns[0]!.process,turns[1]!.process);
@@ -180,8 +202,8 @@ test('actual human Send retains one private same-thread repair and one reverify 
    for(const key of ['initiatedBy','continuation','taskId','allowAssets','allowWorkspaceWrites'])assert.equal(turn.params[key],undefined);}
  const second=packet(randomUUID(),'passed'),repairOrigin=f.taskOrigin();assert.notEqual(repairOrigin,origin);assert.throws(()=>f.prepare(origin,packet()),/admission/);
  releaseHeld();await assert.rejects(held,/admission/);
- f.prepare(repairOrigin,second);await f.service.playtestTasks!.terminal(repairOrigin,second);assert.equal(f.task().state,'awaiting_verification');
- await f.finish(0,2);await until(()=>f.task().state==='verified');await f.service.playtestTasks!.terminal(origin,report);
+ f.prepare(repairOrigin,second);await f.terminal(repairOrigin,second);assert.equal(f.task().state,'awaiting_verification');
+ await f.finish(0,2);await until(()=>f.task().state==='verified');await f.terminal(origin,report);
  assert.equal((await f.wire()).filter(row=>row.method==='turn/start').length,2);assert.equal(f.clients.length,1);assert.throws(()=>f.prepare(origin,packet()),/unavailable/);
 });
 
@@ -190,7 +212,7 @@ test('navigation preserves the original task client and repair cannot borrow a n
  await f.finish();await until(()=>original.snapshot().thread!.turnStatus==='completed');
  assert.equal((await f.action('disconnect',{preserveAssetWork:true})).data.record.state,'acknowledged');assert.equal(original.snapshot().connected,true);assert.equal(f.service.state().snapshot,null);
  await f.ready();const current=f.service.state().snapshot!.connectionId;assert.notEqual(current,original.snapshot().connectionId);
- await f.service.playtestTasks!.terminal(binding,report);await until(async()=> (await f.wire()).filter(row=>row.method==='turn/start').length===2);
+ await f.terminal(binding,report);await until(async()=> (await f.wire()).filter(row=>row.method==='turn/start').length===2);
  const turns=(await f.wire()).filter(row=>row.method==='turn/start');assert.deepEqual(turns.map(row=>row.process),[0,0]);assert.equal(f.service.state().snapshot!.connectionId,current);
  assert.equal(f.clients[1]!.snapshot().thread!.turnStatus,'idle');assert.deepEqual(f.cancelled,[]);
 });
@@ -201,7 +223,7 @@ test('human follow-up cancels original exact job and rotates its MCP credential 
  const sent=await f.post(input);assert.equal(sent.data.record.state,'acknowledged');assert.equal(sent.data.record.connectionId,old);assert.equal(sent.data.record.nextConnectionId,f.service.state().snapshot!.connectionId);
  assert.notEqual(sent.data.record.nextConnectionId,old);assert.equal(f.clients.length,2);assert.notEqual(f.tokens[0],f.tokens[1]);
  assert.deepEqual(f.cancelled.map(value=>value.jobId),[report.jobId]);assert.equal(f.cancelled[0]!.origin,origin);assert.equal(f.clients[0]!.snapshot().connected,false);
- assert.throws(()=>f.service.playtestTasks!.assert(origin),/unavailable/);await f.service.playtestTasks!.terminal(origin,report);await delay(20);
+ assert.throws(()=>f.service.playtestTasks!.assert(origin),/unavailable/);await f.terminal(origin,report);await delay(20);
  assert.deepEqual((await f.wire()).filter(row=>row.method==='turn/start').map(row=>row.process),[0,1]);
  assert.equal((await f.post(input)).data.replayed,true);assert.equal(f.clients.length,2);assert.equal((await f.wire()).filter(row=>row.method==='turn/start').length,2);
 });
@@ -211,7 +233,7 @@ for(const actionName of ['task-stop','revoke-writes','revoke-assets','disconnect
  const fields=actionName==='disconnect'?{}:actionName==='task-stop'?{threadId:THREAD,taskId:origin.taskId}:{threadId:THREAD};
  assert.equal((await f.action(actionName,fields)).data.record.state,'acknowledged');assert.equal(f.cancelled.length,1);assert.equal(f.cancelled[0]!.origin,origin);
  assert.equal(f.cancelled[0]!.jobId,report.jobId);assert.equal(f.clients[0]!.snapshot().connected,false);assert.equal(f.task().state,'cancelled');
- await f.service.playtestTasks!.terminal(origin,report);await delay(20);assert.equal((await f.wire()).filter(row=>row.method==='turn/start').length,1);
+ await f.terminal(origin,report);await delay(20);assert.equal((await f.wire()).filter(row=>row.method==='turn/start').length,1);
 });
 
 test('revocation while actual managed preflight awaits suppresses native turn dispatch',async t=>{
@@ -221,9 +243,9 @@ test('revocation while actual managed preflight awaits suppresses native turn di
 });
 
 test('unknown repair acknowledgement is durably retained and never replays after daemon restart',async t=>{
- const f=await fixture(t,{mode:'unknown-repair'});await f.ready();await f.send();const binding=f.taskOrigin(),report=packet();f.prepare(binding,report);await f.finish();await f.service.playtestTasks!.terminal(binding,report);
+ const f=await fixture(t,{mode:'unknown-repair'});await f.ready();await f.send();const binding=f.taskOrigin(),report=packet();f.prepare(binding,report);await f.finish();await f.terminal(binding,report);
  await until(()=>f.task().state==='unknown');await until(()=>!f.clients[0]!.snapshot().connected);assert.equal((await f.wire()).filter(row=>row.method==='turn/start').length,2);
- await f.service.close();const recovered=new ChatTaskStore({directory:join(f.root,'journal','chat-tasks'),projectPath:f.project});
+ await f.expectCloseFailure(/^Invalid native lifecycle acknowledgement\.$/);const recovered=new ChatTaskStore({directory:join(f.root,'journal','chat-tasks'),projectPath:f.project});
  try{assert.equal(recovered.list()[0]!.state,'unknown');assert.equal(recovered.list()[0]!.repairDispatch,'unknown');assert.equal(recovered.list()[0]!.evidence.length,1);}finally{recovered.close();}
 });
 
@@ -232,13 +254,13 @@ for(const missing of ['capture','source','cleanup'])test('uncertain '+missing+' 
  if(missing==='capture')report={...report,scenario:{...report.scenario!,requiredEvidence:'missing'}};
  if(missing==='source')report={...report,scenario:{...report.scenario!,subjects:'unobserved'}};
  if(missing==='cleanup')report={...report,scenario:{...report.scenario!,restoration:'unknown'}};
- f.prepare(binding,report);await f.service.playtestTasks!.terminal(binding,report);await f.finish();await delay(30);
+ f.prepare(binding,report);await f.terminal(binding,report);await f.finish();await delay(30);
  assert.equal(f.task().state,'paused');assert.deepEqual(f.validated,[]);assert.equal((await f.wire()).filter(row=>row.method==='turn/start').length,1);
 });
 
 test('post-turn source change blocks even a fully settled failed scenario',async t=>{
  const f=await fixture(t,{revalidation:'changed'});await f.ready();await f.send();const binding=f.taskOrigin(),report=packet();f.prepare(binding,report);
- await f.service.playtestTasks!.terminal(binding,report);await f.finish();await until(()=>f.task().state==='paused');assert.equal(f.task().reason,'verification_sources_changed');
+ await f.terminal(binding,report);await f.finish();await until(()=>f.task().state==='paused');assert.equal(f.task().reason,'verification_sources_changed');
  assert.equal((await f.wire()).filter(row=>row.method==='turn/start').length,1);
 });
 
@@ -260,6 +282,7 @@ for(const failure of ['trigger','revision'])test('explicit Stop still closes the
    assert.equal(f.clients[0]!.snapshot().connected,false);assert.deepEqual(f.cancelled.map(value=>value.jobId),[report.jobId]);assert.equal(f.cancelled[0]!.origin,origin);
    assert.throws(()=>f.service.playtestTasks!.assert(origin),/unavailable/);
  }finally{if(failure==='trigger')db.exec('DROP TRIGGER reject_update');db.close();}
+ await f.expectCloseFailure(failure==='trigger'?/fixture task write refused/:/revision/);
 });
 
 test('a rejected task ACK journal update closes the accepted writable native peer and exact job without replay',async t=>{
@@ -283,6 +306,7 @@ test('a rejected task ACK journal update closes the accepted writable native pee
    const replayed=await f.post(input);assert.equal(replayed.status,200);assert.equal(replayed.data.replayed,true);assert.equal(replayed.data.record.state,'acknowledged');
    assert.equal((await f.wire()).filter(row=>row.method==='turn/start').length,1);
  }finally{t.mock.timers.reset();if(db){db.exec('DROP TRIGGER reject_task_ack');db.close();}}
+ await f.expectCloseFailure(/fixture task acknowledgement refused/);
 });
 
 test('shutdown fences and closes every navigation-retained native owner despite failing task journal writes',async t=>{
@@ -292,16 +316,16 @@ test('shutdown fences and closes every navigation-retained native owner despite 
  const db=new DatabaseSync(sqliteTransportPath(join(f.root,'journal','chat-tasks','chat-tasks.sqlite')));
  try{db.exec("CREATE TRIGGER reject_updates BEFORE UPDATE ON chat_tasks BEGIN SELECT RAISE(ABORT,'fixture all task writes refused'); END");
    f.service.fenceTaskAdmission();assert.throws(()=>f.service.playtestTasks!.assert(first),/unavailable/);assert.throws(()=>f.service.playtestTasks!.assert(second),/unavailable/);
-   assert.throws(()=>f.service.playtestTasks!.terminal(first,firstReport),/fixture all task writes refused/);
+   assert.throws(()=>f.terminal(first,firstReport),/fixture all task writes refused/);
  }
- finally{await f.service.close();assert.deepEqual(f.clients.map(client=>client.snapshot().connected),[false,false]);
+ finally{await f.expectCloseFailure(/fixture all task writes refused/);assert.deepEqual(f.clients.map(client=>client.snapshot().connected),[false,false]);
    assert.deepEqual(new Set(f.cancelled.map(value=>value.jobId)),new Set([firstReport.jobId,secondReport.jobId]));db.exec('DROP TRIGGER reject_updates');db.close();}
  assert.equal((await f.wire()).filter(row=>row.method==='turn/start').length,2);
 });
 
 test('registry retirement before daemon close cannot strand an owned native task process',async t=>{
  const f=await fixture(t);await f.ready();await f.send();const origin=f.taskOrigin(),report=packet();f.prepare(origin,report);
- f.registry.close();await f.service.close();assert.equal(f.clients[0]!.snapshot().connected,false);assert.deepEqual(f.cancelled.map(value=>value.jobId),[report.jobId]);
+ f.registry.close();await f.expectCloseFailure(/Native asset authority is unavailable or changed/);assert.equal(f.clients[0]!.snapshot().connected,false);assert.deepEqual(f.cancelled.map(value=>value.jobId),[report.jobId]);
 });
 
 test('a broken action journal still fences and closes all retained owners when every task write fails',async t=>{
@@ -312,6 +336,7 @@ test('a broken action journal still fences and closes all retained owners when e
    assert.equal((await f.post({requestId:randomUUID(),connectionId,action:'history-load',threadId:THREAD+'.other'})).status,400);
    assert.deepEqual(f.clients.map(client=>client.snapshot().connected),[false,false]);assert.deepEqual(new Set(f.cancelled.map(value=>value.jobId)),new Set([a.jobId,b.jobId]));
  }finally{taskDb.exec('DROP TRIGGER reject_updates');taskDb.close();actionDb.close();}
+ await f.expectCloseFailure(/fixture all task writes refused/);
 });
 
 test('actual client continuation rejects copied tokens and human selfclaims, then reserves exactly one private dispatch',async t=>{
@@ -364,7 +389,7 @@ test('existing explicit persistent grants survive exact human-task rotation with
 
 for(const code of ['TIMEOUT','BINDING_CHANGED','RUNTIME_ERROR'])test(code+' cannot be interpreted as an automatic gameplay repair assertion',async t=>{
  const f=await fixture(t);await f.ready();await f.send();const origin=f.taskOrigin(),base=packet(),report={...base,review:{...base.review,code:code as StudioTestTaskSettled['review']['code']}};f.prepare(origin,report);
- await f.service.playtestTasks!.terminal(origin,report);await f.finish();await until(()=>f.task().state==='paused');assert.equal((await f.wire()).filter(row=>row.method==='turn/start').length,1);assert.equal(f.task().round,0);
+ await f.terminal(origin,report);await f.finish();await until(()=>f.task().state==='paused');assert.equal((await f.wire()).filter(row=>row.method==='turn/start').length,1);assert.equal(f.task().round,0);
 });
 
 for(const actionName of ['revoke-writes','revoke-assets','disconnect','select'])test('reopening the same conversation keeps explicit '+actionName+' bound to its retained original task',async t=>{
@@ -387,7 +412,7 @@ test('configured task admission fence rejects a later human Send without legacy 
 test('navigation repair approval focuses the original owned native client without launch/resume/dispatch and uses its exact existing approval response',async t=>{
  const f=await fixture(t,{mode:'repair-approval'});await f.ready();await f.send();const origin=f.taskOrigin(),report=packet(),original=f.clients[0]!;f.prepare(origin,report);
  await f.finish();await until(()=>original.snapshot().thread!.turnStatus==='completed');await f.action('disconnect',{preserveAssetWork:true});await f.ready();
- await f.service.playtestTasks!.terminal(origin,report);await until(()=>original.snapshot().approvals.length===1);
+ await f.terminal(origin,report);await until(()=>original.snapshot().approvals.length===1);
  const before=(await f.wire()).filter(row=>['thread/start','thread/resume','turn/start'].includes(row.method)).length,current=f.service.state().snapshot!.connectionId;
  const input={requestId:randomUUID(),connectionId:current,action:'task-focus',taskId:origin.taskId,threadId:THREAD};
  assert.ok([401,403].includes((await f.post(input,f.generic)).status));assert.equal((await f.post({...input,sessionId:SESSION})).status,400);
@@ -446,7 +471,7 @@ test('actual oversized history rejection preserves the original task owner acros
   assert.equal(original.snapshot().connected,true);assert.equal(original.snapshot().ready,true);assert.deepEqual(f.cancelled,[]);
   assert.equal((await f.action('disconnect',{preserveAssetWork:true})).data.record.state,'acknowledged');assert.equal(original.snapshot().connected,true);
   await f.ready();const current=f.service.state().snapshot!;assert.equal(current.thread!.threadId,'history-target.thread');assert.notEqual(current.connectionId,original.snapshot().connectionId);
-  await f.service.playtestTasks!.terminal(origin,report);await until(async()=>(await f.wire()).filter(row=>row.method==='turn/start').length===2);
+  await f.terminal(origin,report);await until(async()=>(await f.wire()).filter(row=>row.method==='turn/start').length===2);
   assert.deepEqual((await f.wire()).filter(row=>row.method==='turn/start').map(row=>row.process),[0,0]);
   assert.equal(f.clients[1]!.snapshot().thread!.turnStatus,'idle');assert.deepEqual(f.cancelled,[]);
   const receipt=f.service.state().actions.find(row=>row.requestId===rejected.data.record.requestId)!;assert.equal(receipt.state,'rejected');assert.equal(receipt.errorCode,'FRAME_LIMIT');
@@ -463,12 +488,12 @@ function notStarted(jobId=randomUUID()):StudioTestTaskSettled {
 test('an unapproved verification that expired before start allows one exact re-request, then cancels without human review',async t=>{
  const f=await fixture(t);await f.ready();await f.send();const origin=f.taskOrigin(),expired=notStarted();
  f.prepare(origin,expired);assert.equal(f.task().state,'awaiting_verification');
- await f.service.playtestTasks!.terminal(origin,expired);
+ await f.terminal(origin,expired);
  assert.equal(f.task().state,'working');assert.equal(f.task().reason,'verification_not_started_rerequest_allowed');assert.equal(f.task().reportDigest,null);
  const retry=notStarted();f.prepare(origin,retry);assert.equal(f.task().state,'awaiting_verification');
- await assert.rejects(async()=>f.service.playtestTasks!.terminal(origin,expired),/scope changed/);
+ await assert.rejects(async()=>f.terminal(origin,expired),/scope changed/);
  assert.equal(f.task().state,'awaiting_verification');
- await f.service.playtestTasks!.terminal(origin,retry);
+ await f.terminal(origin,retry);
  assert.equal(f.task().state,'cancelled');assert.equal(f.task().reason,'verification_consent_expired');
  assert.throws(()=>f.prepare(origin,packet()),/unavailable/);
  assert.equal((await f.wire()).filter(row=>row.method==='turn/start').length,1);assert.deepEqual(f.validated,[]);
@@ -476,6 +501,6 @@ test('an unapproved verification that expired before start allows one exact re-r
 test('a started run with an unknown outcome still requires human review',async t=>{
  const f=await fixture(t);await f.ready();await f.send();const origin=f.taskOrigin(),base=notStarted();
  const started:StudioTestTaskSettled={...base,review:{...base.review,runId:randomUUID(),phase:'done',cleanup:'unknown',requiresHumanReview:true}};
- f.prepare(origin,started);await f.service.playtestTasks!.terminal(origin,started);
+ f.prepare(origin,started);await f.terminal(origin,started);
  assert.equal(f.task().state,'paused');assert.equal(f.task().reason,'verification_requires_review');
 });

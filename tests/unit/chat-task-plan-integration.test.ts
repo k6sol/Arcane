@@ -13,7 +13,8 @@ const unhandled: unknown[] = []; process.on('unhandledRejection', error => unhan
 async function fixture(t: test.TestContext) {
   const boundary = await realpath(tmpdir()), root = await realpath(await mkdtemp(join(boundary, 'arcane-plan-integration-'))), project = join(root, 'project'); await mkdir(project);
   const budget = new ChatTaskProposalBudget(), coordinator = new ChatTaskCoordinator({ directory: join(root, 'journal'), projectPath: project, proposalBudget: budget });
-  coordinator.attachCancellation(Object.freeze({ async cancelExact() {}, async revalidateExact() { return 'current' as const; } }));
+  const controlledJobCloses=new Map<string,()=>void>();
+  coordinator.attachCancellation(Object.freeze({ async cancelExact(jobId:string) { const close=controlledJobCloses.get(jobId);assert.ok(close);close(); }, async revalidateExact() { return 'current' as const; } }));
   t.after(async () => { closureGate.resolve(); await coordinator.close(); const part = relative(boundary, root);
     assert.ok(part.startsWith('arcane-plan-integration-') && !isAbsolute(part) && !part.includes(sep)); await rm(root, { recursive: true, force: true }); });
   const state: Snapshot = { connectionId: randomUUID(), provenance: 'spawned-node-fixture', mcpIsolation: 'arcane-only-verified', connected: true, ready: true,
@@ -52,6 +53,7 @@ async function fixture(t: test.TestContext) {
     scope.assertActive(); calls.push('evidence'); assert.equal(coordinator.planSteps(plan.id).at(-1)!.kind, 'evidence'); return { runId: randomUUID() };
   } });
   return { coordinator, budget, state, owner, taskId, actorId, calls, scopes, start, workerEntered,
+    controlledJobClose(jobId:string,close:()=>void){controlledJobCloses.set(jobId,close);},
     corruptAck() { corruptAck = true; }, changeAccount() { liveAccount = 'b'.repeat(64); }, unconfirmedClose() { closeFailure = true; }, holdWorker() { held = true; }, releaseWorker() {held=false;for(const release of workerReleases)release();},holdClosures(){heldClosures=true;},releaseClosures(){closureGate.resolve();} };
 }
 
@@ -88,12 +90,16 @@ test('repair reservation stops the planning lane while preserving the original o
   const f = await fixture(t); f.holdWorker(); f.start(); await f.workerEntered.promise;
   const origin = f.coordinator.playtests.capture(f.actorId)!;
   const prepared = { jobId: randomUUID(), displayDigest: '1'.repeat(64), scenarioDigest: '2'.repeat(64), subjectDigest: '3'.repeat(64) };
-  f.coordinator.playtests.prepared(origin, prepared);
-  f.coordinator.playtests.terminal(origin, { ...prepared, reportDigest: '4'.repeat(64),
+  // This manual packet models a controlled fixture job, never native Play proof.
+  const lifetime=deferred();f.controlledJobClose(prepared.jobId,lifetime.resolve);
+  const work=f.coordinator.playtests.registerWork(origin,Object.freeze({kind:'prepare',completion:lifetime.promise,cancel:async()=>{lifetime.resolve();}}));
+  f.coordinator.playtests.prepared(origin, prepared, work);
+  await f.coordinator.playtests.terminal(origin, { ...prepared, reportDigest: '4'.repeat(64),
     review: { runId: randomUUID(), binding: null, scopeDigest: '5'.repeat(64), phase: 'done', outcome: 'failed', code: 'ASSERTION_FAILED', cleanup: 'complete',
       startedAt: 1, deadline: 2, cleanupDeadline: 3, watchdog: { armed: false, fired: false, reason: null }, observations: 1, logs: [], logsTruncated: false,
       evidence: 'fixture', nativeAcceptance: false, canStartAnotherOperation: true, requiresHumanReview: false },
-    scenario: { outcome: 'failed', requiredEvidence: 'complete', inputRelease: 'complete', restoration: 'not_required', subjects: 'current' } });
+    scenario: { outcome: 'failed', requiredEvidence: 'complete', inputRelease: 'complete', restoration: 'not_required', subjects: 'current' } }, work);
+  lifetime.resolve();
   await f.coordinator.drain();
   assert.equal(f.calls.filter(c => c === 'repair').length, 1); assert.ok(!f.calls.includes('revoke'));
   assert.equal(f.coordinator.list()[0]!.repairDispatch, 'acknowledged');

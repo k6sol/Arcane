@@ -17,6 +17,7 @@ import { limits } from '../../packages/codex-client/src/validation.js';
 import { ARCANE_NATIVE_TOOL_NAMES } from '../../packages/protocol/src/arcane-tools.js';
 import type { StudioTestTaskOrigin } from '../../packages/protocol/src/chat-task-playtest.js';
 import { ChatTaskStore } from '../../packages/storage/src/chat-task-store.js';
+import { ChatTaskCoordinator } from '../../apps/daemon/src/chat-task-coordinator.js';
 import { WorkStore } from '../../packages/storage/src/work-store.js';
 
 const THREAD = 'managed.thread:exact', SESSION = 'managed.session:exact';
@@ -179,6 +180,33 @@ test('rotation retires the earlier parent and the new task keeps the exact captu
   assert.equal((await f.propose(original)).data.record.errorCode, 'TASK_SCOPE');
   await f.propose(current); await until(() => f.list(current).proposals[0]?.state === 'proposed');
   assert.equal(workers.calls.length, 1); assert.equal(workers.calls[0]!.accountIdentity, identity); assert.equal(f.clients[1]!.taskAccountIdentity(), identity);
+});
+
+test('service close keeps the original task failure, closes its client and caches falsy outcomes', async t => {
+  for (const first of [new Error('original task cleanup'), null, undefined, false, 0]) {
+    await t.test(String(first), async st => {
+      const f = await fixture(st); await f.ready();
+      const actualTaskClose = ChatTaskCoordinator.prototype.close;
+      const actualClientClose = f.clients[0]!.close.bind(f.clients[0]);
+      const later = new Error('later client cleanup');
+      let taskCloses = 0, clientCloses = 0;
+      st.mock.method(ChatTaskCoordinator.prototype, 'close', async function (this: ChatTaskCoordinator) {
+        taskCloses++; await actualTaskClose.call(this); throw first;
+      });
+      st.mock.method(f.clients[0]!, 'close', async () => {
+        clientCloses++; await actualClientClose(); throw later;
+      });
+      const expectFirst = async (operation: () => Promise<void>) => {
+        let rejected = false, error: unknown;
+        try { await operation(); } catch (value) { rejected = true; error = value; }
+        assert.equal(rejected, true); assert.equal(error, first);
+      };
+      await expectFirst(() => f.closeService());
+      assert.equal(taskCloses, 1); assert.equal(clientCloses, 1);
+      await expectFirst(() => f.service.close());
+      assert.equal(taskCloses, 1); assert.equal(clientCloses, 1);
+    });
+  }
 });
 
 test('service proposal paths left no unhandled rejection', async () => { await delay(20); assert.deepEqual(unhandled, []); });

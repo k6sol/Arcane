@@ -171,7 +171,11 @@ function snapshotFor(live: { connectionId: string; threadId: string; sessionId: 
 async function coordinatorFixture(t: test.TestContext) {
   const f = await fixture(t), coordinator = new ChatTaskCoordinator({ directory: f.directory, projectPath: f.project, proposalBudget: new ChatTaskProposalBudget() });
   coordinator.attachCancellation(Object.freeze({ async cancelExact() {}, async revalidateExact() { return 'current' as const; } }));
-  f.closers.push(() => coordinator.close());
+  let expectedClose:{value:unknown}|null=null;
+  f.closers.push(async()=>{
+    if(expectedClose){const expected=expectedClose.value;await assert.rejects(coordinator.close(),error=>Object.is(error,expected));await assert.rejects(coordinator.close(),error=>Object.is(error,expected));}
+    else await coordinator.close();
+  });
   const signals: AbortSignal[] = [];
   const own = (options: { account?: string | null; getter?: boolean } = {}) => {
     const live = { connectionId: randomUUID(), threadId: 'thread:' + randomUUID(), sessionId: 'session:exact', model: 'fixture', effort: 'low', account: ACCOUNT as string | null };
@@ -183,7 +187,7 @@ async function coordinatorFixture(t: test.TestContext) {
       ...(options.account === null ? {} : { accountIdentity: options.account ?? ACCOUNT }) });
     return { id, live, events, owner };
   };
-  return { ...f, coordinator, own, signals };
+  return { ...f, coordinator, own, signals, expectClose:(value:unknown)=>{expectedClose={value};} };
 }
 type Plan = { factory?: (input: ChatTaskProposalWorkerInput) => Promise<void> | void; propose?: (text: string, input: ChatTaskProposalWorkerInput) => Promise<unknown>; close?: () => Promise<void> };
 function workers(signals: AbortSignal[], plan: Plan = {}) {
@@ -238,8 +242,9 @@ test('factory failures are failed, never replayed; unconfirmed closure keeps the
     const value = await settled(f.coordinator, parent.id, f.coordinator.startProposal({ taskId: parent.id, requestId: randomUUID(), text: 'x', factory: w.factory }).id);
     assert.equal(value.state, 'failed'); assert.equal(value.reason, reason); assert.equal(w.proposed.length, 0);
   }
+  const unconfirmed=coded('PROCESS_EXIT_UNCONFIRMED');f.expectClose(unconfirmed);
   for (let slot = 0; slot < 2; slot++) {
-    const parent = f.own(), w = workers(f.signals, { factory: () => { throw coded('PROCESS_EXIT_UNCONFIRMED'); } });
+    const parent = f.own(), w = workers(f.signals, { factory: () => { throw unconfirmed; } });
     const value = await settled(f.coordinator, parent.id, f.coordinator.startProposal({ taskId: parent.id, requestId: randomUUID(), text: 'x', factory: w.factory }).id);
     assert.equal(value.state, 'failed'); assert.equal(value.reason, 'worker_close_unconfirmed');
   }
@@ -251,12 +256,13 @@ test('factory failures are failed, never replayed; unconfirmed closure keeps the
 
 test('dispatch failures are unknown or output_rejected and duplicates return the original observation', async t => {
   const f = await coordinatorFixture(t);
+  const unconfirmed=coded('PROCESS_EXIT_UNCONFIRMED');f.expectClose(unconfirmed);
   const cases: [Plan, string, string][] = [
     [{ propose: async () => { throw coded('TRANSPORT'); } }, 'unknown', 'dispatch_uncertain'],
     [{ propose: async () => { throw coded('PROPOSAL_OUTPUT'); } }, 'failed', 'output_rejected'],
     [{ propose: async () => ({ threadId: 'proposal.thread', sessionId: null, turnId: 'proposal.turn', text: 'x'.repeat(CHAT_TASK_PROPOSAL_LIMITS.textBytes + 1), status: 'proposed' }) }, 'failed', 'output_rejected'],
     [{ propose: async () => ({ threadId: 'proposal.thread', sessionId: null, turnId: 'proposal.turn', text: 'ok', status: 'proposed', approve: true }) }, 'failed', 'output_rejected'],
-    [{ propose: async () => ({ threadId: 'proposal.thread', sessionId: null, turnId: 'proposal.turn', text: 'ok', status: 'proposed' }), close: async () => { throw coded('PROCESS_EXIT_UNCONFIRMED'); } }, 'unknown', 'worker_close_unconfirmed'],
+    [{ propose: async () => ({ threadId: 'proposal.thread', sessionId: null, turnId: 'proposal.turn', text: 'ok', status: 'proposed' }), close: async () => { throw unconfirmed; } }, 'unknown', 'worker_close_unconfirmed'],
   ];
   for (const [plan, state, reason] of cases) {
     const parent = f.own(), w = workers(f.signals, plan), requestId = randomUUID();
@@ -334,16 +340,18 @@ test('process-wide budget quarantines unconfirmed closures across coordinator an
   const first = await fixture(t), second = await fixture(t), signals: AbortSignal[] = [];
   const old = new ChatTaskCoordinator({ directory: first.directory, projectPath: first.project });
   old.attachCancellation(Object.freeze({ async cancelExact() {}, async revalidateExact() { return 'current' as const; } }));
-  first.closers.push(() => old.close());
+  const originalExit=coded('PROCESS_EXIT_UNCONFIRMED');
+  first.closers.push(async()=>{await assert.rejects(old.close(),error=>error===originalExit);});
   const begin = (coordinator: ChatTaskCoordinator) => { const id = randomUUID(), live = { connectionId: randomUUID(), threadId: 'thread:' + id, sessionId: null, model: 'fixture', effort: 'low' };
     coordinator.begin({ id, actorId: 'actor-' + id, snapshot: snapshotFor(live), allowWorkspaceWrites: false, allowAssets: false, accountIdentity: ACCOUNT,
       owner: { snapshot: () => snapshotFor(live), repair: async () => {}, revoke: () => {}, cancel: async () => {}, accountIdentity: () => ACCOUNT } }); return id; };
-  const failedExit = workers(signals, { factory: () => { throw coded('PROCESS_EXIT_UNCONFIRMED'); } });
+  const failedExit = workers(signals, { factory: () => { throw originalExit; } });
   const quarantined = begin(old), reserved = old.startProposal({ taskId: quarantined, requestId: randomUUID(), text: 'x', factory: failedExit.factory });
   assert.equal((await settled(old, quarantined, reserved.id)).reason, 'worker_close_unconfirmed');
   const held = workers(signals, { propose: async (_text, input) => { await aborted(input.owner.signal); throw coded('PARENT_SCOPE'); }, close: async () => { throw coded('PROCESS_EXIT_UNCONFIRMED'); } });
   const inFlight = begin(old); old.startProposal({ taskId: inFlight, requestId: randomUUID(), text: 'x', factory: held.factory });
-  await delay(10); await old.close(); // Old coordinator closes with an unconfirmed worker exit.
+  await delay(10); await assert.rejects(old.close(),error=>error===originalExit); // Original unconfirmed exit remains the cached failure.
+  await assert.rejects(old.close(),error=>error===originalExit);
   const replacement = new ChatTaskCoordinator({ directory: second.directory, projectPath: second.project });
   replacement.attachCancellation(Object.freeze({ async cancelExact() {}, async revalidateExact() { return 'current' as const; } }));
   second.closers.push(() => replacement.close());
@@ -414,12 +422,15 @@ async function cleanupFaultFixture(t: test.TestContext, faults: CleanupFaults) {
   const coordinator = new ChatTaskCoordinator({ directory: f.directory, projectPath: f.project, proposalBudget: new CleanupBudget() });
   const jobId = randomUUID(), id = randomUUID(), actorId = 'cleanup-' + id;
   const counts = { verification: 0, owner: 0, incorporation: 0, evidence: 0 };
+  let complete!:()=>void,refuse!:(error:unknown)=>void;
+  const lifetime=new Promise<void>((resolve,reject)=>{complete=resolve;refuse=reject;});
   let original: StudioTestTaskOrigin | null = null;
   coordinator.attachCancellation(Object.freeze({
     async cancelExact(job: string, origin: StudioTestTaskOrigin) {
       assert.equal(job, jobId); assert.equal(origin, original);
       counts.verification++; events.push('cancel-exact');
-      if (faults.verification) throw faults.verification.value;
+      if (faults.verification) { refuse(faults.verification.value); throw faults.verification.value; }
+      complete();
     },
     async revalidateExact() { assert.fail('A cancelled task cannot revalidate.'); },
   }));
@@ -427,7 +438,14 @@ async function cleanupFaultFixture(t: test.TestContext, faults: CleanupFaults) {
   const gate = new Promise<void>(resolve => { release = resolve; });
   const begun = new Promise<void>(resolve => { ready = resolve; });
   // Cleanup always releases controlled peers before closing the actual store.
-  f.closers.push(async () => { release(); await coordinator.close(); });
+  f.closers.push(async () => {
+    release();
+    const expected=faults.retire??faults.verification??faults.owner??faults.proposal;
+    if(expected){
+      await assert.rejects(coordinator.close(),error=>Object.is(error,expected.value));
+      await assert.rejects(coordinator.close(),error=>Object.is(error,expected.value));
+    }else await coordinator.close();
+  });
   const live = { connectionId: randomUUID(), threadId: 'cleanup.thread', sessionId: 'cleanup.session', model: 'fixture', effort: 'low' };
   const owner: ChatTaskOwner = {
     snapshot: () => snapshotFor(live), accountIdentity: () => ACCOUNT,
@@ -438,7 +456,9 @@ async function cleanupFaultFixture(t: test.TestContext, faults: CleanupFaults) {
   };
   coordinator.begin({ id, actorId, snapshot: owner.snapshot(), allowWorkspaceWrites: false, allowAssets: false, owner, accountIdentity: ACCOUNT });
   coordinator.dispatched(id, randomUUID()); original = coordinator.playtests.capture(actorId); assert.ok(original);
-  coordinator.playtests.prepared(original, { jobId, displayDigest: sha('display'), scenarioDigest: null, subjectDigest: null });
+  const work=coordinator.playtests.registerWork(original,Object.freeze({kind:'prepare' as const,completion:lifetime,
+    cancel:async()=>{assert.fail('A published job uses only its exact cancellation path.');}}));
+  coordinator.playtests.prepared(original, { jobId, displayDigest: sha('display'), scenarioDigest: null, subjectDigest: null },work);
   const w = workers([], { propose: async () => {
     if (++entered === 2) ready();
     await gate;

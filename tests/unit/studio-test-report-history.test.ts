@@ -13,7 +13,7 @@ import {workflowProjectIdentity} from '../../packages/storage/src/workflow-store
 import { digest,reviewedTestTools,readTestLedger } from '../../packages/studio-test-controller/src/index.js';
 import { buildScenarioProgram } from '../../packages/studio-test-controller/src/scenario-runtime.js';
 import { fixtureScenario,runScenarioFixture,type ScenarioFixtureOptions } from '../../packages/studio-test-controller/testing/scenario-fixture.js';
-import type { StudioTestTaskPort,StudioTestTaskOrigin,StudioTestTaskSettled } from '../../packages/protocol/src/chat-task-playtest.js';
+import type { StudioTestTaskPort,StudioTestTaskOrigin,StudioTestTaskSettled,StudioTestTaskWork,StudioTestTaskWorkRegistration } from '../../packages/protocol/src/chat-task-playtest.js';
 import { makeFixtureDirectory,fixtureTempDirectory } from './windows-fixture-paths.js';
 
 // Actual service/controller, SDK Client/Server, SQLite and safety ledger. The peer and
@@ -39,9 +39,18 @@ async function fixture(t:TestContext,options:{scenario?:boolean;runtime?:Scenari
   const publish=()=>{store.authenticate(pair.sessionId,pair.token);return store.poll(pair.sessionId,{sessionId:pair.sessionId,clientLifetimeId:'report-plugin-life',pluginArtifactHash:ARTIFACT,
     markerName:'ArcaneTestProof_report_history',placeId:0,universeId:0,placeName:NAME,mode:state.mode,playEpoch:state.epoch,continuitySupported:true,connected:true});};
   publish();heartbeat=setInterval(()=>assert.deepEqual(publish(),[]),250);
-  const taskPort:StudioTestTaskPort={capture(actor){assert.equal(actor,ACTOR);return origin;},assert(value){assert.equal(value,origin);},prepared(value,job){assert.equal(value,origin);state.prepared++;
+  const taskController=new AbortController(),workRecords=new WeakMap<StudioTestTaskWork,{registration:StudioTestTaskWorkRegistration;jobId:string|null;finished:boolean}>();
+  const taskPort:StudioTestTaskPort={capture(actor){assert.equal(actor,ACTOR);return origin;},assert(value){assert.equal(value,origin);},
+    registerWork(value,registration){
+      assert.equal(value,origin);
+      if(registration.kind==='revalidate')assert.ok(packets.some(packet=>packet.jobId===registration.jobId&&packet.reportDigest===registration.reportDigest));
+      const work:StudioTestTaskWork=Object.freeze({kind:'studio-test-task-work',signal:taskController.signal,assertActive(){assert.equal(value,origin);assert.equal(taskController.signal.aborted,false);}});
+      const record:{registration:StudioTestTaskWorkRegistration;jobId:string|null;finished:boolean}={registration,jobId:null,finished:false};workRecords.set(work,record);
+      // The actual service supplies this original lifetime, including its SDK cleanup.
+      void registration.completion.then(()=>{record.finished=true;},()=>{record.finished=true;});return work;
+    },prepared(value,job,work){assert.equal(value,origin);const record=workRecords.get(work);assert.ok(record);assert.equal(record.registration.kind,'prepare');assert.equal(record.finished,false);assert.equal(record.jobId,null);work.assertActive();record.jobId=job.jobId;state.prepared++;
       // A fault writer may intentionally refuse storage; actual admitted records precede this callback otherwise.
-      if(!options.writer)assert.equal(reports.get(job.jobId,guard)?.snapshot,'admission');},terminal(value,packet){assert.equal(value,origin);packets.push(packet);}};
+      if(!options.writer)assert.equal(reports.get(job.jobId,guard)?.snapshot,'admission');},terminal(value,packet,work){assert.equal(value,origin);const record=workRecords.get(work);assert.ok(record);assert.equal(record.jobId,packet.jobId);packets.push(packet);}};
   const connect=async():Promise<NativeTestConnection>=>{
     state.connects++;const client=new Client({name:'report-history-fixture-client',version:'fixture-only'}),server=new Server({name:'fixture-not-RobloxStudio',version:'fixture-only'},{capabilities:{tools:{}}});
     const [a,b]=InMemoryTransport.createLinkedPair();
