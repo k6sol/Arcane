@@ -1182,6 +1182,118 @@ class ConversionFidelityPolicyTests(unittest.TestCase):
                 raw = variants[relative][int(crlf)]
                 self.assertEqual(target.read_bytes(), b"X" + raw[1:] if change != "none" else raw)
 
+    def test_windows_export_directory_leaves_unqualified_platform_path_settings_and_call_shapes_unchanged(self):
+        class ForeignSettings(dict): pass
+        class ForeignString(str): pass
+        parent = r"\\?\C:\owned"; output = Path(parent + r"\asset.glb")
+        modes = ("platform", "no-output", "string-output", "ordinary-output", "device-output",
+                 "format", "format-type", "filepath", "filepath-type", "directory", "directory-type",
+                 "missing-field", "settings-subclass", "settings-type", "zero", "one", "three", "keywords", "named")
+        for mode in modes:
+            with self.subTest(mode=mode):
+                context = object(); marker = object(); result = object(); calls = []
+                expected = output; platform = "win32"
+                settings = {"gltf_format": "GLB", "gltf_filepath": str(output), "gltf_filedirectory": parent + "/", "unchanged": marker}
+                if mode == "platform": platform = "linux"
+                elif mode == "no-output": expected = None
+                elif mode == "string-output": expected = str(output)
+                elif mode == "ordinary-output": expected = Path(r"C:\owned\asset.glb")
+                elif mode == "device-output": expected = Path(r"\\.\C:\owned\asset.glb")
+                elif mode == "format": settings["gltf_format"] = "GLTF_SEPARATE"
+                elif mode == "format-type": settings["gltf_format"] = ForeignString("GLB")
+                elif mode == "filepath": settings["gltf_filepath"] = parent + r"\other.glb"
+                elif mode == "filepath-type": settings["gltf_filepath"] = ForeignString(str(output))
+                elif mode == "directory": settings["gltf_filedirectory"] = parent + "\\"
+                elif mode == "directory-type": settings["gltf_filedirectory"] = ForeignString(parent + "/")
+                elif mode == "missing-field": del settings["gltf_filepath"]
+                elif mode == "settings-subclass": settings = ForeignSettings(settings)
+                elif mode == "settings-type": settings = SimpleNamespace(**settings)
+                arguments, keywords = (context, settings), {}
+                if mode == "zero": arguments = ()
+                elif mode == "one": arguments = (context,)
+                elif mode == "three": arguments = (context, settings, marker)
+                elif mode == "keywords": keywords = {"unchanged": marker}
+                elif mode == "named": arguments, keywords = (context,), {"export_settings": settings}
+                before = dict(settings) if isinstance(settings, dict) else vars(settings).copy()
+                def original(*received, **named):
+                    calls.append((received, named)); return result
+                module, function, sites = controlled_observer(original)
+                with patch.object(sys, "platform", platform), patch.object(worker, "_export_observer_bindings", return_value=(module, function, sites)), patch.object(audit, "no_links") as custody:
+                    with worker._observe_export_save(None, expected):
+                        self.assertIs(module.save(*arguments, **keywords), result)
+                    custody.assert_not_called()
+                self.assertIs(module.save, function); self.assertEqual(len(calls), 1)
+                self.assertEqual(len(calls[0][0]), len(arguments))
+                for received, supplied in zip(calls[0][0], arguments): self.assertIs(received, supplied)
+                self.assertEqual(calls[0][1].keys(), keywords.keys())
+                for key in keywords: self.assertIs(calls[0][1][key], keywords[key])
+                self.assertEqual(dict(settings) if isinstance(settings, dict) else vars(settings), before)
+
+    def test_windows_export_directory_changes_only_the_same_settings_field_once_and_restores_every_exit(self):
+        parent = r"\\?\C:\owned"; output = Path(parent + r"\asset.glb")
+        for failure in (None, ValueError("controlled save failure"), KeyboardInterrupt(), SystemExit(9)):
+            with self.subTest(exit=type(failure).__name__):
+                context = object(); marker = object(); result = object(); calls = []
+                old_directory = parent + "/"
+                settings = {"gltf_format": "GLB", "gltf_filepath": str(output), "gltf_filedirectory": old_directory, "unchanged": marker}
+                before = dict(settings)
+                def original(*arguments, **keywords):
+                    calls.append((arguments, keywords))
+                    self.assertEqual(len(arguments), 2); self.assertIs(arguments[0], context); self.assertIs(arguments[1], settings)
+                    self.assertEqual(keywords, {})
+                    self.assertEqual(settings, {**before, "gltf_filedirectory": parent + "\\"})
+                    self.assertIs(settings["unchanged"], marker)
+                    if failure is not None: raise failure
+                    return result
+                module, function, sites = controlled_observer(original)
+                def invoke():
+                    with worker._observe_export_save(None, output):
+                        return module.save(context, settings)
+                with patch.object(sys, "platform", "win32"), patch.object(worker, "_export_observer_bindings", return_value=(module, function, sites)), patch.object(audit, "no_links") as custody:
+                    if failure is None:
+                        self.assertIs(invoke(), result)
+                    else:
+                        with self.assertRaises(type(failure)) as caught: invoke()
+                        self.assertIs(caught.exception, failure)
+                    custody.assert_called_once_with(Path(parent), directory=True)
+                self.assertEqual(len(calls), 1); self.assertIs(module.save, function)
+                self.assertEqual(settings, before); self.assertIs(settings["gltf_filedirectory"], old_directory)
+
+    def test_windows_export_directory_refuses_failed_parent_custody_before_settings_change_or_save(self):
+        parent = r"\\?\C:\owned"; output = Path(parent + r"\asset.glb")
+        settings = {"gltf_format": "GLB", "gltf_filepath": str(output), "gltf_filedirectory": parent + "/"}
+        before = dict(settings); failure = audit.ConversionFailure("IO_LINK"); calls = []
+        def original(*arguments, **keywords): calls.append((arguments, keywords))
+        module, function, sites = controlled_observer(original)
+        def refuse_custody(path, *, directory):
+            self.assertEqual(path, Path(parent)); self.assertIs(directory, True)
+            self.assertEqual(settings, before); self.assertEqual(calls, [])
+            raise failure
+        with patch.object(sys, "platform", "win32"), patch.object(worker, "_export_observer_bindings", return_value=(module, function, sites)), patch.object(audit, "no_links", side_effect=refuse_custody) as custody:
+            with self.assertRaises(audit.ConversionFailure) as caught:
+                with worker._observe_export_save(None, output): module.save(object(), settings)
+            self.assertIs(caught.exception, failure)
+            custody.assert_called_once_with(Path(parent), directory=True)
+        self.assertEqual(calls, []); self.assertEqual(settings, before); self.assertIs(module.save, function)
+
+    def test_windows_export_directory_does_not_install_a_shim_when_source_recognition_is_unavailable(self):
+        parent = r"\\?\C:\owned"; output = Path(parent + r"\asset.glb")
+        for setup_failure in (None, ValueError("controlled unavailable recognition")):
+            with self.subTest(setup=type(setup_failure).__name__):
+                context = object(); result = object(); calls = []
+                settings = {"gltf_format": "GLB", "gltf_filepath": str(output), "gltf_filedirectory": parent + "/"}
+                before = dict(settings)
+                def original(*arguments, **keywords):
+                    self.assertEqual(settings, before); calls.append((arguments, keywords)); return result
+                module, function, _sites = controlled_observer(original)
+                with patch.object(sys, "platform", "win32"), patch.object(worker, "_export_observer_bindings", return_value=None, side_effect=setup_failure), patch.object(audit, "no_links") as custody:
+                    with worker._observe_export_save(None, output) as observation:
+                        self.assertFalse(observation["available"]); self.assertIs(module.save, function)
+                        self.assertIs(module.save(context, settings), result)
+                    custody.assert_not_called()
+                self.assertEqual(len(calls), 1); self.assertIs(calls[0][0][0], context); self.assertIs(calls[0][0][1], settings)
+                self.assertEqual(calls[0][1], {}); self.assertEqual(settings, before); self.assertIs(module.save, function)
+
     def test_collision_position_targets_use_exact_finite_values_without_distance_or_centroid(self):
         vertices = [CollisionVertex(value) for value in ((0, 0, 0), (-0.0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1), (2**-30, 0, 0))]
         targets, unique = worker._collision_position_targets(vertices)

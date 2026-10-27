@@ -12,6 +12,7 @@ import contextlib
 import importlib
 import json
 import math
+import ntpath
 import os
 from pathlib import Path
 from types import FunctionType, ModuleType
@@ -232,7 +233,7 @@ def _export_observer_bindings(bpy, recognition=None):
 
 
 @contextlib.contextmanager
-def _observe_export_save(bpy):
+def _observe_export_save(bpy, expected_output=None):
     observation = {"available": False, "entries": 0, "returned": False, "failure": None}
     recognition = {"reason": None}
     try:
@@ -246,10 +247,27 @@ def _observe_export_save(bpy):
         yield observation
         return
     module, original, sites = bindings
+    expected_filepath = str(expected_output) if isinstance(expected_output, Path) else None
 
     def observed(*arguments, **keywords):
         observation["entries"] = min(2, observation["entries"] + 1)
+        changed_settings = None
+        previous_directory = None
         try:
+            # The pinned operator derives this field with a literal '/'. The
+            # extended Windows namespace requires a backslash separator.
+            if (sys.platform == "win32" and expected_filepath is not None and
+                    expected_filepath.startswith("\\\\?\\") and len(arguments) == 2 and not keywords and
+                    type(arguments[1]) is dict):
+                settings = arguments[1]
+                parent = ntpath.dirname(expected_filepath)
+                previous_directory = settings.get("gltf_filedirectory")
+                if (type(settings.get("gltf_format")) is str and settings["gltf_format"] == "GLB" and
+                        type(settings.get("gltf_filepath")) is str and settings["gltf_filepath"] == expected_filepath and
+                        type(previous_directory) is str and previous_directory == parent + "/"):
+                    audit.no_links(Path(parent), directory=True)
+                    changed_settings = settings
+                    settings["gltf_filedirectory"] = parent + "\\"
             result = original(*arguments, **keywords)
         except Exception as failure:
             try:
@@ -258,6 +276,9 @@ def _observe_export_save(bpy):
             except Exception:
                 observation["available"] = False
             raise
+        finally:
+            if changed_settings is not None:
+                changed_settings["gltf_filedirectory"] = previous_directory
         observation["returned"] = True
         return result
 
@@ -324,7 +345,7 @@ def export_model(bpy, directory, filename, objects, materials):
     path = directory / filename
     audit.require(not path.exists() and not path.is_symlink(), "IO_EXISTS")
     select_objects(bpy, objects)
-    with _observe_export_save(bpy) as observation:
+    with _observe_export_save(bpy, path) as observation:
         operate(bpy.ops.export_scene.gltf, {"filepath": str(path), "check_existing": False,
         "export_format": "GLB", "use_selection": True, "export_extras": True,
         "export_yup": True, "export_apply": False, "export_texcoords": True,
