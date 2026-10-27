@@ -346,6 +346,11 @@ do
 		check(body.apiKey == key and body.code == nil and body.url == nil, "key-only wire contract")
 		check(body.identity.clientSessionId == client.clientSessionId and body.protocolVersion == 1, "connect identity and protocol")
 		check(#body.capabilities == #V.READ_METHODS + #V.WRITE_METHODS + #V.ASSET_STAGE_METHODS + #V.FEATURE_CAPABILITIES, "explicit method and feature capabilities")
+		local advertised: {[string]: boolean} = {}
+		for _, capability in ipairs(body.capabilities) do
+			check(not advertised[capability], "each fixed capability is advertised exactly once")
+			advertised[capability] = true
+		end
 		check(table.find(body.capabilities, "scene.effects") ~= nil, "effects feature capability advertised")
 		for _, method in ipairs(V.ASSET_STAGE_METHODS) do
 			check(table.find(body.capabilities, method) ~= nil and not table.find(V.READ_METHODS, method) and not table.find(V.WRITE_METHODS, method), "host-only staging capability stays separate")
@@ -354,6 +359,7 @@ do
 		return response({sessionId = "session-test", token = "plugin-memory-token", protocolVersion = 1, allowedRoots = {"Workspace"}, allowWrites = false})
 	end
 	client:tick()
+	check(client.pair ~= nil, "the exact fixed capability exchange must complete before reading its bearer")
 	check(client.pair.token == "plugin-memory-token" and client.pair.apiKey == nil and not client.pair.allowWrites, "retains only session bearer and returned read grant")
 	for _, status in ipairs(statuses) do
 		check(not string.find(V.encode(status, http), key, 1, true), "status never exposes API key")

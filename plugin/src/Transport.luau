@@ -399,7 +399,6 @@ function Transport:exchange(desired: any): ()
 	local capabilities = table.clone(V.READ_METHODS)
 	for _, method in ipairs(V.WRITE_METHODS) do table.insert(capabilities, method) end
 	for _, method in ipairs(V.ASSET_STAGE_METHODS or {}) do table.insert(capabilities, method) end
-	for _, method in ipairs(V.ASSET_REVISION_METHODS or {}) do table.insert(capabilities, method) end
 	for _, feature in ipairs(V.FEATURE_CAPABILITIES or {}) do table.insert(capabilities, feature) end
 	-- Keep this mesh only when this Studio exposes the plugin mesh upload API; the probe fails closed.
 	if Operations.meshKeepSupported and Operations.meshKeepSupported(self.gameModel) then
@@ -514,7 +513,6 @@ function Transport:envelope(command: any): ()
 	if command.allowWrites ~= pair.allowWrites then V.fail("GRANT", "Command write grant differs from pairing.") end
 	if not table.find(V.READ_METHODS, command.method) and not table.find(V.WRITE_METHODS, command.method)
 		and not table.find(V.ASSET_STAGE_METHODS or {}, command.method)
-		and not table.find(V.ASSET_REVISION_METHODS or {}, command.method)
 		and not table.find(V.MESH_KEEP_METHODS or {}, command.method) then V.fail("METHOD", "Unsupported Studio method.") end
 	V.string(command.expiresAt, "command expiry", 64)
 	V.object(command.args, "arguments")
@@ -538,7 +536,7 @@ function Transport:guard(command: any, pair: any): ()
 	if not string.match(command.expiresAt, "^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d.*Z$") then V.fail("LEASE", "Expiry must be a UTC timestamp.") end
 	local ok, expires = pcall(function() return DateTime.fromIsoDate(command.expiresAt) end)
 	if not ok or not expires or expires.UnixTimestampMillis <= DateTime.now().UnixTimestampMillis then V.fail("LEASE", "Command lease has expired.") end
-	local staging = table.find(V.ASSET_STAGE_METHODS or {}, command.method) ~= nil or table.find(V.ASSET_REVISION_METHODS or {},command.method)~=nil
+	local staging = table.find(V.ASSET_STAGE_METHODS or {}, command.method) ~= nil
 	local observing = command.method=="scene.observe_import"
 	if not (staging or observing) and not self:isEdit() then V.fail("PLAY", "Commands are only available in Studio edit mode.") end
 	if (table.find(V.WRITE_METHODS, command.method) or staging or table.find(V.MESH_KEEP_METHODS or {}, command.method)) and not pair.allowWrites then V.fail("GRANT", "Session is read only.") end

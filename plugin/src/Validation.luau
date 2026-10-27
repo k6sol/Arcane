@@ -16,8 +16,7 @@ Validation.WRITE_METHODS = table.freeze({"scene.create", "scene.update", "script
 Validation.REMOVE_LIMITS = table.freeze({targets = 64, topLevel = 10000, descendants = 100000})
 Validation.BUILD_LIMITS = table.freeze({items = 2000, prototypes = 32, prototypeParts = 64, instances = 4000, keys = 32})
 Validation.BUILD_PART_CLASSES = table.freeze({"Part", "WedgePart", "CornerWedgePart", "SpawnLocation"})
-Validation.ASSET_STAGE_METHODS = table.freeze({"asset.stage_packet", "asset.reconstruct"})
-Validation.ASSET_REVISION_METHODS = table.freeze({"asset.apply_revision"})
+Validation.ASSET_STAGE_METHODS = table.freeze({"asset.stage_packet", "asset.reconstruct", "asset.apply_revision"})
 -- Keep this mesh: host-only upload + swap; advertised only when the Studio upload API probe passes (AssetPlacement.keepSupported).
 Validation.MESH_KEEP_METHODS = table.freeze({"asset.keep_mesh"})
 -- Non-method feature capabilities (effects classes, environment extras, inspect bounds; GUI classes and ScreenGui builds;

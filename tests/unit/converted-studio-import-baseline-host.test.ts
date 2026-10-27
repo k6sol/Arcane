@@ -196,7 +196,7 @@ async function baselineFixture(t:test.TestContext,collision=false){
   function nextActor(){incarnation.ended(operation);operation='operation-'+(++counter);incarnation.dispatched({...binding,operationId:operation});actor=registry.capture(incarnation.credential(),'mutate');return actor;}
   async function initial(){await controller.stage(JOB,actor);await controller.reconstruct(JOB,nextActor());
     const command=studio.enqueue({sessionId:pair.sessionId,requestId:'observed_initial_place',method:'scene.place_asset',args:{watch:'editable-'+bundles.get(JOB)!.transfer.digest,parent:context().parentRef,name:'Converted model',position:[0,0,0],yaw:0,ground:true,anchor:true,allowScripts:false}});
-    while(studio.command(command.id).state!=='succeeded')await studio.waitForCommandResult(command.id,100);
+    while(studio.command(command.id).state!=='succeeded'){t.signal.throwIfAborted();await studio.waitForCommandResult(command.id,25);}
   }
   return{root,projectPath,work,registry,incarnation,studio,host,ledger,controller,pair,proof,conversation,delivered,bundles,modelRef,context,initial,nextActor,get actor(){return actor;},
     get scope(){return nativeAssetActorScope(actor);},get operation(){return operation;},observe:(callback:(()=>boolean)|null)=>{onObserve=callback;},apply:(callback:(()=>boolean)|null)=>{onApply=callback;},

@@ -270,7 +270,21 @@ test('packaged source confines asset APIs to reviewed bindings and excludes arbi
     assert.ok(operations.indexOf(marker)>mStart&&operations.indexOf(marker)<mEnd);
     confinedOperations=confinedOperations.replace(marker,'');
   }
-  assert.doesNotMatch(files.filter(file=>file.filename!=='TestProof.luau').map(file=>file.filename==='AssetPlacement.luau'?file.source.replace(preserveMetadata,''):file.filename==='Operations.luau'?confinedOperations:file.source).join('\n'), /(?:SetAttribute|AddTag)\s*\(/);
+  // Revision commits set only fixed semantic markers; rollback restores the
+  // exact attributes captured from the original guarded Instances.
+  assert.match(placement,/local NODE_ATTRIBUTE = "ArcaneConvertedNodeKey"/);
+  assert.match(placement,/local OBJECT_ATTRIBUTE = "ArcaneConvertedObjectId"/);
+  const revisionMarkers=['part:SetAttribute(OBJECT_ATTRIBUTE,id)',
+    'item:SetAttribute(NODE_ATTRIBUTE,row.node.nodeKey)',
+    'row.item:SetAttribute(key,nil)', 'row.item:SetAttribute(key,value)'];
+  let confinedPlacement=placement.replace(preserveMetadata,'');
+  for(const marker of revisionMarkers){
+    assert.equal(placement.split(marker).length,2);
+    assert.ok(placement.indexOf(marker)>applyStart&&placement.indexOf(marker)<applyEnd);
+    confinedPlacement=confinedPlacement.replace(marker,'');
+  }
+  assert.match(placement.slice(applyStart,applyEnd),/for key in pairs\(row\.item:GetAttributes\(\)\) do if row\.attributes\[key\]==nil then row\.item:SetAttribute\(key,nil\) end end;for key,value in pairs\(row\.attributes\) do row\.item:SetAttribute\(key,value\) end/);
+  assert.doesNotMatch(files.filter(file=>file.filename!=='TestProof.luau').map(file=>file.filename==='AssetPlacement.luau'?confinedPlacement:file.filename==='Operations.luau'?confinedOperations:file.source).join('\n'), /(?:SetAttribute|AddTag)\s*\(/);
   assert.doesNotMatch(byFile['TestProof.luau'], /AddTag|SetAttribute\([^\n]*(?:apiKey|token|password|credential)/i);
   assert.doesNotMatch(allSource, /\.Source\s*=/);
   assert.doesNotMatch(allSource, /require\(\s*(?:\d|args\.|command\.)/);
