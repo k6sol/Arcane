@@ -100,15 +100,15 @@ test('original readiness refusal is classified uncertain without synthetic obser
 
 test('original scope loss rejects accounting while its held factory and positive late close remain joined',async t=>{
  const f=fixture(t,undefined,true),factoryRelease=deferred<void>(),closeEntered=deferred<void>(),closeRelease=deferred<void>();f.expectRefusal();
- let join:Promise<void>|undefined,closes=0,scopeFailure:unknown;
- const request=f.custody.connect('playtest-prepare','fixture',async()=>{await factoryRelease.promise;return raw(async()=>{closes++;closeEntered.resolve();await closeRelease.promise;});},()=>{},value=>{join=value;});void request.catch(()=>{});
- assert.ok(join);renameSync(f.projectPath,join(f.root,'original-project'));mkdirSync(f.projectPath);
+ let custodyJoin:Promise<void>|undefined,closes=0,scopeFailure:unknown;
+ const request=f.custody.connect('playtest-prepare','fixture',async()=>{await factoryRelease.promise;return raw(async()=>{closes++;closeEntered.resolve();await closeRelease.promise;});},()=>{},value=>{custodyJoin=value;});void request.catch(()=>{});
+ assert.ok(custodyJoin);renameSync(f.projectPath,join(f.root,'original-project'));mkdirSync(f.projectPath);
  try{f.custody.assertReady();assert.fail('Actual original project replacement must refuse');}catch(error){scopeFailure=error;}
  assert.ok(scopeFailure instanceof Error);assert.equal('code'in scopeFailure&&scopeFailure.code,'SDK_CUSTODY_UNCONFIRMED');
- await assert.rejects(join,error=>error===scopeFailure);assert.equal(f.rows()[0]?.state,'quarantined');
+ await assert.rejects(custodyJoin,error=>error===scopeFailure);assert.equal(f.rows()[0]?.state,'quarantined');
  const payload=f.rows()[0]?.payload;assert.equal(typeof payload,'string');assert.equal(JSON.parse(String(payload)).reason,'scope-lost');await pending(request);
  factoryRelease.resolve();await closeEntered.promise;await pending(request);assert.equal(closes,1);
- closeRelease.resolve();await assert.rejects(request,{code:'SDK_CUSTODY_UNCONFIRMED'});await assert.rejects(join,error=>error===scopeFailure);
+ closeRelease.resolve();await assert.rejects(request,{code:'SDK_CUSTODY_UNCONFIRMED'});await assert.rejects(custodyJoin,error=>error===scopeFailure);
  assert.equal(f.rows()[0]?.state,'settled','original positive fixture close may settle its ticket without clearing sticky scope failure');
  assert.throws(()=>f.custody.assertReady(),{code:'SDK_CUSTODY_UNCONFIRMED'});
 });

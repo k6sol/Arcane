@@ -51,7 +51,7 @@ export function createStudioTestNativeCustody(port:StudioNativeCustodyPort|undef
   const entries=new Set<Entry>(),connections=new WeakMap<NativeTestConnection,Entry>();
   const preEntryFailures=new WeakMap<object,'not-admitted'|'ownership-uncertain'>();
   const classify=(error:unknown,kind:'not-admitted'|'ownership-uncertain')=>{if(error!==null&&(typeof error==='object'||typeof error==='function'))preEntryFailures.set(error,kind);return error;};
-  const refuseBeforeEntry=():never=>{throw classify(new ArcaneError('SDK_CUSTODY_UNCONFIRMED',SDK_CUSTODY_UNCONFIRMED_MESSAGE),'ownership-uncertain');};
+  function refuseBeforeEntry():never{throw classify(new ArcaneError('SDK_CUSTODY_UNCONFIRMED',SDK_CUSTODY_UNCONFIRMED_MESSAGE),'ownership-uncertain');}
   let epoch=0,retired=false,fenced=false,opening=0,closing=0,shutdown:Promise<void>|null=null;
   const ready=()=>{
     if(retired||fenced||!port)nativeCustodyRefusal();
