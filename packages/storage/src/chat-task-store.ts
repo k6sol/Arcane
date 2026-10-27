@@ -174,12 +174,12 @@ export class ChatTaskStore {
       if(version!==0&&version!==1&&version!==2&&version!==3&&version!==VERSION)throw new Error('Invalid task journal version.');
       if(this.#db.prepare('PRAGMA quick_check').get()?.quick_check!=='ok')throw new Error('Task journal integrity failed.');
       if(version===0){
-        if(this.#db.prepare("SELECT name FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' LIMIT 1").get()||this.#db.prepare('PRAGMA application_id').get()?.application_id!==0)throw new Error('Unversioned task journal is not empty.');
+        if(this.#db.prepare("SELECT name FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' LIMIT 1").get()||this.#db.prepare('PRAGMA application_id').get()?.application_id!==0)throw new Error('Unversioned task journal is not empty.');
         this.#db.exec('BEGIN IMMEDIATE');try{for(const ddl of TABLES)this.#db.exec(ddl);this.#db.prepare('INSERT INTO chat_task_meta VALUES(1,?,?)').run(this.projectId,this.projectPath);this.#db.exec(`PRAGMA application_id=${APP_ID};PRAGMA user_version=${VERSION};COMMIT;`);}catch(error){this.#db.exec('ROLLBACK');throw error;}
       }
       // Validate the EXACT existing schema, application and project before any ownership claim or migration.
       const schemaFor=(expected:readonly string[])=>{
-        const schema=this.#db.prepare("SELECT sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'").all();
+        const schema=this.#db.prepare("SELECT sql FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*'").all();
         if(this.#db.prepare('PRAGMA application_id').get()?.application_id!==APP_ID||schema.length!==expected.length||schema.some(row=>!expected.includes(String(row.sql))))throw new Error('Task journal schema or project changed.');
         const meta=this.#db.prepare('SELECT project_id,project_path FROM chat_task_meta WHERE id=1').get();
         if(meta?.project_id!==this.projectId||meta.project_path!==this.projectPath)throw new Error('Task journal schema or project changed.');
