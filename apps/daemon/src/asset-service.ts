@@ -32,7 +32,7 @@ import { decodeAssetJobError } from '../../../packages/asset-pipeline/src/failur
 import type { AssetJobError } from '../../../packages/asset-pipeline/src/types.js';
 import type {ArchiveHostFacts} from '../../../packages/asset-pipeline/src/archive-ledger.js';
 import {assetFailureEvent,type FailureReporter} from './diagnostic-reporter.js';
-import {assetReviewCanonical,assetReviewFailure,modelReviewSubject,snapshotAssetReviewScope,snapshotAssetReviewReference,
+import {assetReviewCanonical,assetReviewFailure,modelReviewSubject,convertedModelReviewSubject,snapshotAssetReviewScope,snapshotAssetReviewReference,
   type AssetReviewGate,type AssetReviewImportGuard,type AssetReviewReference,type AssetReviewScope,type AssetReviewSubject} from './asset-review.js';
 
 
@@ -651,13 +651,33 @@ export async function createAssetService(options: AssetServiceOptions) {
     const requested=id(jobId),scope=reviewScope(inputScope,requested,guard),end=Date.now()+ARTIFACT_DOWNLOAD_TIMEOUT_MS;
     const binding=reviewAssociations!.captureBinding('asset-job',requested);
     if(!binding||binding.binding.projectId!==scope.projectId||!isDeepStrictEqual(binding.binding.conversation,scope.conversation))assetReviewFailure('SCOPE');
-    const currentBinding=()=>{ensureOpen();try{binding.assertCurrent();}catch{assetReviewFailure('SCOPE');}};
+    const lineageBindings=[binding];
+    const currentBinding=()=>{ensureOpen();try{for(const witness of lineageBindings)witness.assertCurrent();}catch{assetReviewFailure('SCOPE');}};
     const check=()=>{guard();currentBinding();if(Date.now()>=end)assetReviewFailure('TIMEOUT');};
     const entry=await loadEntry(requested);check();
-    if(entry.job.kind==='converted-glb'||entry.job.state!=='succeeded'||!entry.job.manifestAvailable||active.has(requested)||isAdoptedGlbRequest(entry.job.request))assetReviewFailure('JOB_STATE');
+    if(entry.job.state!=='succeeded'||!entry.job.manifestAvailable||active.has(requested)||isAdoptedGlbRequest(entry.job.request))assetReviewFailure('JOB_STATE');
+    const converted=entry.job.kind==='converted-glb';
+    if(entry.job.kind==='converted-glb'){
+      if(!entry.job.request)assetReviewFailure('JOB_STATE');
+      // Capture the original parent witness before asynchronous artifact verification.
+      // A later binding with identical fields cannot revive this review opening.
+      const associations=importHost?.workAssociations;
+      const parent=associations?.captureBinding('asset-job',entry.job.request.parentJobId);
+      if(!associations||associations.projectPath!==projectPath||associations.projectId!==scope.projectId||!parent||
+          parent.binding.projectId!==scope.projectId||!isDeepStrictEqual(parent.binding.conversation,scope.conversation))assetReviewFailure('SCOPE');
+      lineageBindings.push(parent);currentBinding();
+    }
+    const verifyJournal=async()=>{
+      if(entry.job.kind!=='converted-glb')return;
+      const {journal,metadata}=await readConversionJournal(entry.directory);check();
+      if(journal.state!=='succeeded'||!convertedWorkersClosed(journal)||metadata.jobId!==requested||metadata.form!==entry.job.form||
+          !isDeepStrictEqual(metadata.request,entry.job.request)||!isDeepStrictEqual(metadata.creation,entry.job.creation??null))assetReviewFailure('JOB_STATE');
+    };
+    if(converted){await verifyJournal();check();}
     const first=await verifiedSavedManifest(entry.directory,requested,entry.job);check();
-    if(isAdoptedGlbManifest(first)||convertedManifest(first))assetReviewFailure('JOB_STATE');
-    const paths=[join(entry.directory,'manifest.json'),...first.artifacts.map(a=>artifactPath(entry.directory,a.path))];
+    if(isAdoptedGlbManifest(first)||convertedManifest(first)!==converted)assetReviewFailure('JOB_STATE');
+    const paths=[join(entry.directory,'manifest.json'),...first.artifacts.map(a=>artifactPath(entry.directory,a.path)),
+      ...(converted?[join(entry.directory,'job.json')]:[])];
     const fingerprint=(path:string):string=>{
       try{
         const stat=lstatSync(path,{bigint:true}),actual=process.platform==='win32'?realpathSync.native(path):realpathSync(path),same=process.platform==='win32'?actual.toLowerCase()===path.toLowerCase():actual===path;
@@ -671,12 +691,14 @@ export async function createAssetService(options: AssetServiceOptions) {
     // Verify once more INSIDE the captured metadata window. A source replaced
     // between the first proof and capture cannot become a valid new witness.
     const manifest=await verifiedSavedManifest(entry.directory,requested,entry.job);check();unchanged();
-    if(isAdoptedGlbManifest(manifest)||convertedManifest(manifest)||assetReviewCanonical(manifest)!==assetReviewCanonical(first))assetReviewFailure('SOURCE');
+    if(isAdoptedGlbManifest(manifest)||convertedManifest(manifest)!==converted||assetReviewCanonical(manifest)!==assetReviewCanonical(first))assetReviewFailure('SOURCE');
+    if(converted){await verifyJournal();check();unchanged();}
     const exports=new Map<'asset.glb'|'collision.glb',Buffer>();
-    for(const name of ['asset.glb','collision.glb'] as const){
+    const exportPaths=convertedManifest(manifest)&&manifest.request.collision==='none'?['asset.glb'] as const:['asset.glb','collision.glb'] as const;
+    for(const name of exportPaths){
       const bytes=await readRegularFile(artifactPath(entry.directory,name),STUDIO_IMPORT_LIMITS.fileBytes);check();unchanged();exports.set(name,bytes);
     }
-    const subject=modelReviewSubject(scope,manifest,exports);unchanged();
+    const subject=convertedManifest(manifest)?convertedModelReviewSubject(scope,manifest,exports):modelReviewSubject(scope,manifest,exports);unchanged();
     return Object.freeze({subject,assertCurrent:unchanged,assertSourceCurrent:sourceCurrent});
   }
   async function reviewImport(jobId:unknown,actor:NativeAssetActor,expected:AssetReviewReference|undefined,guard:()=>void):Promise<AssetReviewImportGuard> {

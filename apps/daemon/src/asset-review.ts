@@ -2,14 +2,23 @@ import {createHash} from 'node:crypto';
 import {types} from 'node:util';
 import {ArcaneError} from '../../../packages/protocol/src/providers.js';
 import type {NativeConversation} from '../../../packages/storage/src/conversation-work-store.js';
+import {parseConvertedGlbManifest,type ConvertedGlbManifest} from '../../../packages/asset-pipeline/src/converted-glb-manifest.js';
 import type {AssetManifest} from '../../../packages/asset-pipeline/src/types.js';
 
 /** Model bytes only. This never grants a Studio target, native actor or write permission. */
 export interface AssetReviewScope {readonly projectId:string;readonly conversation:Readonly<NativeConversation>}
-export interface AssetReviewSubject extends AssetReviewScope {
+export interface GeneratedAssetReviewSubject extends AssetReviewScope {
   readonly schemaVersion:1;readonly jobId:string;readonly manifestSha256:string;readonly sourceRequestSha256:string;
   readonly artifacts:readonly {readonly path:'asset.glb'|'collision.glb';readonly sha256:string;readonly bytes:number}[];
 }
+export interface ConvertedAssetReviewSubject extends AssetReviewScope {
+  readonly schemaVersion:2;readonly kind:'converted-glb';readonly jobId:string;readonly manifestSha256:string;
+  readonly requestSha256:string;readonly parentJobId:string;readonly parentManifestSha256:string;
+  readonly sourceSha256:string;readonly sourceMapSha256:string;readonly auditSha256:string;
+  readonly collision:'none'|'convex-hull';
+  readonly artifacts:readonly {readonly path:'asset.glb'|'collision.glb';readonly sha256:string;readonly bytes:number}[];
+}
+export type AssetReviewSubject=GeneratedAssetReviewSubject|ConvertedAssetReviewSubject;
 export interface AssetReviewReference {readonly reviewId:string;readonly subjectDigest:string;readonly revision:number}
 export interface AssetReviewView {
   readonly reviewId:string;readonly subject:AssetReviewSubject;readonly subjectDigest:string;
@@ -64,7 +73,16 @@ export function snapshotAssetReviewScope(value:unknown):AssetReviewScope {
     ||c.sessionId!==null&&(typeof c.sessionId!=='string'||!ID.test(c.sessionId)))assetReviewFailure('INPUT');
   return assetReviewFreeze({projectId:assetReviewHash(a.projectId),conversation:{provider:c.provider,threadId:c.threadId,sessionId:c.sessionId}} as AssetReviewScope);
 }
+export function snapshotAssetReviewSubject(value:GeneratedAssetReviewSubject):GeneratedAssetReviewSubject;
+export function snapshotAssetReviewSubject(value:ConvertedAssetReviewSubject):ConvertedAssetReviewSubject;
+export function snapshotAssetReviewSubject(value:unknown):AssetReviewSubject;
 export function snapshotAssetReviewSubject(value:unknown):AssetReviewSubject {
+  // Inspect the discriminant as a data descriptor before the version-specific reader.
+  if(!value||typeof value!=='object'||types.isProxy(value))assetReviewFailure('INPUT');
+  const version=Object.getOwnPropertyDescriptor(value,'schemaVersion');
+  if(!version||!Object.hasOwn(version,'value')||!version.enumerable)assetReviewFailure('INPUT');
+  if(version.value===2)return snapshotConvertedReviewSubject(value);
+
   const a=assetReviewFields(value,['schemaVersion','projectId','conversation','jobId','manifestSha256','sourceRequestSha256','artifacts']);
   if(a.schemaVersion!==1||!Array.isArray(a.artifacts)||types.isProxy(a.artifacts)||a.artifacts.length!==2
     ||Object.getPrototypeOf(a.artifacts)!==Array.prototype||Reflect.ownKeys(a.artifacts).length!==3)assetReviewFailure('INPUT');
@@ -89,7 +107,7 @@ export function snapshotAssetReviewDecision(value:unknown):AssetReviewDecisionIn
   return Object.freeze({reviewId:assetReviewUuid(a.reviewId),decision:a.decision,idempotencyKey:assetReviewUuid(a.idempotencyKey)});
 }
 /** Called only with a completely verified service manifest and exact owned export bytes. */
-export function modelReviewSubject(scope:AssetReviewScope,manifest:AssetManifest,exports:ReadonlyMap<'asset.glb'|'collision.glb',Buffer>):AssetReviewSubject {
+export function modelReviewSubject(scope:AssetReviewScope,manifest:AssetManifest,exports:ReadonlyMap<'asset.glb'|'collision.glb',Buffer>):GeneratedAssetReviewSubject {
   const canonicalScope=snapshotAssetReviewScope(scope);
   const artifacts=(['asset.glb','collision.glb'] as const).map(path=>{
     const file=manifest.artifacts.find(a=>a.path===path&&a.role==='export'),bytes=exports.get(path);
@@ -98,4 +116,51 @@ export function modelReviewSubject(scope:AssetReviewScope,manifest:AssetManifest
   });
   return snapshotAssetReviewSubject({schemaVersion:1,...canonicalScope,jobId:manifest.jobId,
     manifestSha256:assetReviewDigest(manifest),sourceRequestSha256:manifest.sourceRequestSha256,artifacts});
+}
+
+function snapshotConvertedReviewSubject(value:unknown):ConvertedAssetReviewSubject {
+  const a=assetReviewFields(value,['schemaVersion','kind','projectId','conversation','jobId','manifestSha256','requestSha256','parentJobId','parentManifestSha256','sourceSha256','sourceMapSha256','auditSha256','collision','artifacts']);
+  if(a.schemaVersion!==2||a.kind!=='converted-glb'||a.collision!=='none'&&a.collision!=='convex-hull')assetReviewFailure('INPUT');
+  const paths=a.collision==='none'?['asset.glb'] as const:['asset.glb','collision.glb'] as const;
+  if(!Array.isArray(a.artifacts)||types.isProxy(a.artifacts)||Object.getPrototypeOf(a.artifacts)!==Array.prototype||a.artifacts.length!==paths.length||Reflect.ownKeys(a.artifacts).length!==paths.length+1)assetReviewFailure('INPUT');
+  const scope=snapshotAssetReviewScope({projectId:a.projectId,conversation:a.conversation});
+  const artifacts=paths.map((path,index)=>{
+    const d=Object.getOwnPropertyDescriptor(a.artifacts,index);
+    if(!d||!Object.hasOwn(d,'value')||!d.enumerable)assetReviewFailure('INPUT');
+    const row=assetReviewFields(d.value,['path','sha256','bytes']);
+    if(row.path!==path||typeof row.bytes!=='number'||!Number.isSafeInteger(row.bytes)||row.bytes<20||row.bytes>20_000_000)assetReviewFailure('INPUT');
+    return {path,sha256:assetReviewHash(row.sha256),bytes:row.bytes};
+  });
+  const jobId=assetReviewUuid(a.jobId),parentJobId=assetReviewUuid(a.parentJobId);
+  if(jobId===parentJobId)assetReviewFailure('INPUT');
+  return assetReviewFreeze({schemaVersion:2,kind:'converted-glb',...scope,jobId,parentJobId,
+    manifestSha256:assetReviewHash(a.manifestSha256),requestSha256:assetReviewHash(a.requestSha256),parentManifestSha256:assetReviewHash(a.parentManifestSha256),
+    sourceSha256:assetReviewHash(a.sourceSha256),sourceMapSha256:assetReviewHash(a.sourceMapSha256),auditSha256:assetReviewHash(a.auditSha256),collision:a.collision,artifacts});
+}
+/** Subject data only. The service must separately verify all retained files,
+ * owned worker closure and current conversation witnesses before calling. */
+export function convertedModelReviewSubject(scope:AssetReviewScope,serviceVerifiedConvertedManifest:ConvertedGlbManifest,exportsMap:ReadonlyMap<'asset.glb'|'collision.glb',Buffer>):ConvertedAssetReviewSubject {
+  const canonicalScope=snapshotAssetReviewScope(scope),manifest=parseConvertedGlbManifest(serviceVerifiedConvertedManifest);
+  if(types.isProxy(exportsMap)||Object.getPrototypeOf(exportsMap)!==Map.prototype)assetReviewFailure('SOURCE');
+  const paths=manifest.request.collision==='none'?['asset.glb'] as const:['asset.glb','collision.glb'] as const;
+  const entries=[...Map.prototype.entries.call(exportsMap) as IterableIterator<[unknown,unknown]>];
+  if(entries.length!==paths.length||entries.some(([path])=>!paths.some(expected=>expected===path)))assetReviewFailure('SOURCE');
+  const artifacts=paths.map(path=>{
+    const declared=manifest.artifacts.find(a=>a.path===path&&a.role==='export'),raw=Map.prototype.get.call(exportsMap,path) as unknown;
+    if(!declared||types.isProxy(raw)||!Buffer.isBuffer(raw))assetReviewFailure('SOURCE');
+    // Intrinsic typed-array getters do not evaluate caller-defined Buffer accessors.
+    const prototype=Object.getPrototypeOf(Uint8Array.prototype) as object;
+    const intrinsic=(key:'buffer'|'byteLength'|'byteOffset')=>Object.getOwnPropertyDescriptor(prototype,key)!.get!.call(raw) as unknown;
+    const buffer=intrinsic('buffer') as ArrayBuffer,length=intrinsic('byteLength') as number,offset=intrinsic('byteOffset') as number;
+    if(types.isSharedArrayBuffer(buffer)||length!==declared.bytes||length>20_000_000)assetReviewFailure('SOURCE');
+    const bytes=Buffer.from(new Uint8Array(buffer,offset,length));
+    if(declared.bytes!==bytes.length||declared.sha256!==createHash('sha256').update(bytes).digest('hex'))assetReviewFailure('SOURCE');
+    return {path,sha256:declared.sha256,bytes:declared.bytes};
+  });
+  const pin=(path:string,role:string)=>{const row=manifest.artifacts.find(a=>a.path===path&&a.role===role);if(!row)assetReviewFailure('SOURCE');return row.sha256;};
+  const requestSha256=pin('request.json','request'),auditSha256=pin('conversion-audit.json','audit');
+  if(requestSha256!==manifest.validation.requestSha256||pin('source-map.json','request')!==manifest.request.sourceMapSha256||pin('source.glb','request')!==manifest.request.sourceSha256||pin('parent-manifest.json','request')!==manifest.request.parentManifestSha256)assetReviewFailure('SOURCE');
+  return snapshotAssetReviewSubject({schemaVersion:2,kind:'converted-glb',...canonicalScope,jobId:manifest.jobId,manifestSha256:assetReviewDigest(manifest),requestSha256,
+    parentJobId:manifest.request.parentJobId,parentManifestSha256:manifest.request.parentManifestSha256,sourceSha256:manifest.request.sourceSha256,
+    sourceMapSha256:manifest.request.sourceMapSha256,auditSha256,collision:manifest.request.collision,artifacts});
 }

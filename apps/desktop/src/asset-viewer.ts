@@ -344,12 +344,10 @@ export class AssetViewerPanel {
       if (!active()) { runtime.dispose(); return; }
       this.runtime = runtime;
       this.controls(view, runtime, active);
+      this.reviewStatus(view);
+      void this.review.show(view.footer, { jobId, sha256: artifact.sha256, bytes: artifact.bytes }, controller.signal, active);
       if (fields(manifest)?.origin === 'converted-glb') {
-        view.pill.hidden = false; view.pill.dataset.state = 'preview-only'; view.pillText.textContent = 'Preview only';
-        view.footer.append(this.make('p', 'Studio import is unavailable for converted GLB assets.', 'hint'));
-      } else {
-        this.reviewStatus(view);
-        void this.review.show(view.footer, { jobId, sha256: artifact.sha256, bytes: artifact.bytes }, controller.signal, active);
+        view.footer.append(this.make('p', 'Model approval is recorded separately from Studio import.', 'hint'));
       }
       setStatus('Drag to orbit · Right-drag to pan · Scroll to zoom');
       setPhase('ready');

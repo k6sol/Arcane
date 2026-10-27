@@ -5,11 +5,17 @@ const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}(?![\s\S])/;
 const RESPONSE_LIMIT = 32 * 1024;
 type Decision = 'approved' | 'rejected';
 export interface ViewedAsset { readonly jobId: string; readonly sha256: string; readonly bytes: number }
-interface Subject {
+interface GeneratedSubject {
   schemaVersion: 1; projectId: string; conversation: { provider: 'codex' | 'claude-code' | 'arcane'; threadId: string; sessionId: string | null };
   jobId: string; manifestSha256: string; sourceRequestSha256: string;
   artifacts: { path: 'asset.glb' | 'collision.glb'; sha256: string; bytes: number }[];
 }
+interface ConvertedSubject extends Omit<GeneratedSubject,'schemaVersion'|'sourceRequestSha256'|'artifacts'> {
+  schemaVersion:2;kind:'converted-glb';requestSha256:string;parentJobId:string;parentManifestSha256:string;
+  sourceSha256:string;sourceMapSha256:string;auditSha256:string;collision:'none'|'convex-hull';
+  artifacts:readonly Readonly<{path:'asset.glb'|'collision.glb';sha256:string;bytes:number}>[];
+}
+type Subject=GeneratedSubject|ConvertedSubject;
 interface Review {
   reviewId: string; subject: Subject; subjectDigest: string; status: 'pending' | Decision;
   revision: number; preparedAt: string; decidedAt: string | null;
@@ -39,11 +45,16 @@ async function digest(value: unknown, cryptography: Crypto): Promise<string> {
   return [...new Uint8Array(await cryptography.subtle.digest('SHA-256', new TextEncoder().encode(canonical(value))))].map(byte => byte.toString(16).padStart(2, '0')).join('');
 }
 function subject(value: unknown, viewed: ViewedAsset): Subject {
+  if(!value||typeof value!=='object')return invalid();
+  const version=Object.getOwnPropertyDescriptor(value,'schemaVersion');
+  if(!version||!Object.hasOwn(version,'value')||!version.enumerable)return invalid();
+  if(version.value===2)return convertedSubject(value,viewed);
+
   const s = record(value, ['schemaVersion', 'projectId', 'conversation', 'jobId', 'manifestSha256', 'sourceRequestSha256', 'artifacts']);
   const c = record(s.conversation, ['provider', 'threadId', 'sessionId']);
   if (s.schemaVersion !== 1 || s.jobId !== viewed.jobId || !UUID.test(viewed.jobId) || !HASH.test(viewed.sha256) ||
       c.provider !== 'codex' && c.provider !== 'claude-code' && c.provider !== 'arcane' || !Array.isArray(s.artifacts) || s.artifacts.length !== 2) return invalid();
-  const artifacts: Subject['artifacts'] = s.artifacts.map((value, index) => {
+  const artifacts: GeneratedSubject['artifacts'] = s.artifacts.map((value, index) => {
     const a = record(value, ['path', 'sha256', 'bytes']), path = index === 0 ? 'asset.glb' : 'collision.glb';
     if (a.path !== path) return invalid();
     return { path, sha256: string(a.sha256, HASH), bytes: integer(a.bytes, 1, 64 * 1024 * 1024) };
@@ -51,6 +62,22 @@ function subject(value: unknown, viewed: ViewedAsset): Subject {
   if (artifacts[0]!.sha256 !== viewed.sha256 || artifacts[0]!.bytes !== viewed.bytes) return invalid();
   return { schemaVersion: 1, projectId: string(s.projectId, HASH), conversation: { provider: c.provider, threadId: string(c.threadId, ID), sessionId: c.sessionId === null ? null : string(c.sessionId, ID) },
     jobId: string(s.jobId, UUID), manifestSha256: string(s.manifestSha256, HASH), sourceRequestSha256: string(s.sourceRequestSha256, HASH), artifacts };
+}
+function convertedSubject(value:unknown,viewed:ViewedAsset):ConvertedSubject {
+  const s=record(value,['schemaVersion','kind','projectId','conversation','jobId','manifestSha256','requestSha256','parentJobId','parentManifestSha256','sourceSha256','sourceMapSha256','auditSha256','collision','artifacts']);
+  const c=record(s.conversation,['provider','threadId','sessionId']);
+  if(s.schemaVersion!==2||s.kind!=='converted-glb'||s.collision!=='none'&&s.collision!=='convex-hull'||s.jobId!==viewed.jobId||!UUID.test(viewed.jobId)||!HASH.test(viewed.sha256)||c.provider!=='codex'&&c.provider!=='claude-code'&&c.provider!=='arcane')return invalid();
+  const paths=s.collision==='none'?['asset.glb'] as const:['asset.glb','collision.glb'] as const;
+  if(!Array.isArray(s.artifacts)||Object.getPrototypeOf(s.artifacts)!==Array.prototype||s.artifacts.length!==paths.length||Reflect.ownKeys(s.artifacts).length!==paths.length+1)return invalid();
+  const artifacts=paths.map((path,index)=>{
+    const d=Object.getOwnPropertyDescriptor(s.artifacts,index);if(!d||!Object.hasOwn(d,'value')||!d.enumerable)return invalid();
+    const a=record(d.value,['path','sha256','bytes']);if(a.path!==path)return invalid();
+    return Object.freeze({path,sha256:string(a.sha256,HASH),bytes:integer(a.bytes,20,20_000_000)});
+  });
+  if(artifacts[0]!.sha256!==viewed.sha256||artifacts[0]!.bytes!==viewed.bytes||s.parentJobId===s.jobId)return invalid();
+  return Object.freeze({schemaVersion:2,kind:'converted-glb',projectId:string(s.projectId,HASH),conversation:Object.freeze({provider:c.provider,threadId:string(c.threadId,ID),sessionId:c.sessionId===null?null:string(c.sessionId,ID)}),
+    jobId:string(s.jobId,UUID),manifestSha256:string(s.manifestSha256,HASH),requestSha256:string(s.requestSha256,HASH),parentJobId:string(s.parentJobId,UUID),parentManifestSha256:string(s.parentManifestSha256,HASH),
+    sourceSha256:string(s.sourceSha256,HASH),sourceMapSha256:string(s.sourceMapSha256,HASH),auditSha256:string(s.auditSha256,HASH),collision:s.collision,artifacts:Object.freeze(artifacts)});
 }
 function review(value: unknown, expected: Subject, expectedDigest: string): Review {
   const r = record(value, ['reviewId', 'subject', 'subjectDigest', 'status', 'revision', 'preparedAt', 'decidedAt']);

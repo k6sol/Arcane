@@ -93,23 +93,23 @@ function fixture() {
   return { panel, doc, bytes, requests, inputs, calls, generated, converted, disposed: () => disposed };
 }
 
-test('converted GLB keeps the verified interactive viewer without requesting review or import', async t => {
+test('converted GLB opens its exact-model review alongside the verified interactive viewer', async t => {
   const f = fixture(); t.after(() => f.panel.clear());
   await f.panel.show(f.converted, JOB, () => true);
   assert.equal(f.inputs.length, 1); assert.deepEqual(new Uint8Array(f.inputs[0]!.bytes), f.bytes);
   assert.equal(f.inputs[0]!.signal.aborted, false); assert.equal(f.doc.host.hidden, false);
   assert.equal(f.doc.host.querySelectorAll('canvas').length, 1); assert.equal(f.doc.host.querySelector('.vw')?.dataset.phase, 'ready');
-  assert.equal(f.doc.host.querySelector('.vw-pill')?.textContent.trim(), 'Preview only');
-  assert.equal(f.doc.host.querySelector('.vw-pill')?.dataset.state, 'preview-only');
-  assert.match(f.doc.host.querySelector('.vw-inspector-foot')!.textContent, /Studio import is unavailable/);
-  assert.equal(f.doc.host.querySelector('.viewer-review'), null);
+  assert.notEqual(f.doc.host.querySelector('.vw-pill')?.dataset.state, 'preview-only');
+  assert.match(f.doc.host.querySelector('.vw-inspector-foot')!.textContent, /Model approval is recorded separately/);
+  assert.ok(f.doc.host.querySelector('.viewer-review'));
   assert.match(f.doc.host.querySelector('.vw-hints')!.textContent, /Orbit.*Pan.*Zoom/);
   const controls = f.doc.host.querySelectorAll('button');
   controls.find(button => button.getAttribute('aria-label') === 'Front view')!.click();
   controls.find(button => button.getAttribute('aria-label') === 'Reset view')!.click();
   assert.deepEqual(f.calls, [{ method: 'setView', value: 'front' }, { method: 'reset' }]);
-  assert.deepEqual(f.requests, ['/v1/assets/artifact?jobId=' + JOB + '&path=asset.glb']);
-  assert.equal(controls.some(button => /Approve model|Reject model|Refresh review|Import/.test(button.textContent)), false);
+  assert.deepEqual(f.requests, ['/v1/assets/artifact?jobId=' + JOB + '&path=asset.glb', '/v1/assets/review/prepare']);
+  assert.equal(controls.some(button => /Import/.test(button.textContent)), false);
+  assert.equal(controls.find(button => button.textContent === 'Approve model')?.disabled, true);
   f.panel.clear(); assert.equal(f.disposed(), 1); assert.equal(f.inputs[0]!.signal.aborted, true);
 });
 
