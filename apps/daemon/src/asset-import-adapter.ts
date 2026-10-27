@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { proceduralRenderSourceKeys } from '../../../packages/asset-pipeline/src/procedural.js';
 import { validateGlb } from '../../desktop/src/glb-preflight.js';
 import { AssetError, type AssetManifest, type AssetRequest } from '../../../packages/asset-pipeline/src/types.js';
-import { STUDIO_IMPORT_LIMITS, type HostGeneratedStudioImport, type StudioImportBaseline, type StudioImportSelection } from '../../../packages/asset-pipeline/src/studio-import-manifest.js';
+import { STUDIO_IMPORT_LIMITS, type HostGeneratedStudioImport, type StudioImportBaseline, type GeneratedStudioImportBaselineV1, type StudioImportSelection } from '../../../packages/asset-pipeline/src/studio-import-manifest.js';
 import { ConversationWorkStore,type ConversationWorkBindingWitness } from '../../../packages/storage/src/conversation-work-store.js';
 import { ArcaneError } from '../../../packages/protocol/src/providers.js';
 import { assertNativeAssetActor, nativeAssetActorScope, type NativeAssetActor, type NativeAssetScope } from './native-asset-authority.js';
@@ -102,7 +102,7 @@ function same(a: unknown, b: unknown): boolean { return JSON.stringify(a) === JS
 /** Pure adaptation of already service-verified job bytes. The service owns reading,
  * ownership and rechecks; this adapter never accepts paths or obtains bytes from HTTP. */
 export function adaptCompletedStudioImport(manifest: AssetManifest, exports: ReadonlyMap<'asset.glb' | 'collision.glb', Buffer>,
-  projectId: string, selection: StudioImportSelection, baseline: StudioImportBaseline | null): HostGeneratedStudioImport {
+  projectId: string, selection: StudioImportSelection, baseline: GeneratedStudioImportBaselineV1 | null): HostGeneratedStudioImport {
   if (!manifest.validation.studioImport) throw new AssetError('STUDIO_IMPORT_UNSUPPORTED', 'This completed job predates producer import identities; generate a new owned job.');
   const parsed = evidenceSchema.safeParse(manifest.validation.studioImport);
   if (!parsed.success) evidenceFailure();

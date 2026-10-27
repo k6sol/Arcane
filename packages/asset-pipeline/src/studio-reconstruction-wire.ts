@@ -13,8 +13,32 @@ const source=z.strictObject({sourceObjectId:z.string().min(1).max(128).refine(v=
 const receipt=z.strictObject({runId:uuid,transferDigest:hash,state:z.literal('reconstructed'),objects:z.array(source).min(1).max(STUDIO_RECONSTRUCTION_LIMITS.objects),
   imported:z.literal(false),engineVerification:z.literal('pending')}).refine(v=>new Set(v.objects.map(o=>o.sourceObjectId)).size===v.objects.length
     &&v.objects.reduce((n,o)=>n+o.vertexCount,0)<=STUDIO_RECONSTRUCTION_LIMITS.vertices&&v.objects.reduce((n,o)=>n+o.triangleCount,0)<=STUDIO_RECONSTRUCTION_LIMITS.triangles);
+const nodeKey=z.string().regex(/^node[0-9]{1,4}(?:_primitive[0-9]{1,4})?(?![\s\S])/);
+const convertedSource=source.extend({sourceObjectId:z.string().regex(/^arcane_[a-f0-9]{64}(?![\s\S])/)});
+const logicalNode=z.strictObject({nodeKey,parentKey:nodeKey.nullable(),sourceObjectId:convertedSource.shape.sourceObjectId.nullable()});
+const convertedReceiptFields={runId:uuid,transferDigest:hash,state:z.literal('reconstructed'),objects:z.array(convertedSource).min(1).max(STUDIO_RECONSTRUCTION_LIMITS.objects),
+  imported:z.literal(false),engineVerification:z.literal('pending'),formatVersion:z.literal(2),graphDigest:hash,
+  nodeCount:z.number().int().min(1).max(STUDIO_RECONSTRUCTION_LIMITS.objects),nodes:z.array(logicalNode).min(1).max(STUDIO_RECONSTRUCTION_LIMITS.objects)};
+/** Logical sealed-source summaries only, never observed instance mappings or
+ * proof that current native resources, physical transforms or pivots survive. */
+const convertedReceipt=z.strictObject(convertedReceiptFields).refine(value=>{
+  const {formatVersion:_version,graphDigest:_graph,nodeCount,nodes,...legacy}=value;
+  if(!receipt.safeParse(legacy).success||nodeCount!==nodes.length)return false;
+  const keys=new Set<string>(),associated=new Set<string>(),objects=new Set(value.objects.map(object=>object.sourceObjectId));
+  for(const node of nodes){
+    const primitive=node.nodeKey.includes('_primitive');
+    if(keys.has(node.nodeKey)||node.parentKey!==null&&!keys.has(node.parentKey)||
+      (primitive?node.parentKey!==node.nodeKey.split('_primitive')[0]||node.sourceObjectId===null:node.sourceObjectId!==null))return false;
+    if(node.sourceObjectId!==null){if(!objects.has(node.sourceObjectId)||associated.has(node.sourceObjectId))return false;associated.add(node.sourceObjectId);}
+    keys.add(node.nodeKey);
+  }
+  // The receipt has no role field. Permit at most the one unassociated derived
+  // mesh allowed by protocol v2, without inferring that a collision was observed.
+  return associated.size>0&&objects.size-associated.size<=1&&nodeCount+objects.size-associated.size<=STUDIO_RECONSTRUCTION_LIMITS.objects;
+});
+const anyReceipt=z.union([receipt,convertedReceipt]);
 const commandState=z.enum(['queued','dispatched','succeeded','failed','cancelled','needs_reconciliation']);
-const status=z.strictObject({runId:uuid,commandId:uuid,state:commandState,receipt:receipt.nullable(),receiptScope:z.literal('historical-reconstruction'),
+const status=z.strictObject({runId:uuid,commandId:uuid,state:commandState,receipt:anyReceipt.nullable(),receiptScope:z.literal('historical-reconstruction'),
   currentResources:z.literal('unobserved'),imported:z.literal(false),engineVerification:z.literal('pending'),retry:z.literal(false)})
   .refine(v=>(v.state==='succeeded')===(v.receipt!==null)&&(!v.receipt||v.receipt.runId===v.runId));
 function snapshot(value:unknown):unknown {
@@ -43,7 +67,8 @@ function snapshot(value:unknown):unknown {
 }
 const execution=z.strictObject({runId:uuid,transferDigest:hash,state:z.literal('reconstructed'),objects:z.array(source).min(1).max(128),
   imported:z.literal(false),engineVerification:z.literal('pending'),commandId:uuid}).refine(({commandId,...value})=>receipt.safeParse(value).success);
-export const nativeStudioReconstructionResponse=z.preprocess(snapshot,z.strictObject({jobId:uuid,projectId:hash,reconstructed:execution}));
+const convertedExecution=z.strictObject({...convertedReceiptFields,commandId:uuid}).refine(({commandId,...value})=>convertedReceipt.safeParse(value).success);
+export const nativeStudioReconstructionResponse=z.preprocess(snapshot,z.strictObject({jobId:uuid,projectId:hash,reconstructed:z.union([execution,convertedExecution])}));
 export const nativeStudioReconstructionStatusResponse=z.preprocess(snapshot,z.strictObject({jobId:uuid,projectId:hash,reconstruction:status.nullable()}));
 export type NativeStudioReconstructionResponse=z.output<typeof nativeStudioReconstructionResponse>;
 export type NativeStudioReconstructionStatusResponse=z.output<typeof nativeStudioReconstructionStatusResponse>;

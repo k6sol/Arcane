@@ -8,6 +8,7 @@ local AssetMaterials = require(script.Parent.AssetMaterials)
 local AssetPlacement = require(script.Parent.AssetPlacement)
 local TerrainGen = require(script.Parent.TerrainGen)
 local AssetUpload = require(script.Parent.AssetUpload)
+local Sha256Stream = require(script.Parent.Sha256Stream)
 local Operations = {}
 Operations.__index = Operations
 type Operations = any
@@ -194,7 +195,8 @@ end
 -- Fixed host-owned queue operation. It resolves the actual retained receiver;
 -- neither the digest, source summary nor JSON runId grants engine ownership.
 function Operations:reconstructAsset(args: any, guard: () -> ()): any
-	V.fields(args, {"runId", "expected", "packetCount", "byteLength", "objects", "target", "continuity"}, "asset reconstruction")
+	V.fields(args, if args.formatVersion==2 then {"formatVersion","graphDigest","nodeCount","nodes","runId","expected","packetCount","byteLength","objects","target","continuity"}
+		else {"runId", "expected", "packetCount", "byteLength", "objects", "target", "continuity"}, "asset reconstruction")
 	local runId = V.string(args.runId, "original stage run", 36)
 	local identity = V.fields(args.expected, {"digest", "payloadDigest", "manifestDigest"}, "asset transfer identity")
 	local owned = self.assetTransfers[identity.digest]
@@ -212,6 +214,24 @@ function Operations:reconstructAsset(args: any, guard: () -> ()): any
 	local status = owned.receiver:status()
 	if status.state ~= "sealed" or status.packetCount ~= args.packetCount or status.byteLength ~= args.byteLength then V.fail("STATE", "Original sealed packet accounting changed.") end
 	local plan = owned.receiver:reconstructionPlan()
+	local graphPlan=if type(owned.receiver.graphPlan)=="function" then owned.receiver:graphPlan() else nil
+	local nodes={}
+	if graphPlan then
+		local children,stack={},{}
+		for _,node in ipairs(graphPlan.graph.nodes) do local key=node.parentKey or "";children[key]=children[key] or {};table.insert(children[key],node) end
+		for _,list in pairs(children) do table.sort(list,function(a: any,b: any): boolean return a.nodeKey<b.nodeKey end) end
+		local roots=children[""] or {}
+		for index=#roots,1,-1 do stack[#stack+1]=roots[index] end
+		while #stack>0 do
+			local node=table.remove(stack)
+			local id: any=V.NULL
+			for _,mesh in ipairs(graphPlan.graph.meshes) do if mesh.nodeKey==node.nodeKey then id=mesh.sourceObjectId end end
+			nodes[#nodes+1]={nodeKey=node.nodeKey,parentKey=node.parentKey or V.NULL,sourceObjectId=id}
+			local list=children[node.nodeKey] or {}
+			for index=#list,1,-1 do stack[#stack+1]=list[index] end
+		end
+		if args.formatVersion~=2 or args.graphDigest~=graphPlan.graph.digest or args.nodeCount~=#nodes or not V.equal(args.nodes,V.array(nodes)) then V.fail("SCOPE","Converted reconstruction graph differs from the original sealed transfer.") end
+	elseif args.formatVersion~=nil then V.fail("SCOPE","Generated reconstruction cannot use a converted version.") end
 	local expectedObjects = V.list(args.objects, 128, "reconstructed sources")
 	if #expectedObjects ~= #plan then V.fail("SCOPE", "Reconstruction source count differs from the sealed transfer.") end
 	for index, source in ipairs(plan) do
@@ -219,7 +239,7 @@ function Operations:reconstructAsset(args: any, guard: () -> ()): any
 	end
 	current()
 	owners.consumed[runId] = true; owners.count += 1 -- BEFORE resolving/allocating an engine service.
-	local owner: any = {runId = runId, meshes = {}, retired = false, finished = false, materials = {}, target = owned.target, continuity = owned.continuity, service = nil}
+	local owner: any = {runId = runId, meshes = {}, retired = false, finished = false, materials = {}, target = owned.target, continuity = owned.continuity, service = nil, graphPlan=graphPlan}
 	owners.resources[identity.digest] = owner
 	owned.guard = function(): ()
 		current()
@@ -232,7 +252,9 @@ function Operations:reconstructAsset(args: any, guard: () -> ()): any
 		local entries = owned.receiver:reconstruct(service, AssetMaterials.admitTextures)
 		-- No guard/yield between receiving ownership and registering EVERY mesh.
 		for _, entry in ipairs(entries) do owner.meshes[#owner.meshes + 1] = {mesh = entry.mesh.editableMesh, disposed = false,
-			object = entry.object, material = entry.material, textures = entry.textures, conversion = entry.conversion} end
+			object = entry.object, material = entry.material, textures = entry.textures, conversion = entry.conversion,
+			formatVersion=entry.formatVersion,association=entry.association,nativePlan=entry.nativePlan,
+			coordinateSpace=entry.mesh.coordinateSpace,sourceLocalCentre=entry.mesh.sourceLocalCentre} end
 		owner.service = service -- Retained for materialization; never re-acquired elsewhere.
 		owned.guard()
 		local summary = {}
@@ -241,9 +263,14 @@ function Operations:reconstructAsset(args: any, guard: () -> ()): any
 				vertexCount = entry.mesh.vertexCount, triangleCount = entry.mesh.triangleCount}
 		end
 		if owner.retired or not V.equal(summary, plan) then V.fail("SCOPE", "Reconstructed ownership or source accounting changed.") end
+		if graphPlan then owner.graph=AssetPlacement.convertedPlan(graphPlan,owner.meshes) end
 		owned.guard()
 		owner.finished = true
 		local receipt = {runId = runId, transferDigest = identity.digest, state = "reconstructed", objects = V.array(summary), imported = false, engineVerification = "pending"}
+		if graphPlan then
+			(receipt :: any).formatVersion=2;(receipt :: any).graphDigest=graphPlan.graph.digest
+			(receipt :: any).nodeCount=#nodes;(receipt :: any).nodes=V.array(nodes)
+		end
 		if #V.encode(receipt, self.http) > V.RESULT_BYTES then V.fail("BODY_LIMIT", "Reconstruction receipt exceeds its bound.") end
 		local frozen = V.immutable(receipt)
 		owned.guard()
@@ -271,7 +298,7 @@ local function srgb(linear: number): number
 	local c = math.clamp(if linear == linear then linear else 0, 0, 1)
 	return if c <= 0.0031308 then c * 12.92 else 1.055 * c ^ (1 / 2.4) - 0.055
 end
-function Operations:materializeReconstruction(digest: string, guard: () -> ()): (any, () -> ())
+function Operations:materializeReconstruction(digest: string, guard: () -> (), placement: any?): (any, () -> ())
 	if #digest ~= 64 or not string.match(digest, "^[0-9a-f]+$") then V.fail("WATCH", "Expected an editable-<transfer digest> source.") end
 	local owners = assetOwners[self]
 	local owner = owners and owners.resources[digest]
@@ -281,6 +308,7 @@ function Operations:materializeReconstruction(digest: string, guard: () -> ()): 
 	if owner.materializing or (owner.placed and owner.placed.Parent ~= nil) then
 		V.fail("STATE", "This reconstruction is already placed; clone it with scene_build templates or restore its receipt first.")
 	end
+	if owner.graph and owner.materializeConsumed then V.fail("STATE","Converted materialization was already attempted; inspect the original outcome.") end
 	local targetCurrent = self:assetTargetGuard(owner.target, guard)
 	local function current(): ()
 		targetCurrent()
@@ -292,18 +320,36 @@ function Operations:materializeReconstruction(digest: string, guard: () -> ()): 
 	local plans = {}
 	for index, resource in ipairs(owner.meshes) do
 		current()
-		plans[index] = AssetTransfer.meshPartPlan(resource.object, resource.conversion)
+		plans[index] = AssetTransfer.meshPartPlan(resource.object, resource.conversion, resource.formatVersion)
+		if owner.graph and not V.equal(plans[index],resource.nativePlan) then V.fail("IDENTITY","Retained converted physical plan changed.") end
+		if owner.graph and (resource.coordinateSpace~="centered-carrier-meters" or not V.equal(resource.sourceLocalCentre,plans[index].localBoundsCentre)) then V.fail("IDENTITY","Converted mesh is not its original centered delivery carrier.") end
 		if resource.object.role ~= "collision" then
 			local plan = AssetMaterials.plan(resource.material, resource.textures)
 			if not plan.supported then V.fail("UNSUPPORTED_MATERIAL", "Nonzero emission cannot be mapped faithfully.") end
 		end
 	end
+	if owner.graph then
+		local derived=0;for _,resource in ipairs(owner.meshes) do if resource.object.role=="collision" then derived+=1 end end
+		if self.registry.count+#owner.graph.rows+derived+1>V.MAX_REFS then V.fail("CAPACITY","Converted graph references exceed session capacity.") end
+		AssetPlacement.preflightConverted(owner.graph,if placement then placement.maxSize else nil,if placement then placement.yaw else 0,if placement then placement.depth else 0)
+	end
 	current()
 	owner.materializing = true
+	if owner.graph then owner.materializeConsumed=true end -- BEFORE any allocating API; never replay an uncertain outcome.
 	local model: any = nil
+	local nodes,groups = {},{}
 	local parts, appearances = {}, {}
 	local ok, err = pcall(function()
 		model = Instance.new("Model")
+		if owner.graph then
+			current()
+			for _,row in ipairs(owner.graph.rows) do if not row.resource then
+				local group=Instance.new("Model");groups[#groups+1]=group;nodes[row.node.nodeKey]=group
+				current() -- Allocation is already privately owned.
+				group.Name=if row.node.name==nil or row.node.name==V.NULL then row.node.nodeKey else row.node.name
+				group:SetAttribute("ArcaneConvertedNodeKey",row.node.nodeKey)
+			end end
+		end
 		for index, resource in ipairs(owner.meshes) do
 			current()
 			if owner.retired or resource.disposed or resource.mesh == nil then V.fail("STATE", "Retained meshes were released before placement.") end
@@ -317,14 +363,24 @@ function Operations:materializeReconstruction(digest: string, guard: () -> ()): 
 			if part ~= nil then parts[index] = part end
 			current()
 			if part == nil or not part:IsA("MeshPart") then V.fail("ENGINE", "CreateMeshPartAsync did not return a MeshPart.") end
-			part.Parent = model
+			if owner.graph then AssetPlacement.verifyCarrier(part,resource.object) end
+			if not owner.graph then part.Parent = model end
 			-- Keep this mesh swaps exactly these session parts (AssetPlacement.keep).
 			local plan = plans[index]
 			local size, c = plan.size, plan.cframe
 			part.Size = Vector3.new(size[1], size[2], size[3])
 			part.CFrame = CFrame.new(c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9], c[10], c[11], c[12])
 			local name = if type(object.name) == "string" then string.sub(object.name, 1, 100) else "Part" .. index
-			part.Name = name
+			if owner.graph then
+				local key=resource.association.nodeKey
+				if key~=nil and key~=V.NULL then
+					local node=owner.graph.byKey[key].node;nodes[key]=part
+					part.Name=if node.name==nil or node.name==V.NULL then key else node.name
+					part:SetAttribute("ArcaneConvertedNodeKey",key)
+				else part.Name=object.name end
+				part:SetAttribute("ArcaneConvertedObjectId",object.sourceObjectId)
+				part.PivotOffset=CFrame.new(table.unpack(plan.pivotOffset))
+			else part.Name = name end
 			if collision then
 				part.Transparency, part.CanCollide, part.CastShadow, part.CanQuery = 1, true, false, false
 			else
@@ -354,12 +410,20 @@ function Operations:materializeReconstruction(digest: string, guard: () -> ()): 
 				current()
 			end
 		end
+		if owner.graph then
+			for _,row in ipairs(owner.graph.rows) do nodes[row.node.nodeKey].Parent=nodes[row.node.parentKey] or model end
+			for index,resource in ipairs(owner.meshes) do if resource.object.role=="collision" then parts[index].Parent=model end end
+			local function hash(bytes: string): string local value=Sha256Stream.new();value:update(bytes);return value:digest() end
+			AssetPlacement.registerConverted(model,owner.graph,nodes,parts,hash,appearances)
+			AssetPlacement.initializeConverted(model)
+		end
 		current()
 	end)
 	owner.materializing = false
 	if not ok then
 		local failed = type(err) == "table" and err.field == "cleanup"
 		if model ~= nil and not pcall(function() model:Destroy() end) then failed = true end
+		for _,group in ipairs(groups) do if not pcall(function() group:Destroy() end) then failed=true end end
 		for _, appearance in pairs(appearances) do if not pcall(function() appearance:Destroy() end) then failed = true end end
 		for _, part in pairs(parts) do if not pcall(function() part:Destroy() end) then failed = true end end
 		if failed then self.assetCleanupFailed = true; cleanupFailure() end
@@ -367,7 +431,7 @@ function Operations:materializeReconstruction(digest: string, guard: () -> ()): 
 	end
 	-- No yielding callbacks between final validation and the part ownership update.
 	for index, resource in ipairs(owner.meshes) do resource.part, resource.appearance, resource.keptAssetId = parts[index], appearances[index], nil end
-	model.Name = "ArcaneProcedural"
+	model.Name = if owner.graph then "ArcaneConverted" else "ArcaneProcedural"
 	-- AssetPlacement calls this once the adopted Model is parented.
 	return model, function() owner.placed = model end
 end
@@ -385,11 +449,18 @@ function Operations:keepReconstruction(args: any, guard: () -> ()): any
 		V.fail("STATE", "This mesh is no longer held by this Studio session (reconnected, Play or reopened). Nothing was uploaded; generate and place it again.")
 	end
 	if owner.keeping then V.fail("STATE", "This mesh is already being kept.") end
+	local keepGuard=guard
+	if owner.graph then
+		if not V.equal(owner.continuity,args.continuity) then V.fail("SCOPE","Converted keep continuity differs from its original reconstruction.") end
+		local current=self:assetTargetGuard(owner.target,guard)
+		keepGuard=function(): () current();if owner.retired then V.fail("SCOPE","Converted owner was retired.") end end
+		keepGuard()
+	end
 	-- keepEngineDouble is set only by the standalone VM tests; production always probes and binds the real engine.
 	local double = self.keepEngineDouble
 	if not double and not AssetPlacement.keepSupported(self.gameModel) then V.fail("CAPABILITY", "This Studio does not let plugins upload meshes. Nothing was uploaded.") end
 	owner.keeping = true
-	local ok, result = pcall(AssetPlacement.keep, self, owner, digest, args, guard, double or AssetPlacement.keepEngine(self, AssetUpload))
+	local ok, result = pcall(AssetPlacement.keep, self, owner, digest, args, keepGuard, double or AssetPlacement.keepEngine(self, AssetUpload))
 	owner.keeping = false
 	if not ok then error(result, 0) end
 	if #V.encode(result, self.http) > V.RESULT_BYTES then V.fail("BODY_LIMIT", "Keep receipt exceeds its bound.") end
@@ -1051,6 +1122,7 @@ function Operations:build(command: any, args: any, guard: () -> ()): any
 	local parent = self.registry:resolve(args.parent)
 	local templates = if args.templates == nil then {} else AssetPlacement.buildTemplates(self, args.templates)
 	local cloneExtra = 0 -- template descendants copied by clone items
+	local convertedRefs=0
 	local rootSpec = V.fields(args.container, {"className", "name", "properties"}, "build container")
 	-- A ScreenGui root builds a whole screen UI atomically under StarterGui (or a Model/Folder template holder).
 	local guiRoot = rootSpec.className == "ScreenGui"
@@ -1218,6 +1290,13 @@ function Operations:build(command: any, args: any, guard: () -> ()): any
 			if not single then plan[created].primary = first end
 		elseif item.kind == "clone" then
 			created = add(AssetPlacement.planClone(self, item, name, into, templates))
+			if plan[created].converted then
+				local depth,cursor=1,into
+				while cursor>0 do depth+=1;cursor=plan[cursor].parent or 0 end
+				AssetPlacement.preflightConverted(plan[created].converted.plan,nil,0,#args.parent.pathSegments+depth)
+				convertedRefs+=#plan[created].converted.plan.rows
+				for _,resource in ipairs(plan[created].converted.plan.resources) do if resource.object.role=="collision" then convertedRefs+=1 end end
+			end
 			cloneExtra += plan[created].extra
 			if #plan + cloneExtra > L.instances then V.fail("BODY_LIMIT", "A build may create at most " .. L.instances .. " instances, counting cloned template contents.") end
 		else
@@ -1231,7 +1310,7 @@ function Operations:build(command: any, args: any, guard: () -> ()): any
 			if #keyed > L.keys then V.fail("INPUT", "Too many keyed items.") end
 		end
 	end
-	if self.registry.count + #keyed + 1 > V.MAX_REFS then V.fail("CAPACITY", "Reference capacity reached; pair a new session.") end
+	if self.registry.count + #keyed + 1 + convertedRefs > V.MAX_REFS then V.fail("CAPACITY", "Reference capacity reached; pair a new session.") end
 	-- Detached construction runs BEFORE the undo recording opens: nothing here is in the place,
 	-- so cooperative yields cannot leak a concurrent user edit into Arcane's undo step, and a
 	-- guard after every yield re-checks session, lease and Edit mode before any further work.
@@ -1315,8 +1394,12 @@ function Operations:build(command: any, args: any, guard: () -> ()): any
 			self.registry.owned[root] = {parent = parent, build = {instances = instances, parents = parents, snapshots = snapshots, children = children}}
 			local refs = {}
 			for _, entry in ipairs(keyed) do refs[entry.key] = self.registry:ref(instances[entry.index]) end
-			return {ref = ref, refs = refs, created = {count = #instances + cloneExtra, classes = classes},
+			local result: any = {ref = ref, refs = refs, created = {count = #instances + cloneExtra, classes = classes},
 				mutation = {kind = "scene.build", ref = ref, before = V.NULL, after = {count = #instances + cloneExtra, classes = classes}}}
+			local observations=V.array({})
+			for index,item in ipairs(instances) do if plan[index].converted then observations[#observations+1]={itemIndex=index,observation=AssetPlacement.observeConverted(item,self)} end end
+			if #observations>0 then result.converted=observations end
+			return result
 		end)
 	end)
 	if not recorded then
@@ -1817,6 +1900,7 @@ function Operations:restore(command: any, args: any, guard: () -> ()): any
 			for index, item in ipairs(build.instances) do
 				if item.Parent ~= build.parents[index] or #item:GetChildren() ~= build.children[index] then return false end
 				if not P.ownershipMatches(item, self.collection, build.snapshots[index]) then return false end
+				if AssetPlacement and not AssetPlacement.convertedMatches(item,self) then return false end
 			end
 			return true
 		end

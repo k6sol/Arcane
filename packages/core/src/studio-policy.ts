@@ -866,6 +866,129 @@ function validateEnvironment(input: Record<string, Json>, session: StudioSession
   return a;
 }
 
+const CONVERTED_PACKET_BODIES={
+  begin:['projectId','assetId','revisionId','sourceSha256','origin','identityScheme','preparedDigest','target','conversionRequest','conversionRequestDigest','graph','producer','files','sourceDocuments','conversion','placement','bounds','anchors','objectCount','textureCount','texturesPresent','binaryByteLength','aggregateEncodedByteLength','chunkCount','delta'],
+  node:['node'],texture:['texture'],object:['object','association','material','provenance','primitives'],
+  chunk:['sourceObjectId','primitiveIndex','streamId','semantic','bufferSha256','offset','byteLength','sha256','encoding','data'],seal:['precedingPacketCount','precedingByteLength','contentDigest'],
+} as const;
+const CONVERTED_HASH=/^[a-f0-9]{64}(?![\s\S])/;
+const CONVERTED_NODE=/^node[0-9]{1,4}(?:_primitive[0-9]{1,4})?(?![\s\S])/;
+const CONVERTED_OBJECT=/^arcane_[a-f0-9]{64}(?![\s\S])/;
+function convertedInput():never {throw new ArcaneError('INPUT','Converted asset packet or logical reconstruction summary is invalid.');}
+function convertedClosed(value:unknown,fields:readonly string[],optional:readonly string[]=[]):Record<string,unknown> {
+  const record=object(value),names=Object.keys(record);
+  if(fields.some(key=>!Object.hasOwn(record,key))||names.some(key=>!fields.includes(key)&&!optional.includes(key)))convertedInput();return record;
+}
+function convertedHash(value:unknown):void {if(typeof value!=='string'||!CONVERTED_HASH.test(value))convertedInput();}
+function convertedId(value:unknown,pattern=CONVERTED_OBJECT):void {if(typeof value!=='string'||!pattern.test(value))convertedInput();}
+function convertedInteger(value:unknown,low:number,high:number):number {if(typeof value!=='number'||!Number.isSafeInteger(value)||value<low||value>high)convertedInput();return value;}
+function convertedList(value:unknown,low:number,high:number):unknown[] {if(!Array.isArray(value)||value.length<low||value.length>high)convertedInput();return value;}
+function convertedMatrix(value:unknown):void {
+  const matrix=convertedList(value,16,16);if(matrix.some(n=>typeof n!=='number'||!Number.isFinite(n)||Math.abs(n)>1000000)||matrix[3]!==0||matrix[7]!==0||matrix[11]!==0||matrix[15]!==1)convertedInput();
+  // Full affine data is retained here. Native eligibility requires the complete
+  // graph/association inspection before the controller's durable stage claim.
+}
+function convertedPivot(value:unknown):void {if(convertedList(value,3,3).some(n=>n!==0))convertedInput();}
+function convertedBounds(value:unknown):void {const b=convertedClosed(value,['min','max']);for(const k of ['min','max'])if(convertedList(b[k],3,3).some(n=>typeof n!=='number'||!Number.isFinite(n)||Math.abs(n)>1000000))convertedInput();
+  const min=b.min as number[],max=b.max as number[];if(min.some((n,i)=>n>max[i]!)||min.filter((n,i)=>n<max[i]!).length<2)convertedInput();}
+function convertedAssociation(value:unknown):Record<string,unknown> {
+  const a=convertedClosed(value,['sourceObjectId','nodeKey','sourcePivot','correspondenceSha256']);convertedId(a.sourceObjectId);convertedPivot(a.sourcePivot);
+  if(a.nodeKey===null){if(a.correspondenceSha256!==null)convertedInput();}else{convertedId(a.nodeKey,CONVERTED_NODE);if(!/_primitive[0-9]+$/.test(a.nodeKey as string))convertedInput();convertedHash(a.correspondenceSha256);}return a;
+}
+function convertedStream(value:unknown):Record<string,unknown> {
+  const s=convertedClosed(value,['streamId','semantic','componentType','type','count','normalized','byteLength','sha256','source','chunks']);convertedHash(s.streamId);convertedHash(s.sha256);
+  if(!['POSITION','NORMAL','TEXCOORD_0','indices','ColorMap','NormalMap','RoughnessMap','MetalnessMap'].includes(s.semantic as string)||![5121,5123,5125,5126].includes(s.componentType as number)||!['SCALAR','VEC2','VEC3','VEC4'].includes(s.type as string)||typeof s.normalized!=='boolean')convertedInput();
+  convertedInteger(s.count,1,1024*1024);convertedInteger(s.byteLength,1,32*1024*1024);
+  const semantic=s.semantic as string,components=s.type==='SCALAR'?1:s.type==='VEC2'?2:s.type==='VEC3'?3:4,width=s.componentType===5121?1:s.componentType===5123?2:4;
+  if(s.byteLength!==Number(s.count)*components*width||
+    (semantic==='indices'?(s.type!=='SCALAR'||![5121,5123,5125].includes(s.componentType as number)||s.normalized!==false):
+      semantic==='POSITION'||semantic==='NORMAL'?(s.type!=='VEC3'||s.componentType!==5126||s.normalized!==false):
+      semantic==='TEXCOORD_0'?(s.type!=='VEC2'||![5121,5123,5126].includes(s.componentType as number)||(s.componentType===5126?s.normalized!==false:s.normalized!==true)):
+      (s.type!=='VEC4'||s.componentType!==5121||s.normalized!==false)))convertedInput();
+  if(s.source!==null){const source=convertedClosed(s.source,['accessorIndex','accessor','bufferView']);convertedInteger(source.accessorIndex,0,65535);object(source.accessor);object(source.bufferView);}
+  let offset=0;for(const row of convertedList(s.chunks,1,4096)){const c=convertedClosed(row,['offset','byteLength','sha256']);convertedInteger(c.offset,0,32*1024*1024);convertedInteger(c.byteLength,1,180*1024);convertedHash(c.sha256);if(c.offset!==offset)convertedInput();offset+=Number(c.byteLength);}if(offset!==s.byteLength)convertedInput();return s;
+}
+function convertedPacket(packet:Record<string,unknown>,raw:string,target:Record<string,unknown>):void {
+  // The packet string is opaque to the outer JSON gate. Bound its parsed tree
+  // before JSON.stringify/canonical helpers can recurse through source metadata.
+  const pending:{value:unknown;depth:number}[]=[{value:packet,depth:0}];let values=0;
+  while(pending.length){const {value,depth}=pending.pop()!;if(++values>200000||depth>80)convertedInput();
+    if(typeof value==='number'&&!Number.isFinite(value))convertedInput();
+    if(value&&typeof value==='object')for(const child of Object.values(value))pending.push({value:child,depth:depth+1});
+  }
+  const kind=packet.kind;if(typeof kind!=='string'||!Object.hasOwn(CONVERTED_PACKET_BODIES,kind)||JSON.stringify(packet)!==raw)convertedInput();
+  if(kind!=='begin'&&packet.ordinal===0)convertedInput();
+  convertedClosed(packet,['formatVersion','payloadDigest','manifestDigest','ordinal','kind',...CONVERTED_PACKET_BODIES[kind as keyof typeof CONVERTED_PACKET_BODIES]],kind==='object'?['textureBindings']:[]);
+  if(kind==='begin'){
+    if(packet.ordinal!==0||packet.origin!=='converted-glb'||packet.identityScheme!=='arcane-converted-v2'||canonical(packet.target)!==canonical(target))convertedInput();
+    for(const name of ['projectId','sourceSha256','preparedDigest','conversionRequestDigest'])convertedHash(packet[name]);convertedId(packet.assetId);
+    const r=convertedClosed(packet.conversionRequest,['schemaVersion','fidelityPolicy','kind','jobId','parentJobId','parentManifestSha256','name','sourceSha256','sourceBytes','importSha256','importBytes','sourceMapSha256','collision','renderResolution','renderSamples']);
+    const uuid=/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}(?![\s\S])/;convertedId(r.jobId,uuid);convertedId(r.parentJobId,uuid);
+    if(r.schemaVersion!==2||r.fidelityPolicy!=='arcane-static-fidelity-v1'||r.kind!=='converted-glb'||r.jobId===r.parentJobId||r.jobId!==packet.revisionId||r.sourceSha256!==packet.sourceSha256||!['none','convex-hull'].includes(r.collision as string))convertedInput();
+    textField(r.name,'converted source name',48);for(const key of ['sourceSha256','parentManifestSha256','importSha256','sourceMapSha256'])convertedHash(r[key]);
+    convertedInteger(r.sourceBytes,20,64*1024*1024);convertedInteger(r.importBytes,20,64*1024*1024);convertedInteger(r.renderResolution,128,1024);convertedInteger(r.renderSamples,1,64);
+    const h=convertedClosed(packet.graph,['schemaVersion','sourceSceneIndex','nodeCount','meshCount','digest']);if(h.schemaVersion!==1)convertedInput();convertedHash(h.digest);
+    convertedInteger(h.sourceSceneIndex,0,4095);convertedInteger(h.nodeCount,1,4096);convertedInteger(h.meshCount,1,128);
+    if(packet.objectCount!==h.meshCount||typeof packet.texturesPresent!=='boolean')convertedInput();convertedInteger(packet.textureCount,0,256);
+    if(packet.texturesPresent===false&&packet.textureCount!==0)convertedInput();convertedInteger(packet.binaryByteLength,1,32*1024*1024);convertedInteger(packet.aggregateEncodedByteLength,1,48*1024*1024);convertedInteger(packet.chunkCount,1,4096);
+    const producer=convertedClosed(packet.producer,['blenderVersion','exporterVersion']);for(const [key,max]of [['blenderVersion',128],['exporterVersion',256]] as const)if(typeof producer[key]!=='string'||!(producer[key] as string).length||(producer[key] as string).length>max||!/^[\x20-\x7e]+(?![\s\S])/.test(producer[key] as string))convertedInput();
+    const conversion=convertedClosed(packet.conversion,['sourceUnits','sourceUp','exportUnits','exportUp','targetUnits','targetUp','studsPerMeter']);
+    if(conversion.sourceUnits!=='meters'||conversion.exportUnits!=='meters'||conversion.targetUnits!=='studs'||conversion.sourceUp!=='Y'||conversion.exportUp!=='Y'||conversion.targetUp!=='Y'||typeof conversion.studsPerMeter!=='number'||!Number.isFinite(conversion.studsPerMeter)||conversion.studsPerMeter<=0||conversion.studsPerMeter>1000)convertedInput();
+    convertedList(packet.anchors,0,0);convertedBounds(packet.bounds);object(packet.placement);
+    const files=convertedList(packet.files,r.collision==='convex-hull'?2:1,r.collision==='convex-hull'?2:1),ids=new Set<string>();
+    for(const row of files){const file=convertedClosed(row,['fileId','contentType','sha256','byteLength']);if(!['asset-glb',...(r.collision==='convex-hull'?['collision-glb']:[])].includes(file.fileId as string)||ids.has(file.fileId as string)||file.contentType!=='model/gltf-binary')convertedInput();ids.add(file.fileId as string);convertedHash(file.sha256);convertedInteger(file.byteLength,20,20000000);}
+    const documents=new Set<string>();for(const row of convertedList(packet.sourceDocuments,files.length,files.length)){const source=convertedClosed(row,['fileId','jsonSha256','document']);if(!ids.has(source.fileId as string)||documents.has(source.fileId as string))convertedInput();documents.add(source.fileId as string);convertedHash(source.jsonSha256);object(source.document);}
+    const delta=convertedClosed(packet.delta,['previousDigest','nextDigest','receiptSha256','modelRef','modelAssetId','placementChanged','objects','reviewRemovals','reviewAnchors','geometry','textures','preservation','graph','nodes','reviewNodeRemovals']);
+    const graph=convertedClosed(delta.graph,['previousDigest','nextDigest','changed']);if(graph.nextDigest!==h.digest||delta.nextDigest!==packet.manifestDigest||typeof graph.changed!=='boolean'||delta.preservation!=='preserve-all-scripts-attachments-constraints')convertedInput();convertedList(delta.nodes,h.nodeCount as number,h.nodeCount as number);
+  }else if(kind==='node'){
+    if(packet.ordinal===0)convertedInput();const node=convertedClosed(packet.node,['nodeKey','parentKey','localMatrix','name']);convertedId(node.nodeKey,CONVERTED_NODE);
+    if(node.parentKey!==null){convertedId(node.parentKey,CONVERTED_NODE);if(node.parentKey===node.nodeKey)convertedInput();}convertedMatrix(node.localMatrix);
+    if(node.name!==null&&(typeof node.name!=='string'||node.name.length>256))convertedInput();
+  }else if(kind==='object'){
+    const a=convertedAssociation(packet.association),o=convertedClosed(packet.object,['sourceObjectId','sourceKey','name','role','exportFileId','nodeIndex','meshExportSha256','triangles','materialSha256','textureSha256s','exportTransform','scale','pivot','bounds','worldBounds','collisionFor']);
+    convertedId(o.sourceObjectId);convertedHash(o.meshExportSha256);convertedPivot(o.pivot);convertedMatrix(o.exportTransform);convertedBounds(o.bounds);convertedBounds(o.worldBounds);convertedInteger(o.nodeIndex,0,4095);convertedInteger(o.triangles,1,20000);textField(o.name,'converted object name',256);
+    if(o.sourceObjectId!==a.sourceObjectId||(o.role==='render'?(o.sourceKey!==a.nodeKey||o.exportFileId!=='asset-glb'):o.role!=='collision'||o.sourceKey!=='proxy'||a.nodeKey!==null||o.exportFileId!=='collision-glb'))convertedInput();
+    if(o.role==='render'){convertedId(o.sourceKey,CONVERTED_NODE);if(a.nodeKey===null)convertedInput();}else if(o.materialSha256!==null)convertedInput();
+    if(o.materialSha256!==null)convertedHash(o.materialSha256);convertedList(o.scale,3,3).forEach(n=>{if(typeof n!=='number'||!Number.isFinite(n)||n<=0||n>1000000)convertedInput();});
+    convertedList(o.textureSha256s,0,4).forEach(convertedHash);convertedList(o.collisionFor,o.role==='render'?0:1,o.role==='render'?0:128).forEach(id=>convertedId(id));
+    convertedClosed(packet.provenance,['generator','node','mesh','material']);
+    if(packet.material!==null){const material=convertedClosed(packet.material,['sha256','baseColor','metallic','roughness','alphaMode','alphaCutoff','doubleSided','normalScale','colorMap','normalMap','roughnessMap','metalnessMap'],['emission']);
+      if(material.sha256!==o.materialSha256)convertedInput();convertedHash(material.sha256);
+      for(const name of ['colorMap','normalMap','roughnessMap','metalnessMap'])if(material[name]!==null){const map=convertedClosed(material[name],['sha256','channel','texCoord']);convertedHash(map.sha256);if(map.texCoord!==0||!['rgba','rgb','g','b'].includes(map.channel as string))convertedInput();}
+      if(material.emission!==undefined)convertedClosed(material.emission,['factor','strength','map']);
+    }else if(o.materialSha256!==null)convertedInput();
+    if(packet.textureBindings!==undefined){const bindings=object(packet.textureBindings);keys(bindings,['ColorMap','NormalMap','RoughnessMap','MetalnessMap']);Object.values(bindings).forEach(convertedHash);}
+    for(const row of convertedList(packet.primitives,1,1)){const p=convertedClosed(row,['mode','vertexCount','triangleCount','source','correspondence','attributes','indices']);
+      if(p.mode!==4)convertedInput();convertedInteger(p.vertexCount,1,60000);convertedInteger(p.triangleCount,1,20000);object(p.source);
+      const attrs=convertedClosed(p.attributes,['POSITION'],['NORMAL','TEXCOORD_0']);for(const [name,stream]of Object.entries(attrs)){const descriptor=convertedStream(stream);if(descriptor.semantic!==name||descriptor.count!==p.vertexCount)convertedInput();}
+      const indices=convertedStream(p.indices);if(indices.semantic!=='indices'||indices.count!==Number(p.triangleCount)*3)convertedInput();
+      if(o.role==='collision'){if(p.correspondence!==null)convertedInput();}else{const proof=convertedClosed(p.correspondence,['semantic','accessorIndex','count','sha256','orientedTriangleSha256','ids','accessor','bufferView']);
+        if(proof.semantic!=='_ARCANE_SOURCE_VERTEX_ID'||proof.count!==p.vertexCount||proof.orientedTriangleSha256!==a.correspondenceSha256)convertedInput();convertedInteger(proof.accessorIndex,0,65535);convertedHash(proof.sha256);convertedHash(proof.orientedTriangleSha256);convertedList(proof.ids,p.vertexCount as number,p.vertexCount as number).forEach(id=>convertedInteger(id,0,59999));object(proof.accessor);object(proof.bufferView);}
+    }
+  }else if(kind==='texture'){
+    const t=convertedClosed(packet.texture,['semantic','componentType','type','count','normalized','byteLength','sha256','imageId','materialSha256','sourceSha256','sourceRgbaSha256','channel','factors','width','height','colorSpace','orientation','normalConvention','stream']);
+    for(const key of ['imageId','materialSha256','sourceSha256','sourceRgbaSha256','sha256'])convertedHash(t[key]);const stream=convertedStream(t.stream);
+    if(stream.semantic!==t.semantic||stream.sha256!==t.sha256||stream.count!==t.count||stream.byteLength!==t.byteLength||t.componentType!==5121||t.type!=='VEC4'||t.normalized!==false||!['ColorMap','NormalMap','RoughnessMap','MetalnessMap'].includes(t.semantic as string))convertedInput();convertedInteger(t.width,1,1024);convertedInteger(t.height,1,1024);if(t.count!==Number(t.width)*Number(t.height))convertedInput();
+  }else if(kind==='chunk'){
+    for(const key of ['streamId','bufferSha256','sha256'])convertedHash(packet[key]);convertedInteger(packet.primitiveIndex,-1,0);convertedInteger(packet.offset,0,32*1024*1024);convertedInteger(packet.byteLength,1,180*1024);
+    if(packet.encoding!=='base64'||typeof packet.data!=='string'||!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(packet.data)||packet.data.length!==Math.ceil(Number(packet.byteLength)/3)*4)convertedInput();
+    if(!['POSITION','NORMAL','TEXCOORD_0','indices','ColorMap','NormalMap','RoughnessMap','MetalnessMap'].includes(packet.semantic as string))convertedInput();
+    if(packet.primitiveIndex===-1){convertedId(packet.sourceObjectId,/^texture-[a-f0-9]{64}(?![\s\S])/);if(!['ColorMap','NormalMap','RoughnessMap','MetalnessMap'].includes(packet.semantic as string))convertedInput();}
+    else{convertedId(packet.sourceObjectId);if(!['POSITION','NORMAL','TEXCOORD_0','indices'].includes(packet.semantic as string))convertedInput();}
+  }else{convertedInteger(packet.precedingPacketCount,1,511);convertedInteger(packet.precedingByteLength,1,STUDIO_ASSET_TRANSFER_LIMITS.rawBytes);convertedHash(packet.contentDigest);if(packet.ordinal!==packet.precedingPacketCount)convertedInput();}
+}
+function convertedReconstruction(a:Record<string,Json>):void {
+  convertedHash(a.graphDigest);const count=convertedInteger(a.nodeCount,1,STUDIO_RECONSTRUCTION_LIMITS.objects),nodes=convertedList(a.nodes,count,count),seen=new Set<string>(),associated=new Set<string>();
+  for(const row of nodes){const node=convertedClosed(row,['nodeKey','parentKey','sourceObjectId']);convertedId(node.nodeKey,CONVERTED_NODE);const key=node.nodeKey as string;
+    if(node.parentKey!==null)convertedId(node.parentKey,CONVERTED_NODE);
+    if(seen.has(key)||node.parentKey!==null&&!seen.has(node.parentKey as string))convertedInput();seen.add(key);
+    if(node.sourceObjectId!==null){convertedId(node.sourceObjectId);if(!/_primitive[0-9]+$/.test(key)||node.parentKey!==key.split('_primitive')[0]||associated.has(node.sourceObjectId as string))convertedInput();associated.add(node.sourceObjectId as string);}
+    else if(/_primitive[0-9]+$/.test(key))convertedInput();
+  }
+  const ids=(a.objects as Json[]).map(row=>object(row).sourceObjectId),render=[...associated];
+  if(render.length===0||render.some(id=>!ids.includes(id))||ids.length-render.length>1||count+ids.length-render.length>STUDIO_RECONSTRUCTION_LIMITS.objects)convertedInput();
+}
+
 export function validateCommandArgs(method: StudioMethod, value: unknown, session: StudioSession, internalRestore = false): Record<string, Json> {
   if (method === 'scene.import_context' || method === 'scene.upload_context') {
     const input = object(value), prototype = Object.getPrototypeOf(input);
@@ -883,7 +1006,9 @@ export function validateCommandArgs(method: StudioMethod, value: unknown, sessio
   }
   switch (method) {
     case 'asset.stage_packet': case 'asset.reconstruct': {
-      keys(a, method === 'asset.stage_packet' ? ['expected', 'packet', 'target', 'continuity'] : ['runId','expected','packetCount','byteLength','objects','target','continuity']);
+      const convertedReconstruct=method==='asset.reconstruct'&&a.formatVersion===2;
+      keys(a, method === 'asset.stage_packet' ? ['expected', 'packet', 'target', 'continuity'] :
+        ['runId','expected','packetCount','byteLength','objects','target','continuity',...(convertedReconstruct?['formatVersion','graphDigest','nodeCount','nodes']:[])]);
       const expected = object(a.expected), target = object(a.target), continuity = object(a.continuity);
       keys(expected, ['digest', 'payloadDigest', 'manifestDigest']);
       for (const key of ['digest', 'payloadDigest', 'manifestDigest']) if (typeof expected[key] !== 'string' || !/^[a-f0-9]{64}(?![\s\S])/.test(expected[key])) throw new ArcaneError('INPUT', 'Expected complete asset staging digests.');
@@ -891,9 +1016,14 @@ export function validateCommandArgs(method: StudioMethod, value: unknown, sessio
       textField(a.packet, 'asset packet', 256 * 1024);
       let packet: Record<string, unknown>;
       try {packet = object(JSON.parse(a.packet as string));} catch {throw new ArcaneError('INPUT', 'Expected a bounded JSON asset packet.');}
-      if (packet.formatVersion !== 1 || packet.payloadDigest !== expected.payloadDigest || packet.manifestDigest !== expected.manifestDigest
+      if ((packet.formatVersion !== 1&&packet.formatVersion!==2) || packet.payloadDigest !== expected.payloadDigest || packet.manifestDigest !== expected.manifestDigest
         || !Number.isInteger(packet.ordinal) || (packet.ordinal as number) < 0 || (packet.ordinal as number) >= 512
-        || !['begin', 'texture', 'object', 'chunk', 'seal'].includes(packet.kind as string)) throw new ArcaneError('INPUT', 'Asset packet does not match its fixed staging envelope.');
+        || !(packet.formatVersion===2?['begin','node','texture','object','chunk','seal']:['begin', 'texture', 'object', 'chunk', 'seal']).includes(packet.kind as string)) throw new ArcaneError('INPUT', 'Asset packet does not match its fixed staging envelope.');
+      // This is a per-command structural/scope gate. The trusted controller and
+      // durable reader must inspect the ORIGINAL complete v2 batch before claim:
+      // parent-first phase/coverage, raw hash chain, graph/payload digests and
+      // native representability cannot be proved by one queued packet.
+      if(packet.formatVersion===2)convertedPacket(packet,a.packet as string,target);
       } else {
         if(typeof a.runId!=='string'||!/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}(?![\s\S])/.test(a.runId)||!Number.isSafeInteger(a.packetCount)||Number(a.packetCount)<1||Number(a.packetCount)>512
           ||!Number.isSafeInteger(a.byteLength)||Number(a.byteLength)<Number(a.packetCount)||Number(a.byteLength)>STUDIO_ASSET_TRANSFER_LIMITS.rawBytes
@@ -908,6 +1038,7 @@ export function validateCommandArgs(method: StudioMethod, value: unknown, sessio
           ids.add(id);vertices+=Number(item.vertexCount);triangles+=Number(item.triangleCount);
         }
         if(vertices>STUDIO_RECONSTRUCTION_LIMITS.vertices||triangles>STUDIO_RECONSTRUCTION_LIMITS.triangles)throw new ArcaneError('BODY_LIMIT','Reconstruction exceeds aggregate resource limits.');
+        if(convertedReconstruct){for(const row of a.objects as Json[])convertedId(object(row).sourceObjectId);convertedReconstruction(a);}
       }
       keys(target, ['sessionId', 'placeId', 'universeId', 'root', 'parentRef', 'creator']); root(target.root, session);
       if (target.root !== 'Workspace' || target.sessionId !== session.id || target.placeId !== session.placeId || target.universeId !== session.universeId) throw new ArcaneError('SCOPE', 'Asset staging targets another paired Workspace.');

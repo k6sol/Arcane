@@ -16,6 +16,7 @@ import { guiEditReceiptMatches } from '../../core/src/gui-property-outcomes.js';
 import type { ScriptSourceVerifier, ScriptSourceVerification } from '../../core/src/script-source-verifier.js';
 import type { StudioAssetStageArgs, StudioAssetStageReceipt, StudioAssetReconstructArgs, StudioAssetReconstructReceipt } from '../../protocol/src/studio.js';
 import type { NativeConversation } from './conversation-work-store.js';
+import {inspectConvertedStudioImportTransfer,parseConvertedStudioImportTransferPacket} from '../../asset-pipeline/src/studio-import-transfer.js';
 import { ASSET_CONVERSATION_PROVIDERS } from '../../protocol/src/asset-conversation.js';
 
 type Row = Record<string, string | number | bigint | Uint8Array | null>;
@@ -309,7 +310,8 @@ export class StudioStore {
   #commandResultWaiterCount=0;
   #stageHashRun:string|null=null;
   #stageHashBytes=0;
-  #stageHashes=new Map<string,{raw:string;key:string;fingerprint:string;argsSha256:string;bytes:number}>();
+  #stageHashes=new Map<string,{raw:string;key:string;fingerprint:string;argsSha256:string;bytes:number;packetHeader?:{formatVersion:number;ordinal:unknown;payloadDigest:unknown;manifestDigest:unknown;kind:unknown}}>();
+  #convertedStageInspections=new Map<string,Pick<ReturnType<typeof inspectConvertedStudioImportTransfer>,'graph'>>();
   private clearStageContentHashes():void {this.#stageHashRun=null;this.#stageHashBytes=0;this.#stageHashes.clear();}
   private rememberStageContentHashes(id:string,raw:string,key:string,fingerprint:string,argsSha256:string):void {
     // UTF16 string storage plus a conservative fixed per-entry header charge.
@@ -990,6 +992,8 @@ export class StudioStore {
   }
   private stageTarget(intent:StageRunIntent):void {
     const session=this.session(intent.target.sessionId);
+    // Legacy-shaped scope probe only, never retained/transferred source data.
+    // Actual packets are version-checked at queue and durable read boundaries.
     validateCommandArgs('asset.stage_packet',{expected:{digest:intent.transferDigest,payloadDigest:intent.payloadDigest,manifestDigest:intent.manifestDigest},
       packet:JSON.stringify({formatVersion:1,ordinal:0,kind:'begin',payloadDigest:intent.payloadDigest,manifestDigest:intent.manifestDigest}),
       target:intent.target,continuity:intent.continuity},session);
@@ -1108,7 +1112,7 @@ export class StudioStore {
     const rows=this.db.prepare('SELECT * FROM asset_stage_attempt_commands WHERE run_id=? ORDER BY ordinal LIMIT 513').all(runId) as Row[];
     if(rows.length>intent.plan.length)throw new ArcaneError('STUDIO_STAGE_RECEIPT','Stage association exceeds its plan.');
     if(this.#stageHashRun!==runId){this.clearStageContentHashes();this.#stageHashRun=runId;}
-    let invalidReceipt=false;
+    let invalidReceipt=false,packetVersion:number|undefined;
     const commands:StageRunCommandAssociation[]=rows.map((member,ordinal)=>{
       const {command,raw,cacheable}=this.stageCommandSnapshot(member.command_id as string),plan=intent.plan[ordinal]!;
       const original=this.db.prepare('SELECT fingerprint,state FROM commands WHERE id=?').get(command.id) as Row;
@@ -1121,10 +1125,22 @@ export class StudioStore {
       const argsSha256=hit?saved.argsSha256:hash(JSON.stringify(command.args));
       if(fingerprint!==member.fingerprint||argsSha256!==plan.argsSha256)throw new ArcaneError('STUDIO_STAGE_RECEIPT','Original stage command differs from the pinned association.');
       if(cacheable&&!hit)this.rememberStageContentHashes(command.id,raw,key,fingerprint,argsSha256);
+      const content=cacheable?this.#stageHashes.get(command.id):undefined;
+      let packet=content?.raw===raw?content.packetHeader:undefined;
+      if(!packet){
+        const body=object(JSON.parse(command.args.packet as string));
+        if(body.formatVersion===2)parseConvertedStudioImportTransferPacket(command.args.packet);
+        else if(body.formatVersion!==1)throw new ArcaneError('STUDIO_STAGE_RECEIPT','Original packet version is unsupported.');
+        packet={formatVersion:body.formatVersion as number,ordinal:body.ordinal,payloadDigest:body.payloadDigest,manifestDigest:body.manifestDigest,kind:body.kind};
+        if(content?.raw===raw)content.packetHeader=packet;
+      }
+      if(packet.formatVersion===2&&(packet.ordinal!==ordinal||packet.payloadDigest!==intent.payloadDigest||packet.manifestDigest!==intent.manifestDigest||plan.expectedReceipt.state!==(packet.kind==='seal'?'sealed':'receiving')))throw new ArcaneError('STUDIO_STAGE_RECEIPT','Converted original packet accounting changed.');
+      if(packetVersion!==undefined&&packet.formatVersion!==packetVersion)throw new ArcaneError('STUDIO_STAGE_RECEIPT','Original transfer mixed packet versions.');packetVersion=packet.formatVersion;
       if(command.state==='succeeded'&&canonical(command.result)!==canonical(plan.expectedReceipt))invalidReceipt=true;
       return {ordinal,commandId:command.id,requestId:command.requestId,leaseEpoch:command.leaseEpoch,fingerprint,command};
     });
     const complete=!invalidReceipt&&commands.length===intent.plan.length&&commands.every(c=>c.command.state==='succeeded');
+    if(complete)this.convertedStageInspection(intent,commands);
     const unresolved=invalidReceipt||commands.some(c=>c.command.state==='needs_reconciliation'||run.closedAt!==null&&(c.command.state==='dispatched'||c.command.state==='succeeded'));
     const phase=complete?'cpu-staged':unresolved?'needs_reconciliation':run.closedAt!==null||commands.some(c=>['failed','cancelled'].includes(c.command.state))?'stopped':'running';
     if(phase==='needs_reconciliation'||commands.some(c=>!['queued','dispatched','succeeded','failed','cancelled'].includes(c.command.state)))this.clearStageContentHashes();
@@ -1166,6 +1182,29 @@ export class StudioStore {
       return false;
     }finally{this.db.exec('COMMIT');}
   }
+  /** Derives complete metadata only from associated original packet bytes.
+   * This never restores decoded-data authority or a stage-run handle. */
+  private convertedStageInspection(intent:StageRunIntent,commands:readonly StageRunCommandAssociation[]):Pick<ReturnType<typeof inspectConvertedStudioImportTransfer>,'graph'>|null {
+    if(!commands.length)return null;
+    const first=object(JSON.parse(commands[0]!.command.args.packet as string));
+    if(first.formatVersion!==2)return null;
+    if(commands.length!==intent.plan.length)throw new ArcaneError('STUDIO_RECONSTRUCT_SOURCE','Converted packet closure is incomplete.');
+    // Every caller has already checked actual original command bytes against
+    // these plan hashes. Cache metadata only, never live scope or permissions.
+    const key=hash(canonical(intent));const cached=this.#convertedStageInspections.get(key);if(cached)return cached;
+    const packets=commands.map(({command},ordinal)=>{
+      const json=command.args.packet;if(typeof json!=='string')throw new ArcaneError('STUDIO_STAGE_RECEIPT','Original packet bytes are absent.');
+      const body=parseConvertedStudioImportTransferPacket(json);
+      if(body.ordinal!==ordinal||body.payloadDigest!==intent.payloadDigest||body.manifestDigest!==intent.manifestDigest)throw new ArcaneError('STUDIO_STAGE_RECEIPT','Converted packet identity changed.');
+      return {ordinal,kind:body.kind,json,byteLength:Buffer.byteLength(json),sha256:hash(json)};
+    });
+    const header=object(first.graph),inspection=inspectConvertedStudioImportTransfer({formatVersion:2,engineVerification:'pending',preparedDigest:intent.preparedDigest,
+      payloadDigest:intent.payloadDigest,digest:intent.transferDigest,packets,byteLength:packets.reduce((sum,p)=>sum+p.byteLength,0),
+      graphDigest:header.digest,nodeCount:header.nodeCount,conversionRequestDigest:first.conversionRequestDigest});
+    if(inspection.begin.projectId!==intent.projectId||inspection.begin.revisionId!==intent.jobId||canonical(inspection.begin.target)!==canonical(intent.target))throw new ArcaneError('STUDIO_STAGE_RECEIPT','Converted original packet target or project differs from its journal.');
+    const metadata=Object.freeze({graph:inspection.graph});
+    if(this.#convertedStageInspections.size>=STUDIO_STAGE_RUN_LIMITS.runs)this.#convertedStageInspections.clear();this.#convertedStageInspections.set(key,metadata);return metadata;
+  }
   /** Derive a reconstruction from ORIGINAL associated packet bytes, never a
    * caller's source list. Only the plugin owns the actual sealed receiver. */
   private stageReconstructionArgs(run:StageRunRecord):StudioAssetReconstructArgs {
@@ -1179,8 +1218,14 @@ export class StudioStore {
       objects.push({sourceObjectId:source.sourceObjectId as string,meshExportSha256:source.meshExportSha256 as string,
         vertexCount:primitives.reduce((n,p)=>n+Number(object(p).vertexCount),0),triangleCount:primitives.reduce((n,p)=>n+Number(object(p).triangleCount),0)});
     }
+    const converted=this.convertedStageInspection(run.intent,run.commands);
     const args:StudioAssetReconstructArgs={runId:run.runId,expected:{digest:run.intent.transferDigest,payloadDigest:run.intent.payloadDigest,manifestDigest:run.intent.manifestDigest},
-      packetCount:run.receipt.packetCount,byteLength:run.receipt.byteLength,target:run.intent.target,continuity:run.intent.continuity,objects};
+      packetCount:run.receipt.packetCount,byteLength:run.receipt.byteLength,target:run.intent.target,continuity:run.intent.continuity,objects,
+      ...(converted?{formatVersion:2 as const,graphDigest:converted.graph.digest,nodeCount:converted.graph.nodes.length,
+        nodes:run.commands.map(({command})=>object(JSON.parse(command.args.packet as string))).filter(packet=>packet.kind==='node').map(packet=>{
+          const node=object(packet.node),mesh=converted.graph.meshes.find(row=>row.nodeKey===node.nodeKey);
+          return {nodeKey:node.nodeKey as string,parentKey:node.parentKey as string|null,sourceObjectId:mesh?.sourceObjectId??null};
+        })}:{})};
     return args;
   }
   /** Private host admission with one durable command association per original
@@ -1220,7 +1265,7 @@ export class StudioStore {
     if(command.method!=='asset.reconstruct'||command.sessionId!==run.intent.target.sessionId||command.clientSessionId!==run.intent.continuity.clientLifetimeId
       ||command.requestId!==row.request_id||command.leaseEpoch!==row.lease_epoch||canonical(command.args)!==canonical(args)
       ||fingerprint!==row.fingerprint||actual.fingerprint!==fingerprint||actual.state!==command.state)throw new ArcaneError('STUDIO_RECONSTRUCT_RECEIPT','Original reconstruction command differs.');
-    const expected:StudioAssetReconstructReceipt={runId,transferDigest:run.intent.transferDigest,state:'reconstructed',objects:args.objects,imported:false,engineVerification:'pending'};
+    const expected:StudioAssetReconstructReceipt={runId,transferDigest:run.intent.transferDigest,state:'reconstructed',objects:args.objects,imported:false,engineVerification:'pending',...('formatVersion'in args&&args.formatVersion===2?{formatVersion:2 as const,graphDigest:args.graphDigest,nodeCount:args.nodeCount,nodes:args.nodes}:{})};
     if(command.state==='succeeded'&&canonical(command.result)!==canonical(expected))throw new ArcaneError('STUDIO_RECONSTRUCT_RECEIPT','Original reconstruction receipt differs.');
     return {runId,command,receipt:command.state==='succeeded'?structuredClone(expected):null};
   }
@@ -1254,6 +1299,22 @@ export class StudioStore {
     try { return this.enqueue(a, false, admission); }
     finally { this.#meshKeepAdmissions.delete(admission); }
   }
+  /** Exact historical source of a placed editable transfer. No resource life,
+   * consent, upload permission or replay handle can be inferred from this read. */
+  readStageKeepSource(sessionId:string,transferDigest:string):{run:StageRunRecord;reconstruction:StageReconstructionRecord}|null {
+    if(this.closed)throw new ArcaneError('STUDIO_STAGE_CLOSED','Stage journal is closed.');
+    if(typeof sessionId!=='string'||!/^[A-Za-z0-9_-]{1,128}$/.test(sessionId)||!stageHash.safeParse(transferDigest).success)throw new ArcaneError('STUDIO_STAGE_INPUT','Invalid historical keep source.');
+    this.db.exec('BEGIN DEFERRED');
+    try{
+      const rows=this.db.prepare("SELECT a.project_id,a.job_id,a.run_id,r.command_id FROM asset_stage_reconstructions r JOIN asset_stage_attempts a ON a.run_id=r.run_id JOIN commands c ON c.id=r.command_id WHERE c.session_id=? AND (json_extract(a.payload,'$.intent.transferDigest')=? OR json_extract(c.payload,'$.args.expected.digest')=?) LIMIT 2").all(sessionId,transferDigest,transferDigest) as Row[];
+      if(rows.length===0){this.db.exec('COMMIT');return null;}
+      if(rows.length!==1)throw new ArcaneError('STUDIO_RECONSTRUCT_RECEIPT','Historical keep source is ambiguous.');
+      const row=rows[0]!,run=this.readStageRun(row.project_id as string,row.job_id as string,row.run_id as string),reconstruction=this.readStageReconstruction(row.project_id as string,row.job_id as string,row.run_id as string);
+      if(!run||!reconstruction||reconstruction.command.id!==row.command_id||reconstruction.command.sessionId!==sessionId||run.intent.target.sessionId!==sessionId||run.intent.transferDigest!==transferDigest||reconstruction.command.state!=='succeeded'||!reconstruction.receipt)throw new ArcaneError('STUDIO_RECONSTRUCT_RECEIPT','Original keep source is not a completed reconstruction.');
+      this.db.exec('COMMIT');return {run,reconstruction};
+    }catch(error){this.db.exec('ROLLBACK');throw error;}
+  }
+
   /** The original asset job of a recorded reconstruction command, for display correlation only (never authority). */
   stageJobForReconstruction(commandId: string): string | null {
     const row = this.db.prepare('SELECT a.job_id AS job FROM asset_stage_reconstructions r JOIN asset_stage_attempts a ON a.run_id=r.run_id WHERE r.command_id=?').get(commandId) as Row | undefined;
@@ -1602,7 +1663,7 @@ export class StudioStore {
       }
       if(a.state==='succeeded'&&c.method==='asset.reconstruct'){
         const args=c.args as unknown as StudioAssetReconstructArgs;
-        const expected:StudioAssetReconstructReceipt={runId:args.runId,transferDigest:args.expected.digest,state:'reconstructed',objects:args.objects,imported:false,engineVerification:'pending'};
+        const expected:StudioAssetReconstructReceipt={runId:args.runId,transferDigest:args.expected.digest,state:'reconstructed',objects:args.objects,imported:false,engineVerification:'pending',...('formatVersion'in args&&args.formatVersion===2?{formatVersion:2 as const,graphDigest:args.graphDigest,nodeCount:args.nodeCount,nodes:args.nodes}:{})};
         if(canonical(result)!==canonical(expected))throw new ArcaneError('RECEIPT','Reconstruction receipt differs from the exact original sources.');
       }
       if (a.state === 'succeeded' && c.method === 'asset.keep_mesh') validateMeshKeepReceipt(c.args, result);
@@ -1670,5 +1731,5 @@ export class StudioStore {
     const a = resolve(directory), b = this.workspaceDirectory;
     return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
   }
-  close(): void { if (!this.closed) { this.closed = true; this.clearStageContentHashes();this.#assetDispatchGuards.clear(); for(const waiters of this.#commandResultWaiters.values())for(const finish of waiters)finish(); this.db.close(); closeSync(this.lockFd); unlinkSync(this.lockPath); } }
+  close(): void { if (!this.closed) { this.closed = true; this.clearStageContentHashes();this.#convertedStageInspections.clear();this.#assetDispatchGuards.clear(); for(const waiters of this.#commandResultWaiters.values())for(const finish of waiters)finish(); this.db.close(); closeSync(this.lockFd); unlinkSync(this.lockPath); } }
 }

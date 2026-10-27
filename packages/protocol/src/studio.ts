@@ -103,15 +103,29 @@ export const STUDIO_RECONSTRUCTION_LIMITS = Object.freeze({objects:128,vertices:
 export interface StudioAssetReconstructedObject {
   sourceObjectId:string;meshExportSha256:string;vertexCount:number;triangleCount:number;
 }
-export interface StudioAssetReconstructArgs {
+export interface GeneratedStudioAssetReconstructArgsV1 {
   runId:string;expected:StudioAssetStageArgs['expected'];
   packetCount:number;byteLength:number;target:StudioAssetStageArgs['target'];continuity:StudioAssetStageArgs['continuity'];
   objects:StudioAssetReconstructedObject[];
 }
-export interface StudioAssetReconstructReceipt {
+export interface GeneratedStudioAssetReconstructReceiptV1 {
   runId:string;transferDigest:string;state:'reconstructed';objects:StudioAssetReconstructedObject[];
   imported:false;engineVerification:'pending';
 }
+/** Sealed logical graph summary, not observed Model instances or owned-state
+ * proof. Names, local matrices and source pivots remain bound by graphDigest.
+ * Actual instance/state mappings belong to a later observed placement receipt. */
+export interface StudioAssetReconstructedNode {
+  nodeKey:string;parentKey:string|null;sourceObjectId:string|null;
+}
+export interface ConvertedStudioAssetReconstructArgsV2 extends GeneratedStudioAssetReconstructArgsV1 {
+  formatVersion:2;graphDigest:string;nodeCount:number;nodes:StudioAssetReconstructedNode[];
+}
+export interface ConvertedStudioAssetReconstructReceiptV2 extends GeneratedStudioAssetReconstructReceiptV1 {
+  formatVersion:2;graphDigest:string;nodeCount:number;nodes:StudioAssetReconstructedNode[];
+}
+export type StudioAssetReconstructArgs=GeneratedStudioAssetReconstructArgsV1|ConvertedStudioAssetReconstructArgsV2;
+export type StudioAssetReconstructReceipt=GeneratedStudioAssetReconstructReceiptV1|ConvertedStudioAssetReconstructReceiptV2;
 export type CommandState = 'queued' | 'dispatched' | 'succeeded' | 'failed' | 'cancelled' | 'needs_reconciliation';
 export interface StudioCommand {
   protocolVersion: 1; id: string; requestId: string; sessionId: string; clientSessionId: string;

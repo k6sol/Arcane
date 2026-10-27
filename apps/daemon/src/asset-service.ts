@@ -7,7 +7,7 @@ import {isDeepStrictEqual} from 'node:util';
 import {parseAdoptGlbInput, parseAdoptedGlbRequest, parseAdoptedGlbManifest, snapshotAdoptedGlbConversation, isAdoptedGlbRequest, isAdoptedGlbManifest, readOwnedProjectGlb, validateAdoptedGlbManifest, ADOPTED_GLB_LIMITS, type AdoptedGlbRequest, type AdoptedGlbManifest} from '../../../packages/asset-pipeline/src/adopted-glb.js';
 export type AssetPreviewManifest = AssetManifest | AdoptedGlbManifest | ConvertedGlbManifest;
 import { parseConvertedGlbJobMetadata, type ConvertedGlbCreation, type ConvertedGlbJobMetadata } from '../../../packages/asset-pipeline/src/converted-glb-creation.js';
-import { parseConvertedGlbJson, type ConvertedGlbManifest } from '../../../packages/asset-pipeline/src/converted-glb-manifest.js';
+import { parseConvertedGlbJson, CONVERTED_GLB_ARTIFACT_LIMITS, type ConvertedGlbManifest } from '../../../packages/asset-pipeline/src/converted-glb-manifest.js';
 import { GLB_CONVERSION_LIMITS, type ConvertedGlbRequest } from '../../../packages/asset-pipeline/src/converted-glb.js';
 import { parseConvertGlbInput } from './conversion-start.js';
 import { atomicAssetJson, AtomicJsonFailure } from '../../../packages/asset-pipeline/src/atomic-json.js';
@@ -21,7 +21,8 @@ import { RESOLUTION_RECORD_BYTES, assessJobForResolution, validateResolution,
 import type { AssetInput, AssetJob, AssetJobEvent, AssetJobState, AssetManifest, AssetProbe, AssetRequest, OperationOptions } from '../../../packages/asset-pipeline/src/index.js';
 import { artifactPath, noLinks, prepareOutputRoot, readRegularFile, regularFile } from '../../../packages/asset-pipeline/src/paths.js';
 import { inspectPng, readJson, record, sha256 } from '../../../packages/asset-pipeline/src/validation.js';
-import { createStudioImportManifestAuthority, snapshotStudioImportSelection, STUDIO_IMPORT_LIMITS, type PreparedStudioImport } from '../../../packages/asset-pipeline/src/studio-import-manifest.js';
+import { createStudioImportManifestAuthority, snapshotStudioImportSelection, snapshotConvertedStudioImportBaseline, CONVERTED_STUDIO_IMPORT_FILE_IDS, STUDIO_IMPORT_LIMITS, type PreparedStudioImport, type StudioImportBaseline, type GeneratedStudioImportBaselineV1 } from '../../../packages/asset-pipeline/src/studio-import-manifest.js';
+import { adaptCompletedConvertedStudioImport, type ConvertedImportRetainedPath } from './converted-asset-import-adapter.js';
 import { adaptCompletedStudioImport, assertStudioImportJobScope, type StudioImportHostOptions, type StudioImportPreparationAttempt } from './asset-import-adapter.js';
 import { assertNativeAssetActor, nativeAssetActorScope, acquireNativeAssetWork, assertNativeAssetWorkLease, type NativeAssetActor, type NativeAssetWorkLease } from './native-asset-authority.js';
 import { ConversationWorkStore } from '../../../packages/storage/src/conversation-work-store.js';
@@ -725,6 +726,7 @@ export async function createAssetService(options: AssetServiceOptions) {
     const end = Date.now() + ARTIFACT_DOWNLOAD_TIMEOUT_MS;
     let selected: import('../../../packages/asset-pipeline/src/studio-import-manifest.js').StudioImportSelection | undefined;
     let review:AssetReviewImportGuard|undefined;
+    let convertedSource:{assertCurrent():void}|undefined;
     // Child host/store operations validate their own exact durable binding
     // around every await. Pass only the service lifetime/actor/target guard to
     // them, rather than performing the same expensive store scan twice at
@@ -736,10 +738,9 @@ export async function createAssetService(options: AssetServiceOptions) {
       const scope = nativeAssetActorScope(actor);
       if (selected && importHost.validateTarget) synchronousAdmissionResult(importHost.validateTarget(scope, requested, selected));
     };
-    const check = () => { guard();review?.assertCurrent(); return assertStudioImportJobScope(projectPath, importHost.workAssociations, actor, requested); };
+    const check = () => { guard();review?.assertCurrent();convertedSource?.assertCurrent(); return assertStudioImportJobScope(projectPath, importHost.workAssociations, actor, requested); };
     const originalScope = check();
     const e = await loadEntry(requested);check();
-    if (e.job.kind === 'converted-glb') throw new ArcaneError('STUDIO_IMPORT_UNSUPPORTED','Converted GLB review and delivery adapters are not implemented; conversion metadata grants no import authority.');
     if (isAdoptedGlbRequest(e.job.request)) throw new ArcaneError('STUDIO_IMPORT_UNSUPPORTED','Adopted GLB origin requires safe conversion and observed source mapping; engine import is unavailable.');
     if (e.job.state !== 'succeeded' || !e.job.manifestAvailable || active.has(requested)) throw new ArcaneError('JOB_STATE', 'Import preparation requires a verified completed job.');
     if (studioImportActive) throw new AssetError('BUSY', 'A Studio import preparation is already running.');
@@ -772,9 +773,34 @@ export async function createAssetService(options: AssetServiceOptions) {
       if (value !== requested) throw new ArcaneError('STUDIO_IMPORT_SCOPE', 'Import job identity changed.');
       const scope = check();
       // Tighten import size BEFORE the service's existing complete manifest proof.
-      for (const name of ['asset.glb', 'collision.glb'] as const) await wait(() => regularFile(artifactPath(e.directory, name), STUDIO_IMPORT_LIMITS.fileBytes));
+      const exportPaths=e.job.kind==='converted-glb'&&e.job.request?.collision==='none'?['asset.glb'] as const:['asset.glb','collision.glb'] as const;
+      for (const name of exportPaths) await wait(() => regularFile(artifactPath(e.directory, name), STUDIO_IMPORT_LIMITS.fileBytes));
       const manifest = await wait(() => readers.manifest(requested));
-      if (convertedManifest(manifest)) throw new ArcaneError('STUDIO_IMPORT_UNSUPPORTED','Converted GLB does not have a reviewed delivery adapter.');
+      if (convertedManifest(manifest)) {
+        if(e.job.kind!=='converted-glb'||!e.job.request||!isDeepStrictEqual(manifest.request,e.job.request))throw new AssetError('HASH','Converted import request changed.');
+        // These paths are fixed host-owned retained inputs, not public artifact
+        // requests or caller-selected files. The source witness spans every read.
+        const files=new Map<ConvertedImportRetainedPath,Buffer>();
+        const paths:readonly ConvertedImportRetainedPath[]=['request.json','source-map.json','conversion-audit.json','source.glb','import-source.glb',...exportPaths];
+        for(const path of paths){
+          const declared=manifest.artifacts.find(row=>row.path===path);
+          const isExport=path==='asset.glb'||path==='collision.glb';
+          const maximum=isExport?STUDIO_IMPORT_LIMITS.fileBytes:path==='source.glb'||path==='import-source.glb'?CONVERTED_GLB_ARTIFACT_LIMITS.sourceBytes:CONVERTED_GLB_ARTIFACT_LIMITS.jsonBytes;
+          const result=isExport?await wait(()=>readers.artifact(requested,path)):null;
+          if(result&&result.contentType!=='model/gltf-binary')throw new AssetError('HASH','Converted export content type changed.');
+          const bytes=result?result.bytes:await wait(()=>readRegularFile(artifactPath(e.directory,path),maximum));
+          if(!declared||bytes.length!==declared.bytes||sha256(bytes)!==declared.sha256)throw new AssetError('HASH','Converted retained inputs changed during preparation.');
+          files.set(path,bytes);
+          if(includePayload&&isExport)payloadFiles.set(path==='asset.glb'?CONVERTED_STUDIO_IMPORT_FILE_IDS.render:CONVERTED_STUDIO_IMPORT_FILE_IDS.collision,Buffer.from(bytes));
+        }
+        const selection=snapshotStudioImportSelection(await wait(()=>importHost.selectTarget(scope,requested,actor,guard)));
+        selected=selection;check();
+        const converted=adaptCompletedConvertedStudioImport(manifest,files,scope.projectId,selection,null);
+        const baseline=importHost.loadObservedBaseline?await wait(()=>importHost.loadObservedBaseline!(scope,converted.assetId,selection.target)):null;
+        check();
+        return {...converted,baseline:baseline===null?null:snapshotConvertedStudioImportBaseline(baseline)};
+      }
+      if(e.job.kind==='converted-glb')throw new AssetError('HASH','Converted import cannot use generated provenance.');
       if (isAdoptedGlbManifest(manifest)) throw new ArcaneError('STUDIO_IMPORT_UNSUPPORTED','Adopted GLB has preview-only provenance; engine import is unavailable.');
       if (!manifest.validation.studioImport) throw new AssetError('STUDIO_IMPORT_UNSUPPORTED', 'This completed job predates producer import identities; generate a new owned job.');
       const selection = snapshotStudioImportSelection(await wait(() => importHost.selectTarget(scope, requested, actor, guard)));
@@ -792,12 +818,16 @@ export async function createAssetService(options: AssetServiceOptions) {
       const generated = adaptCompletedStudioImport(manifest, exports, scope.projectId, selection, null);
       const baseline = importHost.loadObservedBaseline ? await wait(() => importHost.loadObservedBaseline!(scope, generated.assetId, selection.target)) : null;
       check();
+      const isGeneratedBaseline=(value:StudioImportBaseline|null):value is GeneratedStudioImportBaselineV1|null=>value===null||value.manifest.schemaVersion===1;
+      if(!isGeneratedBaseline(baseline))throw new AssetError('STUDIO_IMPORT_BASELINE','Generated import requires an observed generated baseline.');
       return { ...generated, baseline };
     } });
     try {
       // The returned review outlives this preparation's target capture and deadline.
       // reviewImport independently retains exact native actor/job/service checks.
       if(includePayload)review=await work.run(() => reviewImport(requested,actor,undefined,()=>{}));
+      else if(e.job.kind==='converted-glb')convertedSource=await work.run(()=>readModelReview(requested,
+        {projectId:originalScope.projectId,conversation:originalScope.conversation},()=>{guard();assertStudioImportJobScope(projectPath,importHost.workAssociations,actor,requested);}));
       const admission = await wait(() => authority.admit(requested));
       check();
       const prepared = authority.prepare(admission);

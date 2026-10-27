@@ -118,6 +118,17 @@ jobs:
       - name: Verify deterministic Studio plugin artifacts
         if: matrix.suite == 'release'
         run: node scripts/build-plugin.mjs --check
+      - name: Retain verified modular Studio plugin artifacts
+        if: runner.os == 'Windows' && matrix.suite == 'release'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: arcane-studio-plugin-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            plugin/build/manifest.json
+            plugin/build/ArcaneLocalBridge.rbxm
+            plugin/build/ArcaneLocalBridge.rbxmx
+          if-no-files-found: error
+          retention-days: 7
       - name: Test deterministic Studio plugin
         if: matrix.suite == 'release'
         run: npm run test:plugin

@@ -1,3 +1,4 @@
+import {types} from 'node:util';
 import { ArcaneError } from '../../protocol/src/providers.js';
 import { MESH_KEEP_LIMITS, object, type Json, type StudioSession } from '../../protocol/src/studio.js';
 
@@ -50,11 +51,11 @@ export function validateMeshKeep(a: Record<string, Json>, session: StudioSession
 }
 
 export interface MeshKeepMeshReceipt { index: number; name: string; assetId: number | null; upload: typeof MESH_KEEP_UPLOADS[number]; reason: string | null; swapped: boolean }
-export interface MeshKeepReceipt { state: MeshKeepState; meshes: MeshKeepMeshReceipt[]; uploadsStarted: number; swapped: number; persistence: 'saved-asset' | 'studio-session-only'; creatorId: number; ref: Json | null }
+export interface LegacyMeshKeepReceipt { state: MeshKeepState; meshes: MeshKeepMeshReceipt[]; uploadsStarted: number; swapped: number; persistence: 'saved-asset' | 'studio-session-only'; creatorId: number; ref: Json | null }
 
 /** Closed check of the plugin's keep receipt against the exact command. The receipt is evidence of what Studio reported,
  * never proof that Roblox finished processing or moderation. */
-export function validateMeshKeepReceipt(args: Record<string, Json>, value: unknown): MeshKeepReceipt {
+function validateLegacyMeshKeepReceipt(args: Record<string, Json>, value: unknown): LegacyMeshKeepReceipt {
   const r = exact(value, ['state', 'meshes', 'uploadsStarted', 'swapped', 'persistence', 'creatorId', 'ref'], 'keep-mesh receipt');
   if (!(MESH_KEEP_STATES as readonly unknown[]).includes(r.state) || !Array.isArray(r.meshes) || r.meshes.length < 1 || r.meshes.length > MESH_KEEP_LIMITS.meshes
     || r.creatorId !== args.creatorId || !Number.isSafeInteger(r.uploadsStarted) || (r.uploadsStarted as number) < 0 || (r.uploadsStarted as number) > r.meshes.length
@@ -75,5 +76,107 @@ export function validateMeshKeepReceipt(args: Record<string, Json>, value: unkno
   const expectedState: MeshKeepState = ids === 0 ? 'failed' : ids < meshes.length ? 'partial' : swapped === meshes.length ? 'kept' : 'uploaded';
   if (r.state !== expectedState || r.persistence !== (expectedState === 'kept' ? 'saved-asset' : 'studio-session-only')) throw new ArcaneError('RECEIPT', 'Keep-mesh state differs from its entries.');
   if (r.ref !== null && (typeof r.ref !== 'object' || Array.isArray(r.ref))) throw new ArcaneError('RECEIPT', 'Keep-mesh model reference is malformed.');
-  return { state: expectedState, meshes, uploadsStarted: r.uploadsStarted as number, swapped, persistence: r.persistence as MeshKeepReceipt['persistence'], creatorId: r.creatorId as number, ref: r.ref as Json | null };
+  return { state: expectedState, meshes, uploadsStarted: r.uploadsStarted as number, swapped, persistence: r.persistence as LegacyMeshKeepReceipt['persistence'], creatorId: r.creatorId as number, ref: r.ref as Json | null };
+}
+
+export interface ConvertedMeshKeepNodeObservation { readonly nodeKey:string; readonly instanceRef:string; readonly ownedStateSha256:string; readonly authoredChildren:readonly [] }
+export interface ConvertedMeshKeepObjectObservation { readonly sourceObjectId:string; readonly instanceRef:string; readonly ownedStateSha256:string; readonly authoredChildren:readonly []; readonly meshAssetId:string }
+export interface ConvertedMeshKeepObservation {
+  readonly formatVersion:2; readonly receiptScope:'studio-session-observation'; readonly imported:false; readonly engineVerification:'pending';
+  readonly graphDigest:string; readonly conversionRequestDigest:string;
+  readonly nodes:readonly ConvertedMeshKeepNodeObservation[]; readonly objects:readonly ConvertedMeshKeepObjectObservation[];
+}
+export interface ConvertedMeshKeepReceipt extends LegacyMeshKeepReceipt { readonly converted:ConvertedMeshKeepObservation }
+export type MeshKeepReceipt=LegacyMeshKeepReceipt|ConvertedMeshKeepReceipt;
+/** Exact sealed graph metadata supplied by a host reader; this conveys no permission. */
+export interface ConvertedMeshKeepExpected {
+  readonly transferDigest:string; readonly graphDigest:string; readonly conversionRequestDigest:string;
+  readonly nodes:readonly {readonly nodeKey:string;readonly parentKey:string|null}[];
+  readonly meshes:readonly {readonly sourceObjectId:string;readonly nodeKey:string|null}[];
+}
+const KEEP_NODE=/^node(?:0|[1-9][0-9]*)(?:_primitive(?:0|[1-9][0-9]*))?$/;
+const KEEP_OBJECT=/^arcane_[a-f0-9]{64}$/;
+const KEEP_INSTANCE=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
+function convertedKeepFailure():never {throw new ArcaneError('RECEIPT','Converted keep observations do not match the reported saved meshes.');}
+/** Descriptor-only snapshot before reading any converted receipt field. */
+function convertedKeepData(value:unknown):unknown {
+  let values=0,bytes=0;const seen=new Set<object>();
+  const walk=(v:unknown,depth:number):unknown=>{
+    if(++values>5000||depth>8)convertedKeepFailure();
+    if(v===null||typeof v==='boolean')return v;
+    if(typeof v==='number'){if(!Number.isFinite(v))convertedKeepFailure();return v;}
+    if(typeof v==='string'){bytes+=Buffer.byteLength(v);if(bytes>256*1024)convertedKeepFailure();return v;}
+    if(typeof v!=='object'||types.isProxy(v)||seen.has(v))convertedKeepFailure();
+    seen.add(v);
+    try{
+      const array=Array.isArray(v),prototype=Object.getPrototypeOf(v);
+      if(array?prototype!==Array.prototype:prototype!==Object.prototype&&prototype!==null)convertedKeepFailure();
+      const keys=Reflect.ownKeys(v);
+      if(array){
+        const length=Object.getOwnPropertyDescriptor(v,'length');
+        if(!length||!Object.hasOwn(length,'value')||!Number.isSafeInteger(length.value)||length.value<0||length.value>128||keys.length!==length.value+1)convertedKeepFailure();
+        const result:unknown[]=[];
+        for(let i=0;i<length.value;i++){const d=Object.getOwnPropertyDescriptor(v,String(i));if(!d||!d.enumerable||!Object.hasOwn(d,'value'))convertedKeepFailure();result.push(walk(d.value,depth+1));}
+        return Object.freeze(result);
+      }
+      if(keys.length>32)convertedKeepFailure();const result:Record<string,unknown>=Object.create(null);
+      for(const key of keys){if(typeof key!=='string')convertedKeepFailure();const d=Object.getOwnPropertyDescriptor(v,key);if(!d||!d.enumerable||!Object.hasOwn(d,'value'))convertedKeepFailure();result[key]=walk(d.value,depth+1);}
+      return Object.freeze(result);
+    }finally{seen.delete(v);}
+  };return walk(value,0);
+}
+function keepFields(value:unknown,fields:readonly string[]):Record<string,unknown>{
+  if(!value||typeof value!=='object'||Array.isArray(value))convertedKeepFailure();
+  const r=value as Record<string,unknown>;if(Object.keys(r).length!==fields.length||fields.some(key=>!Object.hasOwn(r,key)))convertedKeepFailure();return r;
+}
+/** Detached historical observations, never cloud Model IDs or current upload authority. */
+export function snapshotConvertedMeshKeepObservation(value:unknown,meshes:readonly {assetId:number|null;swapped:boolean}[],expected?:ConvertedMeshKeepExpected):ConvertedMeshKeepObservation {
+  const r=keepFields(convertedKeepData(value),['formatVersion','receiptScope','imported','engineVerification','graphDigest','conversionRequestDigest','nodes','objects']);
+  if(r.formatVersion!==2||r.receiptScope!=='studio-session-observation'||r.imported!==false||r.engineVerification!=='pending'||typeof r.graphDigest!=='string'||!DIGEST.test(r.graphDigest)
+    ||typeof r.conversionRequestDigest!=='string'||!DIGEST.test(r.conversionRequestDigest)||!Array.isArray(r.nodes)||r.nodes.length<1||r.nodes.length>128
+    ||!Array.isArray(r.objects)||r.objects.length!==meshes.length||meshes.length<1||meshes.length>MESH_KEEP_LIMITS.meshes||meshes.some(m=>!m.swapped||m.assetId===null))convertedKeepFailure();
+  const nodeKeys=new Set<string>(),nodeRefs=new Set<string>(),objectIds=new Set<string>(),objectRefs=new Set<string>();
+  const observation=(raw:Record<string,unknown>)=>{
+    if(typeof raw.instanceRef!=='string'||!KEEP_INSTANCE.test(raw.instanceRef)||typeof raw.ownedStateSha256!=='string'||!DIGEST.test(raw.ownedStateSha256)||!Array.isArray(raw.authoredChildren)||raw.authoredChildren.length!==0)convertedKeepFailure();
+    return {instanceRef:raw.instanceRef,ownedStateSha256:raw.ownedStateSha256,authoredChildren:Object.freeze([]) as readonly []};
+  };
+  const nodes=r.nodes.map(raw=>{
+    const n=keepFields(raw,['nodeKey','instanceRef','ownedStateSha256','authoredChildren']);
+    if(typeof n.nodeKey!=='string'||!KEEP_NODE.test(n.nodeKey)||nodeKeys.has(n.nodeKey))convertedKeepFailure();
+    const observed=observation(n);if(nodeRefs.has(observed.instanceRef))convertedKeepFailure();nodeKeys.add(n.nodeKey);nodeRefs.add(observed.instanceRef);return Object.freeze({nodeKey:n.nodeKey,...observed});
+  });
+  const objects=r.objects.map((raw,index)=>{
+    const o=keepFields(raw,['sourceObjectId','instanceRef','ownedStateSha256','authoredChildren','meshAssetId']);
+    if(typeof o.sourceObjectId!=='string'||!KEEP_OBJECT.test(o.sourceObjectId)||objectIds.has(o.sourceObjectId)||o.meshAssetId!==String(meshes[index]!.assetId))convertedKeepFailure();
+    const observed=observation(o);if(objectRefs.has(observed.instanceRef))convertedKeepFailure();objectIds.add(o.sourceObjectId);objectRefs.add(observed.instanceRef);return Object.freeze({sourceObjectId:o.sourceObjectId,...observed,meshAssetId:o.meshAssetId as string});
+  });
+  if(new Set([...nodeRefs,...objectRefs]).size>128)convertedKeepFailure();
+  for(const object of objects){const node=nodes.find(n=>n.instanceRef===object.instanceRef);if(node&&node.ownedStateSha256!==object.ownedStateSha256)convertedKeepFailure();}
+  if(expected){
+    if(r.graphDigest!==expected.graphDigest||r.conversionRequestDigest!==expected.conversionRequestDigest||nodes.length!==expected.nodes.length||objects.length!==expected.meshes.length)convertedKeepFailure();
+    const seen=new Set<string>();
+    for(let i=0;i<nodes.length;i++){const actual=nodes[i]!,planned=expected.nodes[i]!;if(actual.nodeKey!==planned.nodeKey||planned.parentKey!==null&&!seen.has(planned.parentKey))convertedKeepFailure();seen.add(planned.nodeKey);}
+    for(let i=0;i<objects.length;i++){
+      const actual=objects[i]!,planned=expected.meshes[i]!;if(actual.sourceObjectId!==planned.sourceObjectId)convertedKeepFailure();
+      const node=planned.nodeKey===null?undefined:nodes.find(n=>n.nodeKey===planned.nodeKey);
+      if(planned.nodeKey!==null&&(!node||node.instanceRef!==actual.instanceRef||node.ownedStateSha256!==actual.ownedStateSha256)||planned.nodeKey===null&&nodeRefs.has(actual.instanceRef))convertedKeepFailure();
+    }
+  }
+  return Object.freeze({formatVersion:2,receiptScope:'studio-session-observation',imported:false,engineVerification:'pending',graphDigest:r.graphDigest,conversionRequestDigest:r.conversionRequestDigest,nodes:Object.freeze(nodes),objects:Object.freeze(objects)});
+}
+export function validateMeshKeepReceipt(args:Record<string,Json>,value:unknown,expected?:ConvertedMeshKeepExpected):MeshKeepReceipt {
+  if(expected&&args.source!=='editable-'+expected.transferDigest)convertedKeepFailure();
+  if(value&&typeof value==='object'){
+    if(types.isProxy(value))convertedKeepFailure();
+    const descriptor=Object.getOwnPropertyDescriptor(value,'converted');
+    if(descriptor){
+      if(!descriptor.enumerable||!Object.hasOwn(descriptor,'value'))convertedKeepFailure();
+      const r=keepFields(convertedKeepData(value),['state','meshes','uploadsStarted','swapped','persistence','creatorId','ref','converted']);
+      const {converted,...legacy}=r,receipt=validateLegacyMeshKeepReceipt(args,legacy);
+      if(receipt.state!=='kept'||receipt.swapped!==receipt.meshes.length)convertedKeepFailure();
+      return Object.freeze({...receipt,converted:snapshotConvertedMeshKeepObservation(converted,receipt.meshes,expected)});
+    }
+  }
+  if(expected)convertedKeepFailure();
+  return validateLegacyMeshKeepReceipt(args,value);
 }

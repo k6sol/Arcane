@@ -130,7 +130,7 @@ for(const collision of ['none','convex-hull'] as const)test('actual converted se
   const pending=f.review.prepare(subject);assert.throws(()=>f.review.decide({reviewId:pending.reviewId,decision:'approved',idempotencyKey:randomUUID()},subject,{approved:true}),refused('ASSET_REVIEW_HUMAN_REQUIRED'));
   const approved=await f.approve(),guard=await f.service.reviewImport(JOB,f.actor);assert.equal(guard.reference.reviewId,approved.review.reviewId);guard.assertCurrent();
   f.service.assertReviewedImport(JOB,f.scope,guard.reference);assert.equal(f.selections(),0);assert.ok(f.validations()>=2);
-  await assert.rejects(f.service.prepareStudioImport(JOB,f.actor),refused('STUDIO_IMPORT_UNSUPPORTED'),'review does not pretend the delivery adapter exists');assert.equal(f.selections(),0);
+  assert.equal(f.selections(),0,'Model review does not select or mutate a Studio target.');
   await f.restart();assert.throws(()=>f.service.assertReviewedImport(JOB,f.scope,guard.reference),refused('ASSET_REVIEW_REQUIRED'),'process-local witness must be rebuilt after restart');
   const reopened=await f.service.reviewImport(JOB,f.actor,guard.reference);assert.deepEqual(reopened.reference,guard.reference);reopened.assertCurrent();
 });

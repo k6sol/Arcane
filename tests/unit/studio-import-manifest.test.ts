@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createStudioImportManifestAuthority, StudioImportManifestError, STUDIO_IMPORT_LIMITS } from '../../packages/asset-pipeline/src/studio-import-manifest.js';
-import type { HostGeneratedStudioImport, PreparedStudioImport, StudioImportAdmission, StudioImportBaseline } from '../../packages/asset-pipeline/src/studio-import-manifest.js';
+import type { HostGeneratedStudioImport, GeneratedPreparedStudioImportV1 as PreparedStudioImport, PreparedStudioImport as AnyPreparedStudioImport, StudioImportAdmission, GeneratedStudioImportBaselineV1 as StudioImportBaseline } from '../../packages/asset-pipeline/src/studio-import-manifest.js';
 import { parseNativeStudioImportResponse } from '../../packages/asset-pipeline/src/studio-import-wire.js';
 
 // Typed, in-memory exported cubes and PNGs. No filesystem, native applications,
@@ -96,9 +96,11 @@ function baseline(prepared: PreparedStudioImport): StudioImportBaseline {
           { instanceRef: 'attachment-' + o.sourceObjectId, kind: 'attachment', stateSha256: sha('attachment') },
           { instanceRef: 'constraint-' + o.sourceObjectId, kind: 'constraint', stateSha256: sha('constraint') }] })) } };
 }
+function generatedPreparation(value:AnyPreparedStudioImport):value is PreparedStudioImport {return value.manifest.schemaVersion===1;}
 async function prepare(input: HostGeneratedStudioImport, limits?: Parameters<typeof createStudioImportManifestAuthority>[0]['limits']) {
   const host = createStudioImportManifestAuthority({ loadGeneratedFiles: async () => input, ...(limits ? { limits } : {}) });
-  return host.prepare(await host.admit(input.revisionId));
+  const prepared=host.prepare(await host.admit(input.revisionId));
+  assert.ok(generatedPreparation(prepared),'This fixture prepares generated version-one models.');return prepared;
 }
 const errorCode = (code: StudioImportManifestError['code']) => (error: unknown) => error instanceof StudioImportManifestError && error.code === code;
 

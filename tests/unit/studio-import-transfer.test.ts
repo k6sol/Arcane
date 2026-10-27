@@ -6,13 +6,14 @@ import {tmpdir} from 'node:os';
 import {join, relative, isAbsolute} from 'node:path';
 import {saveStudioFixture} from '../../packages/asset-pipeline/testing/studio-import-fixture.js';
 import {adaptCompletedStudioImport} from '../../apps/daemon/src/asset-import-adapter.js';
-import {createStudioImportManifestAuthority} from '../../packages/asset-pipeline/src/studio-import-manifest.js';
-import {decodeStudioImportPayload, type StudioImportPayload} from '../../packages/asset-pipeline/src/studio-import-payload.js';
+import {createStudioImportManifestAuthority,type PreparedStudioImport,type GeneratedPreparedStudioImportV1} from '../../packages/asset-pipeline/src/studio-import-manifest.js';
+import {decodeStudioImportPayload, type GeneratedStudioImportPayloadV1 as StudioImportPayload} from '../../packages/asset-pipeline/src/studio-import-payload.js';
 import {createStudioImportTransfer, STUDIO_IMPORT_TRANSFER_LIMITS} from '../../packages/asset-pipeline/src/studio-import-transfer.js';
 
 // Owned synthetic export bytes only: no Blender, Studio, providers or dispatch.
 const JOB = '11111111-1111-4111-8111-111111111111';
 const sha = (v: string | Uint8Array) => createHash('sha256').update(v).digest('hex');
+function generatedPreparation(value:PreparedStudioImport):value is GeneratedPreparedStudioImportV1 {return value.manifest.schemaVersion===1;}
 async function fixture(t: test.TestContext) {
   const parent = tmpdir(), directory = await mkdtemp(join(parent, 'arcane-transfer-'));
   t.after(async () => {const path = relative(parent, directory); assert.ok(path.startsWith('arcane-transfer-') && !isAbsolute(path) && !path.includes('..')); await rm(directory, {recursive: true, force: true});});
@@ -26,6 +27,7 @@ async function fixture(t: test.TestContext) {
   const authority = createStudioImportManifestAuthority({loadGeneratedFiles: async () => generated});
   t.after(() => authority.close());
   const prepared = authority.prepare(await authority.admit(JOB));
+  assert.ok(generatedPreparation(prepared),'This fixture prepares generated version-one models.');
   const files = new Map(generated.files.map(f => [f.fileId, f.bytes]));
   const payload = decodeStudioImportPayload(prepared, files);
   return {prepared, payload, files};

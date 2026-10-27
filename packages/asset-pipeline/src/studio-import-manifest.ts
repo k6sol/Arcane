@@ -4,6 +4,9 @@ import { types } from 'node:util';
 import { z } from 'zod';
 import { validateGlb } from '../../../apps/desktop/src/glb-preflight.js';
 import { decodeMaterialPng, MaterialPngError } from './material-png.js';
+import {parseConvertedGlbRequest,convertedGlbAssetId,convertedGlbObjectId,type ConvertedGlbRequest} from './converted-glb.js';
+import {parseConvertedGraph,type ConvertedGraphV1} from './studio-import-graph.js';
+import {CONVERSION_NODE_KEY,CONVERSION_VERTEX_ID,conversionCorrespondenceSha256,checkConversionMatrix} from './conversion-fidelity-policy.js';
 
 /** Host-only preparation; no filesystem, upload, Studio, Blender or provider calls.
  * Reuses the existing data-only GLB gate, then adds static import policy and revisions.
@@ -94,14 +97,51 @@ const inputSchema = z.strictObject({ schemaVersion: z.literal(1), projectId: has
   producer: manifestContent.shape.producer, target, placement, studsPerMeter: z.number().positive().max(1000),
   files: z.array(generatedFile).min(1).max(32), models: z.array(sourceModel).min(1).max(32), anchors: z.array(anchor).max(128), baseline: baselineSchema.nullable() });
 
+const partKey = z.string().regex(/^node[0-9]{1,4}_primitive[0-9]{1,4}(?![\s\S])/);
+const nodeKey = z.string().regex(/^node[0-9]{1,4}(?:_primitive[0-9]{1,4})?(?![\s\S])/);
+const convertedSourceObject = sourceObject.extend({sourceKey:z.union([partKey,z.literal('proxy')])});
+const convertedSourceModel = sourceModel.extend({objects:z.array(convertedSourceObject).min(1).max(128)});
+const convertedObjectManifest = z.strictObject({sourceObjectId:id,sourceKey:z.union([partKey,z.literal('proxy')]),name:z.string().min(1).max(256),role:z.enum(['render','collision']),
+  exportFileId:id,nodeIndex:z.number().int().nonnegative().max(4095),meshExportSha256:hash,triangles:z.number().int().positive().max(STUDIO_IMPORT_LIMITS.meshTriangles),
+  materialSha256:hash.nullable(),textureSha256s:z.array(hash).max(4),exportTransform:matrix,scale:vec3,pivot:vec3,
+  bounds,worldBounds:bounds,collisionFor:z.array(id).max(128)}).refine(o=>o.role!=='collision'||
+    [o.bounds,o.worldBounds].every(b=>b.min.every((n,i)=>n<b.max[i]!)),'Collision proxies require nonzero volume bounds');
+// Snapshot precedes these parsers. Their errors retain the source-specific code.
+const convertedRequest = z.unknown().transform(value=>parseConvertedGlbRequest(value));
+const convertedGraph = z.unknown().transform(value=>parseConvertedGraph(value));
+const convertedProducer=z.strictObject({blenderVersion:z.string().min(1).max(128).regex(/^[\x20-\x7e]+(?![\s\S])/),
+  exporterVersion:z.string().min(1).max(256).regex(/^[\x20-\x7e]+(?![\s\S])/)});
+const convertedTextureManifest=textureManifest.extend({byteLength:z.number().int().positive().max(STUDIO_IMPORT_LIMITS.fileBytes),
+  width:z.number().int().positive().max(STUDIO_IMPORT_LIMITS.textureDimension),height:z.number().int().positive().max(STUDIO_IMPORT_LIMITS.textureDimension),
+  locations:z.array(z.strictObject({fileId:id,imageIndex:z.number().int().nonnegative().max(4095)})).min(1).max(128)});
+const convertedManifestContent = manifestContent.extend({schemaVersion:z.literal(2),origin:z.literal('converted-glb'),
+  identityScheme:z.literal('arcane-converted-v2'),conversionRequest:convertedRequest,graph:convertedGraph,
+  producer:convertedProducer,conversion:manifestContent.shape.conversion.extend({sourceUp:z.literal('Y')}),objects:z.array(convertedObjectManifest).min(1).max(128),
+  textures:z.array(convertedTextureManifest).max(64),anchors:z.array(z.never()).max(0)});
+const convertedManifestSchema = convertedManifestContent.extend({digest:hash});
+const nodeMapping = z.strictObject({nodeKey,instanceRef:id,ownedStateSha256:hash,authoredChildren:z.array(preservedChild).max(128)});
+const convertedBaselineSchema = baselineSchema.extend({manifest:convertedManifestSchema,
+  receipt:baselineSchema.shape.receipt.extend({graphDigest:hash,nodes:z.array(nodeMapping).min(1).max(4096)})});
+const convertedInputSchema = inputSchema.extend({schemaVersion:z.literal(2),origin:z.literal('converted-glb'),identityScheme:z.literal('arcane-converted-v2'),
+  producer:convertedProducer,conversionRequest:convertedRequest,graph:convertedGraph,models:z.array(convertedSourceModel).min(1).max(2),anchors:z.array(z.never()).max(0),baseline:convertedBaselineSchema.nullable()});
+
 export type HostGeneratedStudioImport = z.input<typeof inputSchema>;
+export type HostGeneratedStudioImportV1 = HostGeneratedStudioImport;
+export type HostConvertedStudioImportV2 = Omit<z.input<typeof convertedInputSchema>,'conversionRequest'|'graph'|'baseline'> & {
+  conversionRequest:ConvertedGlbRequest;graph:ConvertedGraphV1;baseline:ConvertedStudioImportBaselineV2|null;
+};
+export type HostStudioImport = HostGeneratedStudioImportV1 | HostConvertedStudioImportV2;
 export type StudioImportSelection = Pick<HostGeneratedStudioImport, 'target' | 'placement' | 'studsPerMeter'>;
-export type StudioImportManifest = DeepReadonly<z.infer<typeof manifestSchema>>;
-export type StudioImportBaseline = z.input<typeof baselineSchema>;
+export type GeneratedStudioImportManifestV1 = DeepReadonly<z.infer<typeof manifestSchema>>;
+export type ConvertedStudioImportManifestV2 = DeepReadonly<z.infer<typeof convertedManifestSchema>>;
+export type StudioImportManifest = GeneratedStudioImportManifestV1 | ConvertedStudioImportManifestV2;
+export type GeneratedStudioImportBaselineV1 = z.input<typeof baselineSchema>;
+export type ConvertedStudioImportBaselineV2 = DeepReadonly<z.infer<typeof convertedBaselineSchema>>;
+export type StudioImportBaseline = GeneratedStudioImportBaselineV1 | ConvertedStudioImportBaselineV2;
 type DeepReadonly<T> = T extends object ? { readonly [K in keyof T]: DeepReadonly<T[K]> } : T;
 /** A serialized/lookalike token never admits files or a previous Studio receipt. */
 export interface StudioImportAdmission { readonly kind: 'studio-import-admission' }
-export interface StudioImportRevisionDelta {
+export interface GeneratedStudioImportRevisionDeltaV1 {
   readonly previousDigest: string | null;
   readonly nextDigest: string;
   readonly receiptSha256: string | null;
@@ -119,12 +159,22 @@ export interface StudioImportRevisionDelta {
   readonly textures: Readonly<{ prepare: readonly string[]; reuse: readonly string[] }>;
   readonly preservation: 'preserve-all-scripts-attachments-constraints';
 }
-export interface PreparedStudioImport {
+export interface ConvertedStudioImportRevisionDeltaV2 extends GeneratedStudioImportRevisionDeltaV1 {
+  readonly graph:Readonly<{previousDigest:string|null;nextDigest:string;changed:boolean}>;
+  readonly nodes:readonly DeepReadonly<{nodeKey:string;action:'create'|'update-in-place'|'reuse';changed:('parent'|'matrix'|'name'|'mesh'|'pivot')[];
+    instanceRef:string|null;expectedOwnedStateSha256:string|null;preserveChildren:z.infer<typeof preservedChild>[];replaceInstance:false;deleteInstance:false}>[];
+  readonly reviewNodeRemovals:readonly DeepReadonly<z.infer<typeof nodeMapping>&{action:'retain-for-review'}>[];
+}
+export type StudioImportRevisionDelta = GeneratedStudioImportRevisionDeltaV1 | ConvertedStudioImportRevisionDeltaV2;
+export interface GeneratedPreparedStudioImportV1 {
   readonly status: 'prepared';
-  readonly manifest: StudioImportManifest;
-  readonly delta: StudioImportRevisionDelta;
+  readonly manifest: GeneratedStudioImportManifestV1;
+  readonly delta: GeneratedStudioImportRevisionDeltaV1;
   readonly digest: string;
 }
+export interface ConvertedPreparedStudioImportV2 {readonly status:'prepared';readonly manifest:ConvertedStudioImportManifestV2;
+  readonly delta:ConvertedStudioImportRevisionDeltaV2;readonly digest:string}
+export type PreparedStudioImport = GeneratedPreparedStudioImportV1 | ConvertedPreparedStudioImportV2;
 export interface StudioImportManifestAuthority {
   /** HOST ONLY: callback selects a completed job and verifies its generated bytes/ownership. */
   admit(jobId: string): Promise<StudioImportAdmission>;
@@ -151,13 +201,13 @@ function bound(n: number, max: number, label: string): void { if (!Number.isSafe
 
 // Descriptor-only snapshot. Reject getters, proxies, custom prototypes, symbols,
 // sparse arrays and shared buffers before invoking Zod or serializing anything.
-function snapshot(value: unknown, limits: Limits): unknown {
+function snapshot(value: unknown, limits: Limits, converted = false): unknown {
   let values = 0, bytes = 0;
   const seen = new Set<object>();
   const typed = Object.getPrototypeOf(Uint8Array.prototype) as object;
   const internal = (key: string, v: object): unknown => Object.getOwnPropertyDescriptor(typed, key)!.get!.call(v);
   const walk = (v: unknown, depth: number): unknown => {
-    if (++values > 60_000 || depth > 32) fail('BUDGET', 'Metadata complexity budget exceeded.');
+    if (++values > (converted ? 200_000 : 60_000) || depth > 32) fail('BUDGET', 'Metadata complexity budget exceeded.');
     if (v === null || typeof v === 'boolean') return v;
     if (typeof v === 'string') { if (v.length > 4096) fail('BUDGET', 'Metadata string budget exceeded.'); return v; }
     if (typeof v === 'number') { if (!Number.isFinite(v)) fail('SCHEMA', 'Nonfinite metadata.'); return Object.is(v, -0) ? 0 : v; }
@@ -172,7 +222,7 @@ function snapshot(value: unknown, limits: Limits): unknown {
     if (seen.has(v)) fail('SCHEMA', 'Cyclic metadata.');
     seen.add(v);
     const array = Array.isArray(v), prototype: unknown = Object.getPrototypeOf(v);
-    if (prototype !== (array ? Array.prototype : Object.prototype) && prototype !== null) fail('SCHEMA', 'Expected plain metadata.');
+    if (converted && array ? prototype !== Array.prototype : prototype !== (array ? Array.prototype : Object.prototype) && prototype !== null) fail('SCHEMA', 'Expected plain metadata.');
     const descriptors = Object.getOwnPropertyDescriptors(v), keys = Reflect.ownKeys(v);
     if (keys.length > 4097) fail('BUDGET', 'Metadata array/key budget exceeded.');
     const out: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
@@ -312,7 +362,61 @@ function measuredBounds(points: number[][]) {
   return parse(bounds, { min: [0, 1, 2].map(i => points.reduce((n, p) => Math.min(n, p[i]!), Infinity)),
     max: [0, 1, 2].map(i => points.reduce((n, p) => Math.max(n, p[i]!), -Infinity)) });
 }
-function compile(input: z.infer<typeof inputSchema>, limits: Limits): z.infer<typeof manifestSchema> {
+export const CONVERTED_STUDIO_IMPORT_FILE_IDS=Object.freeze({render:'asset-glb',collision:'collision-glb'});
+type ConvertedInput=z.infer<typeof convertedInputSchema>;
+type GeneratedManifest=z.infer<typeof manifestSchema>;
+type ConvertedManifest=z.infer<typeof convertedManifestSchema>;
+function convertedIdentity(value:ConvertedManifest|ConvertedInput):void {
+  const request=value.conversionRequest;
+  if(value.revisionId!==request.jobId||value.sourceSha256!==request.sourceSha256||value.assetId!==convertedGlbAssetId(request.sourceSha256))
+    fail('EXPORT','Converted manifest identity differs from its actual request.');
+  const expected=[CONVERTED_STUDIO_IMPORT_FILE_IDS.render,...(request.collision==='convex-hull'?[CONVERTED_STUDIO_IMPORT_FILE_IDS.collision]:[])].sort();
+  if(canonical(value.files.map(f=>f.fileId).sort())!==canonical(expected)||value.files.some(f=>f.contentType!=='model/gltf-binary'))
+    fail('EXPORT','Converted export inventory differs from its actual collision request.');
+  const objects='models' in value?value.models.flatMap(m=>m.objects):value.objects;
+  unique(objects.map(o=>o.sourceObjectId),'converted object ID');unique(objects.map(o=>o.sourceKey),'converted source key');
+  if(objects.length!==value.graph.meshes.length)fail('EXPORT','Converted objects must cover every graph mesh.');
+  const renderIds=objects.filter(o=>o.role==='render').map(o=>o.sourceObjectId).sort();
+  for(const o of objects){
+    const association=value.graph.meshes.find(m=>m.sourceObjectId===o.sourceObjectId);
+    if(!association||o.sourceObjectId!==convertedGlbObjectId(request.sourceSha256,o.role,o.sourceKey)||canonical(o.pivot)!=='[0,0,0]'||
+      (o.role==='render'?(association.nodeKey!==o.sourceKey||o.sourceKey==='proxy'||o.collisionFor.length!==0):
+        (o.sourceKey!=='proxy'||association.nodeKey!==null||association.correspondenceSha256!==null||canonical([...o.collisionFor].sort())!==canonical(renderIds))))
+      fail('EXPORT','Converted graph association, identity or source pivot differs.');
+  }
+  if(objects.filter(o=>o.role==='collision').length!==(request.collision==='convex-hull'?1:0))fail('EXPORT','Converted collision inventory differs.');
+}
+function convertedModelGraph(input:ConvertedInput,model:ConvertedInput['models'][number],doc:Obj):void {
+  const render=model.fileId===CONVERTED_STUDIO_IMPORT_FILE_IDS.render;
+  if(doc.asset.generator!==input.producer.exporterVersion)fail('EXPORT','Converted producer presentation differs from the actual export generator.');
+  if(model.resources.length||model.objects.some(o=>o.role!==(render?'render':'collision')))fail('EXPORT','Converted exports require their fixed embedded model roles.');
+  for(const o of model.objects){const n=doc.nodes[o.nodeIndex],extra=n?.extras;
+    if(!extra||extra.arcane_identity_scheme!==input.identityScheme||extra.arcane_source_object_id!==o.sourceObjectId||
+      extra.arcane_source_key!==o.sourceKey||extra.arcane_role!==o.role||canonical(extra.arcane_pivot)!=='[0,0,0]'||
+      extra.arcane_collision_for!==JSON.stringify([...o.collisionFor].sort()))fail('EXPORT','Actual converted export identity or pivot differs.');
+  }
+  if(!render){if(doc.nodes.length!==1||model.objects.length!==1||doc.nodes[0].mesh===undefined||canonical(doc.scenes?.[doc.scene??0]?.nodes)!=='[0]')fail('EXPORT','Converted collision must be one derived root.');return;}
+  if(doc.nodes.length!==input.graph.nodes.length)fail('EXPORT','Converted export lost or introduced graph nodes.');
+  const byKey=new Map<string,number>(),parents=new Map<number,number>();
+  doc.nodes.forEach((n:Obj,at:number)=>{const key=n.extras?.[CONVERSION_NODE_KEY];if(typeof key!=='string'||byKey.has(key))fail('EXPORT','Converted export lost unique graph markers.');byKey.set(key,at);
+    for(const child of n.children??[]){if(parents.has(child))fail('EXPORT','Converted graph has ambiguous parents.');parents.set(child,at);}});
+  const roots:string[]=[];
+  for(const n of input.graph.nodes){const at=byKey.get(n.nodeKey);if(at===undefined)fail('EXPORT','Converted export lost a selected EMPTY or mesh node.');
+    const actual=doc.nodes[at],parent=parents.get(at),parentKey=parent===undefined?null:doc.nodes[parent].extras?.[CONVERSION_NODE_KEY],association=input.graph.meshes.find(m=>m.nodeKey===n.nodeKey);
+    if(parentKey!==n.parentKey||canonical(localMatrix(actual))!==canonical(n.localMatrix)||(actual.name??null)!==n.name||
+      (actual.mesh!==undefined)!==Boolean(association))fail('EXPORT','Actual converted direct parent, local matrix, name or mesh differs from the graph.');
+    if(parentKey===null)roots.push(n.nodeKey);
+    if(association&&!model.objects.some(o=>o.nodeIndex===at&&o.sourceObjectId===association.sourceObjectId&&o.sourceKey===n.nodeKey))fail('EXPORT','Converted mesh index differs from its actual marker association.');
+  }
+  const scene=doc.scenes?.[doc.scene??0];
+  if(!scene||canonical(scene.nodes.map((at:number)=>doc.nodes[at]?.extras?.[CONVERSION_NODE_KEY]).sort())!==canonical(roots.sort()))fail('EXPORT','Converted selected scene roots differ from the graph.');
+}
+function compile(input:z.infer<typeof inputSchema>,limits:Limits):GeneratedManifest;
+function compile(input:ConvertedInput,limits:Limits):ConvertedManifest;
+function compile(input: z.infer<typeof inputSchema>|ConvertedInput, limits: Limits): GeneratedManifest|ConvertedManifest {
+  const converted=input.schemaVersion===2?input:null;
+  if(converted){convertedIdentity(converted);unique(converted.models.map(m=>m.fileId),'converted model');
+    if(canonical(converted.models.map(m=>m.fileId).sort())!==canonical(converted.files.map(f=>f.fileId).sort()))fail('EXPORT','Every converted export needs its fixed model inventory.');}
   bound(input.files.length, limits.files, 'File count'); unique(input.files.map(f => f.fileId), 'file ID'); unique(input.models.map(m => m.fileId), 'model ID');
   bound(input.models.reduce((n, m) => n + m.objects.length, 0), limits.objects, 'Source objects');
   const files = new Map(input.files.map(f => [f.fileId, f])), used = new Set<string>();
@@ -321,6 +425,7 @@ function compile(input: z.infer<typeof inputSchema>, limits: Limits): z.infer<ty
   let triangles = 0, pixels = 0;
   for (const model of input.models) {
     const { doc, bin } = readModel(model, files, used, limits), nodes: Obj[] = doc.nodes ?? [], parents = new Map<number, number>();
+    if(converted)convertedModelGraph(converted,model as ConvertedInput['models'][number],doc);
     bound((doc.materials ?? []).length, limits.materials, 'Material definitions'); bound((doc.images ?? []).length, limits.textures, 'Image definitions');
     const imageHashes = (doc.images ?? []).map((image: Obj, imageIndex: number) => {
       const view = doc.bufferViews[image.bufferView], encoded = bin.subarray(view.byteOffset ?? 0, (view.byteOffset ?? 0) + view.byteLength);
@@ -382,13 +487,21 @@ function compile(input: z.infer<typeof inputSchema>, limits: Limits): z.infer<ty
       const node = nodes[source.nodeIndex]; if (!node || node.mesh === undefined) fail('EXPORT', 'Source object is not an exported mesh node.');
       const mesh = doc.meshes[node.mesh], positions: number[][] = [], geometry: unknown[] = [], slots = new Set<number | null>(); let count = 0;
       for (const p of mesh.primitives) {
-        if ((p.mode ?? 4) !== 4 || p.targets || p.extensions || Object.keys(p.attributes).some(k => !['POSITION', 'NORMAL', 'TANGENT', 'TEXCOORD_0', 'COLOR_0'].includes(k))) fail('EXPORT', 'Static import requires baked triangle primitives and UV0.');
+        if ((p.mode ?? 4) !== 4 || p.targets || p.extensions || Object.keys(p.attributes).some(k => !['POSITION', 'NORMAL', 'TANGENT', 'TEXCOORD_0', 'COLOR_0'].includes(k)&&!(converted&&source.role==='render'&&k===CONVERSION_VERTEX_ID))) fail('EXPORT', 'Static import requires baked triangle primitives and UV0.');
         const vertexCount = doc.accessors[p.attributes.POSITION].count as number;
         bound(vertexCount, limits.meshTriangles * 3, 'Per-mesh vertices');
         count += (p.indices === undefined ? vertexCount : doc.accessors[p.indices].count) / 3;
         bound(count, limits.meshTriangles, 'Per-mesh triangles');
         const attrs = Object.fromEntries(Object.keys(p.attributes).sort().map(k => [k, accessor(doc, bin, p.attributes[k])])), pts = attrs.POSITION!;
         const indices = p.indices === undefined ? pts.map((_, i) => [i]) : accessor(doc, bin, p.indices);
+        if(converted&&source.role==='render'){
+          const a=doc.accessors[p.attributes[CONVERSION_VERTEX_ID]],ids=attrs[CONVERSION_VERTEX_ID]?.map(row=>row[0]!);
+          if(mesh.primitives.length!==1||!a||a.type!=='SCALAR'||a.componentType!==5126||a.normalized||!ids||ids.length!==pts.length||
+            ids.some(n=>!Number.isInteger(n)||n<0||n>=60000))fail('EXPORT','Converted render requires its exact host-owned vertex-ID accessor.');
+          const faces:number[][]=[];for(let at=0;at<indices.length;at+=3)faces.push(indices.slice(at,at+3).map(row=>ids[row[0]!]!));
+          const association=converted.graph.meshes.find(m=>m.sourceObjectId===source.sourceObjectId);
+          if(!association||conversionCorrespondenceSha256(faces)!==association.correspondenceSha256)fail('EXPORT','Actual converted oriented ID topology differs from its graph association.');
+        }
         // Existing Arcane generated-GLB policy: doubled triangle area in square
         // meters must exceed 1e-10. Seam duplicates are allowed across faces.
         for (let at = 0; at < indices.length; at += 3) {
@@ -406,13 +519,14 @@ function compile(input: z.infer<typeof inputSchema>, limits: Limits): z.infer<ty
       if (slots.size !== 1) fail('EXPORT', 'Roblox permits one material per mesh object; split the generated export.');
       const slot = [...slots][0]!, materialSha256 = slot === null ? null : materialHashes[slot]!, transform = world(source.nodeIndex), scale = [0, 4, 8].map(at => Math.hypot(...transform.slice(at, at + 3)));
       const determinant = transform[0]! * (transform[5]! * transform[10]! - transform[6]! * transform[9]!) - transform[4]! * (transform[1]! * transform[10]! - transform[2]! * transform[9]!) + transform[8]! * (transform[1]! * transform[6]! - transform[2]! * transform[5]!);
-      if (scale.some(n => n <= 0) || determinant <= 0) fail('EXPORT', 'Bake singular or mirrored transforms before import.');
+      if (scale.some(n => n <= 0) || (!converted&&determinant <= 0)) fail('EXPORT', 'Bake singular or mirrored transforms before import.');
       if (source.role === 'collision' && materialSha256 !== null) fail('EXPORT', 'Collision proxies must not carry materials.');
       let parent = parents.get(source.nodeIndex);
-      while (parent !== undefined && !sourceNodes.has(parent)) parent = parents.get(parent);
+      if(!converted)while (parent !== undefined && !sourceNodes.has(parent)) parent = parents.get(parent);
       const material = materialSha256 ? materials.get(materialSha256)! : null;
       const textureSha256s = material ? sorted([material.colorMap, material.normalMap, material.roughnessMap, material.metalnessMap, material.emission?.map].flatMap(m => m ? [m.sha256] : [])) : [];
-      objects.push(parse(objectManifest, { ...source, name: node.name ?? mesh.name ?? source.sourceObjectId, parentSourceObjectId: parent === undefined ? null : sourceNodes.get(parent),
+      const {sourceKey:_sourceKey,...legacySource}=source as z.infer<typeof sourceObject>&{sourceKey?:string};
+      objects.push(parse(objectManifest, { ...legacySource, name: node.name ?? mesh.name ?? source.sourceObjectId, parentSourceObjectId: converted||parent === undefined ? null : sourceNodes.get(parent),
         exportFileId: model.fileId, meshExportSha256: digest(geometry), triangles: count, materialSha256, textureSha256s, exportTransform: transform, scale,
         bounds: measuredBounds(positions), worldBounds: measuredBounds(positions.map(p => [0, 1, 2].map(i => transform[i]! * p[0]! + transform[4 + i]! * p[1]! + transform[8 + i]! * p[2]! + transform[12 + i]!))), collisionFor: sorted(source.collisionFor) }));
     }
@@ -430,7 +544,7 @@ function compile(input: z.infer<typeof inputSchema>, limits: Limits): z.infer<ty
   const selectedPlacement = input.placement;
   if (selectedPlacement.mode === 'custom-anchor' && !input.anchors.some(a => a.sourceAnchorId === selectedPlacement.anchorId)) fail('EXPORT', 'Unknown custom placement anchor.');
   bound(materials.size, limits.materials, 'Materials'); bound(textures.size, limits.textures, 'Textures');
-  const content = parse(manifestContent, { schemaVersion: 1, status: 'prepared', engineVerification: 'pending', projectId: input.projectId, assetId: input.assetId,
+  const rawContent = { schemaVersion: 1, status: 'prepared', engineVerification: 'pending', projectId: input.projectId, assetId: input.assetId,
     revisionId: input.revisionId, sourceSha256: input.sourceSha256, producer: input.producer, target: input.target, placement: input.placement,
     conversion: { sourceUnits: 'meters', sourceUp: 'Z', exportUnits: 'meters', exportUp: 'Y', targetUnits: 'studs', targetUp: 'Y', studsPerMeter: input.studsPerMeter },
     files: input.files.map(f => ({ fileId: f.fileId, contentType: f.contentType, sha256: f.sha256, byteLength: f.bytes.length })).sort((a, b) => compare(a.fileId, b.fileId)),
@@ -438,12 +552,67 @@ function compile(input: z.infer<typeof inputSchema>, limits: Limits): z.infer<ty
     textures: [...textures.values()].map(t => ({ ...t, locations: t.locations.sort((a, b) => compare(a.fileId, b.fileId) || a.imageIndex - b.imageIndex) })).sort((a, b) => compare(a.sha256, b.sha256)),
     anchors: input.anchors.sort((a, b) => compare(a.sourceAnchorId, b.sourceAnchorId)), bounds: measuredBounds(objects.filter(o => o.role === 'render').flatMap(o => [o.worldBounds.min, o.worldBounds.max])),
     limitations: ['Prepared files are not uploaded, moderated, inserted or verified in Studio.', 'Axes, scale, placement, collision and appearance require in-engine verification.',
-      'PBR factors, alpha modes and packed G/B maps require host-supported baking/conversion before SurfaceAppearance assignment.', 'LOD switching, rigs and animation require separate supported adapters.'] });
-  bound(Buffer.byteLength(canonical(content)), limits.manifestBytes, 'Manifest bytes');
+      'PBR factors, alpha modes and packed G/B maps require host-supported baking/conversion before SurfaceAppearance assignment.', 'LOD switching, rigs and animation require separate supported adapters.'] };
+  if(converted){
+    const keys=new Map(converted.models.flatMap(m=>m.objects.map(o=>[o.sourceObjectId,o.sourceKey] as const)));
+    const convertedContent=parse(convertedManifestContent,{...rawContent,schemaVersion:2,origin:'converted-glb',identityScheme:'arcane-converted-v2',
+      conversionRequest:converted.conversionRequest,graph:converted.graph,conversion:{...rawContent.conversion,sourceUp:'Y'},
+      objects:rawContent.objects.map(o=>{const {parentSourceObjectId:_parent,...object}=o;return{...object,sourceKey:keys.get(o.sourceObjectId)};})});
+    bound(Buffer.byteLength(canonical(convertedContent)),limits.manifestBytes,'Converted manifest bytes');
+    const manifest={...convertedContent,digest:digest(convertedContent)};convertedManifestChecks(manifest);return manifest;
+  }
+  const content=parse(manifestContent,rawContent);bound(Buffer.byteLength(canonical(content)),limits.manifestBytes,'Manifest bytes');
   return { ...content, digest: digest(content) };
 }
 
-function revision(next: z.infer<typeof manifestSchema>, baseline: z.infer<typeof baselineSchema> | null): StudioImportRevisionDelta {
+function graphWorlds(graph:ConvertedGraphV1):Map<string,number[]> {
+  const nodes=new Map(graph.nodes.map(n=>[n.nodeKey,n])),worlds=new Map<string,number[]>();
+  for(const n of graph.nodes){const chain:ConvertedGraphV1['nodes'][number][]= [];let next:string|null=n.nodeKey;
+    while(next!==null&&!worlds.has(next)){const current=nodes.get(next)!;chain.push(current);next=current.parentKey;}
+    let world=next===null?IDENTITY:worlds.get(next)!;
+    while(chain.length){const current=chain.pop()!;world=multiply(world,[...current.localMatrix]);worlds.set(current.nodeKey,world);}
+  }return worlds;
+}
+function convertedManifestChecks(manifest:ConvertedManifest):void {
+  bound(Buffer.byteLength(canonical(manifest)),STUDIO_IMPORT_LIMITS.manifestBytes,'Converted manifest bytes');
+  convertedIdentity(manifest);unique(manifest.files.map(f=>f.fileId),'converted file');
+  unique(manifest.materials.map(m=>m.sha256),'converted material');unique(manifest.textures.map(t=>t.sha256),'converted texture');
+  unique(manifest.anchors.map(a=>a.sourceAnchorId),'converted anchor');
+  bound(manifest.files.reduce((n,f)=>n+f.byteLength,0),STUDIO_IMPORT_LIMITS.totalBytes,'Converted total bytes');
+  bound(manifest.objects.reduce((n,o)=>n+o.triangles,0),STUDIO_IMPORT_LIMITS.triangles,'Converted triangles');
+  const worlds=graphWorlds(manifest.graph);
+  unique(manifest.objects.map(o=>o.exportFileId+'\n'+o.nodeIndex),'converted export node');
+  for(const o of manifest.objects){
+    unique(o.textureSha256s,'converted object texture');unique(o.collisionFor,'converted collision target');
+    bound(o.triangles,STUDIO_IMPORT_LIMITS.meshTriangles,'Converted per-mesh triangles');
+    bound(o.nodeIndex,4095,'Converted node index');checkConversionMatrix(o.exportTransform);
+    if(o.exportFileId!==(o.role==='render'?CONVERTED_STUDIO_IMPORT_FILE_IDS.render:CONVERTED_STUDIO_IMPORT_FILE_IDS.collision)||
+      (o.materialSha256!==null&&!manifest.materials.some(m=>m.sha256===o.materialSha256))||
+      o.textureSha256s.some(h=>!manifest.textures.some(t=>t.sha256===h))||
+      (o.role==='render'&&canonical(o.exportTransform)!==canonical(worlds.get(o.sourceKey)))||
+      canonical(o.scale)!==canonical([0,4,8].map(at=>Math.hypot(...o.exportTransform.slice(at,at+3))))||
+      (o.role==='collision'&&o.materialSha256!==null))fail('EXPORT','Converted object files, graph transform or material references differ.');
+  }
+  for(const m of manifest.materials){const {sha256,...body}=m;if(digest(body)!==sha256)fail('EXPORT','Converted material digest differs.');
+    if([m.colorMap,m.normalMap,m.roughnessMap,m.metalnessMap,m.emission?.map].some(map=>map&&!manifest.textures.some(t=>t.sha256===map.sha256)))fail('EXPORT','Converted material references an absent texture.');}
+  bound(manifest.textures.reduce((n,t)=>n+t.width*t.height,0),STUDIO_IMPORT_LIMITS.texturePixels,'Converted texture pixels');
+  for(const t of manifest.textures)if(t.locations.some(location=>!manifest.files.some(f=>f.fileId===location.fileId)))fail('EXPORT','Converted texture location references an absent export.');
+  for(const a of manifest.anchors)if(!manifest.objects.some(o=>o.sourceObjectId===a.sourceObjectId&&o.role==='render'))fail('EXPORT','Converted anchor target differs.');
+  if(manifest.placement.mode==='custom-anchor'&&!manifest.anchors.some(a=>a.sourceAnchorId===(manifest.placement as {anchorId:string}).anchorId))fail('EXPORT','Converted custom anchor is absent.');
+}
+/** Closed serialized data only; source-bound admission still belongs to the host
+ * loader/adapter and the retained-byte graph builder. This grants no authority. */
+export function parseConvertedStudioImportManifest(value:unknown):ConvertedStudioImportManifestV2 {
+  const manifest=parse(convertedManifestSchema,snapshot(value,{...STUDIO_IMPORT_LIMITS},true)),{digest:actual,...body}=manifest;
+  if(digest(body)!==actual)fail('SCHEMA','Converted manifest digest differs.');convertedManifestChecks(manifest);return freeze(manifest);
+}
+/** Detached observed-baseline data, not a receipt attestation or permission. */
+export function snapshotConvertedStudioImportBaseline(value:unknown):ConvertedStudioImportBaselineV2 {
+  const baseline=parse(convertedBaselineSchema,snapshot(value,{...STUDIO_IMPORT_LIMITS},true));
+  bound(Buffer.byteLength(canonical(baseline)),STUDIO_IMPORT_LIMITS.manifestBytes,'Converted baseline bytes');
+  convertedRevision(baseline.manifest,baseline);return freeze(baseline);
+}
+function revision(next: z.infer<typeof manifestSchema>, baseline: z.infer<typeof baselineSchema> | null): GeneratedStudioImportRevisionDeltaV1 {
   const previous = baseline?.manifest ?? null;
   if (previous) {
     const { digest: oldDigest, ...content } = previous;
@@ -484,6 +653,59 @@ function revision(next: z.infer<typeof manifestSchema>, baseline: z.infer<typeof
     textures: resources(next.textures.map(t => t.sha256), previous?.textures.map(t => t.sha256) ?? []), preservation: 'preserve-all-scripts-attachments-constraints' as const });
 }
 
+function convertedRevision(next:ConvertedManifest,baseline:z.infer<typeof convertedBaselineSchema>|null):ConvertedStudioImportRevisionDeltaV2 {
+  const previous=baseline?.manifest??null;
+  if(previous){
+    parseConvertedStudioImportManifest(previous);
+    if(baseline!.receipt.manifestDigest!==previous.digest||baseline!.receipt.graphDigest!==previous.graph.digest||
+      previous.projectId!==next.projectId||previous.assetId!==next.assetId||previous.sourceSha256!==next.sourceSha256||canonical(previous.target)!==canonical(next.target))
+      fail('BASELINE','Converted baseline belongs to another manifest, graph, source or target.');
+    const receipt=baseline!.receipt;unique(receipt.objects.map(o=>o.sourceObjectId),'converted baseline object','BASELINE');
+    unique(receipt.nodes.map(n=>n.nodeKey),'converted baseline node','BASELINE');
+    if(receipt.objects.length!==previous.objects.length||previous.objects.some(o=>!receipt.objects.some(m=>m.sourceObjectId===o.sourceObjectId))||
+      receipt.nodes.length!==previous.graph.nodes.length||previous.graph.nodes.some(n=>!receipt.nodes.some(m=>m.nodeKey===n.nodeKey)))
+      fail('BASELINE','Converted receipt must map every prior mesh and graph node.');
+    const references=[receipt.modelRef];
+    for(const o of receipt.objects){references.push(o.instanceRef,...o.authoredChildren.map(c=>c.instanceRef));}
+    for(const n of receipt.nodes){const mesh=previous.graph.meshes.find(m=>m.nodeKey===n.nodeKey),object=mesh?receipt.objects.find(o=>o.sourceObjectId===mesh.sourceObjectId):undefined;
+      if(object){if(n.instanceRef!==object.instanceRef||n.ownedStateSha256!==object.ownedStateSha256||canonical(n.authoredChildren)!==canonical(object.authoredChildren))fail('BASELINE','Converted mesh/node receipt mappings disagree.');}
+      else references.push(n.instanceRef,...n.authoredChildren.map(c=>c.instanceRef));
+    }unique(references,'converted baseline owned instance','BASELINE');
+  }
+  const oldObjects=new Map(previous?.objects.map(o=>[o.sourceObjectId,o])??[]),mapped=new Map(baseline?.receipt.objects.map(o=>[o.sourceObjectId,o])??[]);
+  const placementChanged=previous!==null&&(canonical(previous.placement)!==canonical(next.placement)||canonical(previous.conversion)!==canonical(next.conversion));
+  const objects=next.objects.map(o=>{const old=oldObjects.get(o.sourceObjectId),m=mapped.get(o.sourceObjectId),changed:string[]=[];
+    if(old){if(o.role!==old.role)fail('BASELINE','Converted mapped object role changes require conflict review.');
+      if(o.meshExportSha256!==old.meshExportSha256)changed.push('geometry');if(o.materialSha256!==old.materialSha256)changed.push('material');
+      if(canonical(o.textureSha256s)!==canonical(old.textureSha256s))changed.push('textures');
+      if(placementChanged||['exportTransform','pivot','scale'].some(k=>canonical(o[k as keyof typeof o])!==canonical(old[k as keyof typeof old])))changed.push('transform');
+      if(canonical(o.collisionFor)!==canonical(old.collisionFor))changed.push('collision');if(o.name!==old.name||o.sourceKey!==old.sourceKey)changed.push('identity');
+    }return{sourceObjectId:o.sourceObjectId,action:!old?'create' as const:changed.length?'update-in-place' as const:'reuse' as const,changed,
+      instanceRef:m?.instanceRef??null,meshAssetId:m?.meshAssetId??null,expectedOwnedStateSha256:m?.ownedStateSha256??null,
+      preserveChildren:[...(m?.authoredChildren??[])].sort((a,b)=>compare(a.instanceRef,b.instanceRef)),replaceInstance:false as const,deleteInstance:false as const};});
+  const oldNodes=new Map(previous?.graph.nodes.map(n=>[n.nodeKey,n])??[]),nodeMap=new Map(baseline?.receipt.nodes.map(n=>[n.nodeKey,n])??[]);
+  const nextWorlds=graphWorlds(next.graph),oldWorlds=previous?graphWorlds(previous.graph):new Map<string,number[]>();
+  const nodes=next.graph.nodes.map(n=>{const old=oldNodes.get(n.nodeKey),m=nodeMap.get(n.nodeKey),changed:('parent'|'matrix'|'name'|'mesh'|'pivot')[]=[];
+    const before=previous?.graph.meshes.find(mesh=>mesh.nodeKey===n.nodeKey),after=next.graph.meshes.find(mesh=>mesh.nodeKey===n.nodeKey);
+    if(old){if(n.parentKey!==old.parentKey)changed.push('parent');
+      if(placementChanged||canonical(n.localMatrix)!==canonical(old.localMatrix)||canonical(nextWorlds.get(n.nodeKey))!==canonical(oldWorlds.get(n.nodeKey)))changed.push('matrix');
+      if(n.name!==old.name)changed.push('name');
+      if(canonical(before?{sourceObjectId:before.sourceObjectId,correspondenceSha256:before.correspondenceSha256}:null)!==canonical(after?{sourceObjectId:after.sourceObjectId,correspondenceSha256:after.correspondenceSha256}:null))changed.push('mesh');
+      if(canonical(before?.sourcePivot??null)!==canonical(after?.sourcePivot??null))changed.push('pivot');
+    }return{nodeKey:n.nodeKey,action:!old?'create' as const:changed.length?'update-in-place' as const:'reuse' as const,changed,instanceRef:m?.instanceRef??null,
+      expectedOwnedStateSha256:m?.ownedStateSha256??null,preserveChildren:[...(m?.authoredChildren??[])].sort((a,b)=>compare(a.instanceRef,b.instanceRef)),replaceInstance:false as const,deleteInstance:false as const};});
+  const resources=(current:string[],old:string[])=>({prepare:sorted(current.filter(h=>!old.includes(h))),reuse:sorted(current.filter(h=>old.includes(h)))});
+  return freeze({previousDigest:previous?.digest??null,nextDigest:next.digest,receiptSha256:baseline?.receipt.receiptSha256??null,modelRef:baseline?.receipt.modelRef??null,
+    modelAssetId:baseline?.receipt.modelAssetId??null,placementChanged,objects,
+    reviewRemovals:(baseline?.receipt.objects??[]).filter(m=>!next.objects.some(o=>o.sourceObjectId===m.sourceObjectId)).map(m=>({...m,
+      authoredChildren:[...m.authoredChildren].sort((a,b)=>compare(a.instanceRef,b.instanceRef)),action:'retain-for-review' as const})).sort((a,b)=>compare(a.sourceObjectId,b.sourceObjectId)),
+    reviewAnchors:[],geometry:resources(next.objects.map(o=>o.meshExportSha256),previous?.objects.map(o=>o.meshExportSha256)??[]),
+    textures:resources(next.textures.map(t=>t.sha256),previous?.textures.map(t=>t.sha256)??[]),preservation:'preserve-all-scripts-attachments-constraints' as const,
+    graph:{previousDigest:previous?.graph.digest??null,nextDigest:next.graph.digest,changed:previous===null||previous.graph.digest!==next.graph.digest},nodes,
+    reviewNodeRemovals:(baseline?.receipt.nodes??[]).filter(m=>!next.graph.nodes.some(n=>n.nodeKey===m.nodeKey)).map(m=>({...m,
+      authoredChildren:[...m.authoredChildren].sort((a,b)=>compare(a.instanceRef,b.instanceRef)),action:'retain-for-review' as const})).sort((a,b)=>compare(a.nodeKey,b.nodeKey))});
+}
+
 /** Production integration: AssetService.prepareStudioImport owns the loader and
  * admission lifetime. It rechecks the same NativeAssetActor and exact durable
  * ConversationWorkStore binding, reads fixed verified asset.glb/collision.glb,
@@ -508,7 +730,7 @@ function revision(next: z.infer<typeof manifestSchema>, baseline: z.infer<typeof
  * Do not mark a workflow accepted or reuse this admission as Studio write consent.
  */
 export function createStudioImportManifestAuthority(options: {
-  loadGeneratedFiles(jobId: string): Promise<HostGeneratedStudioImport>;
+  loadGeneratedFiles(jobId: string): Promise<HostStudioImport>;
   limits?: Partial<Record<keyof Limits, number>>;
 }): StudioImportManifestAuthority {
   if (!options || typeof options !== 'object' || types.isProxy(options)) fail('AUTHORITY', 'Host loader is required.');
@@ -516,7 +738,7 @@ export function createStudioImportManifestAuthority(options: {
   if (Reflect.ownKeys(options).some(k => k !== 'loadGeneratedFiles' && k !== 'limits') ||
       !descriptors.loadGeneratedFiles || !Object.hasOwn(descriptors.loadGeneratedFiles, 'value') || typeof descriptors.loadGeneratedFiles.value !== 'function' ||
       descriptors.limits && !Object.hasOwn(descriptors.limits, 'value')) fail('AUTHORITY', 'Expected host-code loader and limits.');
-  const load = descriptors.loadGeneratedFiles.value as (jobId: string) => Promise<HostGeneratedStudioImport>;
+  const load = descriptors.loadGeneratedFiles.value as (jobId: string) => Promise<HostStudioImport>;
   const limits: Limits = { ...STUDIO_IMPORT_LIMITS };
   if (descriptors.limits) {
     const overrides = snapshot(descriptors.limits.value as unknown, limits) as Record<string, unknown>;
@@ -532,10 +754,17 @@ export function createStudioImportManifestAuthority(options: {
     async admit(value: string) {
       open(); const requested = parse(jobId, value);
       const raw = await load(requested); open();
-      const input = parse(inputSchema, snapshot(raw, limits));
-      if (input.revisionId !== requested) fail('AUTHORITY', 'Host-generated revision does not match requested job.');
-      const manifest = compile(input, limits), delta = revision(manifest, input.baseline);
-      const prepared = freeze({ status: 'prepared' as const, manifest, delta, digest: digest({ manifestDigest: manifest.digest, delta }) });
+      const isConverted=raw&&typeof raw==='object'&&!types.isProxy(raw)&&Object.getOwnPropertyDescriptor(raw,'schemaVersion')?.value===2;
+      const detached=snapshot(raw,limits,Boolean(isConverted));let prepared:PreparedStudioImport;
+      if(isConverted){const input=parse(convertedInputSchema,detached);
+        if(input.revisionId!==requested)fail('AUTHORITY','Host-converted revision does not match requested job.');
+        const manifest=compile(input,limits),delta=convertedRevision(manifest,input.baseline);
+        prepared=freeze({status:'prepared' as const,manifest,delta,digest:digest({manifestDigest:manifest.digest,delta})});
+      }else{const input=parse(inputSchema,detached);
+        if (input.revisionId !== requested) fail('AUTHORITY', 'Host-generated revision does not match requested job.');
+        const manifest = compile(input, limits), delta = revision(manifest, input.baseline);
+        prepared = freeze({ status: 'prepared' as const, manifest, delta, digest: digest({ manifestDigest: manifest.digest, delta }) });
+      }
       bound(Buffer.byteLength(canonical(prepared)), limits.manifestBytes, 'Prepared plan bytes');
       const token = Object.freeze({ kind: 'studio-import-admission' as const }); admissions.set(token, prepared); return token;
     },

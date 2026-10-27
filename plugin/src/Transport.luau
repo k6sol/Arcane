@@ -512,7 +512,8 @@ function Transport:envelope(command: any): ()
 	for _, root in ipairs(roots) do if not table.find(pair.allowedRoots, root) then V.fail("GRANT", "Command root is not granted.") end end
 	if command.allowWrites ~= pair.allowWrites then V.fail("GRANT", "Command write grant differs from pairing.") end
 	if not table.find(V.READ_METHODS, command.method) and not table.find(V.WRITE_METHODS, command.method)
-		and not table.find(V.ASSET_STAGE_METHODS or {}, command.method) then V.fail("METHOD", "Unsupported Studio method.") end
+		and not table.find(V.ASSET_STAGE_METHODS or {}, command.method)
+		and not table.find(V.MESH_KEEP_METHODS or {}, command.method) then V.fail("METHOD", "Unsupported Studio method.") end
 	V.string(command.expiresAt, "command expiry", 64)
 	V.object(command.args, "arguments")
 	-- The 256 KiB bound is measured once per decoded args table (weakly keyed). guard() runs this

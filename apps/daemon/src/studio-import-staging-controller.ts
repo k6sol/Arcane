@@ -6,7 +6,7 @@ import {StudioStore, type StageRunHandle} from '../../../packages/storage/src/st
 import {ConversationWorkStore} from '../../../packages/storage/src/conversation-work-store.js';
 import {snapshotStudioImportSelection} from '../../../packages/asset-pipeline/src/studio-import-manifest.js';
 import {assertDecodedStudioImportPayload} from '../../../packages/asset-pipeline/src/studio-import-payload.js';
-import {createStudioImportTransfer} from '../../../packages/asset-pipeline/src/studio-import-transfer.js';
+import {createStudioImportTransfer,inspectConvertedStudioImportTransfer,measureStudioImportTransferArguments} from '../../../packages/asset-pipeline/src/studio-import-transfer.js';
 import type {AssetService} from './asset-service.js';
 import {assertStudioImportJobScope} from './asset-import-adapter.js';
 import type {StudioImportHostOptions} from './asset-import-adapter.js';
@@ -209,11 +209,19 @@ export function createStudioImportStagingController(config: StudioImportStagingC
         boundary();
         // Account for JSON-string escaping and the COMPLETE queue argument
         // envelope before the first command. Keep space for existing receipts.
-        const argumentsList: StudioAssetStageArgs[] = transfer.packets.map(packet => ({
+        const convertedInspection=transfer.formatVersion===2?inspectConvertedStudioImportTransfer(transfer):null;
+        if(convertedInspection&&(data.prepared.manifest.schemaVersion!==2||
+            !isDeepStrictEqual(convertedInspection.graph,data.prepared.manifest.graph)||
+            !isDeepStrictEqual(convertedInspection.begin.delta,data.prepared.delta)||
+            !isDeepStrictEqual(convertedInspection.begin.target,selection.target)))fail('STUDIO_STAGE_IDENTITY');
+        // The actual selected continuity is available only here. Never claim a
+        // durable run using a raw-packet estimate or a serialized transfer clone.
+        const measured=transfer.formatVersion===2?measureStudioImportTransferArguments(transfer,selection.target,continuity):null;
+        const argumentsList: StudioAssetStageArgs[] = measured?[...measured.arguments]:transfer.packets.map(packet => ({
           expected: {digest: transfer.digest, payloadDigest: transfer.payloadDigest, manifestDigest: data.prepared.manifest.digest},
           packet: packet.json, target: selection.target, continuity,
         }));
-        const sizes = argumentsList.map(args => Buffer.byteLength(JSON.stringify(args)));
+        const sizes = measured?[...measured.byteLengths]:argumentsList.map(args => Buffer.byteLength(JSON.stringify(args)));
         const envelopeBytes=sizes.reduce((sum,size)=>sum+size,0),largestEnvelopeBytes=Math.max(0,...sizes);
         if (transfer.byteLength > STUDIO_STAGING_LIMITS.rawBytes || argumentsList.length > STUDIO_STAGING_LIMITS.packets || largestEnvelopeBytes > STUDIO_ASSET_TRANSFER_LIMITS.packetBytes
           || envelopeBytes > STUDIO_STAGING_LIMITS.envelopeBytes) throw new ArcaneError('STUDIO_STAGE_BUDGET',

@@ -25,7 +25,8 @@ import { atomicAssetJson } from '../../../packages/asset-pipeline/src/atomic-jso
 import { noLinks, readRegularFile } from '../../../packages/asset-pipeline/src/paths.js';
 import { ArcaneError } from '../../../packages/protocol/src/providers.js';
 import { studioUploadContextObservation, type StudioCommand, type StudioSession, type Json } from '../../../packages/protocol/src/studio.js';
-import { meshKeepName, validateMeshKeepReceipt, type MeshKeepReceipt } from '../../../packages/core/src/mesh-keep-policy.js';
+import { meshKeepName, validateMeshKeepReceipt, snapshotConvertedMeshKeepObservation, type ConvertedMeshKeepObservation, type ConvertedMeshKeepExpected, type MeshKeepReceipt } from '../../../packages/core/src/mesh-keep-policy.js';
+import {inspectConvertedStudioImportTransfer} from '../../../packages/asset-pipeline/src/studio-import-transfer.js';
 import type { StudioStore } from '../../../packages/storage/src/studio-store.js';
 
 export const MESH_KEEP_PATHS = Object.freeze(['/v1/mesh-keep/state', '/v1/mesh-keep/prepare', '/v1/mesh-keep/start', '/v1/mesh-keep/finish', '/v1/mesh-keep/acknowledge']);
@@ -43,17 +44,24 @@ const receiptRecord = z.strictObject({
   state: z.enum(['uploading', 'kept', 'uploaded', 'finishing', 'partial', 'failed', 'unknown']),
   assets: z.array(z.strictObject({ index: z.number().int().min(1).max(16), name: z.string().max(100), assetId: safeId.nullable(),
     upload: z.enum(['succeeded', 'failed', 'reconciliation', 'skipped', 'reused']), reason: z.string().regex(/^[A-Za-z0-9_:]{1,64}$/).nullable(), swapped: z.boolean() })).max(16),
+  convertedSource:z.strictObject({formatVersion:z.literal(2),projectId:z.string().regex(DIGEST),jobId:z.string().regex(UUID),runId:z.string().regex(UUID),transferDigest:z.string().regex(DIGEST),graphDigest:z.string().regex(DIGEST),conversionRequestDigest:z.string().regex(DIGEST)}).optional(),
+  converted: z.unknown().optional(),
   uploadsStarted: z.number().int().min(0).max(16).nullable(), message: z.string().max(4000), acknowledged: z.boolean(), updatedAt: timestamp,
 }).refine(row => row.assets.every((asset, index) => asset.index === index + 1 && (!asset.swapped || asset.assetId !== null)
-  && ((asset.upload === 'succeeded' || asset.upload === 'reused') === (asset.assetId !== null))));
+  && ((asset.upload === 'succeeded' || asset.upload === 'reused') === (asset.assetId !== null)))
+  && (row.convertedSource===undefined||row.convertedSource.transferDigest===row.digest)
+  && (row.converted===undefined||row.state==='kept'&&(()=>{try{const pin=row.convertedSource;if(!pin)return false;const observation=snapshotConvertedMeshKeepObservation(row.converted,row.assets);return observation.graphDigest===pin.graphDigest&&observation.conversionRequestDigest===pin.conversionRequestDigest;}catch{return false;}})()));
 const receiptFile = z.strictObject({ version: z.literal(1), receipts: z.array(receiptRecord).max(MESH_KEEP_SERVICE_LIMITS.receipts) })
   .refine(value => new Set(value.receipts.map(row => row.attemptId)).size === value.receipts.length);
 
 export type MeshKeepReceiptState = 'uploading' | 'kept' | 'uploaded' | 'finishing' | 'partial' | 'failed' | 'unknown';
+export interface ConvertedMeshKeepSourcePin {readonly formatVersion:2;readonly projectId:string;readonly jobId:string;readonly runId:string;readonly transferDigest:string;readonly graphDigest:string;readonly conversionRequestDigest:string}
 export interface MeshKeepRecord {
   attemptId: string; digest: string; sessionId: string; placeName: string; name: string; creatorId: number; meshCount: number | null;
   consentedAt: string; commandId: string; finishCommandId: string | null; state: MeshKeepReceiptState;
   assets: { index: number; name: string; assetId: number | null; upload: string; reason: string | null; swapped: boolean }[];
+  convertedSource?:ConvertedMeshKeepSourcePin;
+  converted?:ConvertedMeshKeepObservation;
   uploadsStarted: number | null; message: string; acknowledged: boolean; updatedAt: string;
 }
 export interface MeshKeepCandidate {
@@ -141,10 +149,37 @@ export function createMeshKeep(options: MeshKeepOptions) {
   function apply(record: MeshKeepRecord, receipt: MeshKeepReceipt | null, state: MeshKeepReceiptState, error: string | null): void {
     if (receipt) {
       record.assets = receipt.meshes.map(m => ({ ...m }));
+      if('converted'in receipt)record.converted=snapshotConvertedMeshKeepObservation(receipt.converted,receipt.meshes);
       if (record.finishCommandId === null) record.uploadsStarted = receipt.uploadsStarted;
     }
     record.state = state; record.message = meshKeepMessage(state, record, error); record.updatedAt = iso();
   }
+  /** Read exact host-owned stage/reconstruction history; observations confer no live authority. */
+  function convertedExpected(record:Pick<MeshKeepRecord,'digest'|'sessionId'|'convertedSource'>):{expected:ConvertedMeshKeepExpected;pin:ConvertedMeshKeepSourcePin}|null {
+    const source=store.readStageKeepSource(record.sessionId,record.digest);
+    if(!source){if(record.convertedSource)throw new ArcaneError('RECEIPT','Pinned converted keep source is unavailable.');return null;}
+    const {run,reconstruction}=source;
+    if(reconstruction.command.args.formatVersion!==2){if(record.convertedSource)throw new ArcaneError('RECEIPT','Pinned converted keep cannot use legacy reconstruction.');return null;}
+    if(run.phase!=='cpu-staged')throw new ArcaneError('RECEIPT','Converted keep lacks completed original stage custody.');
+    const first=run.commands[0]?.command.args.packet;
+    if(typeof first!=='string')throw new ArcaneError('RECEIPT','Converted keep lacks its original staged begin packet.');
+    const begin=JSON.parse(first) as Record<string,unknown>;
+    const packets=run.commands.map(row=>{
+      const c=row.command;if(c.state!=='succeeded'||typeof c.args.packet!=='string')throw new ArcaneError('RECEIPT','Converted stage is incomplete.');
+      const body=JSON.parse(c.args.packet) as Record<string,unknown>;
+      return {ordinal:row.ordinal,kind:body.kind,json:c.args.packet,byteLength:Buffer.byteLength(c.args.packet),sha256:createHash('sha256').update(c.args.packet).digest('hex')};
+    });
+    const graph=begin.graph as Record<string,unknown>;
+    const checked=inspectConvertedStudioImportTransfer({formatVersion:2,engineVerification:'pending',preparedDigest:run.intent.preparedDigest,payloadDigest:run.intent.payloadDigest,digest:record.digest,
+      packets,byteLength:packets.reduce((total,p)=>total+p.byteLength,0),graphDigest:graph.digest,nodeCount:graph.nodeCount,conversionRequestDigest:begin.conversionRequestDigest});
+    const nodes=packets.filter(p=>p.kind==='node').map(p=>(JSON.parse(p.json) as {node:{nodeKey:string;parentKey:string|null}}).node);
+    const rows=checked.payload.objects as readonly {object:{sourceObjectId:string};association:{sourceObjectId:string;nodeKey:string|null}}[];
+    const pin:ConvertedMeshKeepSourcePin=Object.freeze({formatVersion:2,projectId:run.intent.projectId,jobId:run.intent.jobId,runId:run.runId,transferDigest:record.digest,graphDigest:checked.graph.digest,conversionRequestDigest:checked.conversionRequestDigest});
+    const prior=record.convertedSource;
+    if(prior&&(prior.formatVersion!==pin.formatVersion||prior.projectId!==pin.projectId||prior.jobId!==pin.jobId||prior.runId!==pin.runId||prior.transferDigest!==pin.transferDigest||prior.graphDigest!==pin.graphDigest||prior.conversionRequestDigest!==pin.conversionRequestDigest))throw new ArcaneError('RECEIPT','Pinned converted keep source changed.');
+    return {pin,expected:{transferDigest:record.digest,graphDigest:checked.graph.digest,conversionRequestDigest:checked.conversionRequestDigest,nodes,meshes:rows.map(row=>row.association)}};
+  }
+
   /** Reconcile one receipt from its recorded command(s). Unknown stays unknown; nothing is replayed. */
   function reconcile(record: MeshKeepRecord): boolean {
     const finishing = record.state === 'finishing';
@@ -156,7 +191,17 @@ export function createMeshKeep(options: MeshKeepOptions) {
     if (c.state === 'needs_reconciliation') { apply(record, null, finishing ? 'uploaded' : 'unknown', null); return true; }
     if (c.state === 'failed') { apply(record, null, finishing ? 'uploaded' : 'unknown', c.error); if (finishing) record.message = 'Could not swap in the uploaded meshes: ' + clip(c.error ?? 'Studio refused.', 300) + ' The assets stay in your inventory.'; return true; }
     let receipt: MeshKeepReceipt;
-    try { receipt = validateMeshKeepReceipt(c.args, c.result); } catch { apply(record, null, 'unknown', null); return true; }
+    try {
+      receipt=validateMeshKeepReceipt(c.args,c.result);
+      const expected=convertedExpected(record);
+      if(expected){if(receipt.state==='kept')receipt=validateMeshKeepReceipt(c.args,c.result,expected.expected);}
+      else if('converted'in receipt)throw new ArcaneError('RECEIPT','Converted keep lacks original graph custody.');
+    } catch {
+      // Keep genuine returned IDs even when graph observations cannot be admitted;
+      // unresolved history never schedules another upload or invents saved custody.
+      try {const common=validateMeshKeepReceipt(c.args,c.result);apply(record,common,'unknown','Converted keep observations could not be verified. Review the original Studio outcome.');delete record.converted;}
+      catch {apply(record,null,'unknown',null);}return true;
+    }
     const unknown = receipt.meshes.some(m => m.upload === 'reconciliation');
     apply(record, receipt, unknown ? 'unknown' : receipt.state, null);
     return true;
@@ -282,9 +327,10 @@ export function createMeshKeep(options: MeshKeepOptions) {
     assertConsent();
     const reason = blocked(latest(list, entry.digest, entry.sessionId)); if (reason) throw new ArcaneError('MESH_KEEP_STATE', reason);
     const s = session(entry.sessionId), proof = s.proof!;
+    const convertedSource=convertedExpected({digest:entry.digest,sessionId:s.id})?.pin;
     const attemptId = uuid();
     const record: MeshKeepRecord = { attemptId, digest: entry.digest, sessionId: s.id, placeName: entry.placeName, name: entry.name, creatorId: entry.creatorId,
-      meshCount: entry.meshCount, consentedAt: iso(), commandId: '', finishCommandId: null, state: 'uploading', assets: [], uploadsStarted: null,
+      ...(convertedSource?{convertedSource}:{}),meshCount: entry.meshCount, consentedAt: iso(), commandId: '', finishCommandId: null, state: 'uploading', assets: [], uploadsStarted: null,
       message: meshKeepMessage('uploading', { assets: [], meshCount: entry.meshCount }), acknowledged: false, updatedAt: iso() };
     list.push(record);
     await persist(); // intent is durable before anything can reach Studio
@@ -304,6 +350,7 @@ export function createMeshKeep(options: MeshKeepOptions) {
     if (Object.keys(input).length !== 1 || typeof input.attemptId !== 'string' || !UUID.test(input.attemptId)) throw new ArcaneError('INPUT', 'Choose one uploaded mesh.');
     const list = await refreshed(), record = list.find(r => r.attemptId === input.attemptId);
     if (!record || record.state !== 'uploaded' || record.assets.length === 0 || record.assets.some(a => a.assetId === null)) throw new ArcaneError('MESH_KEEP_STATE', 'Only an uploaded mesh waiting for its swap can be finished.');
+    if(record.convertedSource)convertedExpected(record);
     const s = session(record.sessionId), proof = s.proof!;
     record.finishCommandId = 'pending'; record.state = 'finishing'; record.message = meshKeepMessage('finishing', record); record.updatedAt = iso();
     await persist();

@@ -2,7 +2,8 @@ import {createHash} from 'node:crypto';
 import {types} from 'node:util';
 import {z} from 'zod';
 import {ArcaneError} from '../../protocol/src/providers.js';
-import {STUDIO_IMPORT_LIMITS,type PreparedStudioImport} from './studio-import-manifest.js';
+import {STUDIO_IMPORT_LIMITS,parseConvertedStudioImportManifest,type PreparedStudioImport,type ConvertedPreparedStudioImportV2} from './studio-import-manifest.js';
+import {convertedGlbObjectId} from './converted-glb.js';
 const UUID=/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}(?![\s\S])/;
 function fail(code:string):never {throw new ArcaneError(code,'Native chat asset request refused.');}
 // The native route and MCP client share this data-only wire gate. It cannot
@@ -66,16 +67,31 @@ const importResponse=z.strictObject({prepared:z.strictObject({status:z.literal('
    expectedOwnedStateSha256:importHash.nullable(),preserveChildren:z.array(importChild).max(128),replaceInstance:z.literal(false),deleteInstance:z.literal(false)})).min(1).max(128),
   reviewRemovals:z.array(z.strictObject({...importMapping,action:z.literal('retain-for-review')})).max(128),reviewAnchors:z.array(importId).max(256),
   geometry:importResources,textures:importResources,preservation:z.literal('preserve-all-scripts-attachments-constraints')})})});
-function importSnapshot(value:unknown):unknown {
+const importNodeKey=z.string().regex(/^node[0-9]{1,4}(?:_primitive[0-9]{1,4})?(?![\s\S])/);
+const convertedDelta=importResponse.shape.prepared.shape.delta.extend({
+ graph:z.strictObject({previousDigest:importHash.nullable(),nextDigest:importHash,changed:z.boolean()}),
+ nodes:z.array(z.strictObject({nodeKey:importNodeKey,action:z.enum(['create','update-in-place','reuse']),
+  changed:z.array(z.enum(['parent','matrix','name','mesh','pivot'])).max(5),instanceRef:importId.nullable(),expectedOwnedStateSha256:importHash.nullable(),
+  preserveChildren:z.array(importChild).max(128),replaceInstance:z.literal(false),deleteInstance:z.literal(false)})).min(1).max(4096),
+ reviewNodeRemovals:z.array(z.strictObject({nodeKey:importNodeKey,instanceRef:importId,ownedStateSha256:importHash,authoredChildren:z.array(importChild).max(128),action:z.literal('retain-for-review')})).max(4096)});
+const convertedResponse=z.strictObject({prepared:z.strictObject({status:z.literal('prepared'),digest:importHash,
+ manifest:z.unknown().transform(value=>parseConvertedStudioImportManifest(value)),delta:convertedDelta})});
+function convertedEnvelope(value:unknown):boolean {
+ for(const key of ['prepared','manifest','schemaVersion']){
+  if(!value||typeof value!=='object'||types.isProxy(value))return false;
+  const descriptor=Object.getOwnPropertyDescriptor(value,key);if(!descriptor||!Object.hasOwn(descriptor,'value'))return false;value=descriptor.value as unknown;
+ }return value===2;
+}
+function importSnapshot(value:unknown,converted=false):unknown {
  let nodes=0,bytes=0;const seen=new Set<object>();
  const walk=(v:unknown,depth:number):unknown=>{
-  if(++nodes>60_000||depth>16)fail('STUDIO_IMPORT_RESPONSE');
+  if(++nodes>(converted?200_000:60_000)||depth>16)fail('STUDIO_IMPORT_RESPONSE');
   if(v===null||typeof v==='boolean')return v;
   if(typeof v==='number'){if(!Number.isFinite(v))fail('STUDIO_IMPORT_RESPONSE');return v;}
   if(typeof v==='string'){bytes+=Buffer.byteLength(v);if(v.length>4096||bytes>NATIVE_STUDIO_IMPORT_RESPONSE_BYTES)fail('STUDIO_IMPORT_RESPONSE');return v;}
   if(!v||typeof v!=='object'||types.isProxy(v)||seen.has(v))fail('STUDIO_IMPORT_RESPONSE');
   const array=Array.isArray(v),prototype:unknown=Object.getPrototypeOf(v);
-  if(prototype!==(array?Array.prototype:Object.prototype)&&prototype!==null)fail('STUDIO_IMPORT_RESPONSE');
+  if(converted&&array?prototype!==Array.prototype:prototype!==(array?Array.prototype:Object.prototype)&&prototype!==null)fail('STUDIO_IMPORT_RESPONSE');
   const keys=Reflect.ownKeys(v);if(keys.length>4097)fail('STUDIO_IMPORT_RESPONSE');
   const descriptors=Object.getOwnPropertyDescriptors(v),out:Record<string,unknown>=Object.create(null) as Record<string,unknown>;seen.add(v);
   for(const key of keys){
@@ -96,11 +112,47 @@ function importCanonical(value:unknown):string {
  return JSON.stringify(value);
 }
 const importDigest=(value:unknown)=>createHash('sha256').update(importCanonical(value)).digest('hex');
+function convertedPreparedChecks(prepared:ConvertedPreparedStudioImportV2):void {
+ const {manifest,delta}=prepared,initial=delta.previousDigest===null;
+ const unique=(values:readonly string[])=>new Set(values).size===values.length;
+ if(delta.graph.nextDigest!==manifest.graph.digest||(delta.graph.previousDigest===null)!==initial||
+  delta.graph.changed!==(initial||delta.graph.previousDigest!==delta.graph.nextDigest)||
+  !unique(delta.nodes.map(n=>n.nodeKey))||delta.nodes.length!==manifest.graph.nodes.length||
+  manifest.graph.nodes.some(n=>!delta.nodes.some(d=>d.nodeKey===n.nodeKey))||
+  !unique(delta.reviewNodeRemovals.map(n=>n.nodeKey))||delta.reviewNodeRemovals.some(n=>manifest.graph.nodes.some(d=>d.nodeKey===n.nodeKey))||
+  (initial&&delta.reviewNodeRemovals.length>0))fail('STUDIO_IMPORT_RESPONSE');
+ for(const n of delta.nodes){const create=n.action==='create';
+  if((initial&&!create)||[n.instanceRef,n.expectedOwnedStateSha256].some(v=>(v===null)!==create)||!unique(n.changed)||
+   (create&&(n.changed.length>0||n.preserveChildren.length>0))||(n.action==='reuse'&&n.changed.length>0)||
+   (n.action==='update-in-place'&&n.changed.length===0)||!unique(n.preserveChildren.map(c=>c.instanceRef)))fail('STUDIO_IMPORT_RESPONSE');
+  const mesh=manifest.graph.meshes.find(m=>m.nodeKey===n.nodeKey),object=mesh?delta.objects.find(o=>o.sourceObjectId===mesh.sourceObjectId):undefined;
+  if(object&&(n.instanceRef!==object.instanceRef||n.expectedOwnedStateSha256!==object.expectedOwnedStateSha256||
+   importCanonical(n.preserveChildren)!==importCanonical(object.preserveChildren)))fail('STUDIO_IMPORT_RESPONSE');
+ }
+ if(delta.graph.changed&&!initial&&!delta.nodes.some(n=>n.action!=='reuse')&&delta.reviewNodeRemovals.length===0)fail('STUDIO_IMPORT_RESPONSE');
+ const references:string[]=[];if(delta.modelRef!==null)references.push(delta.modelRef);
+ for(const o of [...delta.objects,...delta.reviewRemovals]){
+  if(o.instanceRef!==null)references.push(o.instanceRef);
+  references.push(...('preserveChildren' in o?o.preserveChildren:o.authoredChildren).map(c=>c.instanceRef));
+ }
+ for(const n of delta.nodes)if(!manifest.graph.meshes.some(m=>m.nodeKey===n.nodeKey)){
+  if(n.instanceRef!==null)references.push(n.instanceRef);references.push(...n.preserveChildren.map(c=>c.instanceRef));
+ }
+ for(const n of delta.reviewNodeRemovals){
+  // Removed mesh nodes share their exact object mapping; EMPTYs do not.
+  const object=/_primitive[0-9]+$/.test(n.nodeKey)?delta.reviewRemovals.find(o=>o.sourceObjectId===convertedGlbObjectId(manifest.sourceSha256,'render',n.nodeKey)):undefined;
+  if(object){if(n.instanceRef!==object.instanceRef||n.ownedStateSha256!==object.ownedStateSha256||importCanonical(n.authoredChildren)!==importCanonical(object.authoredChildren))fail('STUDIO_IMPORT_RESPONSE');}
+  else references.push(n.instanceRef,...n.authoredChildren.map(c=>c.instanceRef));
+ }
+ if(!unique(references))fail('STUDIO_IMPORT_RESPONSE');
+}
 /** Verifies bounded serialized evidence, not generated bytes or engine acceptance. */
 export function parseNativeStudioImportResponse(value:unknown,expectedJobId:string,expectedProjectId?:string):{prepared:PreparedStudioImport} {
- const snapshot=importSnapshot(value);
+ const converted=convertedEnvelope(value),snapshot=importSnapshot(value,converted);
  if(Buffer.byteLength(JSON.stringify(snapshot))>NATIVE_STUDIO_IMPORT_RESPONSE_BYTES)fail('STUDIO_IMPORT_RESPONSE');
- const parsed=importResponse.safeParse(snapshot);if(!parsed.success)fail('STUDIO_IMPORT_RESPONSE');
+ let parsed:ReturnType<typeof importResponse.safeParse>|ReturnType<typeof convertedResponse.safeParse>;
+ try{parsed=converted?convertedResponse.safeParse(snapshot):importResponse.safeParse(snapshot);}catch{fail('STUDIO_IMPORT_RESPONSE');}
+ if(!parsed.success)fail('STUDIO_IMPORT_RESPONSE');
  const {prepared}=parsed.data,{manifest,delta}=prepared,{digest,...content}=manifest;
  if(manifest.revisionId!==expectedJobId||(expectedProjectId!==undefined&&manifest.projectId!==expectedProjectId)||
   digest!==importDigest(content)||delta.nextDigest!==digest||prepared.digest!==importDigest({manifestDigest:digest,delta}))fail('STUDIO_IMPORT_RESPONSE');
@@ -111,7 +163,7 @@ export function parseNativeStudioImportResponse(value:unknown,expectedJobId:stri
   !same(manifest.objects.map(o=>o.sourceObjectId),delta.objects.map(o=>o.sourceObjectId))||
   manifest.files.reduce((n,f)=>n+f.byteLength,0)>STUDIO_IMPORT_LIMITS.totalBytes||manifest.objects.reduce((n,o)=>n+o.triangles,0)>STUDIO_IMPORT_LIMITS.triangles)fail('STUDIO_IMPORT_RESPONSE');
  for(const o of manifest.objects)if(!manifest.files.some(f=>f.fileId===o.exportFileId)||
-  (o.parentSourceObjectId!==null&&!manifest.objects.some(p=>p.sourceObjectId===o.parentSourceObjectId))||
+  ('parentSourceObjectId' in o&&o.parentSourceObjectId!==null&&!manifest.objects.some(p=>p.sourceObjectId===o.parentSourceObjectId))||
   (o.materialSha256!==null&&!manifest.materials.some(m=>m.sha256===o.materialSha256))||o.textureSha256s.some(h=>!manifest.textures.some(t=>t.sha256===h))||
   (o.role==='render'?o.collisionFor.length!==0:o.collisionFor.length===0)||o.collisionFor.some(id=>!manifest.objects.some(r=>r.sourceObjectId===id&&r.role==='render')))fail('STUDIO_IMPORT_RESPONSE');
  for(const a of manifest.anchors)if(!manifest.objects.some(o=>o.sourceObjectId===a.sourceObjectId&&o.role==='render'))fail('STUDIO_IMPORT_RESPONSE');
@@ -130,5 +182,6 @@ export function parseNativeStudioImportResponse(value:unknown,expectedJobId:stri
  }
  for(const [resources,hashes] of [[delta.geometry,manifest.objects.map(o=>o.meshExportSha256)],[delta.textures,manifest.textures.map(t=>t.sha256)]] as const)
   if(!same([...resources.prepare,...resources.reuse],[...new Set(hashes)])||(initial&&resources.reuse.length>0))fail('STUDIO_IMPORT_RESPONSE');
+ if(converted)convertedPreparedChecks(prepared as ConvertedPreparedStudioImportV2);
  return parsed.data;
 }

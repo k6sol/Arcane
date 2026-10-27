@@ -2,8 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { createStudioImportManifestAuthority, type HostGeneratedStudioImport, type PreparedStudioImport } from '../../packages/asset-pipeline/src/studio-import-manifest.js';
-import { decodeStudioImportPayload, StudioImportPayloadError, STUDIO_IMPORT_PAYLOAD_LIMITS, type StudioImportPayload, type StudioImportPayloadBuffer } from '../../packages/asset-pipeline/src/studio-import-payload.js';
+import { createStudioImportManifestAuthority, type HostGeneratedStudioImport, type GeneratedPreparedStudioImportV1 as PreparedStudioImport, type PreparedStudioImport as AnyPreparedStudioImport } from '../../packages/asset-pipeline/src/studio-import-manifest.js';
+import { decodeStudioImportPayload, StudioImportPayloadError, STUDIO_IMPORT_PAYLOAD_LIMITS, type GeneratedStudioImportPayloadV1 as StudioImportPayload, type StudioImportPayloadBuffer } from '../../packages/asset-pipeline/src/studio-import-payload.js';
 import { adaptCompletedStudioImport } from '../../apps/daemon/src/asset-import-adapter.js';
 import { createStudioImportTransfer } from '../../packages/asset-pipeline/src/studio-import-transfer.js';
 import type { AssetManifest } from '../../packages/asset-pipeline/src/types.js';
@@ -56,9 +56,10 @@ function fixture(options:{planar?:boolean}={}) {
     files:[{fileId:'export',contentType:'model/gltf-binary',sha256:sha(bytes),bytes}],models:[{fileId:'export',resources:[],objects}],anchors:[{sourceAnchorId:A,sourceObjectId:R,kind:'socket',transform:[...I.slice(0,12),1,0,0,1]}],baseline:null};};
   return {doc,get bin(){return bin;},set bin(v:Buffer){bin=v;doc.buffers[0].byteLength=v.length;},generated};
 }
+function generatedPreparation(value:AnyPreparedStudioImport):value is PreparedStudioImport {return value.manifest.schemaVersion===1;}
 async function prepare(input:HostGeneratedStudioImport):Promise<PreparedStudioImport> {
   const authority=createStudioImportManifestAuthority({loadGeneratedFiles:async()=>input});
-  try{return authority.prepare(await authority.admit(input.revisionId));}finally{authority.close();}
+  try{const prepared=authority.prepare(await authority.admit(input.revisionId));assert.ok(generatedPreparation(prepared),'This fixture prepares generated version-one models.');return prepared;}finally{authority.close();}
 }
 function seal(p:Doc):PreparedStudioImport {
   const {digest:_digest,...content}=p.manifest;p.manifest.digest=sha(canonical(content));p.delta.nextDigest=p.manifest.digest;

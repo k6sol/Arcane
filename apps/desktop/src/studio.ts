@@ -1896,7 +1896,7 @@ export class StudioWorkbench {
     for (const job of jobs) {
       const card = this.make('article', undefined, 'chat-asset-card'); card.setAttribute('role', 'listitem'); card.setAttribute('data-job-id', job.jobId);
       const name = assetJobName(job).replaceAll('-', ' '), title = this.make('strong', name.charAt(0).toUpperCase() + name.slice(1));
-      const state = this.make('span', (job.state === 'succeeded' && !job.manifestAvailable ? 'Finalizing' : labels[job.state]) + (assetJobKind(job) === 'adopted-glb' ? ' · Adopted GLB · preview only' : assetJobKind(job) === 'converted-glb' ? ' · Converted GLB · preview only' : ''), 'chat-asset-state');
+      const state = this.make('span', (job.state === 'succeeded' && !job.manifestAvailable ? 'Finalizing' : labels[job.state]) + (assetJobKind(job) === 'adopted-glb' ? ' · Adopted GLB · preview only' : assetJobKind(job) === 'converted-glb' ? ' · Converted GLB' : ''), 'chat-asset-state');
       const info = this.make('div', undefined, 'chat-asset-info'); info.append(title, state); card.append(info);
       this.renderWorkerStatus(card,job,current);
       this.renderRetentionStatus(card,job,current);
@@ -1959,7 +1959,7 @@ export class StudioWorkbench {
         if (EventType) this.doc.dispatchEvent(new EventType<WorkspaceAssetActivity>(WORKSPACE_ASSET_ACTIVITY_EVENT, {detail:{jobId:job.jobId,state:'running'},bubbles:false}));
       }
     }
-    this.text('asset-job-summary', job ? assetJobName(job) + (assetJobKind(job) === 'adopted-glb' ? ' · adopted GLB; engine import unavailable' : assetJobKind(job) === 'converted-glb' ? ' · converted GLB; engine import unavailable' : '') + ' · ' + job.state.replaceAll('_', ' ') + ' · stage ' + job.stage + (job.error ? ' · ' + job.error.code + ': ' + job.error.message : '') : 'Choose an exact recorded job to inspect progress and evidence.');
+    this.text('asset-job-summary', job ? assetJobName(job) + (assetJobKind(job) === 'adopted-glb' ? ' · adopted GLB; engine import unavailable' : assetJobKind(job) === 'converted-glb' ? ' · converted GLB; Studio verification pending' : '') + ' · ' + job.state.replaceAll('_', ' ') + ' · stage ' + job.stage + (job.error ? ' · ' + job.error.code + ': ' + job.error.message : '') : 'Choose an exact recorded job to inspect progress and evidence.');
   }
   private bindAssetAcknowledgement():void{
     const button=this.doc.getElementById('asset-acknowledge');if(!button||this.assetAcknowledgementBound)return;

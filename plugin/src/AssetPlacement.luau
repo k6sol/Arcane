@@ -59,6 +59,295 @@ local function boxOf(root: any, yaw: number): ({number}, {number}, {number})
 	return components, AssetPlacement.worldExtents(components, size), AssetPlacement.worldExtentsAtYaw(components, size, yaw)
 end
 
+-- Converted graphs are attached only to actual locally materialized Instances.
+-- Neither attributes, serialized receipts nor a caller-supplied graph establish
+-- this ownership. Clones are admitted only from an unchanged private baseline.
+local converted: {[any]: any} = setmetatable({}, {__mode = "k"})
+local NODE_ATTRIBUTE = "ArcaneConvertedNodeKey"
+local OBJECT_ATTRIBUTE = "ArcaneConvertedObjectId"
+local function finite(value: any): number
+	return V.number(value, -1000000, 1000000, "converted number")
+end
+local function matrix(value: any): {number}
+	if type(value) ~= "table" or #value ~= 16 then V.fail("IDENTITY", "Converted affine matrix is incomplete.") end
+	local result = {}
+	for index = 1, 16 do result[index] = finite(value[index]) end
+	if result[4] ~= 0 or result[8] ~= 0 or result[12] ~= 0 or result[16] ~= 1 then V.fail("UNSUPPORTED_TRANSFORM", "Converted matrix is not affine.") end
+	return result
+end
+local function multiply(a: any, b: any): {number}
+	local result = {}
+	for column = 0, 3 do for row = 1, 4 do
+		local total = 0
+		for k = 0, 3 do total += a[k * 4 + row] * b[column * 4 + k + 1] end
+		result[column * 4 + row] = finite(total)
+	end end
+	return result
+end
+local function rigid(m: any, unit: boolean, units: number): {number}
+	local scales, r = {}, {}
+	for column = 0, 2 do
+		local at = column * 4
+		local scale = math.sqrt(m[at + 1]^2 + m[at + 2]^2 + m[at + 3]^2)
+		if scale <= 0 or (unit and math.abs(scale - 1) > 1e-6) then V.fail("UNSUPPORTED_TRANSFORM", "Converted grouping scale requires a baked delivery copy.") end
+		scales[column + 1] = scale
+		for row = 1, 3 do r[at + row] = m[at + row] / scale end
+	end
+	for a = 0, 1 do for b = a + 1, 2 do
+		if math.abs(r[a*4+1]*r[b*4+1]+r[a*4+2]*r[b*4+2]+r[a*4+3]*r[b*4+3]) > 1e-6 then V.fail("UNSUPPORTED_TRANSFORM", "Converted shear requires a baked delivery copy.") end
+	end end
+	local determinant = r[1]*(r[6]*r[11]-r[7]*r[10])-r[5]*(r[2]*r[11]-r[3]*r[10])+r[9]*(r[2]*r[7]-r[3]*r[6])
+	if math.abs(determinant - 1) > 1e-6 then V.fail("UNSUPPORTED_TRANSFORM", "Converted reflection requires a baked delivery copy.") end
+	return {m[13]*units,m[14]*units,m[15]*units,r[1],r[5],r[9],r[2],r[6],r[10],r[3],r[7],r[11]}
+end
+local function sameNumbers(a: any, b: any, tolerance: number): boolean
+	if #a ~= #b then return false end
+	for index, value in ipairs(a) do if math.abs(value-b[index]) > tolerance then return false end end
+	return true
+end
+local function components(value: any): {number} return {value:GetComponents()} end
+local function scaledFrame(values: any, scale: number): any
+	return CFrame.new(values[1]*scale,values[2]*scale,values[3]*scale,table.unpack(values,4,12))
+end
+local function physicalSize(plan: any, scale: number): any
+	local size = {}
+	for axis = 1, 3 do
+		local extent = plan.exactSourceSizeStuds[axis] * scale
+		if extent ~= 0 and (extent < 0.05 or extent > 2048) then V.fail("UNSUPPORTED_TRANSFORM", "Converted scale would stretch or exceed the physical sizing policy.") end
+		size[axis] = if extent == 0 then 0.05 else extent
+	end
+	return Vector3.new(size[1],size[2],size[3])
+end
+
+-- Metadata/native-subset preflight, called with the ORIGINAL receiver's sealed
+-- graph and retained mesh entries before any Model/MeshPart allocation. This
+-- does not narrow the converter's affine data domain or certify Engine output.
+function AssetPlacement.convertedPlan(source: any, resources: any): any
+	if source.formatVersion ~= 2 or type(source.graph) ~= "table" or source.graph.schemaVersion ~= 1 then V.fail("IDENTITY", "Original converted graph is required.") end
+	local graph, byKey, rows, associations = source.graph, {}, {}, {}
+	-- The detached outer Model is a real allocation, not a selected source node.
+	if #graph.nodes < 1 or 1+#graph.nodes > 128 or #resources > 128 then V.fail("BODY_LIMIT", "Converted instance budget exceeded.") end
+	for _, resource in ipairs(resources) do
+		local association = resource.association
+		if resource.formatVersion ~= 2 or not association or association.sourceObjectId ~= resource.object.sourceObjectId
+			or not V.equal(association.sourcePivot,{0,0,0}) then V.fail("IDENTITY", "Converted mesh association or source pivot changed.") end
+		if associations[association.sourceObjectId] then V.fail("IDENTITY", "Duplicate converted mesh association.") end
+		associations[association.sourceObjectId] = resource
+		if not resource.nativePlan or not sameNumbers(resource.nativePlan.sourcePivotCFrame,rigid(matrix(resource.object.exportTransform),false,source.conversion.studsPerMeter),1e-6) then V.fail("IDENTITY", "Converted native plan differs from its retained source transform.") end
+		physicalSize(resource.nativePlan,1)
+	end
+	local derived = 0
+	for _, association in ipairs(graph.meshes) do
+		local resource = associations[association.sourceObjectId]
+		if not resource or not V.equal(resource.association,association) then V.fail("IDENTITY", "Converted graph mesh inventory differs.") end
+		if association.nodeKey == nil or association.nodeKey == V.NULL then
+			if resource.object.role ~= "collision" then V.fail("IDENTITY", "Only derived collision may have no selected node.") end
+			derived += 1
+		end
+	end
+	if #graph.meshes ~= #resources or derived > 1 or 1+#graph.nodes+derived > 128 then V.fail("BODY_LIMIT", "Converted graph coverage or instance budget differs.") end
+	for _, node in ipairs(graph.nodes) do
+		if type(node.nodeKey) ~= "string" or byKey[node.nodeKey] then V.fail("IDENTITY", "Converted node identity is duplicated.") end
+		if node.name~=nil and node.name~=V.NULL and (type(node.name)~="string" or #node.name>256 or string.find(node.name,"\0",1,true) or utf8.len(node.name)==nil) then V.fail("UNSUPPORTED_TRANSFORM","Authored node name exceeds the exact reference display domain.") end
+		local row: any = {node=node,localMatrix=matrix(node.localMatrix)}
+		byKey[node.nodeKey] = row
+		for _, resource in ipairs(resources) do if resource.association.nodeKey == node.nodeKey then
+			if row.resource or resource.object.role ~= "render" then V.fail("IDENTITY", "Selected node mesh association is ambiguous.") end
+			row.resource = resource
+		end end
+		rigid(row.localMatrix,row.resource==nil,source.conversion.studsPerMeter)
+	end
+	-- Iterative topological order handles arbitrary signed graph ordering and
+	-- refuses cycles/missing parents without recursion or nearest-mesh guesses.
+	while #rows < #graph.nodes do
+		local advanced = false
+		for _, node in ipairs(graph.nodes) do
+			local row, parent = byKey[node.nodeKey], byKey[node.parentKey]
+			local root = node.parentKey == nil or node.parentKey == V.NULL
+			if row.world == nil and (root or (parent and parent.world)) then
+				row.world = if root then row.localMatrix else multiply(parent.world,row.localMatrix)
+				row.depth = if root then 1 else parent.depth+1
+				row.pivot = rigid(row.world,row.resource==nil,source.conversion.studsPerMeter)
+				if parent and parent.resource then V.fail("UNSUPPORTED_TRANSFORM", "A mesh parent with children requires a baked delivery copy.") end
+				if row.resource and not sameNumbers(row.world,row.resource.object.exportTransform,1e-6) then V.fail("IDENTITY", "Converted graph and mesh world transform differ.") end
+				rows[#rows+1] = row; advanced = true
+			end
+		end
+		if not advanced then V.fail("IDENTITY", "Converted graph has a cycle or unavailable direct parent.") end
+	end
+	local children,stack,ordered={},{},{}
+	for _,row in ipairs(rows) do local key=row.node.parentKey;if key==nil or key==V.NULL then key="" end;children[key]=children[key] or {};table.insert(children[key],row) end
+	for _,list in pairs(children) do table.sort(list,function(a: any,b: any): boolean return a.node.nodeKey<b.node.nodeKey end) end
+	local roots=children[""] or {};for index=#roots,1,-1 do stack[#stack+1]=roots[index] end
+	while #stack>0 do local row=table.remove(stack);ordered[#ordered+1]=row;local list=children[row.node.nodeKey] or {};for index=#list,1,-1 do stack[#stack+1]=list[index] end end
+	rows=ordered
+	for _,resource in ipairs(resources) do if resource.object.role=="render" and (not byKey[resource.association.nodeKey] or byKey[resource.association.nodeKey].resource~=resource) then V.fail("IDENTITY","Converted render association has no exact graph node.") end end
+	return {source=source,rows=rows,byKey=byKey,resources=resources}
+end
+function AssetPlacement.verifyCarrier(part: any, object: any): ()
+	local size=part.MeshSize
+	for axis,key in ipairs({"X","Y","Z"}) do
+		local actual=finite(size[key])
+		local expected=object.bounds.max[axis]-object.bounds.min[axis]
+		-- MeshSize is the unscaled source geometry size (TriangleMeshPart docs).
+		-- A truly planar axis remains zero at every vertex, independently of the
+		-- Engine's positive physical thickness metadata; no nonzero axis is padded.
+		if actual<0 or (expected>0 and math.abs(actual-expected)>1e-5*math.max(1,expected)) then V.fail("VERIFY","Engine carrier MeshSize differs from measured source extent.") end
+	end
+end
+
+-- Source-space measured bounds, not padded MeshPart boxes. Yaw keeps the
+-- measured world Y extrema exact; X/Z fitting uses their conservative box.
+function AssetPlacement.convertedBounds(plan: any, yaw: number): (any, any)
+	local low,high = {math.huge,math.huge,math.huge},{-math.huge,-math.huge,-math.huge}
+	local angle,units = math.rad(yaw),plan.source.conversion.studsPerMeter
+	local c,s = math.cos(angle),math.sin(angle)
+	for _,resource in ipairs(plan.resources) do if resource.object.role == "render" then
+		local bounds = resource.object.worldBounds
+		for _,x in ipairs({bounds.min[1],bounds.max[1]}) do for _,y in ipairs({bounds.min[2],bounds.max[2]}) do for _,z in ipairs({bounds.min[3],bounds.max[3]}) do
+			local p = {(c*x+s*z)*units,y*units,(-s*x+c*z)*units}
+			for axis=1,3 do low[axis]=math.min(low[axis],p[axis]);high[axis]=math.max(high[axis],p[axis]) end
+		end end end
+	end end
+	if low[1] == math.huge then V.fail("ASSET", "Converted graph has no render bounds.") end
+	return low,high
+end
+function AssetPlacement.convertedScale(plan: any, maxSize: any, yaw: number): number
+	local low,high = AssetPlacement.convertedBounds(plan,yaw)
+	local scale = AssetPlacement.fitScale({high[1]-low[1],high[2]-low[2],high[3]-low[3]},maxSize)
+	for _,resource in ipairs(plan.resources) do physicalSize(resource.nativePlan,scale) end
+	return scale
+end
+
+local function scalar(value: any): string
+	if type(value)=="number" then
+		if value~=value or math.abs(value)==math.huge then V.fail("VERIFY","Nonfinite observed state.") end
+		return if value==0 then "0" else string.format("%.17g",value)
+	elseif type(value)=="string" then return string.format("%q",value)
+	elseif type(value)=="boolean" then return if value then "true" else "false"
+	elseif value==nil then return "null" end
+	V.fail("VERIFY","Unsupported observed state value.")
+end
+local function observed(instance: any, collection: any): any
+	local state: any = {name=instance.Name,className=instance.ClassName,attributes=instance:GetAttributes(),tags=collection:GetTags(instance)}
+	table.sort(state.tags)
+	if instance:IsA("BasePart") then
+		state.cframe=components(instance.CFrame);state.pivotOffset=components(instance.PivotOffset)
+		state.size={instance.Size.X,instance.Size.Y,instance.Size.Z}
+		state.flags={instance.Anchored,instance.CanCollide,instance.CanQuery,instance.CanTouch,instance.CastShadow,instance.Transparency,instance.DoubleSided}
+		state.material={tostring(instance.Material),instance.Color.R,instance.Color.G,instance.Color.B}
+		state.extra={tostring(instance.MaterialVariant),tostring(instance.Reflectance),tostring(instance.Massless),tostring(instance.CollisionGroup),tostring(instance.CustomPhysicalProperties),tostring(instance.Locked),tostring(instance.RootPriority)}
+	elseif instance:IsA("Model") then state.pivot=components(instance.WorldPivot);state.primary=instance.PrimaryPart==nil end
+	if instance:IsA("SurfaceAppearance") then
+		state.appearance={tostring(instance.AlphaMode),tostring(instance.Color),tostring(instance.ColorMapContent),tostring(instance.NormalMapContent),tostring(instance.MetalnessMapContent),tostring(instance.RoughnessMapContent)}
+	end
+	return state
+end
+local function stateBytes(value: any): string
+	if type(value)~="table" then return scalar(value) end
+	local keys,out={},{}
+	for key in pairs(value) do keys[#keys+1]=key end
+	table.sort(keys,function(a: any,b: any): boolean return tostring(a)<tostring(b) end)
+	for _,key in ipairs(keys) do out[#out+1]=scalar(key)..":"..stateBytes(value[key]) end
+	return "{"..table.concat(out,",").."}"
+end
+local function snapshot(root: any, ops: any): any
+	local items = root:GetDescendants();table.insert(items,1,root)
+	local result={}
+	for _,item in ipairs(items) do result[#result+1]={instance=item,parent=item.Parent,children=item:GetChildren(),state=stateBytes(observed(item,ops.collection))} end
+	return result
+end
+local function unchanged(state: any, ops: any): boolean
+	if not state.baseline then return false end
+	for _,row in ipairs(state.baseline) do
+		if row.instance.Parent~=row.parent or #row.instance:GetChildren()~=#row.children or stateBytes(observed(row.instance,ops.collection))~=row.state then return false end
+		local children=row.instance:GetChildren()
+		for _,child in ipairs(row.children) do if not table.find(children,child) then return false end end
+	end
+	return #state.root:GetDescendants()+1==#state.baseline
+end
+
+function AssetPlacement.registerConverted(root: any, plan: any, instances: any, parts: any, hash: any, appearances: any): ()
+	if converted[root] then V.fail("STATE","Converted graph was already registered.") end
+	converted[root]={root=root,plan=plan,instances=instances,parts=parts,appearances=appearances,hash=hash,scale=1,transform=CFrame.new(),baseline=nil}
+end
+function AssetPlacement.convertedMatches(root: any, ops: any): boolean
+	local state=converted[root]
+	return state==nil or unchanged(state,ops)
+end
+function AssetPlacement.preflightConverted(plan: any, maxSize: any, yaw: number, depth: number): ()
+	AssetPlacement.convertedScale(plan,maxSize,yaw)
+	for _,row in ipairs(plan.rows) do if depth+1+row.depth>63 then V.fail("BODY_LIMIT","Converted graph exceeds the reference hierarchy depth.") end end
+end
+local function verifyConverted(state: any): ()
+	local owned={[state.root]=true}
+	for _,item in pairs(state.instances) do owned[item]=true end
+	for _,item in ipairs(state.parts) do owned[item]=true end
+	for index,item in pairs(state.appearances) do
+		owned[item]=true
+		if item.Parent~=state.parts[index] then V.fail("VERIFY","Converted appearance ownership changed.") end
+	end
+	for _,item in ipairs(state.root:GetDescendants()) do if not owned[item] then V.fail("CONFLICT","Converted hierarchy gained an unowned child; no child is removed.") end end
+	for _,row in ipairs(state.plan.rows) do
+		local item=state.instances[row.node.nodeKey]
+		local parent=state.instances[row.node.parentKey] or state.root
+		local name=if row.node.name==nil or row.node.name==V.NULL then row.node.nodeKey else row.node.name
+		if item.Parent~=parent or item.Name~=name or item:GetAttribute(NODE_ATTRIBUTE)~=row.node.nodeKey then V.fail("VERIFY","Converted direct parent, name or node marker differs.") end
+		local expected=state.transform*scaledFrame(row.pivot,state.scale)
+		if not sameNumbers(components(item:GetPivot()),components(expected),1e-4) then V.fail("VERIFY","Converted source-zero pivot differs after Engine assignment.") end
+	end
+	for index,resource in ipairs(state.plan.resources) do
+		local part,plan=state.parts[index],resource.nativePlan
+		local desired=state.transform*scaledFrame(plan.cframe,state.scale)
+		local size=physicalSize(plan,state.scale)
+		if not sameNumbers(components(part.CFrame),components(desired),1e-4)
+			or not sameNumbers(components(part.PivotOffset),components(scaledFrame(plan.pivotOffset,state.scale)),1e-4)
+			or not sameNumbers({part.Size.X,part.Size.Y,part.Size.Z},{size.X,size.Y,size.Z},1e-4)
+			or part:GetAttribute(OBJECT_ATTRIBUTE)~=resource.object.sourceObjectId then V.fail("VERIFY","Converted physical mesh assignment differs.") end
+		if resource.object.role=="collision" and part.Parent~=state.root then V.fail("VERIFY","Derived collision must remain a root association.") end
+	end
+end
+function AssetPlacement.initializeConverted(root: any): ()
+	local state=converted[root]
+	if not state then V.fail("STATE","Converted materialization metadata is absent.") end
+	-- Setter-only pivots: unlike PivotTo, setting WorldPivot leaves already
+	-- positioned descendants untouched (official pivot-tools/Model docs).
+	for _,row in ipairs(state.plan.rows) do if not row.resource then state.instances[row.node.nodeKey].WorldPivot=CFrame.new(table.unpack(row.pivot)) end end
+	root.WorldPivot=CFrame.new()
+	verifyConverted(state)
+end
+local function transformConverted(state: any, transform: any, scale: number): ()
+	for _,resource in ipairs(state.plan.resources) do physicalSize(resource.nativePlan,scale) end -- BEFORE mutation
+	for index,resource in ipairs(state.plan.resources) do
+		local part,plan=state.parts[index],resource.nativePlan
+		part.Size=physicalSize(plan,scale)
+		part.CFrame=transform*scaledFrame(plan.cframe,scale)
+		part.PivotOffset=scaledFrame(plan.pivotOffset,scale)
+	end
+	for _,row in ipairs(state.plan.rows) do if not row.resource then state.instances[row.node.nodeKey].WorldPivot=transform*scaledFrame(row.pivot,scale) end end
+	state.scale,state.transform=scale,transform
+	verifyConverted(state)
+end
+function AssetPlacement.observeConverted(root: any, ops: any): any
+	local state=converted[root]
+	if not state then return nil end
+	verifyConverted(state)
+	local nodes,objects=V.array({}),V.array({})
+	local function observation(item: any): any
+		local ref=ops.registry:ref(item)
+		local digest=state.hash("arcane-converted-owned-state-v1\n"..stateBytes(observed(item,ops.collection)))
+		return {instanceRef=ref.instanceId,ownedStateSha256=digest,authoredChildren=V.array({})}
+	end
+	for _,row in ipairs(state.plan.rows) do
+		local result=observation(state.instances[row.node.nodeKey]);result.nodeKey=row.node.nodeKey;nodes[#nodes+1]=result
+	end
+	for index,resource in ipairs(state.plan.resources) do
+		local result=observation(state.parts[index]);result.sourceObjectId=resource.object.sourceObjectId;objects[#objects+1]=result
+	end
+	state.baseline=snapshot(root,ops)
+	return {formatVersion=2,receiptScope="studio-session-observation",imported=false,engineVerification="pending",graphDigest=state.plan.source.graph.digest,conversionRequestDigest=state.plan.source.conversionRequestDigest,nodes=nodes,objects=objects}
+end
+
 -- One-shot watch: records top-level instances added under Workspace after it is armed.
 function AssetPlacement.watch(ops: any): any
 	local workspace = ops.registry:root("Workspace")
@@ -179,7 +468,7 @@ function AssetPlacement.place(ops: any, command: any, args: any, guard: () -> ()
 	end
 	if editable then
 		if type(ops.materializeReconstruction) ~= "function" then V.fail("WATCH", "This plugin cannot place reconstructed meshes.") end
-		asset, placed = ops:materializeReconstruction(editable, guard)
+		asset, placed = ops:materializeReconstruction(editable, guard, {maxSize=maxSize,yaw=yaw,depth=#args.parent.pathSegments})
 	else
 		local arrived, value = pcall(AssetPlacement.arrival, ops, id, expectName, workspace)
 		if not arrived then scrub(); error(value, 0) end
@@ -188,7 +477,10 @@ function AssetPlacement.place(ops: any, command: any, args: any, guard: () -> ()
 	local ok, result = pcall(AssetPlacement.adopt, ops, command, args, guard, asset, container, name, maxSize, position, yaw, ground, anchor, allowScripts, editable ~= nil, id)
 	if not ok then
 		-- A detached materialized model never reached the scene: release it, no receipt.
-		if editable and asset.Parent == nil then pcall(function() asset:Destroy() end) end
+		if editable and asset.Parent == nil then
+			local cleaned=pcall(function() asset:Destroy() end)
+			if not cleaned and converted[asset] then ops.assetCleanupFailed=true;V.fail("CLEANUP","Detached converted placement cleanup could not be established.") end
+		elseif editable and placed and converted[asset] then placed() end -- A partial converted effect is consumed, never replayed.
 		scrub()
 		error(result, 0)
 	end
@@ -199,6 +491,7 @@ end
 function AssetPlacement.adopt(ops: any, command: any, args: any, guard: () -> (), asset: any, container: any, name: string, maxSize: {number}?,
 	position: {number}, yaw: number, ground: boolean, anchor: boolean, allowScripts: boolean, detached: boolean, id: string): any
 	local workspace = ops.registry:root("Workspace")
+	if converted[asset] then verifyConverted(converted[asset]) end
 	local descendants = asset:GetDescendants()
 	if #descendants + 1 > L.descendants then V.fail("BODY_LIMIT", "The inserted asset has more than " .. L.descendants .. " instances; nothing was adopted. Remove it or choose a lighter asset.") end
 	local physical = asset:IsA("BasePart")
@@ -240,21 +533,37 @@ function AssetPlacement.adopt(ops: any, command: any, args: any, guard: () -> ()
 				if item:IsA("BasePart") then item.Anchored = true; anchored += 1 end
 			end
 		end
-		local components, extents, placedExtents = boxOf(root, yaw)
-		local scale = AssetPlacement.fitScale(placedExtents, maxSize)
-		if scale ~= 1 then
-			root:ScaleTo(root:GetScale() * scale)
-			components, extents, placedExtents = boxOf(root, yaw)
+		local state=converted[root]
+		local scale,placedExtents,bottom
+		if state then
+			AssetPlacement.preflightConverted(state.plan,maxSize,yaw,#args.parent.pathSegments)
+			scale=AssetPlacement.convertedScale(state.plan,maxSize,yaw)
+			local low,high=AssetPlacement.convertedBounds(state.plan,0)
+			bottom={(low[1]+high[1])/2,low[2],(low[3]+high[3])/2}
+			local yawLow,yawHigh=AssetPlacement.convertedBounds(state.plan,yaw)
+			placedExtents={(yawHigh[1]-yawLow[1])*scale,(yawHigh[2]-yawLow[2])*scale,(yawHigh[3]-yawLow[3])*scale}
+		else
+			local components, extents, fitted = boxOf(root, yaw)
+			placedExtents=fitted
+			scale = AssetPlacement.fitScale(placedExtents, maxSize)
+			if scale ~= 1 then
+				root:ScaleTo(root:GetScale() * scale)
+				components, extents, placedExtents = boxOf(root, yaw)
+			end
+			bottom = AssetPlacement.bottomCenter(components, extents)
+			root.WorldPivot = CFrame.new(bottom[1], bottom[2], bottom[3])
 		end
-		local bottom = AssetPlacement.bottomCenter(components, extents)
-		root.WorldPivot = CFrame.new(bottom[1], bottom[2], bottom[3])
 		local y, grounded = position[2], false
 		if ground then
 			-- The asset is detached, so the probe only sees existing terrain and parts.
 			local hit = workspace:Raycast(Vector3.new(position[1], position[2] + 500, position[3]), Vector3.new(0, -1000, 0))
 			if hit then y, grounded = hit.Position.Y, true end
 		end
-		root:PivotTo(CFrame.new(position[1], y, position[3]) * CFrame.Angles(0, math.rad(yaw), 0))
+		local placement=CFrame.new(position[1], y, position[3]) * CFrame.Angles(0, math.rad(yaw), 0)
+		if state then
+			transformConverted(state,placement*CFrame.new(-bottom[1]*scale,-bottom[2]*scale,-bottom[3]*scale),scale)
+			root.WorldPivot=placement
+		else root:PivotTo(placement) end
 		root.Name = name
 		root.Parent = container
 		local ref = ops.registry:ref(root)
@@ -263,11 +572,13 @@ function AssetPlacement.adopt(ops: any, command: any, args: any, guard: () -> ()
 		ops.registry.owned[root] = {parent = container, placed = {count = count, pivot = {root.WorldPivot:GetComponents()}}}
 		release(ops, id)
 		local rounded = math.floor(scale * 10000 + 0.5) / 10000
-		return {ref = ref, adopted = {name = string.sub(asset.Name, 1, 100), className = asset.ClassName},
+		local result: any = {ref = ref, adopted = {name = string.sub(asset.Name, 1, 100), className = asset.ClassName},
 			removedScripts = {count = removed, classes = classes, names = names}, keptScripts = kept, anchored = anchored,
 			scale = rounded, size = V.array({placedExtents[1], placedExtents[2], placedExtents[3]}), grounded = grounded,
 			mutation = {kind = "scene.place_asset", ref = ref, before = V.NULL,
 				after = {descendants = count, removedScripts = removed, keptScripts = kept, scale = rounded}}}
+		if state then result.converted=AssetPlacement.observeConverted(root,ops) end
+		return result
 	end)
 end
 
@@ -325,6 +636,7 @@ function AssetPlacement.restore(ops: any, command: any, original: any, instance:
 		local placed = owned and owned.placed
 		local function matches(): boolean
 			return placed ~= nil and instance.Parent == owned.parent and #instance:GetDescendants() == placed.count and samePivot(instance.WorldPivot, placed.pivot)
+				and AssetPlacement.convertedMatches(instance,ops)
 		end
 		if not matches() then V.fail("CONFLICT", "The placed asset changed, moved, or gained/lost instances; restoration refused.") end
 		ops:record(command, guard, function(progress: any): any
@@ -371,6 +683,7 @@ function AssetPlacement.buildTemplates(ops: any, raw: any): {any}
 		for _, item in ipairs(descendants) do
 			if item:IsA("LuaSourceContainer") or item.ClassName == "PackageLink" then V.fail("SCRIPT", "Clone templates must be script-free; adopt them with scripts stripped.") end
 		end
+		if converted[template] and not unchanged(converted[template],ops) then V.fail("CONFLICT","Converted clone template changed or gained authored children.") end
 		table.insert(templates, {instance = template, extra = #descendants})
 	end
 	return templates
@@ -386,13 +699,64 @@ function AssetPlacement.planClone(ops: any, item: any, name: string, into: numbe
 		local hit = ops.registry:root("Workspace"):Raycast(Vector3.new(at[1], at[2] + 500, at[3]), Vector3.new(0, -1000, 0))
 		if hit then at[2] = hit.Position.Y end
 	end
+	local yaw,scale=V.number(item.yaw,-360,360,"clone yaw"),V.number(item.scale,0.1,20,"clone scale")
+	local state=converted[template.instance]
+	if state then for _,resource in ipairs(state.plan.resources) do physicalSize(resource.nativePlan,state.scale*scale) end end
 	return {clone = template.instance, extra = template.extra, className = template.instance.ClassName, name = name, parent = into,
-		at = at, yaw = V.number(item.yaw, -360, 360, "clone yaw"), scale = V.number(item.scale, 0.1, 20, "clone scale")}
+		at = at, yaw = yaw, scale = scale, converted=state, convertedOps=if state then ops else nil}
 end
 
 function AssetPlacement.instantiate(entry: any): any
+	if entry.converted and not unchanged(entry.converted,entry.convertedOps) then V.fail("CONFLICT","Converted template changed before cloning.") end
 	local copy = entry.clone:Clone()
 	if not copy then V.fail("VERIFY", "The clone template is not archivable.") end
+	if entry.converted then
+		local ok,result=pcall(function(): any
+			local original=entry.converted
+			local instances,parts,appearances={},{},{}
+			for _,item in ipairs(copy:GetDescendants()) do
+				local key,id=item:GetAttribute(NODE_ATTRIBUTE),item:GetAttribute(OBJECT_ATTRIBUTE)
+				if key then
+					if instances[key] or not original.plan.byKey[key] then V.fail("IDENTITY","Converted clone node coverage differs.") end
+					instances[key]=item
+				end
+				if id then
+					local matched=false
+					for index,resource in ipairs(original.plan.resources) do if resource.object.sourceObjectId==id then
+						if parts[index] or not item:IsA("MeshPart") then V.fail("IDENTITY","Converted clone mesh coverage differs.") end
+						parts[index]=item;matched=true
+					end end
+					if not matched then V.fail("IDENTITY","Converted clone contains a foreign mesh.") end
+				end
+			end
+			for index,resource in ipairs(original.plan.resources) do
+				if not parts[index] then V.fail("IDENTITY","Converted clone mesh is absent.") end
+				if original.appearances[index] then
+					for _,child in ipairs(parts[index]:GetChildren()) do if child:IsA("SurfaceAppearance") then
+						if appearances[index] then V.fail("IDENTITY","Converted clone appearance is duplicated.") end
+						appearances[index]=child
+					end end
+					if not appearances[index] then V.fail("IDENTITY","Converted clone appearance is absent.") end
+				end
+			end
+			for _,row in ipairs(original.plan.rows) do if not instances[row.node.nodeKey] then V.fail("IDENTITY","Converted clone node is absent.") end end
+			AssetPlacement.registerConverted(copy,original.plan,instances,parts,original.hash,appearances)
+			local state=converted[copy]
+			local oldPivot=components(original.root:GetPivot())
+			local target=CFrame.new(entry.at[1],entry.at[2],entry.at[3])*CFrame.Angles(0,math.rad(entry.yaw),0)
+			-- Scale the template about its own placement pivot, then move once.
+			local basis=CFrame.new(table.unpack(oldPivot));local relative=basis:Inverse()*original.transform
+			local rc=components(relative);rc[1]*=entry.scale;rc[2]*=entry.scale;rc[3]*=entry.scale
+			transformConverted(state,target*CFrame.new(table.unpack(rc)),original.scale*entry.scale)
+			copy.WorldPivot=target
+			return copy
+		end)
+		if not ok then
+			if not pcall(function() copy:Destroy() end) then entry.convertedOps.assetCleanupFailed=true;V.fail("CLEANUP","Converted clone cleanup could not be established.") end
+			error(result,0)
+		end
+		return result
+	end
 	-- The template was checked when the build was planned; it may have changed since, so check the copy itself.
 	for _, item in ipairs(copy:GetDescendants()) do
 		if item:IsA("LuaSourceContainer") or item.ClassName == "PackageLink" then
@@ -453,6 +817,113 @@ end
 
 local SWAP_FIELDS = table.freeze({"Name", "Size", "CFrame", "Anchored", "CanCollide", "CanQuery", "CanTouch", "CastShadow", "Transparency", "Material", "Color", "DoubleSided"})
 
+-- The converted transaction prepares every replacement off-scene, then swaps
+-- without yielding. Returned upload IDs survive every refusal/failure. Private
+-- node pointers change only after the complete graph passes readback.
+local function keepConverted(ops: any, state: any, owner: any, entries: any, guard: any, engine: any, attemptId: string): (number, any)
+	local fresh,copies,oldParts,oldAppearances,oldIds,parents={},{},{},{},{},{}
+	local originalBaseline=state.baseline
+	local observation: any=nil
+	local function clean(): ()
+		for _,part in pairs(fresh) do if part and part.Parent==nil then
+			if not pcall(function() part:Destroy() end) then ops.assetCleanupFailed=true end
+		end end
+		for _,copy in pairs(copies) do if copy and copy.Parent==nil then
+			if not pcall(function() copy:Destroy() end) then ops.assetCleanupFailed=true end
+		end end
+	end
+	local ok=pcall(function()
+		guard()
+		if owner.retired or not unchanged(state,ops) then V.fail("CONFLICT","Converted graph changed before persistent swap.") end
+		for index,resource in ipairs(owner.meshes) do
+			oldParts[index],oldAppearances[index],oldIds[index],parents[index]=resource.part,resource.appearance,resource.keptAssetId,resource.part.Parent
+			if resource.keptAssetId==entries[index].assetId then fresh[index]=false
+			else
+				local old=resource.part
+				local part=engine.service:CreateMeshPartAsync(engine.content(entries[index].assetId),{CollisionFidelity=old.CollisionFidelity,RenderFidelity=old.RenderFidelity})
+				if part~=nil then fresh[index]=part end -- Retain late allocations BEFORE the guard.
+				guard()
+				if part==nil or not part:IsA("MeshPart") or part.Parent~=nil then V.fail("ENGINE","Expected a detached persistent MeshPart.") end
+				AssetPlacement.verifyCarrier(part,resource.object)
+				for _,field in ipairs(SWAP_FIELDS) do part[field]=old[field] end
+				for _,field in ipairs({"PivotOffset","MaterialVariant","Reflectance","Massless","CollisionGroup","CustomPhysicalProperties","Locked","RootPriority"}) do part[field]=old[field] end
+				for key,value in pairs(old:GetAttributes()) do part:SetAttribute(key,value) end
+				for _,tag in ipairs(ops.collection:GetTags(old)) do ops.collection:AddTag(part,tag) end
+				if resource.appearance then
+					local appearance=resource.appearance:Clone()
+					if appearance~=nil then copies[index]=appearance end
+					guard()
+					if appearance==nil or not appearance:IsA("SurfaceAppearance") or appearance.Parent~=nil then V.fail("ENGINE","Expected a detached persistent appearance copy.") end
+					appearance.Parent=part
+				end
+				if stateBytes(observed(part,ops.collection))~=stateBytes(observed(old,ops.collection)) then V.fail("VERIFY","Persistent replacement properties differ.") end
+			end
+		end
+		guard()
+		if owner.retired or not unchanged(state,ops) then V.fail("CONFLICT","Converted graph changed while loading persistent assets.") end
+		local recording=ops.history:TryBeginRecording("Arcane.keep."..attemptId,"Arcane keep converted mesh")
+		if not recording then V.fail("HISTORY","Cannot begin persistent graph recording.") end
+		local swapped,swapError=pcall(function()
+			for index,resource in ipairs(owner.meshes) do
+				local part=fresh[index]
+				if part then
+					part.Parent=parents[index];oldParts[index].Parent=nil
+					resource.part,resource.appearance,resource.keptAssetId=part,copies[index],entries[index].assetId
+					state.parts[index],state.appearances[index]=part,copies[index]
+					local key=resource.association.nodeKey
+					if key~=nil and key~=V.NULL then state.instances[key]=part end
+				end
+			end
+			verifyConverted(state)
+			observation=AssetPlacement.observeConverted(state.root,ops)
+			for _,object in ipairs(observation.objects) do
+				for resourceIndex,resource in ipairs(owner.meshes) do if object.sourceObjectId==resource.object.sourceObjectId then object.meshAssetId=tostring(entries[resourceIndex].assetId) end end
+			end
+			if not pcall(function() ops.history:FinishRecording(recording,Enum.FinishRecordingOperation.Commit) end) then V.fail("HISTORY","Persistent graph recording could not be committed.") end
+		end)
+		if not swapped then
+			-- No engine call yields within this transaction. Still refuse to
+			-- erase a callback-added child or other unexpected replacement state.
+			local rollback=pcall(function()
+				state.baseline=originalBaseline
+				for index,resource in ipairs(owner.meshes) do
+					local part=fresh[index]
+					if part then
+						for _,child in ipairs(part:GetChildren()) do if child~=copies[index] then V.fail("CONFLICT","Persistent replacement gained an authored child.") end end
+						part.Parent=nil;oldParts[index].Parent=parents[index]
+						resource.part,resource.appearance,resource.keptAssetId=oldParts[index],oldAppearances[index],oldIds[index]
+						state.parts[index],state.appearances[index]=oldParts[index],oldAppearances[index]
+						local key=resource.association.nodeKey
+						if key~=nil and key~=V.NULL then state.instances[key]=oldParts[index] end
+					end
+				end
+				verifyConverted(state)
+				if not unchanged(state,ops) then V.fail("VERIFY","Persistent graph rollback differs from its original baseline.") end
+			end)
+			pcall(function() ops.history:FinishRecording(recording,Enum.FinishRecordingOperation.Commit) end)
+			if not rollback then ops.assetCleanupFailed=true;owner.graphUncertain=true end
+			error(swapError,0)
+		end
+	end)
+	if not ok then
+		clean()
+		for _,entry in ipairs(entries) do entry.reason=if ops.assetCleanupFailed then "CLEANUP" else "SWAP_REFUSED" end
+		return 0,nil
+	end
+	for _,entry in ipairs(entries) do entry.swapped=true end
+	local owned=ops.registry.owned[state.root]
+	if owned and owned.placed then owned.placed.count=#state.root:GetDescendants() end
+	-- Old parts are detached owned session objects. Retire them only after every
+	-- pointer/baseline moved; never destroy an object that gained an authored child.
+	for index,old in ipairs(oldParts) do if fresh[index] then
+		local safe=true
+		for _,child in ipairs(old:GetChildren()) do if child~=oldAppearances[index] then safe=false end end
+		if not safe or not pcall(function() old:Destroy() end) then ops.assetCleanupFailed=true end
+	end end
+	if ops.assetCleanupFailed then for _,entry in ipairs(entries) do entry.reason="CLEANUP" end end
+	return #entries,observation
+end
+
 function AssetPlacement.keep(ops: any, owner: any, digest: string, args: any, guard: () -> (), engine: any): any
 	V.fields(args, {"source", "attemptId", "name", "description", "creatorId", "continuity", "finish", "assetIds"}, "keep-mesh arguments")
 	local attemptId = V.string(args.attemptId, "attempt ID", 36)
@@ -473,6 +944,8 @@ function AssetPlacement.keep(ops: any, owner: any, digest: string, args: any, gu
 	if reuse and #reuse ~= #meshes then V.fail("SCOPE", "The recorded asset IDs do not match this model's meshes.") end
 	local model = owner.placed
 	if model == nil or model.Parent == nil then V.fail("STATE", "The placed model was removed or undone; nothing was uploaded. Place it again first.") end
+	local convertedState=converted[model]
+	if owner.graph and (not convertedState or not unchanged(convertedState,ops) or owner.graphUncertain) then V.fail("CONFLICT","Converted graph changed or its ownership is uncertain; nothing was uploaded.") end
 	for _, resource in ipairs(meshes) do
 		if resource.disposed or resource.mesh == nil then V.fail("STATE", "The session meshes were released; nothing was uploaded.") end
 	end
@@ -505,7 +978,7 @@ function AssetPlacement.keep(ops: any, owner: any, digest: string, args: any, gu
 		end
 		local uploader = engine.AssetUpload.new(recorder, engine.enums, {
 			assertAdmission = function(_ticket: any, resource: any): ()
-				if owner.retired or not current(resource) or not signedIn() then error("admission", 0) end
+				if owner.retired or not current(resource) or not signedIn() or (convertedState and not unchanged(convertedState,ops)) then error("admission", 0) end
 			end,
 			liveGuard = function(_ticket: any, _resource: any): () guard() end,
 			-- The host wrote this attempt's intent receipt before the command existed; the command is that acknowledgement.
@@ -554,7 +1027,10 @@ function AssetPlacement.keep(ops: any, owner: any, digest: string, args: any, gu
 	local complete = true
 	for _, entry in ipairs(entries) do if entry.assetId == V.NULL then complete = false end end
 	local swapped = 0
-	if complete then
+	local convertedObservation: any=nil
+	if complete and convertedState then
+		swapped,convertedObservation=keepConverted(ops,convertedState,owner,entries,guard,engine,attemptId)
+	elseif complete then
 		local fresh: {any}, copies: {any} = {}, {}
 		pcall(function()
 			guard()
@@ -617,8 +1093,10 @@ function AssetPlacement.keep(ops: any, owner: any, digest: string, args: any, gu
 	for _, entry in ipairs(entries) do if entry.assetId ~= V.NULL then ids += 1 end end
 	local state = if ids == 0 then "failed" elseif ids < #entries then "partial" elseif swapped == #entries then "kept" else "uploaded"
 	local refOk, ref = pcall(function(): any return ops.registry:ref(model) end)
-	return {state = state, meshes = V.array(entries), uploadsStarted = started, swapped = swapped,
+	local result: any = {state = state, meshes = V.array(entries), uploadsStarted = started, swapped = swapped,
 		persistence = if state == "kept" then "saved-asset" else "studio-session-only", creatorId = creatorId, ref = if refOk then ref else V.NULL}
+	if convertedObservation then result.converted=convertedObservation end
+	return result
 end
 
 return table.freeze(AssetPlacement)
