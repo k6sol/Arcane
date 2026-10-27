@@ -309,24 +309,28 @@ export class ChatTaskCoordinator {
   }
   async cancel(id: string, reason: string): Promise<void> {
     const entry = this.#owners.get(id); if (!entry) throw new Error('Task has no live owned incarnation.');
-    this.#retire(entry);
-    let failure:unknown;
-    try{this.#store.update(id, value => { if (ACTIVE.has(value.state)) value.state = 'cancelled'; value.reason = reason; });}catch(error){failure=error;}
-    try{await this.#cleanup(entry);}catch(error){failure??=error;}
-    if(failure)throw failure;
+    let failed=false,failure:unknown;
+    const keep=(error:unknown)=>{if(!failed){failed=true;failure=error;}};
+    try{this.#retire(entry);}catch(error){keep(error);}
+    try{this.#store.update(id, value => { if (ACTIVE.has(value.state)) value.state = 'cancelled'; value.reason = reason; });}catch(error){keep(error);}
+    try{await this.#cleanup(entry);}catch(error){keep(error);}
+    if(failed)throw failure;
   }
   #cleanup(entry: OwnedTask): Promise<void> {
     const id=entry.origin.taskId,existing=this.#stopping.get(id);if(existing)return existing;
     const pending=(async()=>{
+      let failed=false,failure:unknown;
+      const keep=(error:unknown)=>{if(!failed){failed=true;failure=error;}};
       try {
         if(entry.currentJob&&!entry.settledJobs.has(entry.currentJob.jobId)){
           if(!this.#cancellation)throw new Error('Owned verification cancellation is unavailable.');
           await this.#cancellation.cancelExact(entry.currentJob.jobId,entry.jobOrigins.get(entry.currentJob.jobId)!);
         }
-      }finally{try{await entry.owner.cancel();}finally{
-        const results=await Promise.allSettled([...(entry.proposal?[entry.proposal]:[]),...entry.planProposals]);
-        const failed=results.find(result=>result.status==='rejected');if(failed?.status==='rejected')throw failed.reason;
-      }}
+      }catch(error){keep(error);}
+      try{await entry.owner.cancel();}catch(error){keep(error);}
+      const results=await Promise.allSettled([...(entry.proposal?[entry.proposal]:[]),...entry.planProposals]);
+      const rejected=results.find(result=>result.status==='rejected');if(rejected?.status==='rejected')keep(rejected.reason);
+      if(failed)throw failure;
     })();
     this.#stopping.set(id,pending);return pending;
   }

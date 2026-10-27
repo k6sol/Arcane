@@ -12,6 +12,7 @@ import { workflowProjectIdentity } from '../../packages/storage/src/workflow-sto
 import { ChatTaskCoordinator, ChatTaskProposalBudget, ChatTaskProposalError, type ChatTaskOwner, type ChatTaskProposalFactory,
   type ChatTaskProposalWorkerInput } from '../../apps/daemon/src/chat-task-coordinator.js';
 import type { Snapshot } from '../../packages/codex-client/src/types.js';
+import type { StudioTestTaskOrigin } from '../../packages/protocol/src/chat-task-playtest.js';
 
 // Real temp SQLite and an injected synthetic proposal worker. No native CLI,
 // provider inference, Studio or process query is involved.
@@ -396,6 +397,91 @@ test('settlement journal fault leaves the attempt reserved, frees the confirmed 
   const store = new ChatTaskStore({ directory: f.directory, projectPath: f.project });
   try { const value = store.proposals(parent.id).find(entry => entry.id === reserved.id)!; assert.equal(value.state, 'unknown'); assert.equal(value.reason, 'daemon_restarted_no_replay'); }
   finally { store.close(); }
+});
+
+type CleanupFault = { readonly value: unknown };
+type CleanupFaults = { retire?: CleanupFault; verification?: CleanupFault; owner?: CleanupFault; proposal?: CleanupFault };
+async function cleanupFaultFixture(t: test.TestContext, faults: CleanupFaults) {
+  const f = await fixture(t), events: string[] = [], released: boolean[] = [];
+  // A trusted budget fault makes the real tracked plan-proposal promise reject
+  // after its worker closed. Ordinary proposal errors are journal outcomes.
+  class CleanupBudget extends ChatTaskProposalBudget {
+    override release(closed: boolean): void {
+      released.push(closed); events.push('proposal-release'); super.release(closed);
+      if (faults.proposal) throw faults.proposal.value;
+    }
+  }
+  const coordinator = new ChatTaskCoordinator({ directory: f.directory, projectPath: f.project, proposalBudget: new CleanupBudget() });
+  const jobId = randomUUID(), id = randomUUID(), actorId = 'cleanup-' + id;
+  const counts = { verification: 0, owner: 0, incorporation: 0, evidence: 0 };
+  let original: StudioTestTaskOrigin | null = null;
+  coordinator.attachCancellation(Object.freeze({
+    async cancelExact(job: string, origin: StudioTestTaskOrigin) {
+      assert.equal(job, jobId); assert.equal(origin, original);
+      counts.verification++; events.push('cancel-exact');
+      if (faults.verification) throw faults.verification.value;
+    },
+    async revalidateExact() { assert.fail('A cancelled task cannot revalidate.'); },
+  }));
+  let release!: () => void, ready!: () => void, entered = 0;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const begun = new Promise<void>(resolve => { ready = resolve; });
+  // Cleanup always releases controlled peers before closing the actual store.
+  f.closers.push(async () => { release(); await coordinator.close(); });
+  const live = { connectionId: randomUUID(), threadId: 'cleanup.thread', sessionId: 'cleanup.session', model: 'fixture', effort: 'low' };
+  const owner: ChatTaskOwner = {
+    snapshot: () => snapshotFor(live), accountIdentity: () => ACCOUNT,
+    revoke() { events.push('revoke'); if (faults.retire) throw faults.retire.value; },
+    async cancel() { counts.owner++; events.push('owner-cancel'); if (faults.owner) throw faults.owner.value; },
+    async repair() { assert.fail('A cancelled task cannot repair.'); },
+    plan: () => ({ async waitForInitial() {}, async incorporate() { counts.incorporation++; assert.fail('No late incorporation.'); } }),
+  };
+  coordinator.begin({ id, actorId, snapshot: owner.snapshot(), allowWorkspaceWrites: false, allowAssets: false, owner, accountIdentity: ACCOUNT });
+  coordinator.dispatched(id, randomUUID()); original = coordinator.playtests.capture(actorId); assert.ok(original);
+  coordinator.playtests.prepared(original, { jobId, displayDigest: sha('display'), scenarioDigest: null, subjectDigest: null });
+  const w = workers([], { propose: async () => {
+    if (++entered === 2) ready();
+    await gate;
+    return { threadId: 'cleanup.proposal', sessionId: null, turnId: 'cleanup.turn', text: 'late proposal', status: 'proposed' };
+  } });
+  coordinator.startPlan({ taskId: id, objective: 'Controlled cleanup error precedence', inputSha256: sha('original task'), factory: w.factory,
+    evidence: async () => { counts.evidence++; assert.fail('No late evidence request.'); } });
+  await begun;
+  return { coordinator, id, events, counts, released, w, release };
+}
+
+test('task cancellation attempts every original cleanup and preserves the first failure, including falsy values', { timeout: 30000 }, async t => {
+  const a = new Error('original verification failure'), b = new Error('later owner failure'), c = new Error('later tracked proposal failure'), d = new Error('original retirement failure');
+  const cases: { name: string; faults: CleanupFaults; expected?: CleanupFault }[] = [
+    ...[a, null, undefined, false, 0].map((value, index) => ({ name: 'verification first ' + index,
+      faults: { verification: { value }, owner: { value: b }, proposal: { value: c } }, expected: { value } })),
+    { name: 'owner before proposal', faults: { owner: { value: b }, proposal: { value: c } }, expected: { value: b } },
+    { name: 'tracked proposal alone', faults: { proposal: { value: c } }, expected: { value: c } },
+    { name: 'retirement before all cleanup', faults: { retire: { value: d }, verification: { value: a }, owner: { value: b }, proposal: { value: c } }, expected: { value: d } },
+    { name: 'undefined retirement still cleans up', faults: { retire: { value: undefined }, verification: { value: a }, owner: { value: b }, proposal: { value: c } }, expected: { value: undefined } },
+    { name: 'all cleanup succeeds', faults: {} },
+  ];
+  for (const entry of cases) await t.test(entry.name, async st => {
+    const f = await cleanupFaultFixture(st, entry.faults);
+    const first = f.coordinator.cancel(f.id, 'controlled stop'), second = f.coordinator.cancel(f.id, 'same owned cleanup');
+    let finished = false;
+    void first.then(() => { finished = true; }, () => { finished = true; });
+    const expected = entry.expected;
+    const verify = (pending: Promise<void>) => expected ? assert.rejects(pending, error => Object.is(error, expected.value)) : pending;
+    const checked = [verify(first), verify(second)]; for (const result of checked) void result.catch(() => {});
+    // Yield a turn after the actual cancellation callbacks: held workers must
+    // keep cleanup pending even if verification and owner cleanup both failed.
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(finished, false);
+    assert.deepEqual(f.events.filter(event => event === 'cancel-exact' || event === 'owner-cancel'), ['cancel-exact', 'owner-cancel']);
+    assert.equal(f.counts.verification, 1); assert.equal(f.counts.owner, 1); assert.equal(f.w.closes, 0);
+    f.release(); await Promise.all(checked); await f.coordinator.drain();
+    assert.equal(f.w.calls.length, 2); assert.equal(f.w.closes, 2); assert.deepEqual(f.released, [true, true]);
+    assert.equal(f.counts.incorporation, 0); assert.equal(f.counts.evidence, 0);
+    assert.equal(f.coordinator.list().find(value => value.id === f.id)!.state, 'cancelled');
+    await verify(f.coordinator.cancel(f.id, 'observe original cleanup again'));
+    assert.equal(f.counts.verification, 1); assert.equal(f.counts.owner, 1); assert.equal(f.w.closes, 2);
+  });
 });
 
 test('no proposal path produced an unhandled rejection', async () => { await delay(20); assert.deepEqual(unhandled, []); });
