@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash,createHmac,randomUUID} from 'node:crypto';
-import {mkdtemp,mkdir,rm} from 'node:fs/promises';
+import {mkdtemp,mkdir,realpath,rm} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {DatabaseSync} from 'node:sqlite';
@@ -67,7 +67,8 @@ for(const collision of ['none','convex-hull'] as const)test('converted review pi
   assert.throws(()=>convertedModelReviewSubject(scope,{...f.manifest,validation:{...f.manifest.validation,requestSha256:h('forged')}},f.exports));
 });
 async function storeFixture(t:test.TestContext){
-  const directory=await mkdtemp(join(tmpdir(),'arcane-converted-review-')),project=workflowProjectIdentity(directory),privateDirectory=join(directory,'private');await mkdir(privateDirectory);
+  const boundary=await realpath(tmpdir()),directory=await mkdtemp(join(boundary,'arcane-converted-review-')),project=workflowProjectIdentity(directory),privateDirectory=join(directory,'private');await mkdir(privateDirectory);
+  assert.equal(await realpath(privateDirectory),privateDirectory,'Review fixture uses the canonical directory required by the storage witness.');
   const key=Buffer.from('synthetic HMAC review key'),proof=Symbol('actual fixture human permit');let permit=false;
   const sign=(value:unknown)=>createHmac('sha256',key).update('converted-review-fixture\0').update(assetReviewCanonical(value)).digest('hex');
   const authority:AssetReviewReceiptAuthority={directory:privateDirectory,sign,verify:(value,signature)=>typeof signature==='string'&&signature===sign(value),withSnapshot:evaluate=>evaluate(),close(){}};
