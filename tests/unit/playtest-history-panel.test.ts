@@ -59,7 +59,9 @@ class DocumentFixture extends Events {
 interface Call {path:string;init:RequestInit}
 type Handler=(call:Call)=>Promise<Response>;
 const flush=async()=>{for(let i=0;i<8;i++)await new Promise<void>(resolve=>setImmediate(resolve));};
-async function until(predicate:()=>boolean):Promise<void>{for(let i=0;i<400&&!predicate();i++)await new Promise<void>(resolve=>setImmediate(resolve));assert.ok(predicate(),'Expected the bounded offline panel operation to settle.');}
+// Report digests settle on the crypto thread pool, not within a fixed number of
+// event-loop turns; bound the wait by real elapsed time (timers/Date are mocked).
+async function until(predicate:()=>boolean):Promise<void>{const deadline=performance.now()+5000;while(!predicate()&&performance.now()<deadline)await new Promise<void>(resolve=>setImmediate(resolve));assert.ok(predicate(),'Expected the bounded offline panel operation to settle.');}
 function fixture(t:TestContext,records=[report()],reports=true){
   t.mock.timers.enable({apis:['setTimeout','Date'],now:NOW});
   const doc=new DocumentFixture(),calls:Call[]=[];let token=TOKEN,signed=true,project=PROJECT,projectEpoch=0,authEpoch=0;
