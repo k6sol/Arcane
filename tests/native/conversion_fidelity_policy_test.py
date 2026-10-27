@@ -146,6 +146,54 @@ def observed_scene(mapping, actual_worlds=None):
     return SimpleNamespace(objects=list(reversed(list(objects.values())))), objects
 
 
+class ImagePixels(list):
+    def foreach_get(self, target):
+        for index, value in enumerate(self): target[index] = value
+
+
+class SceneImage:
+    """Controlled image data only; never a native image-retention proof."""
+    def __init__(self, source="FILE", image_type="IMAGE", packed=False, packs=True):
+        self.source = source; self.type = image_type; self.name = "arbitrary-runtime-name"
+        self.packed_file = object() if packed else None
+        self.packs = packs; self.pack_calls = 0; self.users = 1
+        self.size = (1, 1); self.pixels = ImagePixels([.25, .5, .75, 1])
+        self.colorspace_settings = SimpleNamespace(name="sRGB"); self.alpha_mode = "STRAIGHT"
+
+    def as_pointer(self):
+        return id(self)
+
+    def pack(self):
+        self.pack_calls += 1
+        if self.packs == "raises": raise RuntimeError("controlled image pack failure")
+        if self.packs: self.packed_file = object()
+
+
+def material_node(image=None, group=None):
+    node = SimpleNamespace(bl_idname="ShaderNodeTexImage" if group is None else "ShaderNodeGroup",
+                           image=image, node_tree=group, inputs=[], outputs=[])
+    node.as_pointer = lambda: id(node)
+    return node
+
+
+def material_tree(*nodes):
+    tree = SimpleNamespace(nodes=list(nodes), links=[])
+    tree.as_pointer = lambda: id(tree)
+    return tree
+
+
+def scene_material(tree):
+    material = SimpleNamespace(node_tree=tree)
+    material.as_pointer = lambda: id(material)
+    return material
+
+
+def image_scene(images, material=None):
+    bpy = SimpleNamespace(data=SimpleNamespace(images=list(images)))
+    objects = {"selected-render": SimpleNamespace(material_slots=[SimpleNamespace(material=material)])}
+    return bpy, objects
+
+
 class ConversionFidelityPolicyTests(unittest.TestCase):
     def refused(self, reason, callback):
         with self.assertRaises(audit.ConversionFailure) as failure: callback()
@@ -473,6 +521,77 @@ class ConversionFidelityPolicyTests(unittest.TestCase):
                 # comes from its unchanged comparison with the original map.
                 scene, _objects = observed_scene(mapping, audit.hierarchy_worlds(changed))
                 self.refused("FIDELITY_TRANSFORM", lambda: worker.mapped_scene_nodes(scene, mapping, request, False))
+
+    def test_material_image_collector_covers_recursive_and_disconnected_nodes_without_changing_record(self):
+        direct, nested, disconnected, unrelated = (SceneImage() for _ in range(4))
+        deepest = material_tree(material_node(nested))
+        material = scene_material(material_tree(material_node(direct), material_node(group=material_tree(material_node(group=deepest))), material_node(disconnected)))
+        before = audit.material_graph(material)
+        pointers = set(); collected = audit.material_graph(material, image_pointers=pointers)
+        self.assertEqual(collected, before)
+        self.assertEqual(audit.sha(audit.canonical(collected)), audit.sha(audit.canonical(before)))
+        self.assertEqual(pointers, {direct.as_pointer(), nested.as_pointer(), disconnected.as_pointer()})
+        self.assertNotIn(unrelated.as_pointer(), pointers)
+
+    def test_scene_packing_exempts_only_unreferenced_typed_viewers_and_keeps_all_file_validation(self):
+        source, already, unreferenced = SceneImage(), SceneImage(packed=True), SceneImage()
+        unreferenced.name = "Render Result"  # A name never supplies an exemption.
+        generated = SceneImage("GENERATED", "UV_TEST")
+        result, compositor = SceneImage("VIEWER", "RENDER_RESULT"), SceneImage("VIEWER", "COMPOSITING")
+        material = scene_material(material_tree(material_node(source)))
+        before = audit.material_graph(material)
+        bpy, objects = image_scene([source, already, unreferenced, generated, result, compositor], material)
+        worker.pack_scene_images(bpy, objects)
+        self.assertEqual([image.pack_calls for image in bpy.data.images], [1, 0, 1, 0, 0, 0])
+        self.assertIsNotNone(source.packed_file); self.assertIsNotNone(unreferenced.packed_file)
+        self.assertEqual(audit.material_graph(material), before)
+        self.assertEqual(len(bpy.data.images), 6)  # No data-block was deleted.
+
+    def test_referenced_viewers_refuse_even_through_nested_or_disconnected_material_nodes(self):
+        for image_type in ("RENDER_RESULT", "COMPOSITING"):
+            for location in ("direct", "nested", "disconnected"):
+                with self.subTest(image_type=image_type, location=location):
+                    image = SceneImage("VIEWER", image_type)
+                    node = material_node(image); images = [image]
+                    if location == "nested": tree = material_tree(material_node(group=material_tree(material_node(group=material_tree(node)))))
+                    elif location == "disconnected":
+                        other = SceneImage(); images.append(other)
+                        tree = material_tree(material_node(other), node)
+                    else: tree = material_tree(node)
+                    bpy, objects = image_scene(images, scene_material(tree))
+                    self.refused("MATERIAL", lambda: worker.pack_scene_images(bpy, objects))
+                    self.assertEqual(image.pack_calls, 0)
+
+    def test_unknown_viewer_types_and_unsupported_image_sources_do_not_gain_exemption(self):
+        for source, image_type in (("VIEWER", "IMAGE"), ("VIEWER", "UV_TEST"), ("VIEWER", "UNKNOWN"),
+                                   ("MOVIE", "IMAGE"), ("SEQUENCE", "IMAGE"), ("TILED", "IMAGE"), ("UNKNOWN", "RENDER_RESULT")):
+            with self.subTest(source=source, image_type=image_type):
+                image = SceneImage(source, image_type)
+                bpy, objects = image_scene([image])
+                self.refused("MATERIAL", lambda: worker.pack_scene_images(bpy, objects))
+                self.assertEqual(image.pack_calls, 0)
+
+    def test_failed_image_packing_refuses_or_propagates_without_false_packed_state(self):
+        image = SceneImage(packs=False)
+        bpy, objects = image_scene([image])
+        self.refused("MATERIAL", lambda: worker.pack_scene_images(bpy, objects))
+        self.assertEqual(image.pack_calls, 1); self.assertIsNone(image.packed_file)
+        thrown = SceneImage(packs="raises")
+        bpy, objects = image_scene([thrown])
+        with self.assertRaisesRegex(RuntimeError, "^controlled image pack failure$"):
+            worker.pack_scene_images(bpy, objects)
+        self.assertEqual(thrown.pack_calls, 1); self.assertIsNone(thrown.packed_file)
+
+    def test_image_collection_keeps_graph_cycle_link_and_pixel_refusals_before_packing(self):
+        for mode in ("cycle", "link", "pixels"):
+            with self.subTest(mode=mode):
+                image = SceneImage(); tree = material_tree(material_node(image))
+                if mode == "cycle": tree.nodes.append(material_node(group=tree))
+                elif mode == "link": tree.links.append(SimpleNamespace(is_valid=False))
+                else: image.pixels = ImagePixels([])
+                bpy, objects = image_scene([image], scene_material(tree))
+                self.refused("MATERIAL", lambda: worker.pack_scene_images(bpy, objects))
+                self.assertEqual(image.pack_calls, 0)
 
     def test_strict_v2_inputs_refuse_prototype_or_caller_policy_and_keep_real_source_bytes(self):
         _d, _b, raw, _m, _mb, marked_raw, _p, mapping, request = fixture()

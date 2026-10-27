@@ -843,7 +843,7 @@ NODE_PROPERTIES = ("operation", "blend_type", "data_type", "clamp_type", "use_cl
                    "vector_type", "convert_from", "convert_to", "space", "distribution", "subsurface_method")
 
 
-def material_graph(material):
+def material_graph(material, image_pointers=None):
     if material is None:
         return None
     require(material.node_tree is not None, "MATERIAL")
@@ -862,6 +862,7 @@ def material_graph(material):
                 if hasattr(node, name): record["properties"][name] = sample_tree(getattr(node, name))
             if getattr(node, "image", None) is not None:
                 image = node.image; pointer = image.as_pointer()
+                if image_pointers is not None: image_pointers.add(pointer)
                 if pointer not in images: images[pointer] = image_record(image)
                 record["image"] = images[pointer]
             if getattr(node, "node_tree", None) is not None:

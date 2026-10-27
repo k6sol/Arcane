@@ -489,6 +489,26 @@ def review_renders(bpy, directory, objects, request):
     return rows
 
 
+def pack_scene_images(bpy, objects):
+    referenced, materials = set(), set()
+    for obj in objects.values():
+        for slot in obj.material_slots:
+            material = slot.material
+            if material is not None and material.as_pointer() not in materials:
+                materials.add(material.as_pointer())
+                # Reuse the complete audited graph, including disconnected nodes
+                # and recursive groups. The collector never alters its record.
+                audit.material_graph(material, image_pointers=referenced)
+    for image in bpy.data.images:
+        # Blender's typed transient view buffers are not source textures. They
+        # are exempt only when no actual selected material graph references them.
+        if image.source == "VIEWER" and image.type in ("RENDER_RESULT", "COMPOSITING") and image.as_pointer() not in referenced:
+            continue
+        if image.source == "FILE" and not image.packed_file:
+            image.pack()
+        audit.require(image.source in ("FILE", "GENERATED") and (image.source != "FILE" or image.packed_file is not None), "MATERIAL")
+
+
 def run():
     argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
     class FixedParser(argparse.ArgumentParser):
@@ -554,10 +574,7 @@ def run():
     proxy = make_proxy(bpy, objects, request["sourceSha256"], sum(row["triangles"] for row in imported_rows)) if request["collision"] == "convex-hull" else None
     proxy_hash = proxy_geometry(proxy, bpy)[0] if proxy is not None else None
     event("scene-save")
-    for image in bpy.data.images:
-        if image.source == "FILE" and not image.packed_file:
-            image.pack()
-        audit.require(image.source in ("FILE", "GENERATED") and (image.source != "FILE" or image.packed_file is not None), "MATERIAL")
+    pack_scene_images(bpy, objects)
     operate(bpy.ops.wm.save_as_mainfile, {"filepath": str(directory / "asset.blend"), "check_existing": False})
     saved_scene_hash = audit.sha(audit.read_owned(directory / "asset.blend", audit.BLEND_BYTES))
     event("export")
