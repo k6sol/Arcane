@@ -124,8 +124,7 @@ function metadata(parentRaw:Buffer,source:Buffer,collision:'none'|'convex-hull',
   return {manifest,files};
 }
 async function fixture(t:test.TestContext,collision:'none'|'convex-hull'='none',affine:'rigid'|'scale'='rigid'){
-  let state:'succeeded'|'running'='succeeded',workers:'closed'|'reserved'|'absent'='closed';
-  const journalState=()=>state,workerState=()=>workers;
+  const state='succeeded';
   const spawn=t.mock.method(childProcess,'spawn',()=>{throw Error('Review policy fixture cannot launch native processes.');});syncBuiltinESMExports();
   t.after(()=>{spawn.mock.restore();syncBuiltinESMExports();});
   const boundary=await realpath(tmpdir()),directory=await realpath(await mkdtemp(join(boundary,'arcane-converted-review-service-'))),project=join(directory,'project');await mkdir(project);
@@ -152,10 +151,10 @@ async function fixture(t:test.TestContext,collision:'none'|'convex-hull'='none',
   await writeFile(join(childDirectory,'manifest.json'),JSON.stringify(controlled.manifest)+'\n');
   const request=controlled.manifest.request,creation=makeConvertedGlbCreation(JOB,{parentJobId:parentId,parentManifestSha256:request.parentManifestSha256,name:request.name,
     collision:request.collision,renderResolution:request.renderResolution,renderSamples:request.renderSamples});
-  const journal:Record<string,unknown>={schemaVersion:1,kind:'converted-glb',jobId:JOB,directory:childDirectory,manifestPath:state==='succeeded'?join(childDirectory,'manifest.json'):null,
-    creation,request:journalState()==='running'?null:request,state,error:null,startedAt:'2026-10-27T00:00:00Z',...(state==='succeeded'?{finishedAt:'2026-10-27T00:00:01Z'}:{}),
-    ...(workerState()==='absent'?{}:{workers:[{schemaVersion:1,role:'generate',reservationId:randomUUID(),reservedAt:'2026-10-27T00:00:00.0000000Z',
-      ...(workerState()==='reserved'?{state:'reserved'}:{state:'closed',closure:'not-started',closedAt:'2026-10-27T00:00:01.0000000Z',identity:null})}]})};
+  const journal:Record<string,unknown>={schemaVersion:1,kind:'converted-glb',jobId:JOB,directory:childDirectory,manifestPath:join(childDirectory,'manifest.json'),
+    creation,request,state,error:null,startedAt:'2026-10-27T00:00:00Z',finishedAt:'2026-10-27T00:00:01Z',
+    workers:[{schemaVersion:1,role:'generate',reservationId:randomUUID(),reservedAt:'2026-10-27T00:00:00.0000000Z',
+      state:'closed',closure:'not-started',closedAt:'2026-10-27T00:00:01.0000000Z',identity:null}]};
   await writeFile(join(childDirectory,'job.json'),JSON.stringify(journal)+'\n');work.bind({conversation,kind:'asset-job',id:JOB});
   let validations=0,hook:(()=>Promise<void>)|undefined;
   t.mock.method(AssetPipeline.prototype,'validateConversion',async(manifestPath:string)=>{

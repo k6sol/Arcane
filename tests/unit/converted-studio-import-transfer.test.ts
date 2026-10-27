@@ -11,6 +11,12 @@ import {createStudioImportTransfer,inspectConvertedStudioImportTransfer,measureS
 import {STUDIO_ASSET_TRANSFER_LIMITS} from '../../packages/protocol/src/studio.js';
 // Constructed exact GLBs and synthetic audit metadata only; no native/Studio/resource execution.
 type Doc=Record<string,any>;
+function packetAt(bodies:Doc[],index:number):Doc {
+  const packet=bodies[index];assert.ok(packet,'Expected packet at '+index);return packet;
+}
+function packetMatching(bodies:Doc[],predicate:(packet:Doc)=>boolean):Doc {
+  const packet=bodies.find(predicate);assert.ok(packet,'Expected matching mutation packet');return packet;
+}
 const JOB='11111111-1111-4111-8111-111111111111',PARENT='22222222-2222-4222-8222-222222222222';
 const sha=(value:string|Uint8Array)=>createHash('sha256').update(value).digest('hex');
 const json=(value:unknown)=>Buffer.from(JSON.stringify(value));
@@ -132,17 +138,17 @@ test('converted immutable chunks reconstruct exact source/proof metadata after m
 test('ordinary resealed checksums cannot hide omitted EMPTYs, reordered hierarchy, changed names/pivots or source metadata',async()=>{
   const f=await transferFixture(true),transfer=f.transfer();
   const changes:((bodies:Doc[])=>void)[]=[b=>b.splice(b.findIndex(p=>p.kind==='node'&&p.node.name==='Empty leaf'),1),
-    b=>{const i=b.findIndex(p=>p.kind==='node'&&p.node.parentKey!==null);[b[1],b[i]]=[b[i],b[1]];},
-    b=>b.find(p=>p.kind==='node').node.name='changed name',b=>b.find(p=>p.kind==='node'&&p.node.parentKey!==null).node.parentKey=null,
-    b=>b.find(p=>p.kind==='object').association.sourcePivot=[1,0,0],b=>b.find(p=>p.kind==='object').provenance.node.name='changed source',
-    b=>b.find(p=>p.kind==='object'&&p.object.role==='render').primitives[0].correspondence.ids[0]=999,b=>b[0].sourceDocuments[0].document.asset.generator='substituted',
-    b=>b[0].conversionRequest.parentManifestSha256=sha('foreign parent'),b=>b[0].graph.digest=sha('foreign graph')];
+    b=>{const i=b.findIndex(p=>p.kind==='node'&&p.node.parentKey!==null);const first=packetAt(b,1),child=packetAt(b,i);b[1]=child;b[i]=first;},
+    b=>packetMatching(b,p=>p.kind==='node').node.name='changed name',b=>packetMatching(b,p=>p.kind==='node'&&p.node.parentKey!==null).node.parentKey=null,
+    b=>packetMatching(b,p=>p.kind==='object').association.sourcePivot=[1,0,0],b=>packetMatching(b,p=>p.kind==='object').provenance.node.name='changed source',
+    b=>packetMatching(b,p=>p.kind==='object'&&p.object.role==='render').primitives[0].correspondence.ids[0]=999,b=>packetAt(b,0).sourceDocuments[0].document.asset.generator='substituted',
+    b=>packetAt(b,0).conversionRequest.parentManifestSha256=sha('foreign parent'),b=>packetAt(b,0).graph.digest=sha('foreign graph')];
   for(const change of changes){const changed=reseal(transfer,change);assert.throws(()=>inspectConvertedStudioImportTransfer(changed));}
 });
 test('converted chunk omission, duplicate offsets, foreign streams and changed bytes refuse after ordinary resealing',async()=>{
   const f=await transferFixture(),transfer=f.transfer();
-  for(const change of [(b:Doc[])=>b.splice(b.findIndex(p=>p.kind==='chunk'),1),(b:Doc[])=>b.find(p=>p.kind==='chunk').offset++,
-    (b:Doc[])=>b.find(p=>p.kind==='chunk').streamId=sha('foreign stream'),(b:Doc[])=>b.find(p=>p.kind==='chunk').data='AAAA']){
+  for(const change of [(b:Doc[])=>b.splice(b.findIndex(p=>p.kind==='chunk'),1),(b:Doc[])=>packetMatching(b,p=>p.kind==='chunk').offset++,
+    (b:Doc[])=>packetMatching(b,p=>p.kind==='chunk').streamId=sha('foreign stream'),(b:Doc[])=>packetMatching(b,p=>p.kind==='chunk').data='AAAA']){
     const changed=reseal(transfer,change);assert.throws(()=>inspectConvertedStudioImportTransfer(changed));}
 });
 test('converted data inspection never revives serialized decoded provenance or a partial/resumable transfer claim',async()=>{

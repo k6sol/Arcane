@@ -149,6 +149,7 @@ async function stagingFixture(t:test.TestContext,collision=false){
 // Actual controller, SQLite associations and host keep journal; every plugin ACK
 // below is synthetic. These tests cannot prove engine upload or pivot persistence.
 const CONSENT='e'.repeat(64);
+function registryUuid(value:string):value is ReturnType<typeof randomUUID> {return /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(value);}
 function observations(expected:ConvertedMeshKeepExpected,meshes:readonly MeshKeepMeshReceipt[]){
   const nodes=expected.nodes.map(row=>({nodeKey:row.nodeKey,instanceRef:randomUUID(),ownedStateSha256:sha('synthetic observed '+row.nodeKey),authoredChildren:[]}));
   const objects=expected.meshes.map((row,index)=>{
@@ -268,7 +269,7 @@ test('converted receipt rejects wrong graph, source IDs, returned asset IDs, ref
   const valid=validateMeshKeepReceipt(args,raw,f.expected);assert.ok('converted'in valid);assert.notEqual(valid.converted,raw.converted);
   assert.ok(Object.isFrozen(snapshotConvertedMeshKeepObservation(raw.converted,raw.meshes,f.expected).objects));
   assert.throws(()=>validateMeshKeepReceipt({...args,source:'editable-'+sha('foreign transfer')},raw,f.expected),{code:'RECEIPT'});
-  const uppercase=structuredClone(raw);for(const row of [...uppercase.converted.nodes,...uppercase.converted.objects])row.instanceRef=row.instanceRef.toUpperCase();assert.ok('converted'in validateMeshKeepReceipt(args,uppercase,f.expected),'Registry UUID case is retained exactly.');
+  const uppercase=structuredClone(raw);for(const row of [...uppercase.converted.nodes,...uppercase.converted.objects]){const instanceRef=row.instanceRef.toUpperCase();assert.ok(registryUuid(instanceRef));row.instanceRef=instanceRef;}assert.ok('converted'in validateMeshKeepReceipt(args,uppercase,f.expected),'Registry UUID case is retained exactly.');
   const changes=[(r:Doc)=>{r.converted.graphDigest=sha('other graph');},(r:Doc)=>{r.converted.objects[0].sourceObjectId='arcane_'+sha('other source');},(r:Doc)=>{r.converted.objects[0].meshAssetId='12345';},(r:Doc)=>{r.converted.objects[0].instanceRef=randomUUID();},(r:Doc)=>{r.converted.nodes.pop();},(r:Doc)=>{r.converted.imported=true;},(r:Doc)=>{r.converted.objects[0].authoredChildren=['foreign'];}];
   for(const change of changes){const changed=structuredClone(raw);change(changed);assert.throws(()=>validateMeshKeepReceipt(args,changed,f.expected),{code:'RECEIPT'});}
   let reads=0;const getter=structuredClone(raw);Object.defineProperty(getter.converted.nodes[0]!,'instanceRef',{get(){reads++;throw Error('never');},enumerable:true});assert.throws(()=>validateMeshKeepReceipt(args,getter,f.expected));assert.equal(reads,0);

@@ -109,7 +109,7 @@ export function createMeshKeep(options: MeshKeepOptions) {
 
   async function load(): Promise<MeshKeepRecord[]> {
     if (receipts) return receipts;
-    if (!loading) loading = (async () => {
+    if (!loading) loading = (async ():Promise<MeshKeepRecord[]> => {
       try {
         await noLinks(options.stateDirectory);
         // Only an initially absent directory/file is fresh state. Losing a file during a checked read is an error.
@@ -119,14 +119,19 @@ export function createMeshKeep(options: MeshKeepOptions) {
           await noLinks(directory);
           try { await lstat(file); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') missing = true; else throw error; }
         }
-        if (missing) { receipts = []; loadFailed = false; return receipts; }
+        if (missing) { const fresh:MeshKeepRecord[]=[];receipts = fresh; loadFailed = false; return fresh; }
         const parsed = receiptFile.parse(JSON.parse((await readRegularFile(file, MESH_KEEP_SERVICE_LIMITS.receiptBytes)).toString('utf8')));
-        receipts = parsed.receipts; loadFailed = false;
+        const restored=parsed.receipts.map((row):MeshKeepRecord=>{
+          const {convertedSource,converted,...common}=row;
+          return {...common,
+            ...(convertedSource===undefined?{}:{convertedSource:Object.freeze({...convertedSource})}),
+            ...(converted===undefined?{}:{converted:snapshotConvertedMeshKeepObservation(converted,row.assets)})};
+        });
+        receipts = restored; loadFailed = false;return restored;
       } catch {
         loadFailed = true;
         throw new ArcaneError('MESH_KEEP_RECEIPTS', 'Keep-mesh receipts could not be read; they were left untouched. Nothing new is uploaded until they are repaired.');
       }
-      return receipts;
     })().finally(() => { loading = null; });
     return loading;
   }

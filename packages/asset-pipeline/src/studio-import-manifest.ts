@@ -568,7 +568,7 @@ function compile(input: z.infer<typeof inputSchema>|ConvertedInput, limits: Limi
 function graphWorlds(graph:ConvertedGraphV1):Map<string,number[]> {
   const nodes=new Map(graph.nodes.map(n=>[n.nodeKey,n])),worlds=new Map<string,number[]>();
   for(const n of graph.nodes){const chain:ConvertedGraphV1['nodes'][number][]= [];let next:string|null=n.nodeKey;
-    while(next!==null&&!worlds.has(next)){const current=nodes.get(next)!;chain.push(current);next=current.parentKey;}
+    while(next!==null&&!worlds.has(next)){const current:ConvertedGraphV1['nodes'][number]=nodes.get(next)!;chain.push(current);next=current.parentKey;}
     let world=next===null?IDENTITY:worlds.get(next)!;
     while(chain.length){const current=chain.pop()!;world=multiply(world,[...current.localMatrix]);worlds.set(current.nodeKey,world);}
   }return worlds;
@@ -577,7 +577,7 @@ function convertedManifestChecks(manifest:ConvertedManifest):void {
   bound(Buffer.byteLength(canonical(manifest)),STUDIO_IMPORT_LIMITS.manifestBytes,'Converted manifest bytes');
   convertedIdentity(manifest);unique(manifest.files.map(f=>f.fileId),'converted file');
   unique(manifest.materials.map(m=>m.sha256),'converted material');unique(manifest.textures.map(t=>t.sha256),'converted texture');
-  unique(manifest.anchors.map(a=>a.sourceAnchorId),'converted anchor');
+  if(manifest.anchors.length!==0)fail('EXPORT','Converted assets do not declare anchors.');
   bound(manifest.files.reduce((n,f)=>n+f.byteLength,0),STUDIO_IMPORT_LIMITS.totalBytes,'Converted total bytes');
   bound(manifest.objects.reduce((n,o)=>n+o.triangles,0),STUDIO_IMPORT_LIMITS.triangles,'Converted triangles');
   const worlds=graphWorlds(manifest.graph);
@@ -597,8 +597,7 @@ function convertedManifestChecks(manifest:ConvertedManifest):void {
     if([m.colorMap,m.normalMap,m.roughnessMap,m.metalnessMap,m.emission?.map].some(map=>map&&!manifest.textures.some(t=>t.sha256===map.sha256)))fail('EXPORT','Converted material references an absent texture.');}
   bound(manifest.textures.reduce((n,t)=>n+t.width*t.height,0),STUDIO_IMPORT_LIMITS.texturePixels,'Converted texture pixels');
   for(const t of manifest.textures)if(t.locations.some(location=>!manifest.files.some(f=>f.fileId===location.fileId)))fail('EXPORT','Converted texture location references an absent export.');
-  for(const a of manifest.anchors)if(!manifest.objects.some(o=>o.sourceObjectId===a.sourceObjectId&&o.role==='render'))fail('EXPORT','Converted anchor target differs.');
-  if(manifest.placement.mode==='custom-anchor'&&!manifest.anchors.some(a=>a.sourceAnchorId===(manifest.placement as {anchorId:string}).anchorId))fail('EXPORT','Converted custom anchor is absent.');
+  if(manifest.placement.mode==='custom-anchor')fail('EXPORT','Converted custom anchor is absent.');
 }
 /** Closed serialized data only; source-bound admission still belongs to the host
  * loader/adapter and the retained-byte graph builder. This grants no authority. */

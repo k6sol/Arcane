@@ -18,7 +18,7 @@ import { DaemonClient, type AssetAudience } from '../../apps/mcp/src/daemon-clie
 import { createMcpServer } from '../../apps/mcp/src/server.js';
 import { ConversationWorkStore } from '../../packages/storage/src/conversation-work-store.js';
 import { saveStudioFixture } from '../../packages/asset-pipeline/testing/studio-import-fixture.js';
-import type { PreparedStudioImport, StudioImportSelection, StudioImportBaseline } from '../../packages/asset-pipeline/src/studio-import-manifest.js';
+import type { PreparedStudioImport, GeneratedPreparedStudioImportV1, GeneratedStudioImportBaselineV1, StudioImportSelection, StudioImportBaseline } from '../../packages/asset-pipeline/src/studio-import-manifest.js';
 
 // Real route, native authority, SQLite bindings and AssetService with synthetic
 // completed bytes. MCP uses the official in-memory SDK. No engine/worker/provider.
@@ -37,7 +37,10 @@ function canonical(value: unknown): string {
   return JSON.stringify(value);
 }
 const hash = (value: unknown) => createHash('sha256').update(canonical(value)).digest('hex');
-function rehash(prepared: PreparedStudioImport): PreparedStudioImport {
+function assertGeneratedPrepared(prepared: PreparedStudioImport): asserts prepared is GeneratedPreparedStudioImportV1 {
+  assert.equal(prepared.manifest.schemaVersion, 1, 'This fixture prepares generated v1 assets.');
+}
+function rehash(prepared: GeneratedPreparedStudioImportV1): GeneratedPreparedStudioImportV1 {
   const { digest: _old, ...content } = prepared.manifest, digest = hash(content);
   const manifest = { ...content, digest }, delta = { ...prepared.delta, nextDigest: digest };
   return { status: 'prepared', manifest, delta, digest: hash({ manifestDigest: digest, delta }) };
@@ -342,8 +345,9 @@ test('native preparation serialization refuses accessors, proxies, non-JSON data
 
 test('native wire gate verifies revision preservation and rejects recomputed contradictory plans', async t => {
   const f = await fixture(t), original = parseNativeStudioImportResponse((await f.http().result).data, JOB).prepared;
-  const mutableOriginal = structuredClone(original) as Mutable<PreparedStudioImport>;
-  const baseline: StudioImportBaseline = { manifest: mutableOriginal.manifest, receipt: {
+  assertGeneratedPrepared(original);
+  const mutableOriginal = structuredClone(original) as Mutable<GeneratedPreparedStudioImportV1>;
+  const baseline: GeneratedStudioImportBaselineV1 = { manifest: mutableOriginal.manifest, receipt: {
     manifestDigest: original.manifest.digest, receiptSha256: 'b'.repeat(64), modelRef: 'synthetic-model', modelAssetId: '7001',
     objects: original.manifest.objects.map((o, i) => ({ sourceObjectId: o.sourceObjectId, instanceRef: 'object-' + i,
       meshAssetId: '7002', ownedStateSha256: 'c'.repeat(64), authoredChildren: [{ instanceRef: 'script-' + i, kind: 'script', stateSha256: 'd'.repeat(64) }] })) } };
@@ -353,7 +357,7 @@ test('native wire gate verifies revision preservation and rejects recomputed con
   assert.equal(parseNativeStudioImportResponse({ prepared: next }, OTHER).prepared.manifest.revisionId, OTHER);
   assert.equal(next.delta.previousDigest, original.manifest.digest); assert.equal(next.delta.modelRef, 'synthetic-model');
   assert.ok(next.delta.objects.every(o => o.preserveChildren.length === 1)); assert.ok(next.delta.objects.some(o => o.action === 'update-in-place'));
-  const mutations: ((p: Mutable<PreparedStudioImport>) => void)[] = [
+  const mutations: ((p: Mutable<GeneratedPreparedStudioImportV1>) => void)[] = [
     p => { p.delta.objects[0]!.action = 'reuse'; },
     p => { Object.assign(p.delta.objects[0]!, { deleteInstance: true }); },
     p => { p.manifest.objects.push(p.manifest.objects[0]!); },
@@ -363,7 +367,7 @@ test('native wire gate verifies revision preservation and rejects recomputed con
     p => { Object.assign(p.manifest.files[0]!, { bytes: [1, 2] }); },
   ];
   for (const mutate of mutations) {
-    const changed = structuredClone(original) as Mutable<PreparedStudioImport>; mutate(changed);
+    const changed = structuredClone(original) as Mutable<GeneratedPreparedStudioImportV1>; mutate(changed);
     assert.throws(() => parseNativeStudioImportResponse({ prepared: rehash(changed) }, JOB), refused('STUDIO_IMPORT_RESPONSE'));
   }
 });

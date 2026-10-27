@@ -229,7 +229,7 @@ export function createStudioUploadJournalController(configuration: StudioUploadJ
         const prepared = parseNativeStudioImportResponse({prepared: v.prepared}, payload.revisionId, scope.projectId).prepared;
         if (payload.projectId !== scope.projectId || payload.preparedDigest !== prepared.digest || payload.manifestDigest !== prepared.manifest.digest) fail('STUDIO_UPLOAD_SOURCE');
         const sourceObject = v.sourceObject as StudioImportPayloadObject;
-        if (!sourceObject || types.isProxy(sourceObject) || !payload.objects.includes(sourceObject)
+        if (!sourceObject || types.isProxy(sourceObject) || !payload.objects.some(object => object === sourceObject)
           || !isDeepStrictEqual(sourceObject.object, prepared.manifest.objects.find(o => o.sourceObjectId === sourceObject.object.sourceObjectId))) fail('STUDIO_UPLOAD_SOURCE');
         const target = snapshot(prepared.manifest.target) as StudioImportSelection['target'];
         const contextReceiptId = text(v.contextReceiptId, 128), receipt = snapshot(readCommand(contextReceiptId));

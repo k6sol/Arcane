@@ -11,7 +11,7 @@ import {StudioStore} from '../../packages/storage/src/studio-store.js';
 import {ConversationWorkStore} from '../../packages/storage/src/conversation-work-store.js';
 import {saveStudioFixture} from '../../packages/asset-pipeline/testing/studio-import-fixture.js';
 import {adaptCompletedStudioImport} from '../../apps/daemon/src/asset-import-adapter.js';
-import {createStudioImportManifestAuthority} from '../../packages/asset-pipeline/src/studio-import-manifest.js';
+import {createStudioImportManifestAuthority, type PreparedStudioImport, type GeneratedPreparedStudioImportV1} from '../../packages/asset-pipeline/src/studio-import-manifest.js';
 import {decodeStudioImportPayload} from '../../packages/asset-pipeline/src/studio-import-payload.js';
 import {READ_METHODS, type StudioUploadContextObservation} from '../../packages/protocol/src/studio.js';
 
@@ -24,6 +24,9 @@ const OTHER = '33333333-3333-4333-8333-333333333333';
 const HASH = 'a'.repeat(64);
 const conversation = {provider: 'codex' as const, threadId: 'upload-journal-fixture', sessionId: null};
 const refused = (code: string) => (e: unknown) => !!e && typeof e === 'object' && 'code' in e && e.code === code;
+function assertGeneratedPrepared(prepared: PreparedStudioImport): asserts prepared is GeneratedPreparedStudioImportV1 {
+  assert.equal(prepared.manifest.schemaVersion, 1, 'This fixture prepares generated v1 assets.');
+}
 async function fixture(t: test.TestContext, local = false) {
   const boundary = await realpath(tmpdir()), root = await mkdtemp(join(boundary, 'arcane-upload-controller-'));
   const projectPath = await realpath(root), studioDirectory = join(root, 'studio');
@@ -213,8 +216,9 @@ test('decoded payload and exact source membership cannot be forged, proxied or c
   for (const sourceObject of [structuredClone(f.input.sourceObject), {...f.input.sourceObject}, new Proxy(f.input.sourceObject, {get() {traps++; throw Error('never');}})]) {
     assert.throws(() => f.controller.begin({...f.input, sourceObject}), refused('STUDIO_UPLOAD_SOURCE'));
   }
-  const prepared = {...f.input.prepared, manifest: {...f.input.prepared.manifest,
-    target: {...f.input.prepared.manifest.target, creator: {...f.input.prepared.manifest.target.creator, id: '999'}}}};
+  const original = f.input.prepared; assertGeneratedPrepared(original);
+  const prepared = {...original, manifest: {...original.manifest,
+    target: {...original.manifest.target, creator: {...original.manifest.target.creator, id: '999'}}}};
   assert.throws(() => f.controller.begin({...f.input, prepared}));
   assert.equal(traps, 0); assert.equal(f.counts().guards, 0);
 });

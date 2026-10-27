@@ -161,7 +161,7 @@ export function parseNativeStudioImportResponse(value:unknown,expectedJobId:stri
  if(!unique(manifest.files.map(f=>f.fileId))||!unique(manifest.objects.map(o=>o.sourceObjectId))||!unique(manifest.materials.map(m=>m.sha256))||
   !unique(manifest.textures.map(t=>t.sha256))||!unique(manifest.anchors.map(a=>a.sourceAnchorId))||
   !same(manifest.objects.map(o=>o.sourceObjectId),delta.objects.map(o=>o.sourceObjectId))||
-  manifest.files.reduce((n,f)=>n+f.byteLength,0)>STUDIO_IMPORT_LIMITS.totalBytes||manifest.objects.reduce((n,o)=>n+o.triangles,0)>STUDIO_IMPORT_LIMITS.triangles)fail('STUDIO_IMPORT_RESPONSE');
+  [...manifest.files].reduce((n,f)=>n+f.byteLength,0)>STUDIO_IMPORT_LIMITS.totalBytes||manifest.objects.reduce((n,o)=>n+o.triangles,0)>STUDIO_IMPORT_LIMITS.triangles)fail('STUDIO_IMPORT_RESPONSE');
  for(const o of manifest.objects)if(!manifest.files.some(f=>f.fileId===o.exportFileId)||
   ('parentSourceObjectId' in o&&o.parentSourceObjectId!==null&&!manifest.objects.some(p=>p.sourceObjectId===o.parentSourceObjectId))||
   (o.materialSha256!==null&&!manifest.materials.some(m=>m.sha256===o.materialSha256))||o.textureSha256s.some(h=>!manifest.textures.some(t=>t.sha256===h))||

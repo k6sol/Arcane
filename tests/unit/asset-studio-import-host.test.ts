@@ -8,7 +8,7 @@ import { join, relative, isAbsolute } from 'node:path';
 import { createAssetService, type AssetService } from '../../apps/daemon/src/asset-service.js';
 import { createNativeAssetRegistry, type NativeAssetActor } from '../../apps/daemon/src/native-asset-authority.js';
 import { ConversationWorkStore } from '../../packages/storage/src/conversation-work-store.js';
-import { StudioImportManifestError, STUDIO_IMPORT_LIMITS, type PreparedStudioImport, type StudioImportBaseline, type StudioImportSelection } from '../../packages/asset-pipeline/src/studio-import-manifest.js';
+import { StudioImportManifestError, STUDIO_IMPORT_LIMITS, type PreparedStudioImport, type GeneratedPreparedStudioImportV1, type GeneratedStudioImportBaselineV1, type StudioImportBaseline, type StudioImportSelection } from '../../packages/asset-pipeline/src/studio-import-manifest.js';
 import { saveStudioFixture, saveFixtureManifest, fixtureId } from '../../packages/asset-pipeline/testing/studio-import-fixture.js';
 import {assetReviewDigest,type AssetReviewSubject,type AssetReviewReference} from '../../apps/daemon/src/asset-review.js';
 import { sha256 } from '../../packages/asset-pipeline/src/validation.js';
@@ -60,8 +60,12 @@ async function harness(t: test.TestContext, old = false) {
   return { service, store, registry, incarnation, actor, manifest, jobDirectory, nextDirectory,
     selection: (fn: typeof choose) => { choose = fn; }, baseline: (fn: typeof load) => { load = fn; }, persist: (fn: typeof persist) => { persist = fn; }, counts: () => ({ selections, baselines }) };
 }
-function baseline(prepared: PreparedStudioImport): StudioImportBaseline {
-  return { manifest: structuredClone(prepared.manifest) as StudioImportBaseline['manifest'], receipt: {
+function assertGeneratedPrepared(prepared: PreparedStudioImport): asserts prepared is GeneratedPreparedStudioImportV1 {
+  assert.equal(prepared.manifest.schemaVersion, 1, 'This fixture prepares generated v1 assets.');
+}
+function baseline(prepared: PreparedStudioImport): GeneratedStudioImportBaselineV1 {
+  assertGeneratedPrepared(prepared);
+  return { manifest: structuredClone(prepared.manifest) as GeneratedStudioImportBaselineV1['manifest'], receipt: {
     manifestDigest: prepared.manifest.digest, receiptSha256: sha256(Buffer.from('SYNTHETIC receipt')), modelRef: 'synthetic-model', modelAssetId: '7001',
     objects: prepared.manifest.objects.map(o => ({ sourceObjectId: o.sourceObjectId, instanceRef: 'instance-' + o.sourceObjectId,
       meshAssetId: '7002', ownedStateSha256: sha256(Buffer.from('owned synthetic state')), authoredChildren: [
