@@ -242,7 +242,7 @@ assert(not ok and type(e)=='table' and e.code=='${code}','expected ${code}, got 
 `,{change});
 });
 test('converted stream byte corruption fails before any allocation',options,async t=>{
-  await run(t,`local r=receiver();rejects(function() feed(r) end,'CHECKSUM');assert(creates==0)`,{change:b=>{const p=b.find(p=>p.kind==='chunk');p.data='AAAA'+p.data.slice(4);p.sha256=sha(Buffer.from(p.data,'base64'));}});
+  await run(t,`local r=receiver();rejects(function() feed(r) end,'CHECKSUM');assert(creates==0)`,{change:b=>{const p=b.find(p=>p.kind==='chunk'),original=p.data,bytes=Buffer.from(original,'base64');assert.ok(bytes.length>0,'a real stream byte is required');bytes[0]^=1;p.data=bytes.toString('base64');p.sha256=sha(bytes);assert.notEqual(p.data,original,'the stream corruption must change actual bytes');}});
 });
 test('converted cancellation before native work and during second owned allocation cleans all actual resources',options,async t=>{
   await run(t,`local r=receiver();feed(r);allowed=false;rejects(function() r:reconstruct(service) end,'CANCELLED');assert(creates==0)

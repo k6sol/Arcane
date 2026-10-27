@@ -193,7 +193,7 @@ async function run(t,body,collision=false){
  t.after(async()=>{const r=relative(boundary,directory);assert.ok(r.startsWith('arcane-converted-placement-')&&!r.includes('..')&&!isAbsolute(r));await rm(directory,{recursive:true,force:true});});
  let source=(await readFile(join(resolve('.'),'plugin/fixtures/MockEngine.luau'),'utf8'))+'\n'+engine+'\nlocal __mods: any={}\n';
  for(const name of modules){
-  if(name==='Operations')source+=`__mods.AssetMaterials={plan=function() return {supported=true} end,create=function() return {surfaceAppearance=Instance.new('SurfaceAppearance'),meshPartProperties={Color=Color3.new(.2,.4,.6),Transparency=0,DoubleSided=true}} end}\n`;
+  if(name==='Operations')source+=`__mods.AssetMaterials={plan=function() return {supported=true} end,create=function() return {surfaceAppearance=Instance.new('SurfaceAppearance'),editableImages={},meshPartProperties={Color=Color3.new(.2,.4,.6),Transparency=0,DoubleSided=true}} end}\n`;
   source+='__mods.'+name+'=(function()\n'+(await readFile(join(resolve('.'),'plugin/src',name+'.luau'),'utf8')).replace(/require\(script\.Parent\.(\w+)\)/g,'__mods.$1')+'\nend)()\n';
  }
  source+='local success,reason=pcall(function()\nlocal collision='+collision+'\n'+setup+'\n'+body+'\nprint("CONVERTED_PLACEMENT_OK")\nend)\n';
@@ -277,6 +277,7 @@ for(const failure of ['allocation','scope','mesh-size'])test(`converted ${failur
 prepare();local start=#fixture.created
 ${failure==='allocation'?'fixture.partFailsAt=2':failure==='scope'?'fixture.partHook=function() allowed=false end':'fixture.badMeshSize=true'}
 local ok=pcall(place);assert(not ok)
+${failure==='allocation'?'assert(service.partCalls==2 and #service.parts==1)':''}
 allowed=true;fixture.partFailsAt=nil;fixture.partHook=nil;fixture.badMeshSize=nil
 rejects('STATE',function() place() end)
 ops:cancelAssetTransfers() -- Retire the deliberately retained source/material owner too.

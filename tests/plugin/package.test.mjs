@@ -248,7 +248,18 @@ test('packaged source confines asset APIs to reviewed bindings and excludes arbi
   const preserveMetadata='for key,value in pairs(old:GetAttributes()) do part:SetAttribute(key,value) end\n\t\t\t\tfor _,tag in ipairs(ops.collection:GetTags(old)) do ops.collection:AddTag(part,tag) end';
   assert.equal(placement.split(preserveMetadata).length,2);
   assert.ok(placement.indexOf(preserveMetadata)>convertedStart&&placement.indexOf(preserveMetadata)<kStart);
-  assert.doesNotMatch(files.filter(file=>file.filename!=='TestProof.luau').map(file=>file.filename==='AssetPlacement.luau'?file.source.replace(preserveMetadata,''):file.source).join('\n'), /(?:SetAttribute|AddTag)\s*\(/);
+  // Fixed semantic markers identify already verified converted graph rows.
+  // Attribute names/values come only from this materialization, never args.
+  const graphMarkers=['group:SetAttribute("ArcaneConvertedNodeKey",row.node.nodeKey)',
+    'part:SetAttribute("ArcaneConvertedNodeKey",key)',
+    'part:SetAttribute("ArcaneConvertedObjectId",object.sourceObjectId)'];
+  let confinedOperations=operations;
+  for(const marker of graphMarkers){
+    assert.equal(operations.split(marker).length,2);
+    assert.ok(operations.indexOf(marker)>mStart&&operations.indexOf(marker)<mEnd);
+    confinedOperations=confinedOperations.replace(marker,'');
+  }
+  assert.doesNotMatch(files.filter(file=>file.filename!=='TestProof.luau').map(file=>file.filename==='AssetPlacement.luau'?file.source.replace(preserveMetadata,''):file.filename==='Operations.luau'?confinedOperations:file.source).join('\n'), /(?:SetAttribute|AddTag)\s*\(/);
   assert.doesNotMatch(byFile['TestProof.luau'], /AddTag|SetAttribute\([^\n]*(?:apiKey|token|password|credential)/i);
   assert.doesNotMatch(allSource, /\.Source\s*=/);
   assert.doesNotMatch(allSource, /require\(\s*(?:\d|args\.|command\.)/);
