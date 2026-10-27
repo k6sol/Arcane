@@ -26,7 +26,7 @@ function local(source:string,declaration:string):string{
   return result;
 }
 const mount=section(studio,'  // Bind review to the actual provider transcript, never the shared library row.','  if (chatLink &&');
-const workbench=section(studio,'  let playtests:ReturnType<typeof startPlaytestPanel>','  // Script-editor drafts:');
+const workbench=section(studio,'  const workbench = new StudioWorkbench(','  const startTests=')+section(studio,'  reviewProjectPath = () =>','  // Script-editor drafts:');
 const arcane=section(studio,'    const chat = arcaneChat = new module.ArcaneChat(document);','    // The sign-in card offers Arcane Credits');
 const registry=section(review,'const documentSelections = new WeakMap','\ninterface Session {');
 const coordinatorJs=local(coordinator,'class AssetConversationSelection');
