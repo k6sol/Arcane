@@ -239,7 +239,7 @@ test('changed live owned state refuses fresh application without changing its se
 
 test('epoch change during the current read cannot admit an application',{timeout:30_000},async t=>{
   const f=await baselineFixture(t);await f.initial();await f.staged();f.observe(()=>{f.changeEpoch();return true;});
-  await assert.rejects(()=>f.controller.applyRevision(NEXT,f.nextActor()),refused('STUDIO_IMPORT_CONTINUITY'));
+  await assert.rejects(()=>f.controller.applyRevision(NEXT,f.nextActor()),refused('STUDIO_STAGE_CONTINUITY'));
   assert.equal(f.delivered.some(command=>command.method==='asset.apply_revision'),false);
 });
 
