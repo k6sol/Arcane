@@ -7,7 +7,7 @@ const STAGES = new Set(['prepare-output', 'probe', 'generate', 'request-validati
 const CONVERSION_STAGES = new Set(['input', 'source-import', 'source-map', 'collision', 'scene-save', 'export',
   'scene-reopen', 'export-roundtrip', 'review-render', 'audit-write']);
 for (const stage of CONVERSION_STAGES) STAGES.add(stage);
-const CONVERSION_REASONS = new Set(['INPUT', 'SOURCE', 'MAP', 'FEATURE', 'GEOMETRY', 'MATERIAL', 'COLLISION', 'EXPORT', 'REOPEN', 'RENDER', 'IO', 'NATIVE', 'IO_PATH', 'IO_LINK', 'IO_TYPE', 'IO_SIZE', 'IO_IDENTITY', 'IO_READ', 'IO_CHANGED', 'IO_EXISTS', 'IO_ACCESS', 'GEOMETRY_COUNTS', 'GEOMETRY_TRANSFORM', 'GEOMETRY_DIRECTION', 'GEOMETRY_TOPOLOGY', 'GEOMETRY_AREA', 'GEOMETRY_UV', 'GEOMETRY_TRIANGLES', 'GEOMETRY_HASH', 'GEOMETRY_HASH_POSITION', 'GEOMETRY_HASH_NORMAL', 'GEOMETRY_HASH_TANGENT', 'GEOMETRY_HASH_UV', 'GEOMETRY_HASH_COLOR', 'GEOMETRY_HASH_CORNER_ASSOCIATION', 'FIDELITY_POSITION', 'FIDELITY_NORMAL', 'FIDELITY_TANGENT', 'FIDELITY_UV', 'FIDELITY_COLOR', 'FIDELITY_TRANSFORM', 'FIDELITY_CONDITION', 'FIDELITY_CORRESPONDENCE', 'FIDELITY_HIERARCHY']);
+const CONVERSION_REASONS = new Set(['INPUT', 'SOURCE', 'MAP', 'FEATURE', 'GEOMETRY', 'MATERIAL', 'COLLISION', 'EXPORT', 'REOPEN', 'RENDER', 'IO', 'NATIVE', 'IO_PATH', 'IO_LINK', 'IO_TYPE', 'IO_SIZE', 'IO_IDENTITY', 'IO_READ', 'IO_CHANGED', 'IO_EXISTS', 'IO_ACCESS', 'GEOMETRY_COUNTS', 'GEOMETRY_TRANSFORM', 'GEOMETRY_DIRECTION', 'GEOMETRY_TOPOLOGY', 'GEOMETRY_AREA', 'GEOMETRY_UV', 'GEOMETRY_TRIANGLES', 'GEOMETRY_HASH', 'GEOMETRY_HASH_POSITION', 'GEOMETRY_HASH_NORMAL', 'GEOMETRY_HASH_TANGENT', 'GEOMETRY_HASH_UV', 'GEOMETRY_HASH_COLOR', 'GEOMETRY_HASH_CORNER_ASSOCIATION', 'FIDELITY_POSITION', 'FIDELITY_NORMAL', 'FIDELITY_TANGENT', 'FIDELITY_UV', 'FIDELITY_COLOR', 'FIDELITY_TRANSFORM', 'FIDELITY_CONDITION', 'FIDELITY_CORRESPONDENCE', 'FIDELITY_HIERARCHY', 'OPERATOR_ARGUMENT', 'OPERATOR_RUNTIME', 'OPERATOR_CANCELLED', 'OPERATOR_RESULT', 'OPERATOR_EXCEPTION']);
 const TYPES = new Set(['ValueError', 'RuntimeError', 'TypeError', 'AttributeError', 'KeyError', 'IndexError', 'FileNotFoundError',
   'PermissionError', 'OSError', 'MemoryError', 'ImportError', 'ModuleNotFoundError', 'ZeroDivisionError', 'NotImplementedError', 'Exception']);
 const REASONS: Record<string, string> = {
@@ -56,6 +56,11 @@ const REASONS: Record<string, string> = {
   CONVERSION_IO_EXISTS: 'A new conversion artifact already exists and will not be overwritten.',
   CONVERSION_IO_ACCESS: 'The operating system refused a conversion file or directory operation.',
   CONVERSION_NATIVE: 'Blender stopped unexpectedly during this conversion stage.',
+  CONVERSION_OPERATOR_ARGUMENT: 'The export operator raised an argument or value error.',
+  CONVERSION_OPERATOR_RUNTIME: 'The export operator reported a runtime failure.',
+  CONVERSION_OPERATOR_CANCELLED: 'The export operator returned CANCELLED without a completed export.',
+  CONVERSION_OPERATOR_RESULT: 'The export operator returned an unsupported completion status.',
+  CONVERSION_OPERATOR_EXCEPTION: 'The export operator raised an unclassified exception.',
   REQUEST_PROVENANCE: 'Request bytes failed their size or SHA-256 provenance check.',
   WINDOWS_PATH_LIMIT: 'The installed Blender cannot use this long Windows asset path because no verified short directory alias is available; choose a shorter asset output directory.',
   MESH_REPAIR: 'Generated mesh required structural repair and was rejected.',

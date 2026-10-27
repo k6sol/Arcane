@@ -24,7 +24,7 @@ test('conversion failures retain the exact bounded stage and reason through jour
 });
 
 test('all fixed worker reason tokens and conversion stages round-trip without invented exception types', () => {
-  const reasons = ['INPUT', 'SOURCE', 'MAP', 'FEATURE', 'GEOMETRY', 'MATERIAL', 'COLLISION', 'EXPORT', 'REOPEN', 'RENDER', 'IO', 'NATIVE', 'IO_PATH', 'IO_LINK', 'IO_TYPE', 'IO_SIZE', 'IO_IDENTITY', 'IO_READ', 'IO_CHANGED', 'IO_EXISTS', 'IO_ACCESS', 'GEOMETRY_COUNTS', 'GEOMETRY_TRANSFORM', 'GEOMETRY_DIRECTION', 'GEOMETRY_TOPOLOGY', 'GEOMETRY_AREA', 'GEOMETRY_UV', 'GEOMETRY_TRIANGLES', 'GEOMETRY_HASH', 'GEOMETRY_HASH_POSITION', 'GEOMETRY_HASH_NORMAL', 'GEOMETRY_HASH_TANGENT', 'GEOMETRY_HASH_UV', 'GEOMETRY_HASH_COLOR', 'GEOMETRY_HASH_CORNER_ASSOCIATION', 'FIDELITY_POSITION', 'FIDELITY_NORMAL', 'FIDELITY_TANGENT', 'FIDELITY_UV', 'FIDELITY_COLOR', 'FIDELITY_TRANSFORM', 'FIDELITY_CONDITION', 'FIDELITY_CORRESPONDENCE', 'FIDELITY_HIERARCHY'];
+  const reasons = ['INPUT', 'SOURCE', 'MAP', 'FEATURE', 'GEOMETRY', 'MATERIAL', 'COLLISION', 'EXPORT', 'REOPEN', 'RENDER', 'IO', 'NATIVE', 'IO_PATH', 'IO_LINK', 'IO_TYPE', 'IO_SIZE', 'IO_IDENTITY', 'IO_READ', 'IO_CHANGED', 'IO_EXISTS', 'IO_ACCESS', 'GEOMETRY_COUNTS', 'GEOMETRY_TRANSFORM', 'GEOMETRY_DIRECTION', 'GEOMETRY_TOPOLOGY', 'GEOMETRY_AREA', 'GEOMETRY_UV', 'GEOMETRY_TRIANGLES', 'GEOMETRY_HASH', 'GEOMETRY_HASH_POSITION', 'GEOMETRY_HASH_NORMAL', 'GEOMETRY_HASH_TANGENT', 'GEOMETRY_HASH_UV', 'GEOMETRY_HASH_COLOR', 'GEOMETRY_HASH_CORNER_ASSOCIATION', 'FIDELITY_POSITION', 'FIDELITY_NORMAL', 'FIDELITY_TANGENT', 'FIDELITY_UV', 'FIDELITY_COLOR', 'FIDELITY_TRANSFORM', 'FIDELITY_CONDITION', 'FIDELITY_CORRESPONDENCE', 'FIDELITY_HIERARCHY', 'OPERATOR_ARGUMENT', 'OPERATOR_RUNTIME', 'OPERATOR_CANCELLED', 'OPERATOR_RESULT', 'OPERATOR_EXCEPTION'];
   const stages = ['input', 'source-import', 'source-map', 'collision', 'scene-save', 'export', 'scene-reopen', 'export-roundtrip', 'review-render', 'audit-write'];
   for (const reason of reasons) for (const stage of stages) {
     const error = conversionWorkerFailure(command(report(stage, reason)), 'generate');
@@ -137,4 +137,29 @@ test('conversion semantic hints retain full-comparison refusal without claiming 
       assert.equal(conversionWorkerFailure(command(forged), 'source-import').diagnostic?.reasonCode, 'WORKER_EXIT');
     }
   }
+});
+
+test('export operator failures retain a finite explanation without native messages or arguments', () => {
+  const explanations: Record<string, RegExp> = {
+    OPERATOR_ARGUMENT: /argument or value error/, OPERATOR_RUNTIME: /runtime failure/,
+    OPERATOR_CANCELLED: /returned CANCELLED/, OPERATOR_RESULT: /unsupported completion status/,
+    OPERATOR_EXCEPTION: /unclassified exception/,
+  };
+  for (const [reason, explanation] of Object.entries(explanations)) {
+    const error = conversionWorkerFailure(command(report('export', reason)), 'source-map');
+    assert.equal(error.diagnostic?.stage, 'export');
+    assert.equal(error.diagnostic?.reasonCode, 'CONVERSION_' + reason);
+    assert.equal(error.diagnostic?.exceptionType, null);
+    assert.match(error.message, explanation);
+    assert.doesNotMatch(error.message, /private native traceback/);
+    const saved = JSON.parse(JSON.stringify({ code: error.code, message: error.message, diagnostic: error.diagnostic }));
+    assert.deepEqual(decodeAssetJobError(saved).diagnostic, error.diagnostic);
+    for (const extra of [{ arguments: { filepath: 'private-path-secret' } }, { message: 'private-native-secret' }, { closed: true }]) {
+      const forged = 'ARCANE_FAILURE ' + JSON.stringify({ stage: 'export', reason, type: 'conversion-refused', ...extra });
+      const rejected = conversionWorkerFailure(command(forged), 'source-map');
+      assert.equal(rejected.diagnostic?.reasonCode, 'WORKER_EXIT');
+      assert.doesNotMatch(rejected.message, /private-/);
+    }
+  }
+  assert.equal(conversionWorkerFailure(command(report('export', 'OPERATOR_UNKNOWN')), 'source-map').diagnostic?.reasonCode, 'WORKER_EXIT');
 });

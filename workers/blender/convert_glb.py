@@ -41,12 +41,23 @@ def quiet_native():
             yield
 
 
-def operate(operator, arguments):
+def operate(operator, arguments, *, export_diagnostics=False):
     properties = set(operator.get_rna_type().properties.keys())
     audit.require(set(arguments) <= properties, "FEATURE")
-    with quiet_native():
-        result = operator(**arguments)
-    audit.require(result == {"FINISHED"}, "NATIVE")
+    try:
+        with quiet_native():
+            result = operator(**arguments)
+    except (audit.ConversionFailure, OSError):
+        raise
+    except Exception as failure:
+        if not export_diagnostics:
+            raise
+        reason = ("OPERATOR_ARGUMENT" if isinstance(failure, (TypeError, ValueError)) else
+                  "OPERATOR_RUNTIME" if isinstance(failure, RuntimeError) else "OPERATOR_EXCEPTION")
+        # Classify only fixed categories, never messages, paths or type names.
+        raise audit.ConversionFailure(reason) from None
+    reason = ("OPERATOR_CANCELLED" if result == {"CANCELLED"} else "OPERATOR_RESULT") if export_diagnostics else "NATIVE"
+    audit.require(result == {"FINISHED"}, reason)
 
 
 def import_model(bpy, path):
@@ -81,7 +92,7 @@ def export_model(bpy, directory, filename, objects, materials):
         "export_image_format": "AUTO", "export_animations": False, "export_skins": False,
         "export_morph": False, "export_cameras": False, "export_lights": False,
         "export_gpu_instances": False, "export_draco_mesh_compression_enable": False,
-        "export_use_gltfpack": False})
+        "export_use_gltfpack": False}, export_diagnostics=True)
     return audit.read_owned(path, audit.EXPORT_BYTES, 20)
 
 

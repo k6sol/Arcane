@@ -194,6 +194,32 @@ def image_scene(images, material=None):
     return bpy, objects
 
 
+class ControlledOperator:
+    """Fixed RNA-shaped contract double; not an actual Blender operator."""
+    EXPORT_PROPERTIES = {"filepath", "check_existing", "export_format", "use_selection", "export_extras",
+                         "export_yup", "export_apply", "export_texcoords", "export_normals", "export_tangents",
+                         "export_materials", "export_vertex_color", "export_all_vertex_colors",
+                         "export_active_vertex_color_when_no_material", "export_attributes", "export_image_format",
+                         "export_animations", "export_skins", "export_morph", "export_cameras", "export_lights",
+                         "export_gpu_instances", "export_draco_mesh_compression_enable", "export_use_gltfpack"}
+
+    def __init__(self, failure=None, properties=None):
+        self.failure = failure; self.result = {"FINISHED"}; self.calls = []
+        self.properties = self.EXPORT_PROPERTIES if properties is None else properties
+
+    def get_rna_type(self):
+        return SimpleNamespace(properties=dict.fromkeys(self.properties))
+
+    def __call__(self, **arguments):
+        self.calls.append(arguments)
+        if self.failure is not None: raise self.failure
+        return self.result
+
+
+class ControlledViewObjects(dict):
+    active = None
+
+
 class ConversionFidelityPolicyTests(unittest.TestCase):
     def refused(self, reason, callback):
         with self.assertRaises(audit.ConversionFailure) as failure: callback()
@@ -592,6 +618,79 @@ class ConversionFidelityPolicyTests(unittest.TestCase):
                 bpy, objects = image_scene([image], scene_material(tree))
                 self.refused("MATERIAL", lambda: worker.pack_scene_images(bpy, objects))
                 self.assertEqual(image.pack_calls, 0)
+
+    def test_export_operator_finished_still_calls_once_with_exact_original_arguments(self):
+        operator = ControlledOperator(); arguments = {"filepath": "fixed-owned.glb", "export_format": "GLB"}
+        self.assertIsNone(worker.operate(operator, arguments, export_diagnostics=True))
+        self.assertEqual(operator.calls, [arguments])
+
+    def test_export_operator_exception_categories_are_finite_and_exclude_messages(self):
+        for exception_type, reason in ((TypeError, "OPERATOR_ARGUMENT"), (ValueError, "OPERATOR_ARGUMENT"),
+                                       (RuntimeError, "OPERATOR_RUNTIME"), (KeyError, "OPERATOR_EXCEPTION")):
+            with self.subTest(exception_type=exception_type.__name__):
+                operator = ControlledOperator(failure=exception_type("untrusted diagnostic detail must not escape"))
+                with self.assertRaises(audit.ConversionFailure) as failure:
+                    worker.operate(operator, {"filepath": "fixed-owned.glb"}, export_diagnostics=True)
+                self.assertEqual(failure.exception.reason, reason)
+                self.assertEqual(str(failure.exception), reason)
+                self.assertTrue(failure.exception.__suppress_context__)
+                self.assertEqual(len(operator.calls), 1)
+
+    def test_export_operator_cancelled_and_other_results_remain_failures_without_retry(self):
+        for result, reason in (({"CANCELLED"}, "OPERATOR_CANCELLED"), ({"RUNNING_MODAL"}, "OPERATOR_RESULT"),
+                               ({"FINISHED", "CANCELLED"}, "OPERATOR_RESULT"), (None, "OPERATOR_RESULT"), ({}, "OPERATOR_RESULT")):
+            with self.subTest(result=result):
+                operator = ControlledOperator(); operator.result = result
+                self.refused(reason, lambda: worker.operate(operator, {}, export_diagnostics=True))
+                self.assertEqual(len(operator.calls), 1)
+
+    def test_export_operator_preserves_existing_custody_and_conversion_failures(self):
+        for original in (OSError("controlled custody failure"), audit.ConversionFailure("SOURCE")):
+            with self.subTest(exception_type=type(original).__name__):
+                operator = ControlledOperator(failure=original)
+                with self.assertRaises(type(original)) as failure:
+                    worker.operate(operator, {}, export_diagnostics=True)
+                self.assertIs(failure.exception, original)
+                self.assertEqual(len(operator.calls), 1)
+
+    def test_nonexport_operator_exception_and_result_behavior_is_unchanged(self):
+        for original in (TypeError("controlled argument failure"), ValueError("controlled value failure"),
+                         RuntimeError("controlled runtime failure"), KeyError("controlled other failure"),
+                         OSError("controlled custody failure"), audit.ConversionFailure("SOURCE")):
+            with self.subTest(exception_type=type(original).__name__):
+                operator = ControlledOperator(failure=original)
+                with self.assertRaises(type(original)) as failure: worker.operate(operator, {})
+                self.assertIs(failure.exception, original)
+                self.assertEqual(len(operator.calls), 1)
+        operator = ControlledOperator(); operator.result = {"CANCELLED"}
+        self.refused("NATIVE", lambda: worker.operate(operator, {}))
+        self.assertEqual(len(operator.calls), 1)
+
+    def test_operator_property_admission_stays_fail_closed_before_dispatch(self):
+        for diagnostics in (False, True):
+            operator = ControlledOperator(properties={"filepath"})
+            self.refused("FEATURE", lambda: worker.operate(operator, {"foreign_option": True}, export_diagnostics=diagnostics))
+            self.assertEqual(operator.calls, [])
+
+    def test_actual_export_wrapper_enables_fixed_diagnostics_and_retains_fidelity_options(self):
+        with tempfile.TemporaryDirectory(prefix="arcane-export-diagnostics-") as temporary:
+            directory = Path(temporary).resolve()
+            for materials in ("EXPORT", "NONE"):
+                operator = ControlledOperator(failure=ValueError("controlled operator argument failure"))
+                bpy = SimpleNamespace(ops=SimpleNamespace(export_scene=SimpleNamespace(gltf=operator)),
+                                      context=SimpleNamespace(view_layer=SimpleNamespace(objects=ControlledViewObjects())))
+                self.refused("OPERATOR_ARGUMENT", lambda: worker.export_model(bpy, directory, "asset.glb", [], materials))
+                self.assertEqual(len(operator.calls), 1)
+                arguments = operator.calls[0]
+                self.assertEqual(arguments["export_format"], "GLB")
+                self.assertEqual(arguments["export_materials"], materials)
+                self.assertEqual(arguments["export_vertex_color"], "ACTIVE")
+                self.assertEqual(arguments["export_image_format"], "AUTO")
+                for key in ("export_texcoords", "export_normals", "export_tangents", "export_all_vertex_colors", "export_attributes", "export_extras"):
+                    self.assertIs(arguments[key], True)
+                for key in ("export_apply", "export_animations", "export_skins", "export_morph", "export_cameras", "export_lights", "export_gpu_instances", "export_draco_mesh_compression_enable", "export_use_gltfpack"):
+                    self.assertIs(arguments[key], False)
+                self.assertFalse((directory / "asset.glb").exists())
 
     def test_strict_v2_inputs_refuse_prototype_or_caller_policy_and_keep_real_source_bytes(self):
         _d, _b, raw, _m, _mb, marked_raw, _p, mapping, request = fixture()
