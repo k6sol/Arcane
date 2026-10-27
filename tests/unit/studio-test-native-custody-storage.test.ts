@@ -140,7 +140,16 @@ for(const replacement of ['database','directory'] as const)test('original physic
   if(replacement==='database'){
     const file=join(f.directory,'studio.sqlite');renameSync(file,join(f.root,'retained-database'));writeFileSync(file,Buffer.alloc(0));
   }else{
-    const bytes=readFileSync(join(f.directory,'studio.lock'));renameSync(f.directory,join(f.root,'retained-state'));mkdirSync(f.directory);
+    const bytes=readFileSync(join(f.directory,'studio.lock'));
+    // Windows can refuse renaming a directory containing these deliberately
+    // open original file pins, even after the SQLite connection closes. Move
+    // only the original pinned files out first, keeping both descriptors open.
+    // This changes directory and child path identities, not just the directory.
+    renameSync(join(f.directory,'studio.lock'),join(f.root,'retained-directory-lock'));
+    renameSync(join(f.directory,'studio.sqlite'),join(f.root,'retained-directory-database'));
+    renameSync(f.directory,join(f.root,'retained-state'));mkdirSync(f.directory);
+    assert.deepEqual(readFileSync(join(f.root,'retained-directory-lock')),bytes);
+    assert.equal(existsSync(join(f.root,'retained-directory-database')),true);
     writeFileSync(join(f.directory,'studio.lock'),bytes);writeFileSync(join(f.directory,'studio.sqlite'),Buffer.alloc(0));
   }
   const failure=Error('Synthetic already-closed original database.');
