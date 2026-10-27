@@ -26,7 +26,8 @@ function glb(): Uint8Array<ArrayBuffer> {
 class ElementFixture extends EventTarget {
   children: ElementFixture[] = []; parentElement: ElementFixture | null = null;
   id = ''; className = ''; type = ''; hidden = false; disabled = false;
-  readonly dataset: Record<string, string> = {}, style: Record<string, string> = {};
+  readonly dataset: Record<string, string> = {};
+  readonly style: Record<string, string> = {};
   private text = ''; private readonly attributes = new Map<string, string>();
   constructor(readonly ownerDocument: DocumentFixture, readonly tagName: string) { super(); }
   get textContent(): string { return this.text + this.children.map(child => child.textContent).join(' '); }
