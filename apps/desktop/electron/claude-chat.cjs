@@ -592,6 +592,9 @@ function createClaudeChat(options) {
   const turns = new Map(), byConversation = new Map();
   // Alias -> concrete model id reported by system/init events of this host's turns (in memory; display only).
   const observedModels = new Map();
+  // Main-only diagnostic observations, never renderer status, permissions or launch inputs.
+  let customerCatalogue = null, customerTerminal = null;
+  const customerTurns = new WeakMap();
   let disposeReason = null;
   const closedMessage = () => disposeReason === 'interrupted' ? MESSAGES.interrupted : MESSAGES.closed;
   let disposed = false, statusCache = null, approval = null, approved = false, credential = null, minting = null, instructions = null;
@@ -773,6 +776,7 @@ function createClaudeChat(options) {
     statusCache = { at: now(), value, command }; return value;
   };
   async function readStatus() {
+    customerCatalogue = null;
     if (disposed) return snapshot({ message: MESSAGES.unavailable });
     const command = await locate();
     if (!command) return snapshot({ message: MESSAGES.notInstalled });
@@ -793,6 +797,7 @@ function createClaudeChat(options) {
     const help = await run(command, ['--help']);
     const choices = help.ok && help.code === 0 ? parseChoices(help.stdout) : null;
     if (!choices) return snapshot({ installed: true, signedIn, cliVersion, message: message ?? MESSAGES.choices }, command);
+    customerCatalogue = Object.freeze({source:'cli-help',models:Object.freeze([...choices.ids]),aliases:Object.freeze([...choices.aliases]),efforts:Object.freeze([...choices.efforts])});
     return snapshot({ installed: true, signedIn, cliVersion, models: Object.freeze([...choices.aliases]), efforts: Object.freeze([...choices.efforts]),
       defaultModel: choices.aliases.includes('sonnet') ? 'sonnet' : choices.aliases[0], resolved: resolveAliases(choices.aliases, choices.ids, observedModels), message }, command);
   }
@@ -972,6 +977,7 @@ function createClaudeChat(options) {
     if (turn.finished) return;
     if (containsSecret(error, turn.redactions)) error = MESSAGES.failed;
     turn.finished = true;
+    const customerProof=customerTurns.get(turn);if(customerProof)customerTerminal=Object.freeze({...customerProof,ok:ok===true,toolActivity:turn.tools.size>0,turnId:turn.turnId,conversationId:turn.conversationId});
     retireAssets(turn, { noChild: !!turn.assets && !turn.assets.spawnAttempted });
     clearTimeout(turn.timer); releaseCredential(turn.credential); turn.credential = null;
     if (!ok) statusCache = null; // the next turn re-reads native sign-in status
@@ -1012,6 +1018,7 @@ function createClaudeChat(options) {
         '--mcp-config', turn.credential.configPath, '--strict-mcp-config', '--setting-sources', 'user', '--model', turn.model, '--effort', turn.effort,
         '--permission-mode', 'default', '--tools', '', '--allowedTools', 'mcp__' + MCP_SERVER, '--append-system-prompt', prompt,
         ...(turn.sessionId ? ['--resume', turn.sessionId] : [])];
+      customerTurns.set(turn,{model:turn.model,effort:turn.effort,reportedModel:null,strictOwnedMcp:args.includes('--strict-mcp-config'),builtInToolsDisabled:args[args.indexOf('--tools')+1]==='',allowedTools:args[args.indexOf('--allowedTools')+1],closed:false});
       if (args.some(value => containsSecret(value, turn.redactions))) return finish(turn, false, MESSAGES.start);
       let child;
       const childEnv = { ...nativeEnvironment(), ...turn.credential.env };
@@ -1059,6 +1066,7 @@ function createClaudeChat(options) {
       child.stdin.on('error', () => { turn.inputOpen = false; retireAssets(turn); });
       child.once('error', () => { retireAssets(turn); if (turn.assets) killTree(child); void finish(turn, false, turn.stopped ? MESSAGES.stopped : MESSAGES.start); });
       child.once('close', code => {
+        const customerProof=customerTurns.get(turn); if(customerProof)customerProof.closed=true;
         turn.inputOpen = false;
         if (!turn.finished && !skipping && pending.length) line(Buffer.concat(pending));
         pending = [];
@@ -1109,6 +1117,7 @@ function createClaudeChat(options) {
     // (b) The concrete model the CLI ran for an alias; it names the version shown for that alias from the next status read.
     if (event.type === 'system' && event.subtype === 'init' && typeof event.model === 'string') {
       const id = event.model.replace(/\[[0-9]{1,4}[km]\]$/i, '');
+      const customerProof=customerTurns.get(turn);if(customerProof&&MODEL_ID.test(id))customerProof.reportedModel=id;
       if (ofAlias(turn.model, id) && (observedModels.has(turn.model) || observedModels.size < 32)) observedModels.set(turn.model, id);
     }
     if (event.type === 'rate_limit_event') {
@@ -1249,7 +1258,7 @@ function createClaudeChat(options) {
     await Promise.all(owned.map(retire));
   }
   const host = { version: 1, status: () => status(), list, history, send, steer, rewind, stop, remove };
-  Object.defineProperties(host, { dispose: { value: dispose }, activeTurns: { value: () => turns.size }, revokeApproval: { value: revokeApproval } });
+  Object.defineProperties(host, { customerCheckEvidence:{value:async()=>{const s=await status();return Object.freeze({installed:s.installed,signedIn:s.signedIn,catalogue:customerCatalogue,nativeIsolationVerified:false,isolationEvidence:'host-launch-policy-only',terminal:customerTerminal,active:Object.freeze([...turns.values()].map(turn=>{const proof=customerTurns.get(turn);return proof?Object.freeze({...proof,turnId:turn.turnId,conversationId:turn.conversationId}):null;}))});}}, dispose: { value: dispose }, activeTurns: { value: () => turns.size }, revokeApproval: { value: revokeApproval } });
   return Object.freeze(host);
 }
 

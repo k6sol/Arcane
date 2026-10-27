@@ -13,11 +13,148 @@ const { createStudioKeyVault } = require('./studio-key-vault.cjs');
 app.setName('Arcane'); app.setAppUserModelId('com.arcane.desktop'); app.enableSandbox();
 app.commandLine.appendSwitch('disable-background-networking');
 const args = process.argv.slice(app.isPackaged ? 1 : 2);
+// ARCANE_CUSTOMER_CHAT_CHECK_V1_BEGIN
+// Diagnostic-only: no send, approval, credential export, debug port or renderer capability.
+function createCustomerCheck(argv) {
+  if (argv[0] !== '--arcane-customer-check') return null;
+  const deny = () => { throw new Error('Customer check unavailable.'); };
+  if (!app.isPackaged || process.platform !== 'win32' || argv.length !== 3 || !['first','reopen'].includes(argv[2])) deny();
+  const path = require('node:path'), root = path.resolve(argv[1]);
+  if (root !== argv[1] || !/^arcane-customer-check-[0-9a-f-]{36}$/.test(path.basename(root))) deny();
+  function direct(file, directory = false) {
+    let cursor = path.resolve(file);
+    for (;;) { const st = fs.lstatSync(cursor); if (st.isSymbolicLink()) deny(); const parent = path.dirname(cursor); if (parent === cursor) break; cursor = parent; }
+    const st = fs.lstatSync(file);
+    if (directory ? !st.isDirectory() : !st.isFile() || st.nlink !== 1) deny();
+    if (fs.realpathSync(file).toLowerCase() !== path.resolve(file).toLowerCase()) deny();
+    return st;
+  }
+  direct(root, true);
+  const same = (a,b) => ['dev','ino','mode','nlink','size','mtimeMs','ctimeMs'].every(k=>a[k]===b[k]);
+  function bytes(file,max,hashOnly=false) {
+    const before=direct(file);if(before.size>max)deny();let fd;
+    try {
+      fd=fs.openSync(file,'r');const opened=fs.fstatSync(fd);if(!same(before,opened)||!opened.isFile()||opened.nlink!==1)deny();
+      const buffer=Buffer.alloc(hashOnly?65536:max+1),hash=hashOnly?createHash('sha256'):null;let length=0;
+      for(;;){const count=fs.readSync(fd,buffer,hashOnly?0:length,hashOnly?Math.min(buffer.length,max-length+1):buffer.length-length,length);if(!count)break;length+=count;if(length>max)deny();if(hash)hash.update(buffer.subarray(0,count));if(!hash&&length===buffer.length)break;}
+      const after=fs.fstatSync(fd);if(!same(opened,after)||!same(after,direct(file)))deny();
+      return hash?hash.digest('hex'):buffer.subarray(0,length);
+    }finally{if(fd!==undefined)fs.closeSync(fd);}
+  }
+  const json = name => JSON.parse(bytes(path.join(root,name),16384).toString('utf8'));
+  const digest = value => createHash('sha256').update(typeof value === 'string' || Buffer.isBuffer(value) ? value : JSON.stringify(value)).digest('hex');
+  const exact = (v, keys) => v && Object.getPrototypeOf(v) === Object.prototype && Object.keys(v).sort().join(',') === keys.slice().sort().join(',');
+  const intent = json('intent.json'), intentHash = digest(intent);
+  if (!exact(intent,['schemaVersion','runId','provider','model','effort','nonce','bundleManifestSha256','executableSha256','authorizedOneTurn']) || intent.schemaVersion !== 1 || intent.authorizedOneTurn !== true ||
+      !/^[0-9a-f-]{36}$/.test(intent.runId) || path.basename(root) !== 'arcane-customer-check-'+intent.runId || !['codex','claude'].includes(intent.provider) ||
+      ![intent.model,intent.effort].every(v=>typeof v==='string'&&/^[A-Za-z0-9._:-]{1,128}$/.test(v)) || !/^[0-9a-f]{32}$/.test(intent.nonce) ||
+      ![intent.bundleManifestSha256,intent.executableSha256].every(v=>/^[0-9a-f]{64}$/.test(v))) deny();
+  const bundle = path.dirname(process.execPath);
+  direct(process.execPath); direct(path.join(bundle,'windows-manifest.json'));
+  if (bytes(process.execPath,512*1024*1024,true) !== intent.executableSha256 || bytes(path.join(bundle,'windows-manifest.json'),16*1024*1024,true) !== intent.bundleManifestSha256) deny();
+  // Executables are deliberately not read through the bounded JSON reader.
+  const profile = path.join(root,'profile');
+  if (argv[2] === 'first') { if(fs.existsSync(profile))deny(); fs.mkdirSync(profile,{mode:0o700}); }
+  else { direct(profile,true); const closed=json('first-closed.json'); if(closed.outcome!=='completed'||closed.rootExit!=='normal'||closed.daemonClean!==true||closed.runId!==intent.runId)deny(); }
+  app.setPath('userData',profile);
+  let pin=null, busy=false, timer=null, failed=false, complete=false, terminal=null, previousReceiptSha256=argv[2]==='reopen'?bytes(path.join(root,'first-closed.json'),16384,true):null;
+  const phase=argv[2], prompt='Reply with exactly ARCANE_CUSTOMER_CHAT_OK '+intent.nonce+'. Do not use tools, files, network or Roblox Studio.', reply='ARCANE_CUSTOMER_CHAT_OK '+intent.nonce;
+  const write = (name,data) => {direct(root,true); const bytes=JSON.stringify({schemaVersion:1,kind:'arcane-packaged-customer-chat-diagnostic',runId:intent.runId,provider:intent.provider,phase,processId:process.pid,
+    intentSha256:intentHash,bundleManifestSha256:intent.bundleManifestSha256,executableSha256:intent.executableSha256,requestedModel:intent.model,requestedEffort:intent.effort,
+    fullProductVerified:false,nativeAcceptance:false,studioOperations:0,previousReceiptSha256,...data})+'\n'; fs.writeFileSync(path.join(root,phase+'-'+name+'.json'),bytes,{flag:'wx',mode:0o600});previousReceiptSha256=digest(bytes);};
+  const guard=()=>{
+    if(digest(json('intent.json'))!==intentHash||!pin||pin.retired||window!==pin.window||projectSession!==pin.session||child!==pin.child||origin!==pin.origin||switching||closing||
+      window.isDestroyed()||window.webContents.mainFrame!==pin.frame||window.webContents.isLoading()||projectPath!==path.join(profile,'projects','Untitled')||child.exitCode!=null||child.signalCode!=null||!policy.navigationAllowed(origin,pin.frame.url))deny();
+  };
+  async function get(route) {
+    guard(); const response=await fetch(pin.origin+route,{headers:{Authorization:'Bearer '+token},redirect:'error',signal:AbortSignal.timeout(2000)});
+    const reader=response.body?.getReader();let cleanupFailed=false;
+    try {
+      guard();
+      const maximum=4*1024*1024,type=response.headers.get('content-type'),encoding=response.headers.get('content-encoding'),declared=response.headers.get('content-length');
+      if(!response.ok||!reader||!/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(type??'')||encoding!==null||declared!==null&&(!/^(0|[1-9][0-9]{0,9})$/.test(declared)||Number(declared)>maximum))deny();
+      const bytes=Buffer.alloc(maximum);let length=0;
+      for(;;){
+        guard();const part=await reader.read();guard();
+        if(part.done)break;
+        if(!require('node:util').types.isUint8Array(part.value)||part.value.byteLength===0||part.value.byteLength>maximum-length)deny();
+        bytes.set(part.value,length);length+=part.value.byteLength;
+      }
+      if(declared!==null&&Number(declared)!==length)deny();
+      const raw=new TextDecoder('utf-8',{fatal:true}).decode(bytes.subarray(0,length));guard();return JSON.parse(raw);
+    }finally{
+      if(reader){
+        // A retired scope must not prevent cleanup of this exact owned reader.
+        try{guard();}catch{cleanupFailed=true;}
+        try{await reader.cancel();}catch{cleanupFailed=true;}
+        try{guard();}catch{cleanupFailed=true;}
+        try{reader.releaseLock();}catch{cleanupFailed=true;}
+        if(cleanupFailed)deny();
+      }
+    }
+  }
+  async function ui() {
+    guard();
+    const value=await window.webContents.executeJavaScript(`(async()=>{const d=window.arcaneDesktop;return {model:document.getElementById('codex-model')?.value??null,effort:document.getElementById('codex-effort')?.value??null,prefs:await d.workspacePreferences.read(),library:await d.conversationLibrary.read(),body:document.body.innerText.slice(0,262144)};})()`);
+    guard();return value;
+  }
+  function selection(v) {const p=v.prefs?.preferences;const tab=p?.tabs?.find(t=>t.localId===p.activeTabId);return p?.provider===intent.provider&&tab?.modelId===intent.model&&tab?.effort===intent.effort&&v.model===intent.model&&v.effort===intent.effort;}
+  function library(v) {const l=v.library?.preferences;return l?.conversations?.filter(c=>c.messages?.some(m=>m.provider===intent.provider&&m.role==='user'&&m.text===prompt)&&c.messages.some(m=>m.provider===intent.provider&&m.role==='assistant'&&m.text.trim()===reply))??[];}
+  function stop(code) {if(failed||complete)return;failed=true;write('result',{outcome:'unsupported',code,dispatch:fs.existsSync(path.join(root,'armed.json'))?'armed-unknown':'not-armed'});}
+  async function observe() {
+    if(busy)return;busy=true;
+    try {
+      guard();
+      if(fs.existsSync(path.join(root,phase+'-close.json'))) {const close=json(phase+'-close.json');if(!exact(close,['runId','phase'])||close.runId!==intent.runId||close.phase!==phase)deny();app.quit();return;}
+      if(failed||complete)return;
+      if(intent.provider==='claude') {const evidence=await claudeChat?.customerCheckEvidence?.();guard();stop(evidence?.nativeIsolationVerified===true?'CLAUDE_TERMINAL_PROOF_UNAVAILABLE':'CLAUDE_ISOLATION_UNAVAILABLE');return;}
+      const state=(await get('/v1/codex/state')).state,s=state?.snapshot;
+      if(!s?.ready||!s.connected||s.account?.auth!=='subscription')return;
+      if(s.provenance!=='installed-cli'||s.mcpIsolation!=='arcane-only-verified'){stop('NATIVE_ISOLATION_UNAVAILABLE');return;}
+      if(!s.models?.some(m=>m.model===intent.model&&m.efforts?.includes(intent.effort))){stop('SELECTION_UNSUPPORTED');return;}
+      if(s.droppedEvents!==0||state.displayLimited===true||s.approvals?.length||s.events?.some(e=>e.type==='approval'||e.type==='item'&&(e.tool||/tool|command|fileChange/i.test(e.itemType)))){stop('TOOL_ACTIVITY');return;}
+      if(s.selection?.model!==intent.model||s.selection?.effort!==intent.effort||s.thread&&(!s.thread.configured||s.thread.writeGranted||s.thread.selection?.model!==intent.model||s.thread.selection?.effort!==intent.effort)){if(fs.existsSync(path.join(root,'armed.json')))stop('NATIVE_SELECTION_OR_POLICY');return;}
+      const studio=await get('/v1/studio/sessions');if(!Array.isArray(studio.sessions)||studio.sessions.length){stop('STUDIO_SESSION_PRESENT');return;}
+      const visible=await ui();if(!selection(visible))return;
+      if(pin.nativeConnection&&pin.nativeConnection!==s.connectionId){stop('NATIVE_CONTEXT_CHANGED');return;}
+      pin.nativeConnection=s.connectionId;
+      const turnActions=state.actions?.filter(a=>a.action==='turn-start'||a.action==='turn-steer')??[];if(turnActions.length>1||state.submittedMessages?.earlierCount>0){stop('EXTRA_MESSAGE');return;}
+      const messages=state.submittedMessages?.messages??[];
+      const armed=fs.existsSync(path.join(root,'armed.json'));
+      if(phase==='first'&&!armed){if(messages.length||turnActions.length){stop('UNARMED_MESSAGE');return;}if(!fs.existsSync(path.join(root,'first-ready.json')))write('ready',{outcome:'ready',dispatch:'not-armed',catalogueVerified:true,uiSelectionVerified:true,provenance:'installed-cli',isolation:'arcane-only-verified'});return;}
+      if(phase==='first') {const a=json('armed.json');if(!exact(a,['runId','promptSha256'])||a.runId!==intent.runId||a.promptSha256!==digest(prompt))deny();}
+      if(messages.some(m=>m.text!==prompt)||messages.length>1){stop('EXTRA_MESSAGE');return;}
+      const m=messages[0];if(!m)return;
+      if(m.state==='unknown'||m.state==='rejected'){stop('DISPATCH_UNRESOLVED');return;}
+      const a=state.actions?.filter(a=>a.action==='turn-start'&&a.requestId===m.requestId&&a.state==='acknowledged'&&a.turnId===m.turnId&&a.threadId===state.submittedMessages.threadId&&a.model===intent.model&&a.effort===intent.effort)??[];
+      if(m.state!=='acknowledged'||m.model!==intent.model||m.effort!==intent.effort||a.length!==1)return;
+      const history=(await get('/v1/codex/history')).nativeHistory,record=history?.recorded,result=record?.result;
+      const entries=result?.entries??[];
+      const nativeReply=entries.some(e=>e.role==='assistant'&&e.text.trim()===reply&&e.ids.turnId===m.turnId&&e.ids.threadId===state.submittedMessages.threadId);
+      const nativePrompt=entries.some(e=>e.role==='user'&&e.text===prompt&&e.ids.turnId===m.turnId);
+      const eventReply=s.events?.filter(e=>e.type==='delta'&&e.turnId===m.turnId).map(e=>e.text).join('').trim()===reply;
+      const finished=s.thread?.turnId===m.turnId&&s.thread.turnStatus==='completed';
+      if(phase==='first'&&!(finished&&(eventReply||nativeReply)))return;
+      if(phase==='reopen'&&!(record?.provenance==='installed-cli'&&result.completeness==='complete'&&!result.truncated&&!result.gaps.length&&nativeReply&&nativePrompt))return;
+      const saved=library(visible);if(visible.library.preferences?.conversations?.length!==1||saved.length!==1||!visible.body.includes(prompt)||!visible.body.includes(reply))return;
+      terminal={outcome:'completed',dispatch:'completed',provenance:'installed-cli',isolation:'arcane-only-verified',nativeModel:null,nativeEffort:null,requestedSelectionAcknowledged:true,
+        requestSha256:digest(m.requestId),threadSha256:digest(state.submittedMessages.threadId),turnSha256:digest(m.turnId),conversationSha256:digest(saved[0].id),promptSha256:digest(prompt),replySha256:digest(reply),
+        uiSelectionVerified:true,nativeTurnVerified:true,persistedLibraryVerified:true,nativeHistoryVerified:phase==='reopen',auth:'subscription',reauthenticationAction:'unobserved',providerDescendantCleanup:'unobserved'};
+      write('result',terminal);complete=true;
+    } catch {if(complete){complete=false;failed=true;}else stop('OBSERVATION_UNAVAILABLE');}finally{busy=false;}
+  }
+  return {profile,prompt,start(){pin={window,session:projectSession,child,origin,frame:window.webContents.mainFrame,retired:false};window.webContents.on('did-start-navigation',(_event,_url,_inPlace,isMainFrame)=>{if(isMainFrame)pin.retired=true;});timer=setInterval(()=>void observe(),1000);timer.unref?.();void observe();},
+    async closed(clean){clearInterval(timer);write('closed',{outcome:complete?'completed':failed?'unsupported':'unresolved',rootExit:'normal',daemonClean:clean===true,providerDescendantCleanup:'unobserved',dispatch:terminal?.dispatch??(fs.existsSync(path.join(root,'armed.json'))?'armed-unknown':'not-armed')});}};
+}
+// ARCANE_CUSTOMER_CHAT_CHECK_V1_END
+
+const customerCheck = createCustomerCheck(args);
 const smoke = args[0] === '--arcane-smoke';
-if (args.length && (!smoke || args.length !== 2)) throw new Error('Only the bounded local smoke-check mode is accepted.');
+if (args.length && !customerCheck && (!smoke || args.length !== 2)) throw new Error('Only the bounded local smoke-check mode is accepted.');
 const smokeRoot = smoke ? policy.localPath(args[1]) : null;
 let profilePreparationFailed = false;
-if (smokeRoot) app.setPath('userData', policy.prepareSmokeDirectory(smokeRoot));
+if (customerCheck) { /* The closed diagnostic mode owns this separate profile. */ }
+else if (smokeRoot) app.setPath('userData', policy.prepareSmokeDirectory(smokeRoot));
 else { try { app.setPath('userData', policy.prepareUserDirectory(app.getPath('userData'), { appData: app.getPath('appData'), localAppData: process.env.LOCALAPPDATA })); } catch { profilePreparationFailed = true; } }
 const locked = !profilePreparationFailed && app.requestSingleInstanceLock();
 let window, child, origin = '', token = '', closing = false, switching = false, userRoot, productRoot, nodeExecutable, projectPath;
@@ -134,7 +271,7 @@ function closeDiagnostics() {
   })().catch(() => false).finally(() => { diagnosticClose = null; });
   return diagnosticClose;
 }
-async function exitAfterDiagnostics(code) { const clean = await closeDiagnostics(); app.exit(clean ? code : 1); }
+async function exitAfterDiagnostics(code) { const clean = await closeDiagnostics(); if(customerCheck)await customerCheck.closed(clean && code === 0).catch(()=>{}); app.exit(clean ? code : 1); }
 let studioPlugin;
 let projectPermissions;
 // Decisions (any question with more than one button: Claude tool consent, provider sign-in/terminal, plugin install,
@@ -978,7 +1115,7 @@ else {
         if (Object.keys(saved).sort().join(',') !== 'projectPath,version' || saved.version !== 1) throw new Error('Invalid project preference.'); selected = await policy.directPath(saved.projectPath);
       } catch (error) { if (error.code !== 'ENOENT' && !smoke) await dialog.showMessageBox({ type: 'warning', title: 'Saved project unavailable', message: 'Starting an empty local project. The saved preference was preserved; use File > Open project to choose a folder.' }); }
       if (!await startProjectRuntime(selected)) return;
-      await startClaudeChat(); makeWindow(); installMenu(); await loadWorkspace(); if (smoke) await checkSmoke();
+      await startClaudeChat(); makeWindow(); installMenu(); await loadWorkspace(); if (customerCheck) customerCheck.start(); if (smoke) await checkSmoke();
     } catch (error) { await failStartup(['ARCANE_PROJECT_PORT', 'ARCANE_STARTUP', 'ARCANE_PROJECT_IN_USE'].includes(error.code) ? error.message : 'Startup failed. Verify the complete app folder is present and its runtime is permitted by Windows. No security settings were changed.'); }
   });
 }
