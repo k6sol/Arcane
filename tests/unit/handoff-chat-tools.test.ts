@@ -14,6 +14,7 @@ import { createStudioTestService, type NativeTestConnection } from '../../apps/d
 import { createMcpServer } from '../../apps/mcp/src/server.js';
 import { DaemonClient } from '../../apps/mcp/src/daemon-client.js';
 import { StudioStore } from '../../packages/storage/src/studio-store.js';
+import {workflowProjectIdentity} from '../../packages/storage/src/workflow-store.js';
 import { WorkStore } from '../../packages/storage/src/work-store.js';
 import { encodeRgbPng } from '../../packages/studio-test-controller/src/viewport-image.js';
 import { VIEWPORT_CAMERA_READ_PROGRAM } from '../../packages/studio-test-controller/src/viewport.js';
@@ -79,7 +80,7 @@ async function fixture(t: TestContext, options: { heartbeat?: boolean } = {}) {
       return { placeId: 0, universeId: 0, placeName: s.name, sessionId: s.id, clientLifetimeId: s.clientSessionId, pluginArtifactHash: ARTIFACT };
     }, async close() { /* peers closed after the test */ } };
   };
-  const tests = await createStudioTestService({ directory: join(root, 'playtests'), store: studio, pluginArtifactHash: ARTIFACT, connect });
+  const tests = await createStudioTestService({ directory: join(root, 'playtests'), store: studio, custody: studio.bindNativeCustody(workflowProjectIdentity(project).projectId, join(root, 'studio')), pluginArtifactHash: ARTIFACT, connect });
   const lab = await createConnectionLab({ cwd: process.cwd(), stateDirectory: join(root, 'lab'), projectPath: project, studioStore: studio, workStore: work, assetService: assets,
     studioTestService: tests, codexConnect: async () => { throw new Error('No provider in this fixture.'); } });
   const agents: Client[] = [];

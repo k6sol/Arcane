@@ -15,6 +15,7 @@ import { createStudioTestService, type NativeTestConnection } from '../../apps/d
 import { studioTestRoutes, type StudioTestRouteService } from '../../apps/daemon/src/studio-test-routes.js';
 import { NATIVE_ASSET_RATE } from '../../apps/daemon/src/studio-native-assets.js';
 import { StudioStore } from '../../packages/storage/src/studio-store.js';
+import {workflowProjectIdentity} from '../../packages/storage/src/workflow-store.js';
 import { validateCommandArgs, sceneBuildInstanceCount } from '../../packages/core/src/studio-policy.js';
 import {recordReviewedOriginalRun} from '../helpers/asset-review-boundary-fixture.js';
 import { READ_METHODS, WRITE_METHODS,ASSET_STAGE_METHODS, type Json, type StudioSession } from '../../packages/protocol/src/studio.js';
@@ -233,7 +234,7 @@ async function serviceFixture(t: TestContext, options: { mode?: 'Edit' | 'Play';
       return { placeId: 0, universeId: 0, placeName: s.name, sessionId: s.id, clientLifetimeId: s.clientSessionId, pluginArtifactHash: ARTIFACT };
     }, async close() { options.afterNativeClose?.(); } };
   };
-  const service = await createStudioTestService({ directory: join(root, 'service'), store, pluginArtifactHash: ARTIFACT, connect });
+  const service = await createStudioTestService({ directory: join(root, 'service'), store, custody: store.bindNativeCustody(workflowProjectIdentity(root).projectId, join(root, 'store')), pluginArtifactHash: ARTIFACT, connect });
   if(options.allowModels!==false&&options.mode!=='Play')service.humanControl.toolboxPolicy({sessionId:pair.sessionId,allowModels:true},()=>{});
   t.after(async () => { await service.lifecycle.close(); store.close(); rmSync(root, { recursive: true, force: true }); });
   /** Plugin side of scene.asset_watch: a succeeded read receipt carrying the token. */

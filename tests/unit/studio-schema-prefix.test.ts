@@ -43,7 +43,9 @@ for(const version of [0,6] as const)for(const foreign of foreignNames)
     if(version===6)knownSchema(value);
     const db=new DatabaseSync(sqliteTransportPath(file));
     try {
-      // v6 has the same actual known table shapes as v7, with the historical
+      if(version===6)db.exec('DROP TABLE studio_native_custody;');
+      // Remove the v8 addition to retain the actual v6/v7 known table shapes,
+      // with the historical
       // metadata identity. v0 contains only the foreign table, exercising the
       // rows query independently of the known-schema object-count upper bound.
       db.exec(`PRAGMA application_id=0;PRAGMA user_version=${version};CREATE TABLE "${foreign}"(id INTEGER PRIMARY KEY,payload TEXT NOT NULL) STRICT;`);
@@ -67,7 +69,7 @@ test('known Studio v6 migrates with its real SQLite internal autoindexes retaine
   let db=new DatabaseSync(sqliteTransportPath(file));
   const internal=()=>db.prepare("SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE name GLOB 'sqlite_*' ORDER BY name").all();
   const before=(()=>{try {
-    db.exec('PRAGMA application_id=0;PRAGMA user_version=6');const rows=internal();
+    db.exec('DROP TABLE studio_native_custody;PRAGMA application_id=0;PRAGMA user_version=6');const rows=internal();
     assert.ok(rows.length>0,'real PRIMARY KEY/UNIQUE constraints create internal SQLite indexes');
     assert.ok(rows.every(row=>row.type==='index'&&row.sql===null&&String(row.name).startsWith('sqlite_autoindex_')));
     return rows;
@@ -76,8 +78,10 @@ test('known Studio v6 migrates with its real SQLite internal autoindexes retaine
   try{assert.deepEqual(reopened.sessions(),[]);}finally{reopened.close();}
   db=new DatabaseSync(sqliteTransportPath(file),{readOnly:true});
   try {
-    assert.equal(db.prepare('PRAGMA user_version').get()?.user_version,7);
+    assert.equal(db.prepare('PRAGMA user_version').get()?.user_version,8);
     assert.equal(db.prepare('PRAGMA application_id').get()?.application_id,0x41525354);
-    assert.deepEqual(internal(),before);
+    const after=internal();assert.deepEqual(after.filter(row=>row.tbl_name!=='studio_native_custody'),before);
+    const custody=after.filter(row=>row.tbl_name==='studio_native_custody');assert.equal(custody.length,1);
+    assert.ok(custody.every(row=>row.type==='index'&&row.sql===null&&String(row.name).startsWith('sqlite_autoindex_')));
   }finally{db.close();}
 });

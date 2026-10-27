@@ -15,6 +15,7 @@ import { decodeTestMode } from '../../apps/daemon/src/studio-test-decoders.js';
 import { createStudioTestService, type NativeTestConnection } from '../../apps/daemon/src/studio-test-service.js';
 import { studioTestRoutes, type StudioTestRouteService } from '../../apps/daemon/src/studio-test-routes.js';
 import { StudioStore } from '../../packages/storage/src/studio-store.js';
+import {workflowProjectIdentity} from '../../packages/storage/src/workflow-store.js';
 import { DaemonClient } from '../../apps/mcp/src/daemon-client.js';
 import { createMcpServer } from '../../apps/mcp/src/server.js';
 import { ARCANE_TOOL_NAMES } from '../../packages/protocol/src/arcane-tools.js';
@@ -194,7 +195,7 @@ async function serviceFixture(t: TestContext, options: { allowWrites?: boolean; 
       return { placeId: 0, universeId: 0, placeName: s.name, sessionId: s.id, clientLifetimeId: s.clientSessionId, pluginArtifactHash: ARTIFACT };
     }, async close() { closes++; } };
   };
-  const service = await createStudioTestService({ directory: join(root, 'service'), store, pluginArtifactHash: ARTIFACT, connect });
+  const service = await createStudioTestService({ directory: join(root, 'service'), store, custody: store.bindNativeCustody(workflowProjectIdentity(root).projectId, join(root, 'store')), pluginArtifactHash: ARTIFACT, connect });
   t.after(async () => { await service.lifecycle.close(); store.close(); rmSync(root, { recursive: true, force: true }); });
   return { service, pair, witnesses, closes: () => closes, natives: () => natives };
 }

@@ -3,12 +3,15 @@ import assert from 'node:assert/strict';
 import {rmSync,existsSync,writeFileSync} from 'node:fs';
 import {join,relative,isAbsolute} from 'node:path';
 import {createServer} from 'node:http';
+import {DatabaseSync} from 'node:sqlite';
+import {sqliteTransportPath} from '../../packages/storage/src/sqlite-path.js';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {Server} from '@modelcontextprotocol/sdk/server/index.js';
 import {InMemoryTransport} from '@modelcontextprotocol/sdk/inMemory.js';
 import {CallToolRequestSchema,ListToolsRequestSchema,type CallToolResult,type Tool} from '@modelcontextprotocol/sdk/types.js';
 import {createStudioTestService,type NativeTestConnection} from '../../apps/daemon/src/studio-test-service.js';
 import {StudioStore,type StudioTestTemporaryEdit} from '../../packages/storage/src/studio-store.js';
+import {workflowProjectIdentity} from '../../packages/storage/src/workflow-store.js';
 import {readTestLedger,reviewedTestTools,digest,TestLedger} from '../../packages/studio-test-controller/src/index.js';
 import {buildScenarioProgram} from '../../packages/studio-test-controller/src/scenario-runtime.js';
 import {fixtureScenario,fixtureLayoutScenario,runScenarioFixture,type ScenarioFixtureOptions} from '../../packages/studio-test-controller/testing/scenario-fixture.js';
@@ -52,8 +55,8 @@ const scenarioTools:Tool[]=[...structuredClone(reviewedTestTools),
   {name:'execute_luau',inputSchema:{type:'object',properties:{studio_id:{type:'string'},datamodel_type:{type:'string',enum:['Edit','Client','Server']},code:{type:'string'}},required:['studio_id','datamodel_type','code']}},
   {name:'screen_capture',inputSchema:{type:'object',properties:{studio_id:{type:'string'},capture_id:{type:'string'}},required:['studio_id','capture_id']}}];
 async function fixture(t:TestContext,options:{runtime?:ScenarioFixtureOptions;temporary?:boolean;capture?:boolean;queuedSetup?:boolean;failSecondSetup?:boolean;badRestore?:boolean;
-  taskPort?:StudioTestTaskPort;allowJournalFailure?:boolean;holdSetupAck?:boolean;holdInputAck?:boolean;inputErrorAck?:boolean;captureErrorAck?:boolean;fixtureClock?:boolean;connectionEvidence?:'fixture'|'native';mutateReport?:(report:ReturnType<typeof runScenarioFixture>['report'])=>void}={}){
-  const root=makeFixtureDirectory('arcane-scenario-service-'),directory=join(root,'playtests'),store=new StudioStore({directory:join(root,'store')});
+  root?:string;expectedCustodyCloseRefusal?:boolean;taskPort?:StudioTestTaskPort;allowJournalFailure?:boolean;holdSetupAck?:boolean;holdInputAck?:boolean;inputErrorAck?:boolean;captureErrorAck?:boolean;fixtureClock?:boolean;connectionEvidence?:'fixture'|'native';mutateReport?:(report:ReturnType<typeof runScenarioFixture>['report'])=>void}={}){
+  const root=options.root??makeFixtureDirectory('arcane-scenario-service-'),directory=join(root,'playtests'),store=new StudioStore({directory:join(root,'store')});
   const grant=store.createGrant({allowedRoots:['Workspace','ServerStorage'],allowWrites:true});
   const pair=store.pair({code:grant.code,protocolVersion:1,identity:{clientSessionId:'scenario-plugin-lifetime',placeId:0,universeId:0,name:NAME,pluginVersion:'fixture'},capabilities:[...READ_METHODS,...WRITE_METHODS]});
   const state={mode:'Edit' as 'Edit'|'Play',epoch:20,source:'print("fixture source")',pluginEnabled:!options.queuedSetup,polls:0,closes:0,setupEffects:0,restores:0,transparency:0,clientCalls:0,captures:0,inputRequests:0,inputEffects:0};
@@ -128,9 +131,9 @@ async function fixture(t:TestContext,options:{runtime?:ScenarioFixtureOptions;te
   // A max(last virtual time, wall time) clock freezes during an unaccelerated
   // observation tail and repeatedly schedules it until wall time catches up.
   const fixtureScheduler=observationClock();
-  const service=await createStudioTestService({directory,store,pluginArtifactHash:ARTIFACT,connect,
+  const service=await createStudioTestService({directory,store,custody:store.bindNativeCustody(workflowProjectIdentity(root).projectId,join(root,'store')),pluginArtifactHash:ARTIFACT,connect,
     ...(options.fixtureClock?{fixtureScheduler}:{}),...(options.taskPort?{taskPort:options.taskPort}:{})});
-  t.after(async()=>{inputAck.release();setupAck.release();clearInterval(timer);try{await service.lifecycle.close();for(const connection of connections)await connection.close();assert.equal(pluginFailure,undefined);}finally{store.close();const inside=relative(fixtureTempDirectory(),root);assert.ok(!isAbsolute(inside)&&inside.startsWith('arcane-scenario-service-')&&!inside.startsWith('..'));rmSync(root,{recursive:true,force:true});}});
+  t.after(async()=>{inputAck.release();setupAck.release();clearInterval(timer);try{if(options.expectedCustodyCloseRefusal)await assert.rejects(service.lifecycle.close(),{code:'SDK_CUSTODY_UNCONFIRMED'});else await service.lifecycle.close();for(const connection of connections)await connection.close();assert.equal(pluginFailure,undefined);}finally{store.close();const inside=relative(fixtureTempDirectory(),root);assert.ok(!isAbsolute(inside)&&inside.startsWith('arcane-scenario-service-')&&!inside.startsWith('..'));rmSync(root,{recursive:true,force:true});}});
   const prepare=(durationMs=5000)=>service.requests.prepare({sessionId:pair.sessionId,nativeStudioId:STUDIO,durationMs,observationIntervalMs:250,failOnRuntimeError:true,scenario:plan},ACTOR);
   const approve=(job:{id:string;displayDigest:string})=>service.humanControl.approve({id:job.id,displayDigest:job.displayDigest},()=>{});
   const status=(id:string)=>service.requests.status(id,ACTOR);
@@ -149,9 +152,16 @@ test('accelerated observation clock retains wall progress and real cleanup timer
 
 test('fixture observation clocks require explicit fixture transport and cannot replace native timing',async t=>{
   // The native evidence label is a boundary double; no native process is opened.
-  const f=await fixture(t,{fixtureClock:true,connectionEvidence:'native'});
+  const f=await fixture(t,{fixtureClock:true,connectionEvidence:'native',expectedCustodyCloseRefusal:true});
   await assert.rejects(f.prepare(),{code:'INVALID_REQUEST'});
   assert.equal(f.calls.length,0);assert.equal(f.state.closes,1);
+  const db=new DatabaseSync(sqliteTransportPath(join(f.root,'store','studio.sqlite')),{readOnly:true});
+  try {
+    const rows=db.prepare('SELECT payload FROM studio_native_custody').all();assert.equal(rows.length,1);
+    const payload=rows[0]?.payload;assert.equal(typeof payload,'string');const retained=JSON.parse(String(payload));
+    assert.equal(retained.projectId,workflowProjectIdentity(f.root).projectId);assert.equal(retained.evidence,'fixture');
+    assert.equal(retained.state,'quarantined');assert.equal(retained.settlement,null,'a native-labelled fixture cannot become native closure proof');
+  }finally{db.close();}
   const directory=join(f.root,'refused-clock');
   await assert.rejects(createStudioTestService({directory,store:f.store,pluginArtifactHash:ARTIFACT,
     fixtureScheduler:{now:Date.now,schedule(){assert.fail('A refused native clock must never schedule work.');}}}),{code:'INVALID_REQUEST'});
@@ -173,7 +183,7 @@ test('production service runs approved read-only assertions without virtual inpu
 });
 
 for(const failed of [false,true])test(`production service settles player attribute evidence with its original task and source digest: ${failed?'measured failure':'checkpoint changes'}`,{timeout:15000},async t=>{
-  const task=taskFixture(),f=await fixture(t,{capture:false,fixtureClock:true,taskPort:task.port,runtime:{inputUnavailable:true,attribute:{initial:1,...(failed?{}:{next:2,transition:'wait' as const})}}});
+  const task=taskFixture(),f=await fixture(t,{capture:false,fixtureClock:true,root:task.root,taskPort:task.port,runtime:{inputUnavailable:true,attribute:{initial:1,...(failed?{}:{next:2,transition:'wait' as const})}}});
   Object.assign(f.plan,{version:1,runtimeBudgetMs:300,targets:[],steps:[{id:'checkpoint',kind:'assert-player-attribute',attribute:'Checkpoint',equals:2,withinMs:100,requireTransition:true}],capture:{required:false}});
   const job=await f.prepare();assert.equal(f.state.clientCalls,0);await f.approve(job);await taskSettled(task,f,job.id);
   const report=f.status(job.id),row=report.review.scenario!.steps[0]!,packet=task.packets[0]!;assert.deepEqual(playtestJob.parse(report),report);
@@ -189,7 +199,7 @@ for(const failed of [false,true])test(`production service settles player attribu
 });
 
 for(const mutation of ['missing','server','wrong-name','contradiction']as const)test('native player attribute failure cannot authorize repair with '+mutation+' evidence',{timeout:15000},async t=>{
-  const task=taskFixture(),f=await fixture(t,{capture:false,taskPort:task.port,runtime:{attribute:{initial:1}},mutateReport(report){
+  const task=taskFixture(),f=await fixture(t,{capture:false,root:task.root,taskPort:task.port,runtime:{attribute:{initial:1}},mutateReport(report){
     const row=report.steps[0]!;
     if(mutation==='missing')delete row.attribute;
     else if(mutation==='server')Object.assign(row.attribute!,{context:'Server'});
@@ -204,7 +214,7 @@ for(const mutation of ['missing','server','wrong-name','contradiction']as const)
 });
 
 for(const failed of [false,true])test(`production service binds approved layout measurements to settled source-current task evidence: ${failed?'measured failure':'current layout passes'}`,{timeout:15000},async t=>{
-    const task=taskFixture(),f=await fixture(t,{capture:false,taskPort:task.port,runtime:{inputUnavailable:true,layout:failed?{width:60}:{}}});Object.assign(f.plan,fixtureLayoutScenario());
+    const task=taskFixture(),f=await fixture(t,{capture:false,root:task.root,taskPort:task.port,runtime:{inputUnavailable:true,layout:failed?{width:60}:{}}});Object.assign(f.plan,fixtureLayoutScenario());
     const job=await f.prepare();assert.deepEqual(playtestJob.parse(job),job);assert.equal(f.state.clientCalls,0);await f.approve(job);await taskSettled(task,f,job.id);
     const report=f.status(job.id),row=report.review.scenario!.steps[0]!,packet=task.packets[0]!;assert.deepEqual(playtestJob.parse(report),report);
     assert.equal(report.review.outcome,failed?'failed':'succeeded');assert.equal(report.review.code,failed?'ASSERTION_FAILED':'OK');assert.equal(report.review.cleanup,'complete');
@@ -217,7 +227,7 @@ for(const failed of [false,true])test(`production service binds approved layout 
 });
 
 for(const mutation of ['missing','null','string','contradiction','wrong-minimum','clip-overflow']as const)test(`native layout failures require measured metadata before they can become repair evidence: ${mutation}`,{timeout:15000},async t=>{
-    const task=taskFixture(),f=await fixture(t,{capture:false,taskPort:task.port,runtime:{layout:{width:60}},mutateReport(report){
+    const task=taskFixture(),f=await fixture(t,{capture:false,root:task.root,taskPort:task.port,runtime:{layout:{width:60}},mutateReport(report){
       const row=report.steps[0]!;
       if(mutation==='missing')delete row.layout;
       else if(mutation==='null'){delete row.layout;row.observed=null;}
@@ -303,16 +313,17 @@ test('restoration conflict preserves original measured scenario evidence and ret
 });
 
 function taskFixture(){
-  const origin:StudioTestTaskOrigin=Object.freeze({kind:'studio-test-task-origin',taskId:'fixture-task',projectId:'fixture-project',provider:'codex',threadId:'fixture-thread',sessionId:'fixture-session',incarnationId:'fixture-incarnation'});
+  const root=makeFixtureDirectory('arcane-scenario-service-'),projectId=workflowProjectIdentity(root).projectId;
+  const origin:StudioTestTaskOrigin=Object.freeze({kind:'studio-test-task-origin',taskId:'fixture-task',projectId,provider:'codex',threadId:'fixture-thread',sessionId:'fixture-session',incarnationId:'fixture-incarnation'});
   let revoked=false;const prepared:StudioTestTaskPrepared[]=[],packets:StudioTestTaskSettled[]=[],settled=gate();
   const port:StudioTestTaskPort=Object.freeze({capture(actor:string){assert.equal(actor,ACTOR);return origin;},assert(value:StudioTestTaskOrigin){if(value!==origin||revoked)throw new StudioTestError('HUMAN_AUTH_REQUIRED');},
     prepared(value:StudioTestTaskOrigin,packet:StudioTestTaskPrepared){assert.equal(value,origin);prepared.push(structuredClone(packet));},
     terminal(value:StudioTestTaskOrigin,packet:StudioTestTaskSettled){assert.equal(value,origin);packets.push(structuredClone(packet));settled.release();}});
-  return{origin,port,prepared,packets,settled:settled.promise,revoke(){revoked=true;}};
+  return{root,origin,port,prepared,packets,settled:settled.promise,revoke(){revoked=true;}};
 }
 
 test('private task evidence is settled once and revalidated from a fresh read-only connection after the requesting turn',{timeout:15000},async t=>{
-  const task=taskFixture(),f=await fixture(t,{capture:false,fixtureClock:true,taskPort:task.port}),job=await f.prepare();
+  const task=taskFixture(),f=await fixture(t,{capture:false,fixtureClock:true,root:task.root,taskPort:task.port}),job=await f.prepare();
   assert.equal(task.prepared.length,1);assert.deepEqual(task.prepared[0],{jobId:job.id,displayDigest:job.displayDigest,scenarioDigest:digest(f.plan),subjectDigest:job.display.proposal.subjectDigest});
   await f.approve(job);await taskSettled(task,f,job.id);const report=f.status(job.id),packet=task.packets[0]!;
   assert.equal(report.review.outcome,'succeeded');assert.equal(report.review.cleanup,'complete');assert.equal(packet.reportDigest,digest(report));
@@ -329,7 +340,7 @@ test('private task evidence is settled once and revalidated from a fresh read-on
 });
 
 test('revoked task origins cannot approve effects while the same private origin can still cancel its pending job',async t=>{
-  const task=taskFixture(),f=await fixture(t,{taskPort:task.port}),job=await f.prepare();task.revoke();
+  const task=taskFixture(),f=await fixture(t,{root:task.root,taskPort:task.port}),job=await f.prepare();task.revoke();
   await assert.rejects(f.approve(job),{code:'HUMAN_AUTH_REQUIRED'});
   await assert.rejects(f.service.cancelExact(job.id,structuredClone(task.origin)),{code:'HUMAN_AUTH_REQUIRED'});
   await f.service.cancelExact(job.id,task.origin);assert.equal(task.packets.length,1);assert.equal(task.packets[0]!.scenario!.requiredEvidence,'missing');
@@ -337,7 +348,7 @@ test('revoked task origins cannot approve effects while the same private origin 
 });
 
 test('private cancellation settles owned stop but refuses successor admission when original input ACK is unknown',{timeout:15000},async t=>{
-  const task=taskFixture(),f=await fixture(t,{taskPort:task.port,holdInputAck:true}),job=await f.prepare();await f.approve(job);await f.inputEntered.promise;task.revoke();
+  const task=taskFixture(),f=await fixture(t,{root:task.root,taskPort:task.port,holdInputAck:true}),job=await f.prepare();await f.approve(job);await f.inputEntered.promise;task.revoke();
   const stopping=assert.rejects(f.service.cancelExact(job.id,task.origin),{code:'FENCED'});await new Promise(resolve=>setTimeout(resolve,30));f.inputAck.release();await stopping;
   assert.equal(f.state.mode,'Edit');assert.equal(task.packets.length,1);assert.equal(task.packets[0]!.scenario!.inputRelease,'unknown');
   assert.equal(await f.service.revalidateExact(job.id,task.origin,task.packets[0]!.reportDigest),'unobserved');assert.equal(f.state.closes,1);

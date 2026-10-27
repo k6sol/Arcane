@@ -38,7 +38,7 @@ test('private reservation seals finite setup, derives exact inverse, and release
   assert.deepEqual((command.args.ref as unknown as {pathSegments:string[]}).pathSegments,['Part']);
   assert.equal(f.store.enqueueTestSetup(owner,'temporary-color').id,command.id);
   const db=new DatabaseSync(sqliteTransportPath(join(f.directory,'studio.sqlite')));
-  try{assert.equal(db.prepare("SELECT count(*) AS n FROM studio_test_reservations WHERE state='active'").get()?.n,1);assert.equal(db.prepare('SELECT command_id FROM studio_test_commands').get()?.command_id,command.id);assert.equal(db.prepare('PRAGMA user_version').get()?.user_version,7);}finally{db.close();}
+  try{assert.equal(db.prepare("SELECT count(*) AS n FROM studio_test_reservations WHERE state='active'").get()?.n,1);assert.equal(db.prepare('SELECT command_id FROM studio_test_commands').get()?.command_id,command.id);assert.equal(db.prepare('PRAGMA user_version').get()?.user_version,8);}finally{db.close();}
   assert.throws(()=>f.store.enqueue({sessionId:command.sessionId,requestId:command.requestId,method:command.method,args:command.args}),{code:'BUSY'});
   assert.throws(()=>f.store.releaseTest(command.sessionId,'owned-job'),{code:'TEST_RESERVATION'});
   assert.equal(f.observe()[0]?.id,command.id);f.ackSetup(command);
@@ -205,9 +205,9 @@ test('restart and an actual new process cannot recover private authority or repl
 test('v5 migration adds private journals without changing receipts and future versions remain untouched',t=>{
   const f=fixture(t);const command=f.store.enqueue({sessionId:f.paired.sessionId,requestId:'migration-read-01',method:'selection.read',args:{}});f.store.poll(f.paired.sessionId);f.store.result({sessionId:f.paired.sessionId,commandId:command.id,state:'succeeded',result:{items:[]}});
   const before=f.store.command(command.id);f.store.close();const filename=sqliteTransportPath(join(f.directory,'studio.sqlite'));
-  let db=new DatabaseSync(filename);try{db.exec('DROP TABLE studio_test_commands; DROP TABLE studio_test_reservations; PRAGMA application_id=0; PRAGMA user_version=5;');}finally{db.close();}
+  let db=new DatabaseSync(filename);try{db.exec('DROP TABLE studio_native_custody; DROP TABLE studio_test_commands; DROP TABLE studio_test_reservations; PRAGMA application_id=0; PRAGMA user_version=5;');}finally{db.close();}
   f.reopen();assert.deepEqual(f.store.command(command.id),before);f.store.close();
-  db=new DatabaseSync(filename);try{assert.equal(db.prepare('PRAGMA user_version').get()?.user_version,7);assert.equal(db.prepare('SELECT count(*) AS n FROM studio_test_reservations').get()?.n,0);db.exec('PRAGMA user_version=8;');}finally{db.close();}
+  db=new DatabaseSync(filename);try{assert.equal(db.prepare('PRAGMA user_version').get()?.user_version,8);assert.equal(db.prepare('SELECT count(*) AS n FROM studio_test_reservations').get()?.n,0);db.exec('PRAGMA user_version=9;');}finally{db.close();}
   assert.throws(()=>new StudioStore({directory:f.directory}),{code:'MIGRATION'});
-  db=new DatabaseSync(filename);try{assert.equal(db.prepare('PRAGMA user_version').get()?.user_version,8);assert.equal(db.prepare('SELECT payload FROM commands WHERE id=?').get(command.id)?.payload,JSON.stringify(before));}finally{db.close();}
+  db=new DatabaseSync(filename);try{assert.equal(db.prepare('PRAGMA user_version').get()?.user_version,9);assert.equal(db.prepare('SELECT payload FROM commands WHERE id=?').get(command.id)?.payload,JSON.stringify(before));}finally{db.close();}
 });

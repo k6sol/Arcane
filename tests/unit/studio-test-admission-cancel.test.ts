@@ -10,6 +10,7 @@ import { fixture } from '../../packages/studio-test-controller/tests/harness.js'
 import { TestLedger, readTestLedger, reviewedTestTools } from '../../packages/studio-test-controller/src/index.js';
 import { createStudioTestService, type NativeTestConnection } from '../../apps/daemon/src/studio-test-service.js';
 import { StudioStore } from '../../packages/storage/src/studio-store.js';
+import {workflowProjectIdentity} from '../../packages/storage/src/workflow-store.js';
 import { fixtureTempDirectory, makeFixtureDirectory } from './windows-fixture-paths.js';
 
 // Real controller, fsynced ledger, SDK and service paths with synthetic native
@@ -120,7 +121,7 @@ test('production service cancel joins admitting run cleanup, releases the reserv
     },
     async close() { if (closes) return; closes++; await client.close(); await server.close(); },
   };
-  const service = await createStudioTestService({ directory, store, pluginArtifactHash: ARTIFACT, connect: async () => connection });
+  const service = await createStudioTestService({ directory, store, custody: store.bindNativeCustody(workflowProjectIdentity(root).projectId, join(root, 'store')), pluginArtifactHash: ARTIFACT, connect: async () => connection });
   t.after(async () => {
     try { await service.lifecycle.close(); await connection.close(); }
     finally {

@@ -83,6 +83,9 @@ export interface ViewportCaptureOptions {
   verifyBinding(signal: AbortSignal): Promise<string>;
   /** Verified native get_studio_state decoder. */
   decodeMode(result: CallToolResult): { mode: 'Edit' | 'Play' };
+  /** Host-only effect admission immediately before each native capture. Camera
+   * observation/restoration remains available under its original ownership. */
+  admissionGuard?: () => void;
   scheduler?: Scheduler; requestTimeoutMs?: number; captureTimeoutMs?: number;
 }
 
@@ -134,8 +137,11 @@ export async function captureEditViewport(options: ViewportCaptureOptions, signa
   for (const value of [timeout, captureTimeout]) if (!Number.isInteger(value) || value < 1 || value > 30_000) fail('INVALID_REQUEST');
   const studio = options.nativeStudioId, client = options.client;
   const call = async (name: string, args: Record<string, unknown>, local: AbortSignal, limitMs = timeout): Promise<CallToolResult> =>
-    parse(CallToolResultSchema, await bounded(scheduler, limitMs, local, inner => client.callTool({ name, arguments: args }, CallToolResultSchema,
-      { signal: inner, timeout: limitMs, maxTotalTimeout: limitMs, resetTimeoutOnProgress: false })), 'BAD_NATIVE_RESPONSE');
+    parse(CallToolResultSchema, await bounded(scheduler, limitMs, local, inner => {
+      if (name === 'screen_capture') options.admissionGuard?.();
+      return client.callTool({ name, arguments: args }, CallToolResultSchema,
+        { signal: inner, timeout: limitMs, maxTotalTimeout: limitMs, resetTimeoutOnProgress: false });
+    }), 'BAD_NATIVE_RESPONSE');
   const text = (result: CallToolResult): string => {
     const item = result.content[0];
     if (result.isError || result.content.length !== 1 || item?.type !== 'text' || Buffer.byteLength(item.text) > 4096) fail('BAD_NATIVE_RESPONSE');

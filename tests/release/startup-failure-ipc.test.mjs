@@ -157,7 +157,7 @@ test('startup evidence projection never invokes accessors, proxies or arbitrary 
 
 test('actual daemon reports newer saved state over IPC without changing retained files',async t=>{
   const f=await fixture(t),path=join(f.state,'studio.sqlite');
-  const db=new DatabaseSync(path);db.exec('PRAGMA user_version=8');db.close();
+  const db=new DatabaseSync(path);db.exec('PRAGMA user_version=9');db.close();
   const before=await readFile(path);
   reported(await start(f),'STATE_NEWER');assert.deepEqual(await readFile(path),before);
 });

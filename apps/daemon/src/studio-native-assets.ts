@@ -21,7 +21,8 @@ function rejected(code:'BUSY'|'STALE_PROOF'|'BINDING_CHANGED'|'HUMAN_AUTH_REQUIR
 interface Job{id:string;actor:string;sessionId:string;nativeStudioId:string;kind:'mesh'|'material'|'texture';nativeJobId:string|null;state:JobState;
   refusal:NativeRefusal|null;watch:string|null;materialVariant:string|null;baseMaterial:string|null;createdAt:number}
 export interface NativeAssetDependencies{
-  store:StudioStore;pluginArtifactHash:string;connect:()=>Promise<NativeTestConnection>;fixtureScheduler?:Scheduler;
+  store:StudioStore;pluginArtifactHash:string;connect:(operation:'asset-search'|'asset-insert'|'asset-job')=>Promise<NativeTestConnection>;fixtureScheduler?:Scheduler;
+  assertCurrent?:(connection:NativeTestConnection)=>void;assertReady?:()=>void;
   /** Exact eligible pairing (unpublished place, write grant) or a thrown refusal. */
   eligible(sessionId:string):Session;identity(session:Session):string;
   /** True while a playtest, preparation or viewport capture owns the native connection. */
@@ -49,38 +50,41 @@ export function createNativeAssetRequests(deps:NativeAssetDependencies){
     if(list.length>=NATIVE_ASSET_RATE[kind])throw new NativeAssetHostRefusal('RATE_LIMITED');
     list.push(now);
   };
-  const idle=()=>{if(active||deps.busy())rejected('BUSY');};
+  const idle=()=>{deps.assertReady?.();if(active||deps.busy())rejected('BUSY');};
   const actorOk=(actor:string)=>{if(!/^[A-Za-z0-9_-]{1,128}$/.test(actor))rejected('HUMAN_AUTH_REQUIRED');};
   const current=(request?:NativeAssetRequestScope)=>{request?.guard();request?.signal.throwIfAborted();};
   const watched=(session:Session,watch:string)=>deps.store.commands(session.id).some(command=>command.method==='scene.asset_watch'&&command.state==='succeeded'
     &&command.finishedAt!==null&&Date.now()-Date.parse(command.finishedAt)<=600_000&&(command.result as {watch?:unknown}|null)?.watch===watch);
   /** Bracket one operation with the exact paired session's native binding. */
-  const withNative=async<T>(sessionId:string,requested:string|undefined,deadlineMs:number,action:(context:NativeAssetContext,session:Session,nativeStudioId:string,signal:AbortSignal)=>Promise<T>,policy:()=>void=()=>{},request?:NativeAssetRequestScope):Promise<T>=>{
-    current(request);
+  const withNative=async<T>(operation:'asset-search'|'asset-insert'|'asset-job',sessionId:string,requested:string|undefined,deadlineMs:number,action:(context:NativeAssetContext,session:Session,nativeStudioId:string,signal:AbortSignal)=>Promise<T>,policy:()=>void=()=>{},request?:NativeAssetRequestScope):Promise<T>=>{
+    current(request);deps.assertReady?.();
     if(active||deps.busy())rejected('BUSY');
     const session=deps.eligible(sessionId),p=session.proof;
     if(!p||!p.connected||p.pluginArtifactHash!==deps.pluginArtifactHash||Date.parse(p.expiresAt)<=Date.now())rejected('STALE_PROOF');
     if(p.mode!=='Edit')throw new StudioTestError('MODE_MISMATCH');
-    active=true;let connection:NativeTestConnection|undefined;
+    active=true;let connection:NativeTestConnection|undefined,failed=false;
     try{
-      connection=await deps.connect();
-      current(request);
+      connection=await deps.connect(operation);
+      deps.assertCurrent?.(connection);current(request);
       if(deps.fixtureScheduler&&connection.evidence!=='fixture')rejected('INVALID_REQUEST');
       const native=connection,timeout=AbortSignal.timeout(deadlineMs),signal=request?AbortSignal.any([timeout,request.signal]):timeout;
       const inventory=decodeTestInventory(await native.client.callTool({name:'list_roblox_studios',arguments:{}},CallToolResultSchema,{signal,timeout:5000,maxTotalTimeout:5000})) as {id:string;name:string}[];
+      deps.assertCurrent?.(native);
       const candidates=requested?inventory.filter(s=>s.id===requested):inventory.filter(s=>s.name===session.name);
       if(candidates.length!==1)rejected('BINDING_CHANGED');
       const nativeStudioId=candidates[0]!.id,scope=deps.identity(session);
       const verifyBinding=async(local:AbortSignal)=>{
+        deps.assertCurrent?.(native);
         const s=deps.eligible(session.id),proof=s.proof;
         if(!proof||!proof.connected||proof.mode!=='Edit'||Date.parse(proof.expiresAt)<=Date.now()||proof.clientLifetimeId!==p.clientLifetimeId||proof.pluginArtifactHash!==deps.pluginArtifactHash||proof.markerName!==p.markerName||deps.identity(s)!==scope)rejected('BINDING_CHANGED');
         const witness=await native.witness(nativeStudioId,proof.markerName,'Edit',local);
+        deps.assertCurrent?.(native);
         if(witness.placeId!==0||witness.universeId!==s.universeId||witness.sessionId!==s.id||witness.clientLifetimeId!==s.clientSessionId||witness.pluginArtifactHash!==deps.pluginArtifactHash)rejected('BINDING_CHANGED');
         return digest({scope,nativeStudioId,clientLifetimeId:proof.clientLifetimeId,playEpoch:proof.playEpoch,markerName:proof.markerName});
       };
-      const context:NativeAssetContext={client:native.client,nativeStudioId,verifyBinding,authorize:()=>{current(request);policy();},...(request?{dispatched:request.dispatched}:{}),decodeMode:decodeTestMode,...(deps.fixtureScheduler?{scheduler:deps.fixtureScheduler}:{})};
-      return await action(context,session,nativeStudioId,signal);
-    }finally{active=false;if(connection)await connection.close().catch(()=>{});}
+      const context:NativeAssetContext={client:native.client,nativeStudioId,verifyBinding,authorize:()=>{deps.assertCurrent?.(native);current(request);policy();},...(request?{dispatched:request.dispatched}:{}),decodeMode:decodeTestMode,...(deps.fixtureScheduler?{scheduler:deps.fixtureScheduler}:{})};
+      const result=await action(context,session,nativeStudioId,signal);deps.assertCurrent?.(native);return result;
+    }catch(error){failed=true;throw error;}finally{try{if(connection)await connection.close();}catch(error){if(!failed)throw error;}finally{active=false;}}
   };
   const view=(job:Job)=>({job:{jobId:job.id,kind:job.kind,state:job.state,sessionId:job.sessionId,nativeStudioId:job.nativeStudioId,
     watch:job.watch,materialVariant:job.state==='completed'?job.materialVariant:null,baseMaterial:job.baseMaterial,
@@ -100,7 +104,7 @@ export function createNativeAssetRequests(deps:NativeAssetDependencies){
     /** Read-only Creator Store/inventory search: free results only, bounded pages. */
     async search(input:unknown,actor:string,request?:NativeAssetRequestScope){
       actorOk(actor);current(request);const a=nativeAssetSearchSchema.parse(input);if(a.category!=='Audio')requireModels(a.sessionId);prune();idle();admit('search');
-      return withNative(a.sessionId,a.nativeStudioId,DEADLINE.search,async(context,session,nativeStudioId,signal)=>{
+      return withNative('asset-search',a.sessionId,a.nativeStudioId,DEADLINE.search,async(context,session,nativeStudioId,signal)=>{
         const found=await searchNativeAssets(context,a,signal);
         // Audio ids are Sound.SoundId values only; they never become insertable.
         for(const item of a.category==='Audio'?[]:found.results){
@@ -116,7 +120,7 @@ export function createNativeAssetRequests(deps:NativeAssetDependencies){
       if((searched.get(a.sessionId+':'+actor+':'+a.assetId)??0)<=Date.now())throw new NativeAssetHostRefusal('ASSET_NOT_SEARCHED');
       if(!watched(deps.eligible(a.sessionId),a.watch))throw new NativeAssetHostRefusal('ASSET_WATCH_REQUIRED');
       idle();admit('insert');
-      return withNative(a.sessionId,a.nativeStudioId,DEADLINE.insert,async(context,session,nativeStudioId,signal)=>{
+      return withNative('asset-insert',a.sessionId,a.nativeStudioId,DEADLINE.insert,async(context,session,nativeStudioId,signal)=>{
         const inserted=await insertNativeAsset(context,a,signal);
         return {insert:{sessionId:session.id,nativeStudioId,assetId:a.assetId,assetName:inserted.assetName,acknowledgement:inserted.outcome}};
       },()=>requireModels(a.sessionId),request);
@@ -133,7 +137,7 @@ export function createNativeAssetRequests(deps:NativeAssetDependencies){
       const job=jobs.get(a.jobId);
       if(!job||!(actor==='human'||actor===job.actor))throw new NativeAssetHostRefusal('ASSET_JOB_NOT_FOUND');
       if(job.state!=='running'||!job.nativeJobId)return view(job);
-      return withNative(job.sessionId,job.nativeStudioId,DEADLINE.job,async(context,_session,nativeStudioId,signal)=>{
+      return withNative('asset-job',job.sessionId,job.nativeStudioId,DEADLINE.job,async(context,_session,nativeStudioId,signal)=>{
         if(nativeStudioId!==job.nativeStudioId)rejected('BINDING_CHANGED');
         const waited=await waitNativeJob(context,job.nativeJobId!,18_000,signal);job.state=waited.state;job.refusal=waited.refusal;
         return view(job);

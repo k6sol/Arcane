@@ -1,3 +1,4 @@
+import {SDK_CUSTODY_UNCONFIRMED_MESSAGE} from './studio-test-native-custody.js';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { StudioTestService } from './studio-test-service.js';
 import {scenarioPlanSchema,SCENARIO_LIMITS,type ScenarioPlan} from '../../../packages/studio-test-controller/src/scenario.js';
@@ -73,6 +74,7 @@ const ERRORS: Readonly<Record<string, readonly [number, string]>> = {
   MODE_MISMATCH: [409, 'The Studio play mode changed.'],
   NOT_OWNED_PLAY: [409, 'This play session is not owned by the test.'],
   FENCED: [409, 'The previous test requires human reconciliation.'],
+  SDK_CUSTODY_UNCONFIRMED: [409, SDK_CUSTODY_UNCONFIRMED_MESSAGE],
   DISCONNECTED: [503, 'The Studio connection is unavailable.'],
   SHUTDOWN: [503, 'The playtest service is closing.'],
   JOURNAL_FAILED: [503, 'The playtest journal is unavailable.'],

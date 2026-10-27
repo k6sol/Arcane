@@ -3,7 +3,7 @@ import { StudioTestError } from '../../../packages/studio-test-controller/src/in
 export const STUDIO_TEST_OWNED_CLOSE_MS = 5000;
 interface CloseClient { close(): Promise<void> }
 interface CloseTransport extends CloseClient { onclose?: () => void }
-export interface StudioTestOwnedClose { close(): Promise<void> }
+export interface StudioTestOwnedClose { readonly physicalClosed: Promise<void>; close(): Promise<void> }
 
 /** Fresh host-owned SDK objects only. Install before Client.connect so the SDK
  * chains this callback into its own pending-request and client-close handling.
@@ -34,12 +34,12 @@ export function createStudioTestOwnedClose(client: CloseClient, transport: Close
       if (result !== 'closed') throw new StudioTestError('FENCED');
     } finally { if (timer !== undefined) clearTimeout(timer); }
   };
-  return Object.freeze({ close(): Promise<void> { return pending ??= join(); } });
+  return Object.freeze({ physicalClosed: physicallyClosed, close(): Promise<void> { return pending ??= join(); } });
 }
 
 /** Failed initialization retains its original error identity after bounded
  * owned cleanup. Cleanup failure never substitutes a different connect result. */
-export async function closeAfterStudioTestConnectFailure(owned: StudioTestOwnedClose, error: unknown): Promise<never> {
+export async function closeAfterStudioTestConnectFailure(owned: Pick<StudioTestOwnedClose, 'close'>, error: unknown): Promise<never> {
   try { await owned.close(); } catch { /* Original connect failure remains authoritative. */ }
   throw error;
 }

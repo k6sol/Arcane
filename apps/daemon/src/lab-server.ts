@@ -25,7 +25,8 @@ import { TestLedger } from '../../../packages/studio-test-controller/src/ledger.
 import { ArcaneError, type Connection, type Selection } from '../../../packages/protocol/src/providers.js';
 import { validateSelection, SelectionStore } from '../../../packages/core/src/selection.js';
 import { discoverProviders } from '../../../packages/model-adapters/src/discovery.js';
-import type { StudioStore } from '../../../packages/storage/src/studio-store.js';
+import type { StudioStore,StudioNativeCustodyPort } from '../../../packages/storage/src/studio-store.js';
+import {SDK_CUSTODY_UNCONFIRMED_MESSAGE,captureStudioTestNativeProject} from './studio-test-native-custody.js';
 import { studioRoutes } from './studio-routes.js';
 import type { WorkStore } from '../../../packages/storage/src/work-store.js';
 import type { AssetService } from './asset-service.js';
@@ -49,6 +50,7 @@ import { createMeshKeep } from './mesh-keep-routes.js';
 import { createImportedAssets } from './imported-assets.js';
 
 const unavailableTestMessages = {
+  SDK_CUSTODY_UNCONFIRMED: SDK_CUSTODY_UNCONFIRMED_MESSAGE,
   UNAVAILABLE: 'Playtests are unavailable because the trusted plugin source could not be verified. Repair the local plugin build artifacts and restart Arcane before requesting a test.',
   FENCED: 'Playtests, viewport capture and Studio asset tools are paused: Arcane kept the records of an earlier playtest that did not finish cleanly. Ask the user to stop any running playtest in Studio and click "Repair playtest records" in the Playtests panel, then try again. Do not delete the journal or writer lock.',
 } as const;
@@ -63,7 +65,7 @@ function unavailableStudioTestRoutes(code: keyof typeof unavailableTestMessages,
     lifecycle: { async close() {} },
   };
   const route = studioTestRoutes(service, resolveActor);
-  const status = code === 'FENCED' ? 409 : 503;
+  const status = code === 'FENCED'||code==='SDK_CUSTODY_UNCONFIRMED' ? 409 : 503;
   const json = JSON.stringify({ error: code, message: unavailableTestMessages[code] });
   const bytes = Buffer.byteLength(json);
   if (bytes > STUDIO_TEST_HTTP_LIMITS.responseBytes) throw new ArcaneError('RESPONSE_LIMIT', 'Playtest recovery guidance exceeds the response bound.');
@@ -163,6 +165,8 @@ export async function createConnectionLab(options: Options) {
   let testHistoryEpoch = 0;
   // Playtest journal repair (human only): set when the owned service is fenced by retained records.
   let testsFenced = false, repairingTests = false;
+  let nativeTestCustody:StudioNativeCustodyPort|undefined;
+  let assertNativeTestProject:(()=>void)|undefined;
   let openOwnedTests: (() => Promise<boolean>) | null = null, exclusiveTestWriter: (() => boolean) | null = null;
   const native = options.studioStore ? nativeRoutes() : null;
   const learning = options.learningService ? learningRoutes(options.learningService) : null;
@@ -235,7 +239,9 @@ export async function createConnectionLab(options: Options) {
       // Only this daemon can write the journal when its StudioStore holds the project's exclusive
       // workspace lock and the playtest state lives inside that project directory.
       exclusiveTestWriter=()=>studioStore.holdsWorkspaceLock(dirname(options.stateDirectory));
-      const testProjectId=workflowProjectIdentity(options.projectPath??options.cwd).projectId;
+      const testProject=captureStudioTestNativeProject(options.projectPath??options.cwd),testProjectId=testProject.projectId;
+      assertNativeTestProject=testProject.assertCurrent;
+      try{nativeTestCustody=studioStore.bindNativeCustody(testProjectId,dirname(options.stateDirectory));}catch{/* History remains independently readable; native admission refuses below. */}
       const archiveUnavailable=Object.freeze({state:'unavailable',code:'ARCHIVE_UNAVAILABLE'} as const);
       try {
         testReports=await openStudioTestReportStore({directory:join(options.stateDirectory,'playtest-reports'),
@@ -278,17 +284,21 @@ export async function createConnectionLab(options: Options) {
         if(codex?.playtestTasks&&tests.cancelExact&&tests.revalidateExact)codex.attachPlaytestCancellation?.(Object.freeze({cancelExact:tests.cancelExact,revalidateExact:tests.revalidateExact}));
       };
       openOwnedTests=async()=>{
-        let unavailableCode: keyof typeof unavailableTestMessages = 'UNAVAILABLE';
+        let unavailableCode: keyof typeof unavailableTestMessages = 'SDK_CUSTODY_UNCONFIRMED';
         try{
+          const custody=nativeTestCustody;if(!custody)throw new ArcaneError('SDK_CUSTODY_UNCONFIRMED',SDK_CUSTODY_UNCONFIRMED_MESSAGE);
+          testProject.assertCurrent();custody.assertReady();
+          unavailableCode='UNAVAILABLE';
           // Match the actual loaded Script/ModuleScript identity used by the
           // plugin's continuity proof, rather than a delivery-file checksum.
           const pluginArtifactHash=await studioImportPluginArtifactHash(options.cwd);
+          unavailableCode='SDK_CUSTODY_UNCONFIRMED';testProject.assertCurrent();custody.assertReady();
           // Once source verification passes, a failed journal initialization is
           // retained state. Only a provably abandoned writer lock with fully
           // verified, resolved records is cleared (inside TestLedger.open);
           // everything else waits for the human "Repair playtest records" action.
           unavailableCode='FENCED';
-          ownedTests=await createStudioTestService({directory:join(options.stateDirectory,'playtests'),store:studioStore,pluginArtifactHash,
+          ownedTests=await createStudioTestService({directory:join(options.stateDirectory,'playtests'),store:studioStore,pluginArtifactHash,custody,assertProject:testProject.assertCurrent,
             exclusiveWriter:exclusiveTestWriter!,
             ...(testReports?{reports:testReports}:{}),
             ...(options.studioTestConnect?{connect:options.studioTestConnect}:{}),
@@ -381,11 +391,15 @@ export async function createConnectionLab(options: Options) {
     if (!input || typeof input !== 'object' || Object.keys(input).join(',') !== 'confirm' || input.confirm !== 'studio-in-edit-mode') {
       send(response, 400, { error: 'INVALID_REQUEST', message: 'Confirm that Studio is back in Edit mode.' }); return true;
     }
+    const custody=nativeTestCustody,checkProject=assertNativeTestProject;
+    try{if(!custody||!checkProject)throw new Error();checkProject();custody.assertReady();}
+    catch{send(response,409,{error:'SDK_CUSTODY_UNCONFIRMED',message:SDK_CUSTODY_UNCONFIRMED_MESSAGE});return true;}
     if (!testsFenced) { send(response, 409, { error: 'NOT_FENCED', message: 'Playtest records are already healthy.' }); return true; }
     if (repairingTests) { send(response, 409, { error: 'BUSY', message: 'A repair is already running.' }); return true; }
     repairingTests = true;
     try {
       const root = await realpath(join(options.stateDirectory, 'playtests'));
+      try{if(!checkProject||!custody)throw new Error();checkProject();custody.assertReady();}catch{send(response,409,{error:'SDK_CUSTODY_UNCONFIRMED',message:SDK_CUSTODY_UNCONFIRMED_MESSAGE});return true;}
       let retained: string;
       try { retained = await TestLedger.retainForRepair(join(root, 'ledger'), root, join(options.stateDirectory, 'playtests-retained'), { exclusiveWriter: exclusiveTestWriter }); }
       catch { send(response, 409, { error: 'FENCED', message: 'Arcane could not set the earlier playtest records aside. Close other Arcane windows for this project and try again.' }); return true; }

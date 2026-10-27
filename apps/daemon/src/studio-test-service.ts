@@ -6,7 +6,7 @@ import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
 import {CallToolResultSchema,type CallToolResult} from '@modelcontextprotocol/sdk/types.js';
 import {discoverNativeStudioExecutable} from '../../../packages/studio-adapter/src/discovery.js';
-import {StudioStore,type StudioTestReservation} from '../../../packages/storage/src/studio-store.js';
+import {StudioStore,type StudioTestReservation,type StudioNativeCustodyPort,type StudioNativeCustodyOperation} from '../../../packages/storage/src/studio-store.js';
 import {validateCommandArgs} from '../../../packages/core/src/studio-policy.js';
 import {createStudioTestControl,NativeTestAdapter,TestLedger,digest,StudioTestError,type ConsentDisplay,type TestBinding,type TestReview,type Scheduler} from '../../../packages/studio-test-controller/src/index.js';
 import {decodeTestInventory,decodeTestState,decodeTestMode,decodeTestLogs,decodeTestFocus} from './studio-test-decoders.js';
@@ -16,7 +16,8 @@ import {scenarioSubjectDigest,scenarioSubjectProgram} from './studio-test-subjec
 import {captureEditViewport,viewportRequestSchema,VIEWPORT_LIMITS} from '../../../packages/studio-test-controller/src/viewport.js';
 import {createNativeAssetRequests} from './studio-native-assets.js';
 import type {StudioTestTaskPort,StudioTestTaskOrigin,StudioTestTaskSettled} from '../../../packages/protocol/src/chat-task-playtest.js';
-import {createStudioTestOwnedClose,closeAfterStudioTestConnectFailure} from './studio-test-owned-close.js';
+import {createStudioTestOwnedClose} from './studio-test-owned-close.js';
+import {createStudioTestNativeCustody,closeAfterStudioTestNativeConnectFailure,type StudioTestNativeConnectAttempt} from './studio-test-native-custody.js';
 import {createStudioTestHistoricalReport,StudioTestReportError,STUDIO_TEST_REPORT_ARCHIVE_CODES,type StudioTestReportWriter,type StudioTestReportArchiveStatus} from './studio-test-report-store.js';
 
 const id=z.string().regex(/^[A-Za-z0-9_-]{1,128}$/), hash=z.string().regex(/^[a-f0-9]{64}$/);
@@ -26,6 +27,10 @@ const witnessSchema=z.strictObject({placeId:z.number().int().nonnegative(),unive
 type Witness=z.infer<typeof witnessSchema>;
 export interface NativeTestConnection {client:Client;evidence:'native'|'fixture';witness(studioId:string,markerName:string,mode:'Edit'|'Play',signal:AbortSignal):Promise<Witness>;close():Promise<void>}
 interface Options {directory:string;store:StudioStore;pluginArtifactHash:string;connect?:()=>Promise<NativeTestConnection>;taskPort?:StudioTestTaskPort;
+  /** Original fixed-project StudioStore custody port. Absence never permits native dispatch. */
+  custody?:StudioNativeCustodyPort;
+  /** Actual original LAB project identity guard; never supplied by HTTP. */
+  assertProject?:()=>void;
   /** Trusted host proof that this process is the only possible journal writer (the project workspace lock). Never HTTP input. */
   exclusiveWriter?:()=>boolean;
   /** Trusted fixture clock only; never request data and never accepted for a native connection. */
@@ -41,16 +46,22 @@ function rejected(code:'INVALID_REQUEST'|'BINDING_CHANGED'|'BUSY'|'PLACE_DENIED'
 
 /** Dedicated vetted SDK client. The only additional execution is this fixed
  * read-only metadata witness; no caller Luau, paths, flags or URLs are accepted. */
-async function connectNativeTest(maxBufferSize:number=SCENARIO_LIMITS.wireBytes):Promise<NativeTestConnection>{
+async function connectNativeTest(attempt:StudioTestNativeConnectAttempt,maxBufferSize:number=SCENARIO_LIMITS.wireBytes):Promise<NativeTestConnection>{
+  let launched=false,ownedClose:ReturnType<typeof createStudioTestOwnedClose>|undefined;
+  try{
   const executable=await discoverNativeStudioExecutable();
+  attempt.assertCurrent();
   const transport=new StdioClientTransport({command:executable.path,args:[],cwd:dirname(executable.path),stderr:'ignore',maxBufferSize});
   const client=new Client({name:'arcane-owned-playtest',version:'0.1.0'},{capabilities:{}});
-  const ownedClose=createStudioTestOwnedClose(client,transport);
-  try{
+  const close=createStudioTestOwnedClose(client,transport);ownedClose=close;
+  attempt.observePhysicalClose(close.physicalClosed);
+  attempt.launchAttempted();launched=true;
     await client.connect(transport,{timeout:10000,maxTotalTimeout:10000});
+    attempt.assertCurrent();
     if(client.getServerVersion()?.name!=='RobloxStudio')rejected('BAD_NATIVE_RESPONSE');
     // Query the real advertised witness schema before ever using privileged code.
     const inventory=await client.listTools({}, {timeout:5000,maxTotalTimeout:5000});
+    attempt.assertCurrent();
     const tool=inventory.tools.find(t=>t.name==='execute_luau');
     if(inventory.nextCursor||inventory.tools.length>128||!tool||tool.inputSchema.type!=='object'||!['code','studio_id','datamodel_type'].every(k=>tool.inputSchema.required?.includes(k)))rejected('BAD_NATIVE_RESPONSE');
     return {client,evidence:'native',async witness(studioId,markerName,mode,signal){
@@ -60,8 +71,12 @@ async function connectNativeTest(maxBufferSize:number=SCENARIO_LIMITS.wireBytes)
       const result=CallToolResultSchema.parse(await client.callTool({name:'execute_luau',arguments:{studio_id:studioId,datamodel_type:mode==='Edit'?'Edit':'Server',code}},CallToolResultSchema,{signal,timeout:5000,maxTotalTimeout:5000,resetTimeoutOnProgress:false}));
       if(result.isError||result.content.length!==1||result.content[0]?.type!=='text'||Buffer.byteLength(result.content[0].text)>4096)rejected('BAD_NATIVE_RESPONSE');
       try{return witnessSchema.parse(JSON.parse(result.content[0].text));}catch{rejected('BAD_NATIVE_RESPONSE');}
-    },close:()=>ownedClose.close()};
-  }catch(error){return closeAfterStudioTestConnectFailure(ownedClose,error);}
+    },close:()=>close.close()};
+  }catch(error){
+    if(!launched){attempt.noStart();throw error;}
+    if(ownedClose)return closeAfterStudioTestNativeConnectFailure(attempt,ownedClose,error);
+    throw error;
+  }
 }
 
 /** Real product lifecycle, not a fixture-only controller. Human approval is a
@@ -70,6 +85,10 @@ async function connectNativeTest(maxBufferSize:number=SCENARIO_LIMITS.wireBytes)
 export async function createStudioTestService(options:Options){
   if(!hash.safeParse(options.pluginArtifactHash).success)rejected('INVALID_REQUEST');
   if(options.fixtureScheduler&&!options.connect)rejected('INVALID_REQUEST');
+  const custody=createStudioTestNativeCustody(options.custody,options.assertProject);
+  const connectOwned=(operation:StudioNativeCustodyOperation,maximum:number=SCENARIO_LIMITS.wireBytes)=>custody.connect(operation,options.connect?'fixture':'native',
+    attempt=>options.connect?options.connect():connectNativeTest(attempt,maximum),
+    connection=>{if(options.fixtureScheduler&&connection.evidence!=='fixture')rejected('INVALID_REQUEST');});
   await mkdir(options.directory,{recursive:true,mode:0o700});const root=await realpath(options.directory);
   const ledger=await TestLedger.open(join(root,'ledger'),root,options.exclusiveWriter?{exclusiveWriter:options.exclusiveWriter}:{});
   const captures=await createStudioTestCaptureStore(root).catch(async error=>{
@@ -102,9 +121,16 @@ export async function createStudioTestService(options:Options){
   };
   const owned=(jobId:string,actor:string)=>{const j=jobs.get(jobId);if(!j||!(actor==='human'||j.view.actor===actor))rejected('HUMAN_AUTH_REQUIRED');return j;};
   const closeJob=(j:Job):Promise<void>=>{
-    if(j.closing)return j.closing;clearTimeout(j.expiry);
-    j.closing=(async()=>{try{try{await j.control.lifecycle.shutdown();}finally{try{const review=j.control.requests.status();if(j.reserved&&review.cleanup==='complete'){if(j.reservation)options.store.releaseTestReservation(j.reservation);else options.store.releaseTest(j.view.display.proposal.binding.pairedSessionId,j.view.id);j.reserved=false;}}finally{await j.connection.close();}}}finally{archive(j,'terminal');}
+    if(j.closing)return j.closing;custody.beginClosing(j.connection);clearTimeout(j.expiry);
+    j.closing=(async()=>{
+      let failed=false,failure:unknown;
+      const keep=(error:unknown)=>{if(!failed){failed=true;failure=error;}};
+      try{await j.control.lifecycle.shutdown();}catch(error){keep(error);}
+      try{const review=j.control.requests.status();if(j.reserved&&review.cleanup==='complete'){if(j.reservation)options.store.releaseTestReservation(j.reservation);else options.store.releaseTest(j.view.display.proposal.binding.pairedSessionId,j.view.id);j.reserved=false;}}catch(error){keep(error);}
+      try{await j.connection.close();}catch(error){keep(error);}finally{archive(j,'terminal');}
+      if(failed)throw failure;
       if(j.origin&&options.taskPort&&!j.terminalSent){
+        options.assertProject?.();
         const report=view(j),review=report.review,scenario=review.scenario,plan=report.display.proposal.scenario;
         const packet:StudioTestTaskSettled={jobId:report.id,displayDigest:report.displayDigest,scenarioDigest:scenario?.scenarioDigest??null,subjectDigest:scenario?.subjectDigest??null,reportDigest:digest(report),review,
           scenario:scenario&&plan?{outcome:scenario.state==='passed'&&review.outcome==='succeeded'?'passed':scenario.state==='failed'&&review.code==='ASSERTION_FAILED'?'failed':'incomplete',
@@ -115,17 +141,20 @@ export async function createStudioTestService(options:Options){
     })();return j.closing;
   };
   const prepare=async(input:unknown,actor:string):Promise<StudioTestView>=>{
+    custody.assertReady();
     if(closed||preparing||viewing||nativeAssets.active()||current&&(current.reserved||current.view.state==='needs_approval'||current.view.state==='running')||ledger.unresolved())rejected('BUSY');
     if(!id.safeParse(actor).success)rejected('HUMAN_AUTH_REQUIRED');
-    const origin=options.taskPort?.capture(actor)??null;if(origin)options.taskPort!.assert(origin);
+    const origin=options.taskPort?.capture(actor)??null;if(origin){options.taskPort!.assert(origin);if(origin.projectId!==options.custody?.projectId)rejected('BINDING_CHANGED');}
     const a=request.parse(input),session=eligible(a.sessionId),p=session.proof;
     for(const edit of a.scenario?.temporaryEdits??[])validateCommandArgs('scene.update',{ref:edit.ref,expected:edit.expected,properties:edit.properties},session);
     if(!p||!p.connected||!p.continuitySupported||p.pluginArtifactHash!==options.pluginArtifactHash||Date.parse(p.expiresAt)<=Date.now())rejected('STALE_PROOF');
-    preparing=true;let connection:NativeTestConnection|undefined;
+    preparing=true;let connection:NativeTestConnection|undefined,failed=false;
     try{
-      connection=await(options.connect??connectNativeTest)();
+      connection=await connectOwned('playtest-prepare');
+      custody.assertConnection(connection);
       if(options.fixtureScheduler&&connection.evidence!=='fixture')rejected('INVALID_REQUEST');
       const result=await connection.client.callTool({name:'list_roblox_studios',arguments:{}},CallToolResultSchema,{timeout:5000,maxTotalTimeout:5000});
+      custody.assertConnection(connection);
       const inventory=decodeTestInventory(result) as {id:string;name:string}[];
       const candidates=a.nativeStudioId?inventory.filter(s=>s.id===a.nativeStudioId):inventory.filter(s=>s.name===session.name);
       if(candidates.length!==1)rejected('BINDING_CHANGED');
@@ -160,7 +189,7 @@ export async function createStudioTestService(options:Options){
         if(!fresh||fresh.mode!=='Edit'||fresh.playEpoch!==proof.playEpoch||identity(after)!==wanted.scopeRevision||digest(receipts)!==digest(appliedReceipts()))rejected('BINDING_CHANGED');
         try{return scenarioSubjectDigest(result,{sessionId:session.id,clientLifetimeId:session.clientSessionId,pluginArtifactHash:options.pluginArtifactHash,allowedRoots:before.allowedRoots},receipts);}catch{rejected('BAD_NATIVE_RESPONSE');}
       };
-      const adapter=new NativeTestAdapter({client:native.client,evidence:native.evidence,pairedProof:proofReader,requestTimeoutMs:5000,proofMaxAgeMs:6000,captureStore:captures,subjectReader:{read:readSubjects},admissionGuard:()=>{if(origin)options.taskPort!.assert(origin);},onDisconnect:()=>control?.lifecycle.onDisconnect(),decoder:{inventory:decodeTestInventory,state:(r,studioId)=>{if(!lastWitness||lastWitness.placeId!==0)rejected('BAD_NATIVE_RESPONSE');return decodeTestState(r,{nativeStudioId:studioId,placeId:lastWitness.placeId});},logs:decodeTestLogs,focus:decodeTestFocus}});
+      const adapter=new NativeTestAdapter({client:native.client,evidence:native.evidence,pairedProof:proofReader,requestTimeoutMs:5000,proofMaxAgeMs:6000,captureStore:captures,subjectReader:{read:readSubjects},admissionGuard:()=>{custody.assertConnection(native);if(origin)options.taskPort!.assert(origin);},onDisconnect:()=>control?.lifecycle.onDisconnect(),decoder:{inventory:decodeTestInventory,state:(r,studioId)=>{if(!lastWitness||lastWitness.placeId!==0)rejected('BAD_NATIVE_RESPONSE');return decodeTestState(r,{nativeStudioId:studioId,placeId:lastWitness.placeId});},logs:decodeTestLogs,focus:decodeTestFocus}});
       let subjectDigest:string|undefined;
       if(a.scenario){await adapter.prepareScenario(a.scenario,new AbortController().signal);subjectDigest=await adapter.readScenarioSubjects(binding,new AbortController().signal);}
       let j:Job;
@@ -173,64 +202,71 @@ export async function createStudioTestService(options:Options){
       control=createStudioTestControl({adapter,ledger,requestTimeoutMs:15000,cleanupGraceMs:15000,proofMaxAgeMs:6000,
         ...(options.fixtureScheduler?{scheduler:options.fixtureScheduler}:{}),
         ...(a.scenario?{temporary:{
-          async setup(signal:AbortSignal){try{for(const edit of a.scenario!.temporaryEdits??[]){signal.throwIfAborted();if(j.origin)options.taskPort!.assert(j.origin);if(!j.reservation)rejected('FENCED');const command=options.store.enqueueTestSetup(j.reservation,edit.id);setupCommands.push(command.id);await waitCommand(command.id,signal);}}catch(error){if(j.reservation)options.store.cancelTestSetup(j.reservation);throw error;}},
+          async setup(signal:AbortSignal){try{for(const edit of a.scenario!.temporaryEdits??[]){signal.throwIfAborted();custody.assertConnection(native);if(j.origin)options.taskPort!.assert(j.origin);if(!j.reservation)rejected('FENCED');const command=options.store.enqueueTestSetup(j.reservation,edit.id);setupCommands.push(command.id);await waitCommand(command.id,signal);}}catch(error){if(j.reservation)options.store.cancelTestSetup(j.reservation);throw error;}},
           async restore(signal:AbortSignal){if(!j.reservation)rejected('FENCED');options.store.cancelTestSetup(j.reservation);let unknown=false;for(const commandId of [...setupCommands].reverse()){try{let original=options.store.command(commandId);if(original.state==='cancelled')continue;if(original.state==='dispatched')original=await waitCommand(commandId,signal);if(original.state!=='succeeded'){unknown=true;continue;}const restore=options.store.enqueueTestRestore(j.reservation,commandId);await waitCommand(restore.id,signal);}catch{unknown=true;}}if(unknown)throw new StudioTestError('EFFECT_UNKNOWN');},
           verifySubjects,
           release(){if(!j.reservation)rejected('FENCED');options.store.releaseTestReservation(j.reservation);j.reserved=false;},
         }}:{}),humanVerifier:{async confirm(context,display,displayDigest,signal){return typeof context==='object'&&context!==null&&humanContexts.has(context)&&digest(display)===displayDigest&&!signal.aborted;}},onStatus(status){if(current?.control===control&&status.phase==='done')current.view.state=current.cancelled?'cancelled':'complete';}});
       const prepared=await control.requests.prepare({binding,durationMs:a.durationMs,observationIntervalMs:a.observationIntervalMs,failOnRuntimeError:a.failOnRuntimeError,...(a.scenario?{scenario:a.scenario,subjectDigest}:{})});
+      custody.assertConnection(native);
       const jobId=randomUUID();
       j={view:{id:jobId,targetName:session.name,actor,state:'needs_approval',display:prepared.display,displayDigest:prepared.displayDigest,review:control.requests.status(),evidence:native.evidence,nativeAcceptance:false},control,connection:native,proposalId:prepared.proposalId,expiry:setTimeout(()=>{if(j.view.state==='needs_approval'){j.cancelled=true;j.view.state='cancelled';void closeJob(j).catch(()=>{});}},60000),closing:null,cancelled:false,reserved:false,reservation:null,verifySubjects:a.scenario?verifySubjects:null,
         origin,terminalSent:false,reportDigest:null,historyCreatedAt:new Date().toISOString(),subjects:'unobserved',revalidate:a.scenario?async(signal)=>{
           let fresh:NativeTestConnection|undefined;
-          try{fresh=await(options.connect??connectNativeTest)();if(fresh.evidence!==native.evidence)return 'unobserved';
+          try{fresh=await connectOwned('playtest-revalidate');custody.assertConnection(fresh);if(fresh.evidence!==native.evidence)return 'unobserved';
             const reader=fresh,proof=createProofReader(reader),check=new NativeTestAdapter({client:reader.client,evidence:reader.evidence,pairedProof:proof,requestTimeoutMs:5000,proofMaxAgeMs:6000,captureStore:captures,
               subjectReader:{read:(wanted,local)=>readSubjects(wanted,local,reader,proof)},decoder:{inventory:decodeTestInventory,state:(r,studioId)=>decodeTestState(r,{nativeStudioId:studioId,placeId:0}),logs:decodeTestLogs,focus:decodeTestFocus}});
-            await check.prepareScenario(a.scenario!,signal);return subjectDigest===await check.readScenarioSubjects(binding,signal)?'current':'changed';
+            await check.prepareScenario(a.scenario!,signal);custody.assertConnection(reader);const observed=await check.readScenarioSubjects(binding,signal);custody.assertConnection(reader);return subjectDigest===observed?'current':'changed';
           }catch{return 'unobserved';}finally{await fresh?.close();}
         }:null};
       // Internal preparation identity is deliberately not request-controlled.
       current=j;jobs.set(jobId,j);if(jobs.size>64)jobs.delete(jobs.keys().next().value!);connection=undefined;
       archive(j,'admission');
-      if(origin){try{options.taskPort!.assert(origin);options.taskPort!.prepared(origin,{jobId,displayDigest:j.view.displayDigest,scenarioDigest:j.view.review.scenario?.scenarioDigest??null,subjectDigest:subjectDigest??null});}catch(error){j.cancelled=true;j.view.state='cancelled';await closeJob(j);throw error;}}
+      if(origin){try{options.taskPort!.assert(origin);options.taskPort!.prepared(origin,{jobId,displayDigest:j.view.displayDigest,scenarioDigest:j.view.review.scenario?.scenarioDigest??null,subjectDigest:subjectDigest??null});}catch(error){j.cancelled=true;j.view.state='cancelled';try{await closeJob(j);}catch{/* Preserve the original task admission error. */}throw error;}}
       return view(j);
-    }finally{preparing=false;if(connection)await connection.close();}
+    }catch(error){failed=true;throw error;}finally{try{if(connection)await connection.close();}catch(error){if(!failed)throw error;}finally{preparing=false;}}
   };
   /** Read-only Edit viewport image for the exact paired, unpublished, Edit-mode
    * session through the built-in Studio MCP screen_capture tool. Never starts
    * Play, sends input, reserves the place, or accepts caller Luau. */
   const viewport=async(input:unknown,actor:string)=>{
+    custody.assertReady();
     if(!id.safeParse(actor).success)rejected('HUMAN_AUTH_REQUIRED');
     const now=Date.now();while(viewportTimes.length&&now-viewportTimes[0]!>600_000)viewportTimes.shift();
     if(closed||preparing||viewing||nativeAssets.active()||current?.view.state==='running'||current?.reserved||viewportTimes.length>=VIEWPORT_RATE.captures)rejected('BUSY');
     const a=viewportRequestSchema.parse(input),session=eligible(a.sessionId),p=session.proof;
     if(!p||!p.connected||p.pluginArtifactHash!==options.pluginArtifactHash||Date.parse(p.expiresAt)<=Date.now())rejected('STALE_PROOF');
     if(p.mode!=='Edit')throw new StudioTestError('MODE_MISMATCH');
-    viewing=true;viewportTimes.push(now);let connection:NativeTestConnection|undefined;
+    viewing=true;viewportTimes.push(now);let connection:NativeTestConnection|undefined,failed=false;
     try{
-      connection=await(options.connect??(()=>connectNativeTest(VIEWPORT_LIMITS.wireBytes)))();
+      connection=await connectOwned('viewport',VIEWPORT_LIMITS.wireBytes);
+      custody.assertConnection(connection);
       if(options.fixtureScheduler&&connection.evidence!=='fixture')rejected('INVALID_REQUEST');
       const native=connection;
       const inventory=decodeTestInventory(await native.client.callTool({name:'list_roblox_studios',arguments:{}},CallToolResultSchema,{timeout:5000,maxTotalTimeout:5000})) as {id:string;name:string}[];
+      custody.assertConnection(native);
       const candidates=a.nativeStudioId?inventory.filter(s=>s.id===a.nativeStudioId):inventory.filter(s=>s.name===session.name);
       if(candidates.length!==1)rejected('BINDING_CHANGED');
       const nativeStudioId=candidates[0]!.id,scope=identity(session);
       const verifyBinding=async(signal:AbortSignal)=>{
+        custody.assertConnection(native);
         const s=eligible(session.id),proof=s.proof;
         if(!proof||!proof.connected||proof.mode!=='Edit'||Date.parse(proof.expiresAt)<=Date.now()||proof.clientLifetimeId!==p.clientLifetimeId||proof.pluginArtifactHash!==options.pluginArtifactHash||proof.markerName!==p.markerName||identity(s)!==scope)rejected('BINDING_CHANGED');
         const witness=await native.witness(nativeStudioId,proof.markerName,'Edit',signal);
+        custody.assertConnection(native);
         if(witness.placeId!==0||witness.universeId!==s.universeId||witness.sessionId!==s.id||witness.clientLifetimeId!==s.clientSessionId||witness.pluginArtifactHash!==options.pluginArtifactHash)rejected('BINDING_CHANGED');
         return digest({scope,nativeStudioId,clientLifetimeId:proof.clientLifetimeId,playEpoch:proof.playEpoch,markerName:proof.markerName});
       };
       const image=await captureEditViewport({client:native.client,nativeStudioId,captureId:'ArcaneViewport_'+randomUUID().replaceAll('-',''),maxDimension:a.maxDimension,
-        ...(a.camera?{camera:a.camera}:{}),...(a.sheet?{sheet:a.sheet}:{}),verifyBinding,decodeMode:decodeTestMode,...(options.fixtureScheduler?{scheduler:options.fixtureScheduler}:{})},AbortSignal.timeout(VIEWPORT_RATE.deadlineMs));
+        ...(a.camera?{camera:a.camera}:{}),...(a.sheet?{sheet:a.sheet}:{}),verifyBinding,admissionGuard:()=>custody.assertConnection(native),decodeMode:decodeTestMode,...(options.fixtureScheduler?{scheduler:options.fixtureScheduler}:{})},AbortSignal.timeout(VIEWPORT_RATE.deadlineMs));
+      custody.assertConnection(native);
       return {viewport:{sessionId:session.id,nativeStudioId,mode:'Edit' as const,mimeType:'image/png' as const,width:image.width,height:image.height,
         originalWidth:image.originalWidth,originalHeight:image.originalHeight,downscaled:image.downscaled,bytes:image.bytes,sha256:image.sha256,camera:image.camera,evidence:native.evidence},
         data:image.png.toString('base64')};
-    }finally{viewing=false;if(connection)await connection.close().catch(()=>{});}
+    }catch(error){failed=true;throw error;}finally{try{if(connection)await connection.close();}catch(error){if(!failed)throw error;}finally{viewing=false;}}
   };
   /** Native asset search/insert/generation: same exact-session Edit binding as the viewport. */
-  const nativeAssets=createNativeAssetRequests({store:options.store,pluginArtifactHash:options.pluginArtifactHash,connect:options.connect??(()=>connectNativeTest()),
+  const nativeAssets=createNativeAssetRequests({store:options.store,pluginArtifactHash:options.pluginArtifactHash,connect:operation=>connectOwned(operation),assertCurrent:connection=>custody.assertConnection(connection),assertReady:()=>custody.assertReady(),
     ...(options.fixtureScheduler?{fixtureScheduler:options.fixtureScheduler}:{}),eligible,identity,busy:()=>closed||preparing||viewing||current?.view.state==='running'||!!current?.reserved});
   return Object.freeze({
     reportArchiveStatus:()=>reportFault,
@@ -253,6 +289,7 @@ export async function createStudioTestService(options:Options){
     humanControl:Object.freeze({toolboxPolicy:nativeAssets.toolboxPolicy,async approve(input:unknown,guard:()=>void){
       guard();const a=approval.parse(input),j=owned(a.id,'human');
       if(closed||j!==current||j.cancelled||j.view.state!=='needs_approval'||a.displayDigest!==j.view.displayDigest)rejected('HUMAN_AUTH_REQUIRED');
+      custody.assertReady();custody.assertConnection(j.connection);
       if(j.origin)options.taskPort!.assert(j.origin);
       const session=eligible(j.view.display.proposal.binding.pairedSessionId);
       if(identity(session)!==j.view.display.proposal.binding.scopeRevision)rejected('BINDING_CHANGED');
@@ -264,15 +301,23 @@ export async function createStudioTestService(options:Options){
         if(j.verifySubjects){await j.verifySubjects(new AbortController().signal);guard();}
         if(j.origin)options.taskPort!.assert(j.origin);
         if(j.cancelled)rejected('HUMAN_AUTH_REQUIRED');
+        custody.assertConnection(j.connection);
         j.reservation=options.store.reserveTest(j.view.display.proposal.binding.pairedSessionId,j.view.id,j.view.display.proposal.scenario?.temporaryEdits);j.reserved=true;clearTimeout(j.expiry);
         try{await j.control.requests.start({proposalId:j.proposalId,consentId});}
-        catch(error){j.view.state='complete';await closeJob(j);throw error;}
+        catch(error){j.view.state='complete';try{await closeJob(j);}catch{/* Preserve the original start error. */}throw error;}
         j.view.state='running';
         void j.control.requests.wait({runId:j.control.requests.status().runId!}).finally(()=>closeJob(j)).catch(()=>{});
         return view(j);
       }finally{humanContexts.delete(context);}
     }}),
-    lifecycle:Object.freeze({async close(){closed=true;nativeAssets.close();try{if(current)await closeJob(current);}finally{await ledger.close();}}}),
+    lifecycle:Object.freeze({async close(){
+      closed=true;custody.retireAdmissions();nativeAssets.close();let failed=false,failure:unknown;
+      const keep=(error:unknown)=>{if(!failed){failed=true;failure=error;}};
+      try{if(current)await closeJob(current);}catch(error){keep(error);}
+      try{await custody.close();}catch(error){keep(error);}
+      try{await ledger.close();}catch(error){keep(error);}
+      if(failed)throw failure;
+    }}),
   });
 }
 type CreatedStudioTestService=Awaited<ReturnType<typeof createStudioTestService>>;

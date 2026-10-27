@@ -54,7 +54,7 @@ async function until(check: () => boolean | Promise<boolean>) {
   while (!await check()) { assert.ok(Date.now() < end, 'Expected joint task state before its deadline.'); await delay(10); }
 }
 async function fixture(t: TestContext, holdClose = false) {
-  const root = makeFixtureDirectory('arcane-chat-studio-'), project = join(root, 'project'), directory = join(root, 'lab');
+  const root = makeFixtureDirectory('arcane-chat-studio-'), project = join(root, 'project'), directory = join(root, 'studio', 'lab');
   let store:StudioStore|undefined,work:WorkStore|undefined,assets:Awaited<ReturnType<typeof createAssetService>>|undefined;
   let creatingAssets:Promise<Awaited<ReturnType<typeof createAssetService>>>|undefined;
   let lab:Awaited<ReturnType<typeof createConnectionLab>>|undefined,creatingLab:Promise<Awaited<ReturnType<typeof createConnectionLab>>>|undefined;

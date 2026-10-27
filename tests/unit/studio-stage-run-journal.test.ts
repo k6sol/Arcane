@@ -123,12 +123,12 @@ test('attempt migration preserves original stage rows and associations',t=>{
   try{
     db.exec('INSERT INTO asset_stage_runs SELECT run_id,project_id,job_id,intent_sha256,payload FROM asset_stage_attempts; INSERT INTO asset_stage_commands SELECT * FROM asset_stage_attempt_commands;');
     oldPayload=db.prepare('SELECT payload FROM asset_stage_runs').get()?.payload;
-    db.exec('DROP TABLE studio_test_commands; DROP TABLE studio_test_reservations; DROP TABLE asset_stage_reconstructions; DROP TABLE asset_stage_attempt_commands; DROP TABLE asset_stage_attempts; PRAGMA application_id=0; PRAGMA user_version=3;');
+    db.exec('DROP TABLE studio_native_custody; DROP TABLE studio_test_commands; DROP TABLE studio_test_reservations; DROP TABLE asset_stage_reconstructions; DROP TABLE asset_stage_attempt_commands; DROP TABLE asset_stage_attempts; PRAGMA application_id=0; PRAGMA user_version=3;');
   }finally{db.close();}
   f.restart();const migrated=f.store.readStageRun(projectId,jobId)!;
   assert.equal(migrated.runId,original.runId);assert.deepEqual(migrated.commands,original.commands);assert.deepEqual(migrated.intent,original.intent);
   const check=new DatabaseSync(join(f.directory,'studio.sqlite'));
-  try{assert.equal(check.prepare('SELECT payload FROM asset_stage_runs').get()?.payload,oldPayload);assert.equal(check.prepare('PRAGMA user_version').get()?.user_version,7);}finally{check.close();}
+  try{assert.equal(check.prepare('SELECT payload FROM asset_stage_runs').get()?.payload,oldPayload);assert.equal(check.prepare('PRAGMA user_version').get()?.user_version,8);}finally{check.close();}
 });
 
 for(const provider of ['claude-code','arcane'] as const)test(provider+' stage journals preserve app attribution across restart without creating write authority',t=>{
@@ -137,22 +137,23 @@ for(const provider of ['claude-code','arcane'] as const)test(provider+' stage jo
   f.restart();assert.deepEqual(f.store.readStageRun(projectId,jobId)?.intent.conversation,intent.conversation);
   assert.equal(f.store.commands().length,0);assert.throws(()=>f.store.enqueueStagePacket(run.handle,0,f.args[0]!,guard),{code:'STUDIO_STAGE_HANDLE'});
 });
-function legacyStudioSchema(db:DatabaseSync,version:2|3|4|5|6,uploads=true):void {
+function legacyStudioSchema(db:DatabaseSync,version:2|3|4|5|6|7,uploads=true):void {
+  db.exec('DROP TABLE studio_native_custody;');
   if(version<6)db.exec('DROP TABLE studio_test_commands; DROP TABLE studio_test_reservations;');
   if(version<5)db.exec('DROP TABLE asset_stage_reconstructions;');
   if(version<4)db.exec('DROP TABLE asset_stage_attempt_commands; DROP TABLE asset_stage_attempts;');
   if(version<3)db.exec('DROP TABLE asset_stage_commands; DROP TABLE asset_stage_runs; DROP TABLE asset_upload_context_pins;');
   if(version===2&&!uploads)db.exec('DROP TABLE asset_uploads;');
-  db.exec('PRAGMA application_id=0; PRAGMA user_version='+version);
+  db.exec('PRAGMA application_id='+(version===7?0x41525354:0)+'; PRAGMA user_version='+version);
 }
-for(const [version,uploads]of [[2,false],[2,true],[3,true],[4,true],[5,true],[6,true]] as const)
+for(const [version,uploads]of [[2,false],[2,true],[3,true],[4,true],[5,true],[6,true],[7,true]] as const)
   test('source-backed Studio v'+version+(uploads?' with uploads':' before uploads')+' migrates as one verified known schema',t=>{
     const f=fixture(t);f.store.close();const db=new DatabaseSync(join(f.directory,'studio.sqlite'));
     try{legacyStudioSchema(db,version,uploads);}finally{db.close();}
     f.restart();const check=new DatabaseSync(join(f.directory,'studio.sqlite'));
-    try{assert.equal(check.prepare('PRAGMA user_version').get()?.user_version,7);assert.equal(check.prepare('PRAGMA application_id').get()?.application_id,0x41525354);assert.equal(check.prepare('SELECT count(*) AS n FROM asset_uploads').get()?.n,0);}finally{check.close();}
+    try{assert.equal(check.prepare('PRAGMA user_version').get()?.user_version,8);assert.equal(check.prepare('PRAGMA application_id').get()?.application_id,0x41525354);assert.equal(check.prepare('SELECT count(*) AS n FROM asset_uploads').get()?.n,0);}finally{check.close();}
   });
-test('v6 to v7 preserves closed stage bytes, original associations and successful protocol-v2 Image upload facts',t=>{
+test('v6 to v8 preserves closed stage bytes, original associations and successful protocol-v2 Image upload facts',t=>{
   const f=fixture(t),run=f.store.beginStageRun(f.intent,guard);assert.ok(run.created);
   const command=f.store.enqueueStagePacket(run.handle,0,f.args[0]!,guard);f.ack(command.id,0);f.store.closeStageRun(run.handle);
   const upload:AssetUploadIntent={projectId,jobId,sourceId:'atlas-basecolor',sourceSha256:'1'.repeat(64),assetType:'Image',
@@ -166,7 +167,7 @@ test('v6 to v7 preserves closed stage bytes, original associations and successfu
   try{legacyStudioSchema(db,6);before=snapshot(db);}finally{db.close();}
   f.restart();assert.deepEqual(f.store.readStageRun(projectId,jobId)?.commands[0]?.commandId,command.id);
   assert.equal(f.store.assetUpload(started.record.attemptId).intent.assetType,'Image');
-  db=new DatabaseSync(filename);try{assert.deepEqual(snapshot(db),before);assert.equal(db.prepare('PRAGMA user_version').get()?.user_version,7);}finally{db.close();}
+  db=new DatabaseSync(filename);try{assert.deepEqual(snapshot(db),before);assert.equal(db.prepare('PRAGMA user_version').get()?.user_version,8);}finally{db.close();}
 });
 test('Studio migration failure rolls back version, application identity and original payloads together',t=>{
   const f=fixture(t),run=f.store.beginStageRun(f.intent,guard);assert.ok(run.created);f.store.closeStageRun(run.handle);f.store.close();
@@ -174,13 +175,13 @@ test('Studio migration failure rolls back version, application identity and orig
   try{legacyStudioSchema(db,6);before=db.prepare('SELECT * FROM asset_stage_attempts').all();}finally{db.close();}
   const original=DatabaseSync.prototype.exec;
   const fault=t.mock.method(DatabaseSync.prototype,'exec',function(this:DatabaseSync,sql:string){
-    const result=original.call(this,sql);if(sql==='PRAGMA application_id=1095914324; PRAGMA user_version=7;')throw Error('Synthetic migration publish fault.');return result;
+    const result=original.call(this,sql);if(sql==='PRAGMA application_id=1095914324; PRAGMA user_version=8;')throw Error('Synthetic migration publish fault.');return result;
   });
   try{assert.throws(()=>new StudioStore({directory:f.directory}),/Synthetic migration publish fault/);}finally{fault.mock.restore();}
   db=new DatabaseSync(filename);try{assert.equal(db.prepare('PRAGMA user_version').get()?.user_version,6);assert.equal(db.prepare('PRAGMA application_id').get()?.application_id,0);assert.deepEqual(db.prepare('SELECT * FROM asset_stage_attempts').all(),before);}finally{db.close();}
   f.restart();assert.equal(f.store.readStageRun(projectId,jobId)?.runId,run.runId);
 });
-for(const fault of ['unexpected-table','unexpected-trigger','foreign-identity','populated-v0','unknown-v1','future-v8'] as const)
+for(const fault of ['unexpected-table','unexpected-trigger','foreign-identity','populated-v0','unknown-v1','future-v9'] as const)
   test('Studio migration refuses '+fault+' without adopting or rewriting the database',t=>{
     const f=fixture(t),run=f.store.beginStageRun(f.intent,guard);assert.ok(run.created);f.store.closeStageRun(run.handle);f.store.close();
     const filename=join(f.directory,'studio.sqlite');let db=new DatabaseSync(filename),before:unknown;
@@ -190,7 +191,7 @@ for(const fault of ['unexpected-table','unexpected-trigger','foreign-identity','
       if(fault==='unexpected-table')db.exec('CREATE TABLE foreign_data (value TEXT) STRICT;');
       else if(fault==='unexpected-trigger')db.exec("CREATE TRIGGER foreign_trigger AFTER INSERT ON events BEGIN SELECT 1; END;");
       else if(fault==='foreign-identity')db.exec('PRAGMA application_id=1;');
-      else db.exec('PRAGMA user_version='+(fault==='populated-v0'?0:fault==='unknown-v1'?1:8));
+      else db.exec('PRAGMA user_version='+(fault==='populated-v0'?0:fault==='unknown-v1'?1:9));
       before=snapshot(db);
     }finally{db.close();}
     assert.throws(()=>new StudioStore({directory:f.directory}),{code:'MIGRATION'});

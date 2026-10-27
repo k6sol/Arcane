@@ -273,7 +273,7 @@ test('benchmark scene: pillar + circular spawn + forest + lighting play end to e
   const assets = simulatedAssets(project, join(dir, 'assets'));
   const native = await nativeStudio();
   let plugin: ReturnType<typeof simulatedPlugin> | null = null;
-  const lab = await createConnectionLab({ cwd: ROOT, stateDirectory: join(dir, 'lab'), projectPath: project, studioStore: studio, workStore: work, assetService: assets.service,
+  const lab = await createConnectionLab({ cwd: ROOT, stateDirectory: join(dir, 'studio', 'lab'), projectPath: project, studioStore: studio, workStore: work, assetService: assets.service,
     codexConnect: refuseNativeCodex, probe: noProviderProbe, scriptSourceVerifier: {
       async verify(source: string) {
         const compiler = process.env.ARCANE_LUAU_COMPILE;

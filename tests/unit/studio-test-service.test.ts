@@ -11,6 +11,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult } fr
 import { createStudioTestService, type NativeTestConnection, type StudioTestService,
   type StudioTestView } from '../../apps/daemon/src/studio-test-service.js';
 import { StudioStore } from '../../packages/storage/src/studio-store.js';
+import {workflowProjectIdentity} from '../../packages/storage/src/workflow-store.js';
 import { digest, readTestLedger, reviewedTestTools } from '../../packages/studio-test-controller/src/index.js';
 import { fixtureTempDirectory, makeFixtureDirectory } from './windows-fixture-paths.js';
 import { playtestJob } from '../../apps/mcp/src/playtest-schemas.js';
@@ -195,7 +196,7 @@ async function fixture(t: TestContext, options: {
     return connection;
   };
   const openService = async () => {
-    const service = await createStudioTestService({ directory, store, pluginArtifactHash: ARTIFACT, connect });
+    const service = await createStudioTestService({ directory, store, custody: store.bindNativeCustody(workflowProjectIdentity(root).projectId, storeDirectory), pluginArtifactHash: ARTIFACT, connect });
     services.push(service);
     return service;
   };

@@ -53,11 +53,12 @@ function persistentFiles(root: string): Record<string, string> {
   walk(root); return result;
 }
 
-function fixture(t: TestContext, source: Source = 'verified') {
+function fixture(t: TestContext, source: Source = 'verified', options: { outsideWorkspace?: boolean } = {}) {
   const root = makeFixtureDirectory('arcane-studio-test-unavailable-');
-  const cwd = join(root, 'synthetic-resources'), stateDirectory = join(root, 'lab');
+  const cwd = join(root, 'synthetic-resources'), storeDirectory = join(root, 'studio-fixture');
+  const stateDirectory = options.outsideWorkspace ? join(root, 'lab') : join(storeDirectory, 'connection-lab');
   const artifacts = join(cwd, 'plugin', 'build'), ledgerDirectory = join(stateDirectory, 'playtests', 'ledger');
-  mkdirSync(artifacts, { recursive: true }); mkdirSync(stateDirectory);
+  mkdirSync(artifacts, { recursive: true }); mkdirSync(stateDirectory, { recursive: true });
   const sources = join(cwd, 'plugin', 'src'); mkdirSync(sources);
   const bundled = resolve('plugin');
   copyFileSync(join(bundled, 'build', 'ArcaneLocalBridge.rbxmx'), join(artifacts, 'ArcaneLocalBridge.rbxmx'));
@@ -78,7 +79,7 @@ function fixture(t: TestContext, source: Source = 'verified') {
   if (source === 'missing-source') rmSync(join(artifacts, 'ArcaneLocalBridge.rbxmx'));
   if (source === 'missing-module') rmSync(join(sources, 'AssetUpload.luau'));
   if (source === 'tampered-module') writeFileSync(join(sources, 'AssetUpload.luau'), '--!strict\n-- Changed child module fixture.\nreturn {}\n');
-  const storeDirectory = join(root, 'studio-fixture'), store = new StudioStore({ directory: storeDirectory });
+  const store = new StudioStore({ directory: storeDirectory });
   const grant = store.createGrant({ allowedRoots: ['Workspace', 'ServerStorage'], allowWrites: true });
   const pair = store.pair({ code: grant.code, protocolVersion: 1,
     identity: { clientSessionId: 'unavailable-fixture-lifetime', placeId: 0, universeId: 0,
@@ -147,11 +148,12 @@ function call(lab: Lab, options: {
 const post = (lab: Lab, endpoint: string, value: unknown, token = lab.agentToken, headers: Record<string, string> = {}) =>
   call(lab, { path: '/v1/playtests/' + endpoint, body: JSON.stringify(value), token, headers });
 
-function refusal(reply: Reply, code: 'UNAVAILABLE' | 'FENCED', lab: Lab, root: string) {
-  assert.equal(reply.status, code === 'FENCED' ? 409 : 503);
+function refusal(reply: Reply, code: 'UNAVAILABLE' | 'FENCED' | 'SDK_CUSTODY_UNCONFIRMED', lab: Lab, root: string) {
+  assert.equal(reply.status, code === 'UNAVAILABLE' ? 503 : 409);
   assert.equal(reply.json.error, code);
   assert.deepEqual(Object.keys(reply.json).sort(), ['error', 'message'], 'A refusal cannot impersonate a job or completion.');
-  assert.match(String(reply.json.message), code === 'FENCED' ? /stop any running playtest.*Repair playtest records/i : /repair.*plugin.*restart/i);
+  if (code === 'SDK_CUSTODY_UNCONFIRMED') assert.equal(reply.json.message, 'Studio native operations are paused because Arcane could not confirm that an owned SDK connection closed. Saved playtest reports remain available. Edit-mode record repair cannot settle this connection. Do not retry native work or delete the retained records.');
+  else assert.match(String(reply.json.message), code === 'FENCED' ? /stop any running playtest.*Repair playtest records/i : /repair.*plugin.*restart/i);
   assert.equal(reply.headers['cache-control'], 'no-store');
   assert.equal(reply.headers['content-type'], 'application/json; charset=utf-8');
   assert.equal(reply.headers['x-content-type-options'], 'nosniff');
@@ -355,9 +357,9 @@ test('an empty writer lock left by a killed daemon no longer fences playtests or
   f.noExecution();
 });
 
-test('a foreign lock, unresolved run or lab outside the project lock stays fenced with the repair guidance', async t => {
+test('foreign ledger state and a lab outside its workspace retain distinct refusal guidance', async t => {
   for (const kind of ['foreign-lock', 'unresolved-run', 'no-project-lock'] as const) await t.test(kind, async sub => {
-    const f = fixture(sub);
+    const f = fixture(sub, 'verified', { outsideWorkspace: kind === 'no-project-lock' });
     const layout = kind === 'no-project-lock'
       ? { stateDirectory: f.stateDirectory, ledgerDirectory: f.ledgerDirectory } : projectLayout(f);
     mkdirSync(layout.ledgerDirectory, { recursive: true });
@@ -372,7 +374,7 @@ test('a foreign lock, unresolved run or lab outside the project lock stays fence
     }
     const before = persistentFiles(f.root);
     const lab = await f.start({ stateDirectory: layout.stateDirectory });
-    refusal(await call(lab), 'FENCED', lab, f.root);
+    refusal(await call(lab), kind === 'no-project-lock' ? 'SDK_CUSTODY_UNCONFIRMED' : 'FENCED', lab, f.root);
     assert.deepEqual(persistentFiles(f.root), before, 'Unprovable state is never cleared automatically.');
     f.noExecution();
   });

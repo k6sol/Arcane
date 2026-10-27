@@ -9,6 +9,7 @@ import { CallToolRequestSchema,ListToolsRequestSchema,type CallToolResult,type T
 import { createStudioTestService,type NativeTestConnection,type StudioTestService } from '../../apps/daemon/src/studio-test-service.js';
 import { openStudioTestReportStore,type StudioTestReportWriter,type StudioTestReportStore } from '../../apps/daemon/src/studio-test-report-store.js';
 import { StudioStore } from '../../packages/storage/src/studio-store.js';
+import {workflowProjectIdentity} from '../../packages/storage/src/workflow-store.js';
 import { digest,reviewedTestTools,readTestLedger } from '../../packages/studio-test-controller/src/index.js';
 import { buildScenarioProgram } from '../../packages/studio-test-controller/src/scenario-runtime.js';
 import { fixtureScenario,runScenarioFixture,type ScenarioFixtureOptions } from '../../packages/studio-test-controller/testing/scenario-fixture.js';
@@ -17,14 +18,15 @@ import { makeFixtureDirectory,fixtureTempDirectory } from './windows-fixture-pat
 
 // Actual service/controller, SDK Client/Server, SQLite and safety ledger. The peer and
 // standalone-Luau physics/input are controlled fixtures, never native Studio proof.
-const PROJECT='a'.repeat(64),ARTIFACT='b'.repeat(64),ACTOR='agent-private-bearer-derived-fixture',STUDIO='report-history-peer',NAME='Report history fixture';
+const ARTIFACT='b'.repeat(64),ACTOR='agent-private-bearer-derived-fixture',STUDIO='report-history-peer',NAME='Report history fixture';
 const text=(v:unknown):CallToolResult=>({content:[{type:'text',text:typeof v==='string'?v:JSON.stringify(v)}]});
 const tools:Tool[]=[...structuredClone(reviewedTestTools),{name:'execute_luau',inputSchema:{type:'object',properties:{studio_id:{type:'string'},datamodel_type:{type:'string',enum:['Edit','Client','Server']},code:{type:'string'}},required:['studio_id','datamodel_type','code']}}];
 const guard=()=>{};
 async function until(predicate:()=>boolean){const end=Date.now()+10000;while(!predicate()){assert.ok(Date.now()<end,'controlled history service did not settle');await new Promise(resolve=>setTimeout(resolve,10));}}
 async function fixture(t:TestContext,options:{scenario?:boolean;runtime?:ScenarioFixtureOptions;closeFailure?:Error;writer?:(store:StudioTestReportStore)=>StudioTestReportWriter;task?:boolean}={}){
   const root=makeFixtureDirectory('arcane-playtest-history-'),directory=join(root,'playtests'),reportDirectory=join(root,'reports');
-  const store=new StudioStore({directory:join(root,'studio')}),reports=await openStudioTestReportStore({directory:reportDirectory,projectId:PROJECT,exclusiveWriter:()=>true});
+  const projectId=workflowProjectIdentity(root).projectId;
+  const store=new StudioStore({directory:join(root,'studio')}),reports=await openStudioTestReportStore({directory:reportDirectory,projectId,exclusiveWriter:()=>true});
   const services:StudioTestService[]=[],connections:NativeTestConnection[]=[],packets:StudioTestTaskSettled[]=[],reportStores:StudioTestReportStore[]=[reports];
   let heartbeat:ReturnType<typeof setInterval>|undefined;
   t.after(async()=>{clearInterval(heartbeat);try{for(const s of services)try{await s.lifecycle.close();}catch(e){assert.equal(e,options.closeFailure);}
@@ -32,7 +34,7 @@ async function fixture(t:TestContext,options:{scenario?:boolean;runtime?:Scenari
   const grant=store.createGrant({allowedRoots:['Workspace','ServerStorage'],allowWrites:true});
   const pair=store.pair({code:grant.code,protocolVersion:1,identity:{clientSessionId:'report-plugin-life',placeId:0,universeId:0,name:NAME,pluginVersion:'fixture'},capabilities:['scene.children']});
   const state={mode:'Edit' as 'Edit'|'Play',epoch:10,connects:0,closes:0,starts:0,stops:0,clientPrograms:0,prepared:0};
-  const origin:StudioTestTaskOrigin=Object.freeze({kind:'studio-test-task-origin',taskId:'33333333-3333-4333-8333-333333333333',projectId:PROJECT,provider:'codex',threadId:'fixture-thread',sessionId:null,incarnationId:'44444444-4444-4444-8444-444444444444'});
+  const origin:StudioTestTaskOrigin=Object.freeze({kind:'studio-test-task-origin',taskId:'33333333-3333-4333-8333-333333333333',projectId,provider:'codex',threadId:'fixture-thread',sessionId:null,incarnationId:'44444444-4444-4444-8444-444444444444'});
   const plan=fixtureScenario();plan.capture.required=false;
   const publish=()=>{store.authenticate(pair.sessionId,pair.token);return store.poll(pair.sessionId,{sessionId:pair.sessionId,clientLifetimeId:'report-plugin-life',pluginArtifactHash:ARTIFACT,
     markerName:'ArcaneTestProof_report_history',placeId:0,universeId:0,placeName:NAME,mode:state.mode,playEpoch:state.epoch,continuitySupported:true,connected:true});};
@@ -66,9 +68,9 @@ async function fixture(t:TestContext,options:{scenario?:boolean;runtime?:Scenari
     connections.push(connection);return connection;
   };
   const writer=options.writer?.(reports)??reports;
-  const openService=async()=>{const service=await createStudioTestService({directory,store,pluginArtifactHash:ARTIFACT,connect,reports:writer,...(options.task?{taskPort}:{})});services.push(service);return service;};
+  const openService=async()=>{const service=await createStudioTestService({directory,store,custody:store.bindNativeCustody(projectId,join(root,'studio')),pluginArtifactHash:ARTIFACT,connect,reports:writer,...(options.task?{taskPort}:{})});services.push(service);return service;};
   const service=await openService();
-  const openReports=async()=>{const r=await openStudioTestReportStore({directory:reportDirectory,projectId:PROJECT,exclusiveWriter:()=>true});reportStores.push(r);return r;};
+  const openReports=async()=>{const r=await openStudioTestReportStore({directory:reportDirectory,projectId,exclusiveWriter:()=>true});reportStores.push(r);return r;};
   const prepare=()=>service.requests.prepare({sessionId:pair.sessionId,nativeStudioId:STUDIO,durationMs:5000,observationIntervalMs:250,failOnRuntimeError:true,...(options.scenario?{scenario:plan}:{})},ACTOR);
   return {root,directory,reportDirectory,store,reports,service,openService,openReports,state,packets,prepare};
 }
@@ -105,7 +107,7 @@ test('unknown actual input cleanup remains readable when the reopened live safet
 
 test('archive writer and failure-recorder exceptions never change cancellation or original task evidence',async t=>{
   let admissions=0,terminals=0,notes=0;
-  const f=await fixture(t,{task:true,writer:()=>({projectId:PROJECT,recordAdmission(){admissions++;return {stored:false,code:'ARCHIVE_WRITE'};},recordTerminal(){terminals++;throw new Error('PRIVATE_ARCHIVE_FAILURE');},noteFailure(){notes++;throw new Error('PRIVATE_RECORDER_FAILURE');}})});
+  const f=await fixture(t,{task:true,writer:reports=>({projectId:reports.projectId,recordAdmission(){admissions++;return {stored:false,code:'ARCHIVE_WRITE'};},recordTerminal(){terminals++;throw new Error('PRIVATE_ARCHIVE_FAILURE');},noteFailure(){notes++;throw new Error('PRIVATE_RECORDER_FAILURE');}})});
   const job=await f.prepare(),cancelled=await f.service.requests.cancel(job.id,ACTOR);
   assert.equal(admissions,1);assert.equal(terminals,1);assert.equal(notes,2);assert.equal(f.state.prepared,1);assert.equal(f.packets.length,1);
   assert.equal(cancelled.state,'cancelled');assert.equal(cancelled.review.cleanup,'not_started');assert.equal(f.state.starts,0);assert.equal(f.state.stops,0);assert.equal(f.state.closes,1);
@@ -115,7 +117,7 @@ test('archive writer and failure-recorder exceptions never change cancellation o
 
 test('archive faults cannot replace an original SDK-close rejection or fabricate task settlement',async t=>{
   const original=new Error('controlled original close failure');let archived=0;
-  const f=await fixture(t,{task:true,closeFailure:original,writer:()=>({projectId:PROJECT,recordAdmission(){return {stored:true};},recordTerminal(){archived++;throw new Error('archive rejected');},noteFailure(){throw new Error('recorder rejected');}})});
+  const f=await fixture(t,{task:true,closeFailure:original,writer:reports=>({projectId:reports.projectId,recordAdmission(){return {stored:true};},recordTerminal(){archived++;throw new Error('archive rejected');},noteFailure(){throw new Error('recorder rejected');}})});
   const job=await f.prepare();await assert.rejects(f.service.requests.cancel(job.id,ACTOR),error=>error===original);
   assert.equal(archived,1);assert.equal(f.state.closes,1);assert.equal(f.packets.length,0,'the original failed-close path never sent a task terminal');
   assert.equal(f.state.starts,0);assert.deepEqual(f.service.reportArchiveStatus?.(),{state:'degraded',code:'ARCHIVE_WRITE'});

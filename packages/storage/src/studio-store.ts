@@ -1,7 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { sqliteTransportPath } from './sqlite-path.js';
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, unlinkSync, writeFileSync, type BigIntStats } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { createHash, createHmac, randomBytes, randomInt, randomUUID, timingSafeEqual } from 'node:crypto';
 import { types } from 'node:util';
 import { z } from 'zod';
@@ -23,6 +23,21 @@ import { ASSET_CONVERSATION_PROVIDERS } from '../../protocol/src/asset-conversat
 
 type Row = Record<string, string | number | bigint | Uint8Array | null>;
 interface Options { directory: string; now?: () => number }
+export type StudioNativeCustodyOperation = 'playtest-prepare'|'viewport'|'playtest-revalidate'|'asset-search'|'asset-insert'|'asset-job';
+export type StudioNativeCustodyEvidence = 'native'|'fixture';
+export type StudioNativeCustodyReason = 'close-unconfirmed'|'scope-lost'|'storage-unavailable';
+/** Original process-local identity only; its serialized spelling is never a permit. */
+export interface StudioNativeCustodyTicket {readonly kind:'studio-native-custody-ticket'}
+export interface StudioNativeCustodyPort {
+  readonly projectId:string;readonly ownerEpoch:string;
+  assertReady():void;
+  reserve(operation:StudioNativeCustodyOperation,evidence:StudioNativeCustodyEvidence):StudioNativeCustodyTicket;
+  quarantine(ticket:StudioNativeCustodyTicket,reason:StudioNativeCustodyReason):void;
+  settleNoStart(ticket:StudioNativeCustodyTicket):void;
+  settleNativeClosed(ticket:StudioNativeCustodyTicket):void;
+  settleFixtureClosed(ticket:StudioNativeCustodyTicket):void;
+  retireAdmissions():void;
+}
 export interface ArcaneKeySummary {keyId:string;allowedRoots:StudioSession['allowedRoots'];allowWrites:boolean;issuedAt:string;revokedAt:string|null;lastUsedAt:string|null}
 export type ArcaneKeyIssue = ArcaneKeySummary & { apiKey: string };
 export interface AssetUploadIntent {
@@ -218,7 +233,75 @@ function stageIntent(value:unknown):StageRunIntent {
 }
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 const stageContinuityKey = (intent:StageRunIntent) => hash(canonical({sessionId:intent.target.sessionId,clientLifetimeId:intent.continuity.clientLifetimeId,playEpoch:intent.continuity.playEpoch}));
-const STUDIO_DATABASE_VERSION=7,STUDIO_APPLICATION_ID=0x41525354;
+const nativeCustodyOperations=['playtest-prepare','viewport','playtest-revalidate','asset-search','asset-insert','asset-job'] as const;
+const nativeCustodyReasons=['close-unconfirmed','scope-lost','storage-unavailable'] as const;
+const nativeCustodySchema=z.strictObject({schemaVersion:z.literal(1),slot:z.number().int().min(1).max(64),custodyId:stageJob,
+  projectId:stageHash,ownerEpoch:stageJob,operation:z.enum(nativeCustodyOperations),evidence:z.enum(['native','fixture']),
+  state:z.enum(['pending','quarantined','settled']),createdAt:z.iso.datetime(),settledAt:z.iso.datetime().nullable(),
+  settlement:z.enum(['no-start','native-close','fixture-close']).nullable(),reason:z.enum(nativeCustodyReasons).nullable()});
+type NativeCustodyRecord=z.infer<typeof nativeCustodySchema>;
+type NativePhysicalIdentity={path:string;physical:string;dev:bigint;ino:bigint};
+const nativeCustodyMessage='Studio native operations are paused because Arcane could not confirm that an owned SDK connection closed. Saved playtest reports remain available. Edit-mode record repair cannot settle this connection. Do not retry native work or delete the retained records.';
+function nativeCustodyFailure():never {throw new ArcaneError('SDK_CUSTODY_UNCONFIRMED',nativeCustodyMessage);}
+const sameNativePath=(a:string,b:string)=>process.platform==='win32'?a.toLowerCase()===b.toLowerCase():a===b;
+const sameNativeIdentity=(a:Pick<BigIntStats,'dev'|'ino'>,b:Pick<BigIntStats,'dev'|'ino'>)=>a.dev===b.dev&&a.ino===b.ino;
+function nativeFile(path:string,fd?:number):BigIntStats {
+  const named=lstatSync(path,{bigint:true});
+  if(!named.isFile()||named.isSymbolicLink()||named.nlink!==1n||named.ino===0n)nativeCustodyFailure();
+  if(fd!==undefined){const opened=fstatSync(fd,{bigint:true});if(!opened.isFile()||opened.nlink!==1n||!sameNativeIdentity(named,opened))nativeCustodyFailure();}
+  return named;
+}
+function nativeIdentity(path:string,stat:BigIntStats):NativePhysicalIdentity {return {path,physical:realpathSync(path),dev:stat.dev,ino:stat.ino};}
+function nativeDirectoryPins(path:string):NativePhysicalIdentity[] {
+  const pins:NativePhysicalIdentity[]=[];
+  for(let current=resolve(path);;current=dirname(current)){
+    const stat=lstatSync(current,{bigint:true});
+    if(!stat.isDirectory()||stat.isSymbolicLink()||stat.ino===0n)nativeCustodyFailure();
+    pins.push(nativeIdentity(current,stat));if(dirname(current)===current)return pins;
+  }
+}
+function nativeCheckDirectories(pins:readonly NativePhysicalIdentity[]):void {
+  for(const pin of pins){const stat=lstatSync(pin.path,{bigint:true});if(!stat.isDirectory()||stat.isSymbolicLink()||!sameNativeIdentity(pin,stat)||!sameNativePath(realpathSync(pin.path),pin.physical))nativeCustodyFailure();}
+}
+function nativeLockBytes(path:string,originalFd:number,pin:NativePhysicalIdentity):Buffer {
+  const before=nativeFile(path,originalFd);
+  if(!sameNativeIdentity(pin,before)||!sameNativePath(realpathSync(path),pin.physical)||before.size>1024n)nativeCustodyFailure();
+  const fd=openSync(path,'r');
+  try{const stat=nativeFile(path,fd);if(!sameNativeIdentity(pin,stat))nativeCustodyFailure();
+    const bytes=Buffer.alloc(Number(stat.size));if(readSync(fd,bytes,0,bytes.length,0)!==bytes.length)nativeCustodyFailure();
+    const after=nativeFile(path,fd);if(!sameNativeIdentity(pin,after)||after.size!==stat.size)nativeCustodyFailure();return bytes;
+  }finally{closeSync(fd);}
+}
+function readNativeCustody(db:DatabaseSync,fail:()=>never):NativeCustodyRecord[] {
+  const budget=db.prepare('SELECT count(*) AS n,coalesce(max(length(CAST(payload AS BLOB))),0) AS largest FROM studio_native_custody').get() as Row;
+  if(Number(budget.n)>64||Number(budget.largest)>2048)fail();
+  // Bound the projection too: a concurrent foreign writer or disabled SQL
+  // constraints must not turn the inventory check into an unbounded JS read.
+  const records=db.prepare('SELECT slot,substr(custody_id,1,37) AS custody_id,substr(project_id,1,65) AS project_id,substr(owner_epoch,1,37) AS owner_epoch,substr(state,1,12) AS state,substr(payload,1,2049) AS payload,length(CAST(payload AS BLOB)) AS payload_bytes FROM studio_native_custody ORDER BY slot LIMIT 65').all() as Row[];
+  if(records.length>64||records.length!==Number(budget.n))fail();
+  return records.map(row=>{
+    if(typeof row.payload!=='string'||Number(row.payload_bytes)>2048||Buffer.byteLength(row.payload)>2048)fail();
+    try{
+      // The new payload is flat. Inspect its original key tokens as well as its
+      // parsed shape so duplicate keys cannot disappear through JSON.parse.
+      const value:unknown=JSON.parse(row.payload),seen=new Set<string>();let depth=0;
+      for(let i=0;i<row.payload.length;i++){
+        const c=row.payload[i];if(c==='{'||c==='['){depth++;continue;}if(c==='}'||c===']'){depth--;continue;}
+        if(c!=='"')continue;const start=i++;for(;i<row.payload.length;i++){if(row.payload[i]==='\\'){i++;continue;}if(row.payload[i]==='"')break;}
+        let next=i+1;while(/\s/.test(row.payload[next]??'x'))next++;
+        if(depth===1&&row.payload[next]===':'){const key:unknown=JSON.parse(row.payload.slice(start,i+1));if(typeof key!=='string'||seen.has(key))fail();seen.add(key);}
+      }
+      const parsed=nativeCustodySchema.safeParse(value);if(!parsed.success)fail();const record=parsed.data;
+      if(record.slot!==row.slot||record.custodyId!==row.custody_id||record.projectId!==row.project_id||record.ownerEpoch!==row.owner_epoch||record.state!==row.state)fail();
+      if(record.state==='pending'&&(record.settlement!==null||record.settledAt!==null||record.reason!==null)||
+        record.state==='quarantined'&&(record.settlement!==null||record.settledAt!==null||record.reason===null)||
+        record.state==='settled'&&(record.settlement===null||record.settledAt===null||record.reason!==null)||
+        record.settlement==='native-close'&&record.evidence!=='native'||record.settlement==='fixture-close'&&record.evidence!=='fixture')fail();
+      return record;
+    }catch{fail();}
+  });
+}
+const STUDIO_DATABASE_VERSION=8,STUDIO_APPLICATION_ID=0x41525354;
 // Exact source-backed v2..v6 shapes. Version2 existed both before and after
 // asset_uploads was introduced; populated v0/v1 has no supported provenance.
 const STUDIO_SCHEMA=[
@@ -238,25 +321,27 @@ const STUDIO_SCHEMA=[
  "CREATE TABLE studio_test_reservations (id TEXT PRIMARY KEY,session_id TEXT NOT NULL REFERENCES sessions(id),job_id TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('active','released')),setup_closed INTEGER NOT NULL DEFAULT 0 CHECK(setup_closed IN (0,1)),payload TEXT NOT NULL) STRICT",
  'CREATE INDEX studio_test_reservations_state ON studio_test_reservations(state)',
  "CREATE TABLE studio_test_commands (reservation_id TEXT NOT NULL REFERENCES studio_test_reservations(id),edit_id TEXT NOT NULL,role TEXT NOT NULL CHECK(role IN ('setup','restore')),command_id TEXT NOT NULL UNIQUE REFERENCES commands(id),request_id TEXT NOT NULL UNIQUE,lease_epoch INTEGER NOT NULL,fingerprint TEXT NOT NULL,PRIMARY KEY(reservation_id,edit_id,role)) STRICT",
+ "CREATE TABLE studio_native_custody (slot INTEGER PRIMARY KEY CHECK(slot>=1 AND slot<=64),custody_id TEXT NOT NULL UNIQUE,project_id TEXT NOT NULL,owner_epoch TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('pending','quarantined','settled')),payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB))<=2048)) STRICT",
 ] as const;
 const schemaSql=(sql:string)=>sql.replace(/\bIF NOT EXISTS\s+/g,'').replace(/\s+/g,' ').replace(/\s*([(),=<>])\s*/g,'$1').trim();
 function verifyStudioSchema(db:DatabaseSync,version:number):Set<string>{
  function fail():never {throw new ArcaneError('MIGRATION','Studio database schema or journal is not a supported Arcane version.');}
  if(version>STUDIO_DATABASE_VERSION)throw new ArcaneError('MIGRATION','Studio database is newer than this Arcane build.');
  const application=Number(db.prepare('PRAGMA application_id').get()?.application_id);
- if(!Number.isSafeInteger(version)||version<0||version===1||version>STUDIO_DATABASE_VERSION||application!==(version===7?STUDIO_APPLICATION_ID:0))fail();
+ if(!Number.isSafeInteger(version)||version<0||version===1||version>STUDIO_DATABASE_VERSION||application!==((version===7||version===8)?STUDIO_APPLICATION_ID:0))fail();
  if(db.prepare('PRAGMA quick_check').get()?.quick_check!=='ok')fail();
  const size=db.prepare("SELECT count(*) AS n,coalesce(max(length(CAST(sql AS BLOB))),0) AS largest FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*'").get() as Row;
  if(Number(size.n)>STUDIO_SCHEMA.length||Number(size.largest)>8192)fail();
  const rows=db.prepare("SELECT type,name,sql FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*'").all() as Row[];
  if(version===0){if(rows.length)fail();return new Set();}
- const count=version===2?6:version===3?10:version===4?12:version===5?13:16;
+ const count=version===2?6:version===3?10:version===4?12:version===5?13:version===8?17:16;
  const expected=new Set<string>(STUDIO_SCHEMA.slice(0,count).map(schemaSql));
  const actual=new Set<string>();const names=new Set<string>();
  for(const row of rows){if(!['table','index'].includes(String(row.type))||typeof row.sql!=='string')fail();actual.add(schemaSql(row.sql));names.add(String(row.name));}
  if(version===2&&actual.has(schemaSql(STUDIO_SCHEMA[6])))expected.add(schemaSql(STUDIO_SCHEMA[6]));
  if(actual.size!==rows.length||actual.size!==expected.size||[...expected].some(sql=>!actual.has(sql)))fail();
  if(db.prepare('PRAGMA foreign_key_check').get())fail();
+ if(names.has('studio_native_custody'))readNativeCustody(db,fail);
  for(const table of ['asset_stage_runs','asset_stage_attempts'])if(names.has(table)){
    const budget=db.prepare(`SELECT count(*) AS n,coalesce(max(length(CAST(payload AS BLOB))),0) AS largest FROM ${table}`).get() as Row;
    if(Number(budget.n)>STUDIO_STAGE_RUN_LIMITS.runs||Number(budget.largest)>4*1024*1024)fail();
@@ -298,6 +383,12 @@ export class StudioStore {
   private lockFd: number;
   private now: () => number;
   private closed = false;
+  #nativeCustodyFault=false;
+  #nativeDirectories:readonly NativePhysicalIdentity[]=[];
+  #nativeLock:NativePhysicalIdentity|null=null;
+  #nativeLockContents:Buffer|null=null;
+  #nativeDatabase:NativePhysicalIdentity|null=null;
+  #nativeDatabaseFd:number|null=null;
   // Only trusted host verification can mint this one-use authority. JSON claims
   // (including those in a restoration receipt) never authorize execution.
   #activationAdmissions = new WeakMap<object, ScriptSourceVerification>();
@@ -409,7 +500,8 @@ export class StudioStore {
     this.now = options.now ?? Date.now;
     mkdirSync(options.directory, { recursive: true });
     this.workspaceDirectory = resolve(options.directory);
-    this.lockPath = join(options.directory, 'studio.lock');
+    this.#nativeDirectories=nativeDirectoryPins(this.workspaceDirectory);
+    this.lockPath = join(this.workspaceDirectory, 'studio.lock');
     // workspaceInUse marks only a lock whose owner process is alive (another open Arcane runtime), so the launcher can
     // say so precisely. A live owner's lock is never signalled, taken over or removed.
     const inUse = (message: string) => Object.assign(new ArcaneError('LOCKED', message), { workspaceInUse: true as const });
@@ -427,9 +519,19 @@ export class StudioStore {
     }
     try { this.lockFd = openSync(this.lockPath, 'wx', 0o600); }
     catch { throw new ArcaneError('LOCKED', 'Another daemon acquired this workspace.'); }
-    writeFileSync(this.lockFd, JSON.stringify({ pid: process.pid, openedAt: this.iso() }));
     try {
-      this.db = new DatabaseSync(sqliteTransportPath(join(options.directory, 'studio.sqlite')), { timeout: 2000, allowExtension: false });
+      this.#nativeLock=nativeIdentity(this.lockPath,nativeFile(this.lockPath,this.lockFd));
+      this.#nativeLockContents=Buffer.from(JSON.stringify({ pid: process.pid, openedAt: this.iso() }));
+      writeFileSync(this.lockFd,this.#nativeLockContents);
+      nativeCheckDirectories(this.#nativeDirectories);
+      const database=join(this.workspaceDirectory,'studio.sqlite');
+      if(!existsSync(database)){this.#nativeDatabaseFd=openSync(database,'wx',0o600);}
+      else {nativeFile(database);this.#nativeDatabaseFd=openSync(database,'r');}
+      this.#nativeDatabase=nativeIdentity(database,nativeFile(database,this.#nativeDatabaseFd));
+      this.db = new DatabaseSync(sqliteTransportPath(database), { timeout: 2000, allowExtension: false });
+      this.#assertNativeOwnership();
+      // FULL must already govern migration commits, not only later WAL work.
+      this.#nativeFullSync();
       this.transaction(() => {
         const version=Number(this.db.prepare('PRAGMA user_version').get()?.user_version);
         const present=verifyStudioSchema(this.db,version);
@@ -468,7 +570,106 @@ export class StudioStore {
         this.event('daemon_started', 'local', { protocolVersion: STUDIO_PROTOCOL });
       });
       this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;');
-    } catch (error) { try { this.db!.close(); } catch {} closeSync(this.lockFd); unlinkSync(this.lockPath); throw error; }
+      this.#assertNativeOwnership();this.#nativeFullSync();
+    } catch (error) {
+      for(const cleanup of [()=>this.db!.close(),()=>this.#closeNativeDatabasePin(),()=>this.#releaseNativeLock()])try{cleanup();}catch{/* Preserve the original startup failure while attempting every owned cleanup. */}
+      throw error;
+    }
+  }
+  #checkNativeLock():void {
+    nativeCheckDirectories(this.#nativeDirectories);
+    if(!this.#nativeLock||!this.#nativeLockContents||!nativeLockBytes(this.lockPath,this.lockFd,this.#nativeLock).equals(this.#nativeLockContents))nativeCustodyFailure();
+  }
+  #assertNativeOwnership():void {
+    this.#checkNativeLock();
+    const pin=this.#nativeDatabase,fd=this.#nativeDatabaseFd;
+    if(!pin||fd===null)nativeCustodyFailure();
+    const stat=nativeFile(pin.path,fd);
+    if(!sameNativeIdentity(pin,stat)||!sameNativePath(realpathSync(pin.path),pin.physical))nativeCustodyFailure();
+    // Fixed sidecar inventory only. Sizes/mtimes legitimately change with WAL;
+    // neither is used as identity, and no sidecar contents are read.
+    for(const suffix of ['-wal','-shm','-journal']){
+      const path=pin.path+suffix;
+      try {nativeFile(path);}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
+    }
+  }
+  #nativeFullSync():void {
+    this.db.exec('PRAGMA synchronous=FULL;');
+    if(Number(this.db.prepare('PRAGMA synchronous').get()?.synchronous)!==2)nativeCustodyFailure();
+  }
+  #closeNativeDatabasePin():void {if(this.#nativeDatabaseFd!==null){const fd=this.#nativeDatabaseFd;this.#nativeDatabaseFd=null;closeSync(fd);}}
+  #releaseNativeLock():void {
+    let owned=false;try{this.#checkNativeLock();owned=true;}catch{/* Never unlink a replacement or unknown lock. */}
+    const errors:unknown[]=[];try{closeSync(this.lockFd);}catch(error){errors.push(error);}
+    try{if(owned)unlinkSync(this.lockPath);}catch(error){errors.push(error);}
+    if(errors.length)throw errors[0];
+  }
+  /** Fixed-project host port. Tickets and a live port epoch cannot be reconstructed from records. */
+  bindNativeCustody(projectId:string,workspaceDirectory:string):StudioNativeCustodyPort {
+    if(typeof projectId!=='string'||!stageHash.safeParse(projectId).success||typeof workspaceDirectory!=='string'||!this.holdsWorkspaceLock(workspaceDirectory))nativeCustodyFailure();
+    const ownerEpoch=randomUUID(),tickets=new WeakMap<StudioNativeCustodyTicket,{slot:number;custodyId:string;evidence:StudioNativeCustodyEvidence}>();
+    const pending=new Map<string,number>();let retired=false,fenced=false;
+    const physical=()=>{
+      try{if(this.closed||this.#nativeCustodyFault)nativeCustodyFailure();this.#assertNativeOwnership();}
+      catch{this.#nativeCustodyFault=true;nativeCustodyFailure();}
+    };
+    const rows=()=>{try{return readNativeCustody(this.db,nativeCustodyFailure);}catch{this.#nativeCustodyFault=true;nativeCustodyFailure();}};
+    const ready=(records:readonly NativeCustodyRecord[])=>{
+      if(retired||fenced||records.some(row=>row.state!=='settled'&&(row.state!=='pending'||row.projectId!==projectId||row.ownerEpoch!==ownerEpoch||pending.get(row.custodyId)!==row.slot)))nativeCustodyFailure();
+    };
+    const commit=<T>(work:()=>T):T=>{
+      physical();
+      try{
+        this.#nativeFullSync();
+        const value=this.transaction(()=>{physical();const value=work();physical();if(Number(this.db.prepare('PRAGMA synchronous').get()?.synchronous)!==2)nativeCustodyFailure();return value;});
+        physical();return value;
+      }catch{this.#nativeCustodyFault=true;nativeCustodyFailure();}
+    };
+    const write=(record:NativeCustodyRecord)=>{
+      const payload=JSON.stringify(record);if(!nativeCustodySchema.safeParse(record).success||Buffer.byteLength(payload)>2048)nativeCustodyFailure();
+      this.db.prepare('INSERT INTO studio_native_custody(slot,custody_id,project_id,owner_epoch,state,payload) VALUES(?,?,?,?,?,?) ON CONFLICT(slot) DO UPDATE SET custody_id=excluded.custody_id,project_id=excluded.project_id,owner_epoch=excluded.owner_epoch,state=excluded.state,payload=excluded.payload')
+        .run(record.slot,record.custodyId,record.projectId,record.ownerEpoch,record.state,payload);
+    };
+    const original=(ticket:StudioNativeCustodyTicket,records:readonly NativeCustodyRecord[])=>{
+      const identity=tickets.get(ticket);if(!identity)nativeCustodyFailure();
+      const record=records.find(row=>row.slot===identity.slot&&row.custodyId===identity.custodyId&&row.projectId===projectId&&row.ownerEpoch===ownerEpoch&&row.evidence===identity.evidence);
+      if(!record)nativeCustodyFailure();return record;
+    };
+    const settle=(ticket:StudioNativeCustodyTicket,settlement:NonNullable<NativeCustodyRecord['settlement']>)=>{
+      const identity=tickets.get(ticket);if(!identity||settlement==='native-close'&&identity.evidence!=='native'||settlement==='fixture-close'&&identity.evidence!=='fixture')nativeCustodyFailure();
+      physical();original(ticket,rows());
+      commit(()=>{
+        const record=original(ticket,rows());
+        if(record.state==='settled'){if(record.settlement!==settlement)nativeCustodyFailure();return;}
+        write({...record,state:'settled',settledAt:this.iso(),settlement,reason:null});
+      });
+      pending.delete(identity.custodyId);
+    };
+    physical();
+    return Object.freeze({projectId,ownerEpoch,
+      assertReady:()=>{physical();ready(rows());physical();},
+      reserve:(operation:StudioNativeCustodyOperation,evidence:StudioNativeCustodyEvidence)=>{
+        if(!nativeCustodyOperations.includes(operation)||evidence!=='native'&&evidence!=='fixture')nativeCustodyFailure();
+        physical();const records=rows();ready(records);
+        if(records.length===64&&!records.some(row=>row.state==='settled'))nativeCustodyFailure();
+        const custodyId=randomUUID();
+        const ticket=Object.freeze({kind:'studio-native-custody-ticket' as const});
+        const selected=commit(()=>{const current=rows();ready(current);const used=new Set(current.map(row=>row.slot));
+          let slot=Array.from({length:64},(_,i)=>i+1).find(value=>!used.has(value));
+          if(slot===undefined)slot=current.filter(row=>row.state==='settled').sort((a,b)=>Date.parse(a.settledAt!)-Date.parse(b.settledAt!)||a.custodyId.localeCompare(b.custodyId))[0]?.slot;
+          if(slot===undefined)nativeCustodyFailure();
+          write({schemaVersion:1,slot,custodyId,projectId,ownerEpoch,operation,evidence,state:'pending',createdAt:this.iso(),settledAt:null,settlement:null,reason:null});return slot;});
+        tickets.set(ticket,{slot:selected,custodyId,evidence});pending.set(custodyId,selected);return ticket;
+      },
+      quarantine:(ticket:StudioNativeCustodyTicket,reason:StudioNativeCustodyReason)=>{
+        if(!nativeCustodyReasons.includes(reason)||!tickets.has(ticket))nativeCustodyFailure();physical();original(ticket,rows());fenced=true;
+        commit(()=>{const record=original(ticket,rows());if(record.state==='pending')write({...record,state:'quarantined',reason});});
+      },
+      settleNoStart:(ticket:StudioNativeCustodyTicket)=>settle(ticket,'no-start'),
+      settleNativeClosed:(ticket:StudioNativeCustodyTicket)=>settle(ticket,'native-close'),
+      settleFixtureClosed:(ticket:StudioNativeCustodyTicket)=>settle(ticket,'fixture-close'),
+      retireAdmissions:()=>{retired=true;},
+    });
   }
   private iso(): string { return new Date(this.now()).toISOString(); }
   private transaction<T>(work: () => T): T {
@@ -1934,5 +2135,8 @@ export class StudioStore {
     const a = resolve(directory), b = this.workspaceDirectory;
     return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
   }
-  close(): void { if (!this.closed) { this.closed = true; this.clearStageContentHashes();this.#convertedStageInspections.clear();this.#assetDispatchGuards.clear();this.#importRevisionGuards.clear();this.#importObservationClaims.clear();this.#importRevisionClaims.clear(); for(const waiters of this.#commandResultWaiters.values())for(const finish of waiters)finish(); this.db.close(); closeSync(this.lockFd); unlinkSync(this.lockPath); } }
+  close(): void { if (!this.closed) { this.closed = true; this.clearStageContentHashes();this.#convertedStageInspections.clear();this.#assetDispatchGuards.clear();this.#importRevisionGuards.clear();this.#importObservationClaims.clear();this.#importRevisionClaims.clear(); for(const waiters of this.#commandResultWaiters.values())for(const finish of waiters)finish();
+    const errors:unknown[]=[];for(const cleanup of [()=>this.db.close(),()=>this.#closeNativeDatabasePin(),()=>this.#releaseNativeLock()])try{cleanup();}catch(error){errors.push(error);}
+    if(errors.length)throw errors[0];
+  } }
 }
