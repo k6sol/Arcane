@@ -586,7 +586,7 @@ export async function createConnectionLab(options: Options) {
     server, origin, token, agentToken, url: origin + (bridge ? '/studio#' : '/#') + token, meshKeep, imports, appAssets,
     close(): Promise<void> {
       if (cleanup) return cleanup;
-      shuttingDown = true; testHistoryEpoch++; humanAssetSelection.close(); appAssets?.close(); const fenceErrors = fenceTasks(); handoffs?.close(); nativeAssetRegistry?.close(); ownedSourceVerifier?.dispose(); scriptSync?.close();
+      shuttingDown = true; testHistoryEpoch++; humanAssetSelection.close(); appAssets?.close(); const fenceErrors = fenceTasks(); handoffs?.close(); ownedSourceVerifier?.dispose(); scriptSync?.close();
       cleanup = (async () => {
         // Quiesce the listener first; all cleanup paths still run on failure.
         const listenerClosed = new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
@@ -599,6 +599,9 @@ export async function createConnectionLab(options: Options) {
         try { await workflow?.closeAsync(); } catch (error) { errors.push(error); }
         try { if (ownsAssociations) associations?.close(); } catch (error) { errors.push(error); }
         try { await codex?.close(); } catch (error) { errors.push(error); }
+        // Owned chat tasks cancel their asset work through this registry, so it
+        // closes after them; the listener and connections are already closed.
+        try { nativeAssetRegistry?.close(); } catch (error) { errors.push(error); }
         const listenerError = await listenerClosed;
         if (listenerError) errors.push(listenerError);
         if (errors.length) throw new ArcaneError('CLEANUP', 'Owned local service cleanup failed; retained state needs inspection.');
