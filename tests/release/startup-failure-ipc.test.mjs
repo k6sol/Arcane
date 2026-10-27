@@ -12,11 +12,48 @@ import {createHash,randomUUID} from 'node:crypto';
 import {createRequire} from 'node:module';
 import {once} from 'node:events';
 import {PassThrough} from 'node:stream';
+import {performance} from 'node:perf_hooks';
+import {types} from 'node:util';
 
 const ROOT=fileURLToPath(new URL('../../',import.meta.url));
 const ENTRY=join(ROOT,'dist/apps/daemon/src/product-main.js');
 const test=(name,run)=>nodeTest(name,{timeout:20000},run);
 const ENVIRONMENT_NAMES=new Set(['path','systemroot','windir','systemdrive','comspec','pathext','temp','tmp','home','userprofile','appdata','localappdata','lang','lc_all','lc_ctype']);
+
+const STARTUP_CODES=new Set(['PORT_IN_USE','PROJECT_IN_USE','STATE_NEWER','STATE_UNSAFE','RESOURCE_UNAVAILABLE','STARTUP_FAILED']);
+const EXIT_SIGNALS=new Set(['SIGINT','SIGTERM','SIGKILL','SIGBREAK']);
+function ownData(value,key){
+  if(!value||typeof value!=='object'||types.isProxy(value))return undefined;
+  const prototype=Object.getPrototypeOf(value);if(prototype!==Object.prototype&&prototype!==null)return undefined;
+  const descriptor=Object.getOwnPropertyDescriptor(value,key);
+  return descriptor&&Object.hasOwn(descriptor,'value')?descriptor.value:undefined;
+}
+// Fixed observational metadata only. Never serialize IPC payloads (ready has a
+// bearer), output text, paths, environment or an underlying spawn exception.
+function startupFailureSnapshot(value){
+  const elapsed=ownData(value,'elapsedMs'),bytes=ownData(value,'outputBytes'),raw=ownData(value,'messages'),outcome=ownData(value,'outcome');
+  const validMessages=raw&&typeof raw==='object'&&!types.isProxy(raw)&&Array.isArray(raw),messages=validMessages?raw:[];
+  const failureCodes=new Set();let readySeen=false,unrecognizedIpc=raw!==undefined&&!validMessages;
+  for(let i=0;i<Math.min(messages.length,5);i++){
+    const descriptor=Object.getOwnPropertyDescriptor(messages,String(i)),message=descriptor&&Object.hasOwn(descriptor,'value')?descriptor.value:undefined;
+    const kind=ownData(message,'type'),version=ownData(message,'protocolVersion');
+    if(version===1&&kind==='arcane-ready')readySeen=true;
+    else if(version===1&&kind==='arcane-startup-failure'&&STARTUP_CODES.has(ownData(message,'code')))failureCodes.add(ownData(message,'code'));
+    else unrecognizedIpc=true;
+  }
+  const code=ownData(outcome,'code'),signal=ownData(outcome,'signal');
+  const codeKnown=code===null||Number.isInteger(code)&&code>=-2147483648&&code<=2147483647;
+  const signalKnown=signal===null||EXIT_SIGNALS.has(signal);
+  return{
+    schemaVersion:1,spawned:ownData(value,'spawned')===true,spawnErrorSeen:ownData(value,'spawnErrorSeen')===true,
+    elapsedMs:typeof elapsed==='number'&&Number.isFinite(elapsed)&&elapsed>=0?Math.min(60000,Math.round(elapsed)):null,
+    elapsedCapped:typeof elapsed==='number'&&Number.isFinite(elapsed)&&elapsed>60000,
+    outputBytes:Number.isSafeInteger(bytes)&&bytes>=0?Math.min(bytes,65537):null,outputBytesCapped:Number.isSafeInteger(bytes)&&bytes>65537,
+    ipcCount:Math.min(messages.length,5),ipcCountCapped:messages.length>5,readySeen,failureCodes:[...failureCodes],unrecognizedIpc,
+    closeObserved:code!==undefined&&signal!==undefined,exitCode:codeKnown?code:null,exitSignal:signalKnown?signal:null,
+    unrecognizedClose:outcome!==null&&outcome!==undefined&&(!codeKnown||!signalKnown),
+  };
+}
 
 async function fixture(t){
   const base=await realpath(tmpdir()),root=await mkdtemp(join(base,'arcane-startup-ipc-'));
@@ -35,8 +72,10 @@ async function fixture(t){
 async function start(f,{resources=ROOT,port='0'}={}){
   const env={...Object.fromEntries(Object.entries(process.env).filter(([key])=>ENVIRONMENT_NAMES.has(key.toLowerCase()))),
     ARCANE_RESOURCE_DIRECTORY:resolve(resources),ARCANE_STATE_DIRECTORY:f.state,ARCANE_PROJECT:f.project,ARCANE_PORT:port};
-  const child=spawn(process.execPath,[ENTRY],{cwd:f.root,env,shell:false,windowsHide:true,stdio:['ignore','pipe','pipe','ipc']});
-  const messages=[];let outputBytes=0,timedOut=false;
+  const started=performance.now(),child=spawn(process.execPath,[ENTRY],{cwd:f.root,env,shell:false,windowsHide:true,stdio:['ignore','pipe','pipe','ipc']});
+  const messages=[];let outputBytes=0,timedOut=false,spawned=false,spawnErrorSeen=false;
+  child.once('spawn',()=>{spawned=true;});
+  const evidence=outcome=>' [startup evidence '+JSON.stringify(startupFailureSnapshot({spawned,spawnErrorSeen,elapsedMs:performance.now()-started,outputBytes,messages,outcome}))+']';
   child.on('message',value=>{messages.push(value);if(messages.length>4)child.kill();});
   for(const stream of [child.stdout,child.stderr])stream.on('data',chunk=>{outputBytes+=chunk.length;if(outputBytes>65536)child.kill();});
   const outcome=await new Promise((accept,reject)=>{
@@ -45,23 +84,76 @@ async function start(f,{resources=ROOT,port='0'}={}){
     const deadline=setTimeout(()=>{
       timedOut=true;child.kill();
       force=setTimeout(()=>child.kill('SIGKILL'),1000);
-      unconfirmed=setTimeout(()=>{clear();reject(Error('Owned fixture process closure was not confirmed.'));},2000);
+      unconfirmed=setTimeout(()=>{clear();reject(Error('Owned fixture process closure was not confirmed.'+evidence(null)));},2000);
     },15000);
-    child.once('error',error=>{clear();reject(error);});
+    child.once('error',()=>{spawnErrorSeen=true;clear();reject(Error('Owned fixture process emitted an error.'+evidence(null)));});
     child.once('close',(code,signal)=>{clear();accept({code,signal});});
   });
-  assert.equal(timedOut,false,'Owned daemon must finish its failed startup within the fixture deadline.');
-  assert.ok(outputBytes<=65536,'Startup diagnostics must remain bounded.');
-  assert.notEqual(outcome.code,0);assert.equal(outcome.signal,null);
-  assert.equal(await readFile(f.portRecord,'utf8'),f.saved);
-  await assert.rejects(access(join(f.state,'daemon.json')),{code:'ENOENT'});
+  const detail=evidence(outcome);
+  assert.equal(timedOut,false,'Owned daemon must finish its failed startup within the fixture deadline.'+detail);
+  assert.ok(outputBytes<=65536,'Startup diagnostics must remain bounded.'+detail);
+  assert.notEqual(outcome.code,0,detail);assert.equal(outcome.signal,null,detail);
+  assert.equal(await readFile(f.portRecord,'utf8'),f.saved,detail);
+  await assert.rejects(access(join(f.state,'daemon.json')),{code:'ENOENT'},detail);
   return messages;
 }
 
 function reported(messages,code){
-  assert.deepEqual(messages,[{type:'arcane-startup-failure',protocolVersion:1,code}]);
+  try{assert.deepEqual(messages,[{type:'arcane-startup-failure',protocolVersion:1,code}]);}
+  catch{assert.fail('Owned daemon startup IPC did not match the fixed expected failure. [startup evidence '+JSON.stringify(startupFailureSnapshot({messages}))+']');}
   assert.equal(JSON.stringify(messages).includes('token'),false);
 }
+
+// These pure cases exercise projection only, never claim an actual daemon result.
+test('startup evidence retains only fixed codes and normalized observed outcome fields',()=>{
+  for(const code of STARTUP_CODES){
+    const result=startupFailureSnapshot({spawned:true,spawnErrorSeen:false,elapsedMs:123.25,outputBytes:42,
+      messages:[{type:'arcane-startup-failure',protocolVersion:1,code}],outcome:{code:1,signal:null}});
+    assert.equal(result.spawned,true);assert.equal(result.spawnErrorSeen,false);assert.equal(result.elapsedMs,123);assert.equal(result.outputBytes,42);
+    assert.equal(result.ipcCount,1);assert.equal(result.readySeen,false);assert.deepEqual(result.failureCodes,[code]);assert.equal(result.unrecognizedIpc,false);
+    assert.equal(result.closeObserved,true);assert.equal(result.exitCode,1);assert.equal(result.exitSignal,null);assert.equal(result.unrecognizedClose,false);
+    assert.ok(Buffer.byteLength(JSON.stringify(result))<1024);
+  }
+});
+
+test('startup evidence and IPC mismatch errors never expose ready credentials, paths or unknown codes',()=>{
+  const secret='PRIVATE_STARTUP_PAYLOAD_4381',messages=[{type:'arcane-ready',protocolVersion:1,origin:'file:///'+secret,token:secret},
+    {type:'arcane-startup-failure',protocolVersion:1,code:secret,stderr:secret,path:secret},
+    {type:'arcane-startup-failure',protocolVersion:2,code:'PORT_IN_USE'}];
+  const result=startupFailureSnapshot({spawned:true,elapsedMs:10,outputBytes:99,messages,outcome:{code:secret,signal:secret,path:secret},path:secret,stderr:secret});
+  assert.equal(result.readySeen,true);assert.deepEqual(result.failureCodes,[]);assert.equal(result.unrecognizedIpc,true);
+  assert.equal(result.exitCode,null);assert.equal(result.exitSignal,null);assert.equal(result.unrecognizedClose,true);
+  assert.equal(JSON.stringify(result).includes(secret),false);
+  assert.throws(()=>reported(messages,'PORT_IN_USE'),error=>{
+    assert.equal(error.code,'ERR_ASSERTION');assert.equal(error.message.includes(secret),false);
+    assert.equal(error.actual,undefined);assert.equal(error.expected,undefined);assert.match(error.message,/startup evidence/);return true;
+  });
+});
+
+test('startup evidence bounds counters and inspects at most five IPC entries',()=>{
+  let called=0;const messages=Array.from({length:1000},()=>({type:'unknown',payload:'x'.repeat(100)}));
+  Object.defineProperty(messages,'5',{get(){called++;throw Error('Beyond the bounded summary');}});
+  const result=startupFailureSnapshot({elapsedMs:1e12,outputBytes:Number.MAX_SAFE_INTEGER,messages,outcome:null});
+  assert.equal(result.elapsedMs,60000);assert.equal(result.elapsedCapped,true);assert.equal(result.outputBytes,65537);assert.equal(result.outputBytesCapped,true);
+  assert.equal(result.ipcCount,5);assert.equal(result.ipcCountCapped,true);assert.equal(result.unrecognizedIpc,true);assert.equal(result.closeObserved,false);
+  assert.equal(called,0);assert.ok(Buffer.byteLength(JSON.stringify(result))<1024);
+  for(const value of [NaN,Infinity,-1,1.5]){
+    const invalid=startupFailureSnapshot({elapsedMs:value,outputBytes:value,messages:[]});
+    if(!Number.isFinite(value)||value<0)assert.equal(invalid.elapsedMs,null);
+    assert.equal(invalid.outputBytes,null);
+  }
+});
+
+test('startup evidence projection never invokes accessors, proxies or arbitrary prototype methods',()=>{
+  let called=0;const getter={protocolVersion:1};Object.defineProperty(getter,'type',{get(){called++;return 'arcane-ready';}});
+  const proxy=new Proxy({},{get(){called++;throw Error('Do not read proxy');},ownKeys(){called++;throw Error('Do not enumerate proxy');},getPrototypeOf(){called++;throw Error('Do not inspect proxy');}});
+  const custom=Object.create({type:'arcane-ready',protocolVersion:1,toJSON(){called++;throw Error('Do not serialize prototype');}});
+  const messages=[getter,proxy,custom];Object.defineProperty(messages,'3',{get(){called++;throw Error('Do not read array accessor');}});
+  const value={messages,outcome:proxy};Object.defineProperty(value,'elapsedMs',{get(){called++;return 1;}});
+  const result=startupFailureSnapshot(value);assert.equal(result.readySeen,false);assert.deepEqual(result.failureCodes,[]);assert.equal(result.elapsedMs,null);
+  assert.equal(result.unrecognizedIpc,true);assert.equal(JSON.stringify(result).includes('Do not'),false);
+  assert.equal(startupFailureSnapshot(proxy).spawned,false);assert.equal(called,0);
+});
 
 test('actual daemon reports newer saved state over IPC without changing retained files',async t=>{
   const f=await fixture(t),path=join(f.state,'studio.sqlite');

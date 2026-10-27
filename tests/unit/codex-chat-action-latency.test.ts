@@ -59,11 +59,12 @@ async function fixture(t:test.TestContext,mode:'acknowledged'|'rejected'|'unknow
   const doc=new DocumentFixture(),state=initial(),posts:ChatAction[]=[],reads:number[]=[];
   let holdReads=false,release!:()=>void;const readGate=new Promise<void>(done=>{release=done;});
   let holdAction=false,releaseAction!:()=>void;const actionGate=new Promise<void>(done=>{releaseAction=done;});
+  let enteredAction!:()=>void;const actionStarted=new Promise<void>(done=>{enteredAction=done;});
   const chat=new CodexChat(doc.asDocument(),new CodexChatApi('a'.repeat(64),async(_path,init)=>{
     if(init?.method!=='POST'){
       reads.push(posts.length);if(holdReads)await readGate;return Response.json({state});
     }
-    const input=JSON.parse(String(init.body)) as ChatAction;posts.push(input);if(holdAction)await actionGate;
+    const input=JSON.parse(String(init.body)) as ChatAction;posts.push(input);enteredAction();if(holdAction)await actionGate;
     if(mode==='transport')throw new Error('Synthetic transport failure');
     if(mode==='acknowledged'&&input.action==='thread-start')state.snapshot!.thread={threadId:'latency-thread',sessionId:null,
       configured:true,writeGranted:false,selection:{model:'latency-fixture',effort:'low'},turnId:null,turnStatus:'idle'};
@@ -79,7 +80,7 @@ async function fixture(t:test.TestContext,mode:'acknowledged'|'rejected'|'unknow
   await chat.start();t.after(()=>{release();releaseAction();chat.stop();});
   doc.getElementById('codex-model').value='latency-fixture';doc.getElementById('codex-effort').value='low';
   const controller=chat as unknown as Internals;
-  return {chat,controller,doc,state,posts,reads,hold(){holdReads=true;},release,holdAction(){holdAction=true;},releaseAction};
+  return {chat,controller,doc,state,posts,reads,actionStarted,hold(){holdReads=true;},release,holdAction(){holdAction=true;},releaseAction};
 }
 const settle=()=>new Promise<void>(done=>setImmediate(done));
 
@@ -319,7 +320,7 @@ test('accepted reference send consumes only its original objects and retains new
     return walk(f.doc.getElementById('codex-attachments')).map(node=>node.src).filter(src=>src.startsWith('blob:'));
   };
   const originalPreview=previews()[0];assert.ok(originalPreview);input.value='Sent caption';f.holdAction();
-  const sending=f.controller.submitMessage();for(let i=0;i<20&&!f.posts.length;i++)await settle();
+  const sending=f.controller.submitMessage();await f.actionStarted;
   assert.equal(f.posts.length,1);await f.choose('next.png');input.value='Next caption';
   const nextPreview=previews().find(value=>value!==originalPreview);assert.ok(nextPreview);
   f.releaseAction();await sending;
