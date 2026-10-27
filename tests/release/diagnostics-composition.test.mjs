@@ -25,7 +25,7 @@ function fixture(options={}){
    const event=report.diagnosticEvent(frame.event);
    void host.report(event).then(result=>{if(current())owned.send({type:'arcane-diagnostic-ack',protocolVersion:1,requestId:frame.requestId,eventId:event.eventId,stored:result.stored===true},()=>{});});
   };owned.on('message',receive);return()=>{row.detached++;owned.removeListener('message',receive);};}};
- const context={smoke:options.smoke??false,closing:false,child:null,userRoot:'C:\\Fixture\\Arcane',productRoot:'C:\\Product',safeStorage:{},billing:null,
+ const context={customerCheck:null,smoke:options.smoke??false,closing:false,child:null,userRoot:'C:\\Fixture\\Arcane',productRoot:'C:\\Product',safeStorage:{},billing:null,
   join:path.join,Date,Buffer,Promise,Object,JSON,setTimeout,clearTimeout,
   setInterval(callback,ms){const timer={callback,ms,cleared:false,unref(){}};intervals.push(timer);return timer;},clearInterval(timer){if(timer)timer.cleared=true;},
   app:{exit:code=>calls.push('exit:'+code)},
