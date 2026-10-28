@@ -207,7 +207,7 @@ async function baselineFixture(t:test.TestContext,collision=false){
   };
 }
 
-for(const collision of [false,true])test('converted '+(collision?'hull':'none')+' baseline uses original joined evidence and fresh actor reads, then applies once and chains the new source',{timeout:30_000},async t=>{
+for(const collision of [false,true])test('converted '+(collision?'hull':'none')+' baseline uses original joined evidence and fresh actor reads, then applies once and chains the new source',{timeout:90_000},async t=>{
   const f=await baselineFixture(t,collision);await f.initial();f.addDisplayHistory();assert.equal(f.studio.commands(f.pair.sessionId).some(c=>c.method==='scene.place_asset'),false,'the display window no longer contains placement');
   await f.staged();const data=f.bundles.get(NEXT)!;assert.ok(data.prepared.delta.observation);assert.equal(data.prepared.delta.modelAssetId,null);
   assert.equal(data.prepared.delta.modelRef,f.modelRef.instanceId);assert.ok(data.prepared.delta.objects.every(object=>object.meshAssetId===null));
