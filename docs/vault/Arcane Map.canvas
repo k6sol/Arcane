@@ -1,0 +1,95 @@
+{
+  "nodes": [
+    {
+      "id": "home",
+      "type": "file",
+      "file": "Home.md",
+      "x": 0,
+      "y": 0,
+      "width": 420,
+      "height": 280
+    },
+    {
+      "id": "goals",
+      "type": "file",
+      "file": "Delivery/Goal Board.md",
+      "x": -520,
+      "y": 0,
+      "width": 420,
+      "height": 280
+    },
+    {
+      "id": "skills",
+      "type": "file",
+      "file": "Skills/Skills Hub.md",
+      "x": 520,
+      "y": 0,
+      "width": 420,
+      "height": 280
+    },
+    {
+      "id": "system",
+      "type": "file",
+      "file": "Architecture/System Map.md",
+      "x": 0,
+      "y": 400,
+      "width": 420,
+      "height": 280
+    },
+    {
+      "id": "proof",
+      "type": "file",
+      "file": "Operations/Evidence Ledger.md",
+      "x": -520,
+      "y": 400,
+      "width": 420,
+      "height": 280
+    },
+    {
+      "id": "resume",
+      "type": "file",
+      "file": "Operations/Next Session.md",
+      "x": 520,
+      "y": 400,
+      "width": 420,
+      "height": 280
+    }
+  ],
+  "edges": [
+    {
+      "id": "0",
+      "fromNode": "home",
+      "fromSide": "bottom",
+      "toNode": "goals",
+      "toSide": "top"
+    },
+    {
+      "id": "1",
+      "fromNode": "home",
+      "fromSide": "bottom",
+      "toNode": "skills",
+      "toSide": "top"
+    },
+    {
+      "id": "2",
+      "fromNode": "home",
+      "fromSide": "bottom",
+      "toNode": "system",
+      "toSide": "top"
+    },
+    {
+      "id": "3",
+      "fromNode": "home",
+      "fromSide": "bottom",
+      "toNode": "proof",
+      "toSide": "top"
+    },
+    {
+      "id": "4",
+      "fromNode": "home",
+      "fromSide": "bottom",
+      "toNode": "resume",
+      "toSide": "top"
+    }
+  ]
+}
