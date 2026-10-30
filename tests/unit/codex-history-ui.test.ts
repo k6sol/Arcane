@@ -31,6 +31,16 @@ function state(known: HistoryBinding | null = binding()) {
     lastSnapshot: { events: [{ text: 'OLD_STREAM_MUST_STAY_SEPARATE' }] }, actions: [] };
 }
 
+test('saved finite failure details use the unchanged strict historical text schema', () => {
+  const text=JSON.stringify({toolFailure:{schemaVersion:1,kind:'arcane-code',tool:'skills_recommend',code:'INTEGRITY'}});
+  const input=result({entries:[entry('tool',text,'failure-turn','failure-item')]});
+  const parsed=validateHistoryResult(input,{threadId:THREAD,sessionId:SESSION});
+  assert.deepEqual(parsed.entries,input.entries);
+  assert.deepEqual(Object.keys(parsed.entries[0]!).sort(),['ids','role','text']);
+  assert.throws(()=>validateHistoryResult({...input,entries:[{...input.entries[0],failure:{code:'INTEGRITY'}}]},{threadId:THREAD,sessionId:SESSION}));
+  assert.throws(()=>validateHistoryResult(input,{threadId:'foreign',sessionId:SESSION}));
+});
+
 // A small explicit DOM fixture models trusted human events separately from
 // synthetic dispatch. HTML sinks fail; tests never launch a daemon or provider.
 class ElementFixture {

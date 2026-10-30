@@ -1,4 +1,6 @@
 import { redactNativeHistoryText } from './history.js';
+import { types as nodeTypes } from 'node:util';
+import { summarizeMcpToolFailure } from './tool-failure.js';
 import type { McpToolCallSummary, McpToolCallArgs } from './types.js';
 
 /**
@@ -12,7 +14,7 @@ const SERVER = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const TOOL = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 const PROPERTY = /^[A-Za-z]{1,32}$/;
 const plain = (value: unknown): value is Record<string, unknown> =>
-  value !== null && typeof value === 'object' && !Array.isArray(value) && [Object.prototype, null].includes(Object.getPrototypeOf(value));
+  value !== null && typeof value === 'object' && !nodeTypes.isProxy(value) && !Array.isArray(value) && [Object.prototype, null].includes(Object.getPrototypeOf(value));
 /** Own enumerable data value only; getters and inherited fields are never invoked or read. */
 function own(value: Record<string, unknown>, key: string): unknown {
   const descriptor = Object.getOwnPropertyDescriptor(value, key);
@@ -82,5 +84,6 @@ export function summarizeMcpToolCall(item: Record<string, unknown>): McpToolCall
   const server = own(item, 'server'), tool = own(item, 'tool');
   if (typeof server !== 'string' || !SERVER.test(server) || typeof tool !== 'string' || !TOOL.test(tool)) return null;
   if (safeText(server, MCP_TOOL_SUMMARY_LIMITS.maxServer) !== server || safeText(tool, MCP_TOOL_SUMMARY_LIMITS.maxTool) !== tool) return null;
-  return { server, tool, args: server === 'arcane' ? summarizeArcaneToolArgs(own(item, 'arguments')) : null };
+  const failure=summarizeMcpToolFailure(item);
+  return { server, tool, args: server === 'arcane' ? summarizeArcaneToolArgs(own(item, 'arguments')) : null, ...(failure?{failure}:{}) };
 }

@@ -5,6 +5,7 @@ import {
   parseCodexPaginatedHistory, parseCodexThreadRead, planNativeHistoryCapabilities, redactNativeHistoryText,
 } from '../../packages/codex-client/src/history.js';
 import type { CodexHistoryScope } from '../../packages/codex-client/src/history.js';
+import {readStudioStagingDiagnostic} from '../../packages/asset-pipeline/src/failure-diagnostics.js';
 
 // Synthetic fixtures follow the installed public v2 schema; no native files or CLI.
 const THREAD = '0199fa23-7777-7000-8000-000000000001';
@@ -471,6 +472,53 @@ test('paginated projections still enforce scope, limits and cursor-envelope reje
 // ---- documented paged history: metadata-only thread/read + ascending itemsView:'full' thread/turns/list pages ----
 const metadata = (overrides: Record<string, unknown> = {}) => { const value = read([], { historyMode: 'paginated', ...overrides }); delete (value.thread as Record<string, unknown>).turns; return value; };
 const page = (data: unknown[], nextCursor: string | null = null, extra: Record<string, unknown> = {}) => ({ data, nextCursor, backwardsCursor: data.length ? 'back-cursor' : null, ...extra });
+
+test('failed MCP details use finite envelopes in legacy and paged history without raw provider messages', () => {
+  const items = [
+    { type:'mcpToolCall',id:'skill',server:'arcane',tool:'skills_recommend',status:'failed',result:{content:[{type:'text',text:'PRIVATE_ERROR_BODY'}],structuredContent:{error:{code:'INTEGRITY',message:'PRIVATE_PATH C:/secret'}},_meta:{secret:'PRIVATE_META'}} },
+    { type:'mcpToolCall',id:'provider',server:'arcane',tool:'skills_get',status:'failed',result:null,error:{message:'PRIVATE_PROVIDER_ERROR password=secret'} },
+    { type:'mcpToolCall',id:'forest',server:'arcane',tool:'scene_build',status:'failed',result:{content:[{type:'text',text:'{"error":{"code":"FOREST_SOURCES_REQUIRED","message":"PRIVATE_FOREST"}}'}]} },
+    { type:'mcpToolCall',id:'unknown',server:'arcane',tool:'skills_get',status:'failed',result:null,error:null },
+  ];
+  const legacy=parseCodexThreadRead(read([turn(items)]),SCOPE);
+  const paged=parseCodexPaginatedHistory(metadata(),[page([turn(items)])],SCOPE);
+  assert.equal(legacy.completeness,'complete');assert.deepEqual(paged.entries,legacy.entries);
+  assert.deepEqual(legacy.entries.map(entry=>JSON.parse(entry.text).toolFailure),[
+    {schemaVersion:1,kind:'arcane-code',tool:'skills_recommend',code:'INTEGRITY'},
+    {schemaVersion:1,kind:'mcp-error',tool:'skills_get',code:null},
+    {schemaVersion:1,kind:'arcane-code',tool:'scene_build',code:'FOREST_SOURCES_REQUIRED'},
+    {schemaVersion:1,kind:'details-unavailable',tool:'skills_get',code:null},
+  ]);
+  assert.deepEqual(legacy.entries[1]!.ids,{threadId:THREAD,sessionId:SESSION,turnId:TURN,itemId:'provider'});
+  assert.ok(!JSON.stringify(legacy).includes('PRIVATE_'));assert.ok(!JSON.stringify(legacy).includes('password='));
+  const duplicate=parseCodexThreadRead(read([turn([items[0],items[0]])]),SCOPE);assert.equal(duplicate.entries.length,1);
+  const changed={...items[0],result:{structuredContent:{error:{code:'REGISTRY'}},content:[]}};
+  const conflict=parseCodexThreadRead(read([turn([items[0],changed])]),SCOPE);
+  assert.deepEqual(conflict.entries,[]);assert.ok(reasons(conflict).includes('conflicting-item'));
+  const capped=parseCodexThreadRead(read([turn(Array.from({length:12},(_,n)=>({...items[1],id:'failure-'+n})))]),SCOPE,{maxBytes:1024});
+  assert.equal(capped.completeness,'incomplete');assert.ok(Buffer.byteLength(JSON.stringify(capped))<=1024);
+});
+
+test('failed MCP projection never invokes private getters or proxy traps', () => {
+  let invoked=0;const hidden=()=>{invoked++;throw new Error('untrusted field was read');};
+  const failure={type:'mcpToolCall',id:'failed',server:'arcane',tool:'skills_get',status:'failed',result:null};
+  Object.defineProperty(failure,'error',{enumerable:true,get:hidden});
+  const projected=parseCodexThreadRead(read([turn([failure])]),SCOPE);
+  assert.equal(JSON.parse(projected.entries[0]!.text).toolFailure.kind,'details-unavailable');
+  const proxy=new Proxy({},{getPrototypeOf:hidden,getOwnPropertyDescriptor:hidden,ownKeys:hidden});
+  const rejected=parseCodexThreadRead(read([turn([proxy])]),SCOPE);
+  assert.ok(reasons(rejected).includes('malformed-item'));assert.equal(invoked,0);
+});
+
+test('existing finite staging unknown details retain public phase/reason even with a failed provider item status',()=>{
+  const diagnostic=readStudioStagingDiagnostic({schemaVersion:1,operation:'stage',phase:'packet-receipt',reason:'proof-expired',packetOrdinal:12});assert.ok(diagnostic);
+  const body={state:'unknown',terminal:false,ambiguous:true,retry:false,error:{code:'STUDIO_STAGE_CONTINUITY',message:'Fixed host continuity message.',diagnostic}};
+  const text=JSON.stringify(body),item={type:'mcpToolCall',id:'staging',server:'arcane',tool:'assets_stage_studio_import',status:'failed',result:{content:[{type:'text',text}],structuredContent:body}};
+  for(const projected of [parseCodexThreadRead(read([turn([item])]),SCOPE),parseCodexPaginatedHistory(metadata(),[page([turn([item])])],SCOPE)]){
+    assert.equal(projected.entries[0]!.text,text,'existing safe public staging fields are not replaced by a generic failure');
+    assert.deepEqual(JSON.parse(projected.entries[0]!.text).error.diagnostic,diagnostic);
+  }
+});
 
 test('metadata reads select storage mode only after exact scope and persistence checks', () => {
   assert.equal(codexThreadHistoryMode(metadata(), SCOPE), 'paginated');

@@ -2,7 +2,7 @@
 import type { CodexAction, CodexActionRecord, CodexProductState } from '../../daemon/src/codex-service.js';
 import type { RequestedModel } from '../../../packages/core/src/workflow-recipes.js';
 import type { NativeWorkflowConversation, WorkflowDraftProvenance } from './workflow-panel.js';
-import type { Approval, McpToolCallArgs, Model, SessionEvent, Snapshot } from '../../../packages/codex-client/src/types.js';
+import type { Approval, McpToolCallArgs, McpToolFailureSummary, McpToolFailureCode, McpFailureTool, Model, SessionEvent, Snapshot } from '../../../packages/codex-client/src/types.js';
 import type { ChatTabs, ChatTabsOptions, ChatTabView, ChatSelection, ChatTabsController } from './chat-tabs.js';
 import type { ChatAttachmentsController, ChatAttachmentSend } from './chat-attachments.js';
 import type { ChatFeedbackHooks, ChatFeedbackTool } from './learned-preferences.js';
@@ -93,9 +93,56 @@ function readUsage(value:unknown,report=false):void {
 }
 const duration=(v:unknown)=>integer(v)&&(v as number)<=31_536_000_000;
 const TOOL_ARG_TEXT:Record<string,number>={root:64,query:100,name:100,className:64,kind:100};
-/** Exact allowlisted live tool identity (server, tool, display-only args); anything else rejects the snapshot. */
+// Independent finite browser decoding: no new runtime module request or provider text.
+const MCP_SKILL_FAILURES=['BUNDLE_INTEGRITY','INTEGRITY','REGISTRY','FRONTMATTER','DESCRIPTION','LICENCE','FILE_LIMIT','INVALID_PATH','PATH_ESCAPE',
+  'BUDGET_EXCEEDED','UNKNOWN_SKILL','UNAPPROVED','REFERENCES','SKILL_ROUTE_INPUT','SKILL_CATALOGUE_LIMIT'] as const;
+const MCP_VIEWPORT_FAILURES=['VIEWPORT_TOOL_UNSUPPORTED','VIEWPORT_INVALID','VIEWPORT_FAILED','VIEWPORT_CAMERA_UNKNOWN',
+  'BUSY','STALE_PROOF','BINDING_CHANGED','MODE_MISMATCH','DISCONNECTED','TIMEOUT','FENCED','SDK_CUSTODY_UNCONFIRMED'] as const;
+const MCP_FAILURE_PAIRS:Record<Exclude<McpFailureTool,null>,readonly McpToolFailureCode[]>={skills_recommend:MCP_SKILL_FAILURES,skills_list:MCP_SKILL_FAILURES,
+  skills_get:MCP_SKILL_FAILURES,studio_viewport_capture:MCP_VIEWPORT_FAILURES,scene_build:['FOREST_SOURCES_REQUIRED']};
+function readMcpFailure(value:unknown):McpToolFailureSummary|null {
+  try{
+    if(!dataObject(value,['schemaVersion','kind','tool','code'])||value.schemaVersion!==1||!(value.tool===null||typeof value.tool==='string'&&Object.hasOwn(MCP_FAILURE_PAIRS,value.tool)))return null;
+    const tool=value.tool as McpFailureTool,kind=value.kind,code=value.code;
+    if(kind==='arcane-code'){
+      if(tool===null||typeof code!=='string'||!(MCP_FAILURE_PAIRS[tool] as readonly string[]).includes(code))return null;
+      return Object.freeze({schemaVersion:1,kind,tool,code:code as McpToolFailureCode});
+    }
+    return (kind==='mcp-error'||kind==='details-unavailable')&&code===null?Object.freeze({schemaVersion:1,kind,tool,code:null}):null;
+  }catch{return null;}
+}
+function readFailureEnvelope(value:unknown):McpToolFailureSummary|null {
+  try{return dataObject(value,['toolFailure'])?readMcpFailure(value.toolFailure):null;}catch{return null;}
+}
+function mcpFailureMessage(failure:McpToolFailureSummary):string {
+  const code=failure.code;
+  if(failure.kind==='mcp-error')return 'The tool failed without a usable public result. Detailed reason is unavailable.';
+  if(failure.kind!=='arcane-code'||code===null)return 'The tool failed. No recognized safe error detail is available.';
+  if(code==='FOREST_SOURCES_REQUIRED')return 'Forest model sources are missing. Generate, review and import them before using their templates.';
+  if(code==='BUDGET_EXCEEDED')return 'The skill request exceeded its context budget. Select fewer relevant skills or references.';
+  if(['UNKNOWN_SKILL','UNAPPROVED','REFERENCES','SKILL_ROUTE_INPUT','SKILL_CATALOGUE_LIMIT'].includes(code))return 'The skill request or reference is unavailable under the current selection policy.';
+  if((MCP_SKILL_FAILURES as readonly string[]).includes(code))return 'Bundled skill content could not be verified. Repair or update Arcane before using it.';
+  switch(code){
+    case 'VIEWPORT_TOOL_UNSUPPORTED':return 'This Studio connection does not support the reviewed capture operation.';
+    case 'VIEWPORT_INVALID':case 'VIEWPORT_FAILED':return 'The capture did not return a usable viewport image.';
+    case 'VIEWPORT_CAMERA_UNKNOWN':return 'Camera restoration is unconfirmed. Inspect the Studio Edit camera.';
+    case 'BUSY':return 'Another owned Studio operation is still in progress.';
+    case 'STALE_PROOF':return 'Current Studio connection proof was not usable for this capture.';
+    case 'BINDING_CHANGED':return 'The Studio binding changed before this capture could complete.';
+    case 'MODE_MISMATCH':return 'Studio changed play mode before this capture could complete.';
+    case 'DISCONNECTED':return 'The Studio connection was unavailable for this capture.';
+    case 'TIMEOUT':return 'The capture request exceeded its deadline; no image was confirmed.';
+    case 'FENCED':return 'An earlier owned Studio test requires human reconciliation.';
+    case 'SDK_CUSTODY_UNCONFIRMED':return 'Native connection closure is unconfirmed. Capture remains unavailable.';
+    default:return 'The tool failed. No recognized safe error detail is available.';
+  }
+}
+/** Exact allowlisted live tool identity and optional finite failure; anything else rejects the snapshot. */
 function readToolCall(value:unknown):void {
-  if(!dataObject(value,['server','tool','args'])||!text(value.server,64)||!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(value.server)||!text(value.tool,128)||!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(value.tool))throw new Error('Invalid live tool identity.');
+  if(!object(value))throw new Error('Invalid live tool identity.');
+  const hasFailure=Object.hasOwn(value,'failure');
+  if(!dataObject(value,['server','tool','args',...(hasFailure?['failure']:[])])||!text(value.server,64)||!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(value.server)||!text(value.tool,128)||!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(value.tool))throw new Error('Invalid live tool identity.');
+  if(hasFailure){const failure=readMcpFailure(value.failure);if(!failure||failure.tool!==null&&(value.server!=='arcane'||failure.tool!==value.tool))throw new Error('Invalid live tool failure.');}
   const args=value.args;if(args===null)return;
   if(value.server!=='arcane'||!dataObject(args)||!Object.keys(args).length||utf8(JSON.stringify(args))>2048)throw new Error('Invalid live tool arguments.');
   const ref=(r:unknown)=>dataObject(r,['root','pathSegments'])&&text(r.root,64)&&Array.isArray(r.pathSegments)&&r.pathSegments.length<=16&&r.pathSegments.every(part=>text(part,100));
@@ -154,6 +201,7 @@ function readSnapshot(value: unknown): ChatSnapshot | null {
       readUsage(event.usage);
     }
     if(Object.hasOwn(event,'tool')&&(event.type!=='item'||event.itemType!=='mcpToolCall'||(readToolCall(event.tool),false)))throw new Error('Invalid live tool event.');
+    if(object(event.tool)&&Object.hasOwn(event.tool,'failure')&&event.status!=='failed')throw new Error('Invalid live tool failure status.');
     if(Object.hasOwn(event,'durationMs')&&(event.type!=='turn'||!duration(event.durationMs)))throw new Error('Invalid native turn duration.');
     if(event.type==='turn'&&(!dataObject(event,['type','seq','threadId','turnId','status',...(Object.hasOwn(event,'durationMs')?['durationMs']:[])])||!text(event.threadId)||!text(event.turnId)||!text(event.status,64)))throw new Error('Invalid exact native turn event.');
   }
@@ -606,7 +654,7 @@ export function codexMessageDetails(message:ChatMessage,state:ChatState|null):st
   return fields.filter(([,value])=>value!==undefined&&value!==null).map(([label,value])=>label+': '+value).join('\n');
 }
 /** Live Arcane tool identity from the native item event: tool name plus allowlisted display arguments. Presentation only. */
-export interface LiveToolCall { name:string; input:McpToolCallArgs|null }
+export interface LiveToolCall { name:string; input:McpToolCallArgs|null; failure?:McpToolFailureSummary }
 type TurnCounts={inputTokens:number;cachedInputTokens:number;outputTokens:number};
 /** One turn's token counts from native usage reports: the thread total before its first request, and the latest total. */
 export interface TurnUsageRow { baseline:TurnCounts; latest:TurnCounts }
@@ -672,10 +720,12 @@ export class CodexTranscript {
         // Live tool calls report their state and, for Arcane, the tool name and display arguments, so the line reads the
         // same as the Claude chat while it runs; the saved history later adds the real result.
         const key=event.threadId+'\0'+event.turnId+'\0'+event.itemId,toolState:ToolActivityState=event.status==='failed'?'failed':event.status==='completed'?'finished':'started';
-        const toolCall:LiveToolCall|undefined=event.tool?.server==='arcane'?{name:event.tool.tool,input:event.tool.args}:undefined;
+        const toolCall:LiveToolCall|undefined=event.tool?.server==='arcane'?{name:event.tool.tool,input:event.tool.args,...(event.tool.failure?{failure:event.tool.failure}:{})}:undefined;
+        const failure=toolState==='failed'?readMcpFailure(toolCall?.failure):null,failureText=failure?JSON.stringify({toolFailure:failure}):'';
         const existing=this.messages.find(m=>m.role==='tool'&&m.key===key);
-        if(existing){existing.toolState=toolState;if(toolCall)existing.toolCall=toolCall;}
-        else this.messages.push({key,role:'tool',threadId:event.threadId,scope:event.threadId+' · '+event.turnId+' · '+event.itemId,text:'',toolState,...(toolCall?{toolCall}:{})});
+        if(existing){existing.toolState=toolState;if(toolCall)existing.toolCall=toolCall;if(failureText)existing.text=failureText;
+          else if(toolState!=='failed'&&readFailureEnvelope(parseToolDetail(existing.text)))existing.text='';}
+        else this.messages.push({key,role:'tool',threadId:event.threadId,scope:event.threadId+' · '+event.turnId+' · '+event.itemId,text:failureText,toolState,...(toolCall?{toolCall}:{})});
         continue;
       }
       if(event.type==='usage'){
@@ -1541,6 +1591,7 @@ export function toolResultFacts(tool:string,args:Record<string,unknown>|null,res
 }
 /** A short, single-line reason for a failed call: the error message the tool returned, or its plain-text excerpt. */
 export function toolFailureReason(result:unknown):string|null {
+  const failure=readFailureEnvelope(result);if(failure)return mcpFailureMessage(failure);
   const outcome=activityRecord(result),command=activityRecord(outcome?.command);
   const raw=typeof result==='string'?result:[activityRecord(outcome?.error)?.message,outcome?.error,activityRecord(command?.error)?.message,command?.error,outcome?.message]
     .find(value=>typeof value==='string'&&value.trim());
@@ -1629,6 +1680,7 @@ function describeToolCall(name:string,input:unknown,result:unknown,state:ToolAct
  */
 export function readToolResultText(text:string):{name:string|null;input:unknown;result:unknown;state:ToolActivityState} {
   const result=activityRecord(parseToolDetail(text)),command=activityRecord(result?.command),method=typeof command?.method==='string'?command.method:'';
+  const failure=readFailureEnvelope(result);if(failure)return {name:failure.tool,input:null,result,state:'failed'};
   if(stagingUnknownDiagnostic(result))return {name:'assets_stage_studio_import',input:null,result,state:'finished'};
   const failed=!!result&&(!!activityRecord(result.error)||['failed','cancelled','needs_reconciliation'].includes(String(result.state)));
   return {name:STUDIO_METHOD_TOOLS[method]??null,input:command?.args??null,result,state:failed?'failed':'finished'};
@@ -1792,7 +1844,11 @@ export const UNNAMED_TOOL_TEXT='Running a step';
 export function renderCodexToolArticle(doc:Document,message:Pick<ChatMessage,'scope'|'text'|'toolState'|'toolCall'>&{key?:string},safe:(value:string)=>string=value=>value):{article:HTMLElement;change:ToolChange|null} {
   const read=message.text?readToolResultText(message.text):null,state:ToolActivityState=message.toolState??read?.state??'finished';
   // A failed call's plain-text result is its reason.
-  const result=read?.result??(state==='failed'&&message.text?message.text:null);
+  const liveFailure=readMcpFailure(message.toolCall?.failure);
+  const matchedLive=liveFailure&&(liveFailure.tool===null||message.toolCall&&arcaneToolName(message.toolCall.name)===liveFailure.tool)
+    &&(!read?.name||liveFailure.tool===read.name)?liveFailure:null;
+  const failure=state==='failed'?(readFailureEnvelope(read?.result)??matchedLive):null;
+  const result=failure?{toolFailure:failure}:read?.result??(state==='failed'&&message.text?message.text:null);
   // A result that names its own command wins; otherwise the live identity (tool name + display args) describes the call,
   // then a result recognised by its shape; a bare result stays a generic step.
   const live=message.toolCall,inferred=!read?.name&&!live?inferToolFromResult(read?.result)??(message.text&&read?.result===null?inferToolFromText(message.text,state):null):null;
@@ -1802,7 +1858,11 @@ export function renderCodexToolArticle(doc:Document,message:Pick<ChatMessage,'sc
   const article=doc.createElement('article');article.className='codex-message tool';
   article.setAttribute('data-role','tool');article.setAttribute('aria-label','Tool activity');article.dataset.toolState=state;
   if(message.key)article.dataset.toolKey=message.key.slice(0,512);
-  article.append(...renderToolActivity(doc,activity,state,safe(message.scope+(message.text?'\n'+message.text:''))));
+  const fallback='The tool failed. No recognized safe error detail is available.';
+  const display=state==='failed'&&!activity.reason&&!/ — /.test(activity.text)?{...activity,reason:fallback}:activity;
+  const details=failure?message.scope+'\n'+(failure.tool?'Tool: '+failure.tool+'\n':'')+(failure.code?'Code: '+failure.code+'\n':'')+mcpFailureMessage(failure)
+    :message.scope+(message.text?'\n'+message.text:state==='failed'?'\n'+fallback:'');
+  article.append(...renderToolActivity(doc,display,state,safe(details)));
   return {article,change:activity.change};
 }
 // ---- Grouped tool cards: consecutive calls of one kind on one container collapse into one compact, expandable card. ----

@@ -8,11 +8,35 @@ import { pathToFileURL } from 'node:url';
 import { deflateSync } from 'node:zlib';
 import { randomUUID } from 'node:crypto';
 import {readStudioStagingDiagnostic,studioStagingDiagnosticMessage,STUDIO_STAGING_PHASES,STUDIO_STAGING_REASONS} from '../../packages/asset-pipeline/src/failure-diagnostics.js';
+import {mcpToolFailureEnvelope} from '../../packages/codex-client/src/tool-failure.js';
 import { buildProgressSummary, compactCount, describeToolActivity, formatElapsed, inferToolFromResult, inferToolFromText, readToolResultText, retriedRows, toolFailureReason, toolResultFacts,
   toolResultImage, UNNAMED_TOOL_TEXT, type ChatState } from '../../apps/desktop/src/codex-chat.js';
 
 // ---- Fact extraction: a few plain numbers from the compact results the Arcane tools really return ----
 const outcome = (method: string, result: unknown, extra: Record<string, unknown> = {}) => ({ commandId: 'cmd-1', state: 'succeeded', terminal: true, command: { method, args: {}, result }, ...extra });
+test('actual finite MCP envelopes decode to safe failure reasons without receipt facts or successful build claims',()=>{
+  const skills=['BUNDLE_INTEGRITY','INTEGRITY','REGISTRY','FRONTMATTER','DESCRIPTION','LICENCE','FILE_LIMIT','INVALID_PATH','PATH_ESCAPE',
+    'BUDGET_EXCEEDED','UNKNOWN_SKILL','UNAPPROVED','REFERENCES','SKILL_ROUTE_INPUT','SKILL_CATALOGUE_LIMIT'];
+  const captures=['VIEWPORT_TOOL_UNSUPPORTED','VIEWPORT_INVALID','VIEWPORT_FAILED','VIEWPORT_CAMERA_UNKNOWN','BUSY','STALE_PROOF','BINDING_CHANGED',
+    'MODE_MISMATCH','DISCONNECTED','TIMEOUT','FENCED','SDK_CUSTODY_UNCONFIRMED'];
+  const pairs=[...['skills_recommend','skills_list','skills_get'].flatMap(tool=>skills.map(code=>({tool,code}))),
+    ...captures.map(code=>({tool:'studio_viewport_capture',code})),{tool:'scene_build',code:'FOREST_SOURCES_REQUIRED'}];
+  for(const {tool,code} of pairs){
+    const text=mcpToolFailureEnvelope({schemaVersion:1,kind:'arcane-code',tool,code});assert.ok(text);
+    const read=readToolResultText(text),activity=describeToolActivity(read.name!,read.input,read.result,read.state);
+    assert.equal(read.name,tool);assert.equal(read.state,'failed');assert.equal(activity.change,null);
+    const reason=activity.reason;assert.deepEqual(activity.facts,[]);assert.ok(reason);assert.ok(reason.length<=96);
+    assert.doesNotMatch(reason,/PRIVATE|token=|C:\\|https?:/);
+    const summary=buildProgressSummary([{tool,state:'failed',text:activity.text},{tool:'scene_build',state:'finished',text:'A different successful step'}],false,45000);
+    if(tool!=='scene_build')assert.match(summary.title,/^Incomplete/,'a successful other tool does not resolve this failure');
+  }
+  for(const kind of ['mcp-error','details-unavailable']){
+    const text=mcpToolFailureEnvelope({schemaVersion:1,kind,tool:null,code:null});assert.ok(text);
+    assert.match(toolFailureReason(readToolResultText(text).result)!,/unavailable/);
+  }
+  assert.equal(mcpToolFailureEnvelope({schemaVersion:1,kind:'arcane-code',tool:'skills_get',code:'PRIVATE_UNKNOWN'}),null);
+});
+
 test('actual closed staging descriptors reach loaded-history and shared named-result reasons without confirmed failure or import',()=>{
   for(const phase of STUDIO_STAGING_PHASES)for(const reason of STUDIO_STAGING_REASONS){
     const diagnostic=readStudioStagingDiagnostic({schemaVersion:1,operation:'stage',phase,reason,packetOrdinal:phase==='packet-enqueue'||phase==='packet-receipt'?511:null})!;
@@ -274,6 +298,22 @@ test('Edge: build progress group, live and collapsed, with facts, retry, reason 
     assert.equal(await staging.locator('details').evaluate(node=>(node as HTMLDetailsElement).open),true);
     assert.match(await staging.locator('pre').innerText(),/"state": "unknown"/);assert.doesNotMatch(await staging.locator('.message-text').innerText(),/Imported|Failed/);
     await staging.evaluate(node=>node.remove());
+    const failureChange=await page.evaluate(async()=>{
+      const module=await import(new URL('/codex-chat.js',location.origin).href);
+      const failure={schemaVersion:1,kind:'arcane-code',tool:'scene_build',code:'FOREST_SOURCES_REQUIRED'};
+      const rendered=module.renderCodexToolArticle(document,{scope:'fixture-thread · fixture-turn · forest-source',text:JSON.stringify({toolFailure:failure})});
+      rendered.article.id='finite-tool-failure-proof';document.body.append(rendered.article);return rendered.change;
+    });
+    const failed=page.locator('#finite-tool-failure-proof');assert.equal(failureChange,null);
+    assert.equal(await failed.getAttribute('data-tool-state'),'failed');
+    assert.equal(await failed.locator('.tool-fact').count(),0);
+    assert.match(await failed.locator('.tool-activity-reason').innerText(),/Forest model sources are missing/);
+    await failed.locator('.tool-activity').press('Enter');
+    assert.equal(await failed.locator('details').evaluate(node=>(node as HTMLDetailsElement).open),true);
+    assert.match(await failed.locator('pre').innerText(),/Code: FOREST_SOURCES_REQUIRED/);
+    await failed.locator('.tool-activity').press('Space');
+    assert.equal(await failed.locator('details').evaluate(node=>(node as HTMLDetailsElement).open),false);
+    await failed.evaluate(node=>node.remove());
     await page.evaluate(() => document.dispatchEvent(new CustomEvent('workspace:providerpreference', { detail: { provider: 'claude' } })));
     await page.waitForFunction(() => !document.getElementById('claude-chat-tabs')!.hidden);
     await page.evaluate(() => (window as any).fx.refreshed);

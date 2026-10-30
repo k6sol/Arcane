@@ -155,6 +155,19 @@ createInterface({ input: process.stdin }).on('line', line => {
       for(let n=0;n<40;n++) notify('item/agentMessage/delta',{threadId,turnId,itemId:'fixture-message',delta:'delta-'+n});
       notify('account/chatgptAuthTokens/changed',{accessToken:'FIXTURE_SECRET',email:'synthetic@example.test'}); return;
     }
+    if (mode === 'mcp-tool-failures') {
+      const call = (id, tool, extra = {}) => ({ id, type: 'mcpToolCall', status: 'failed', server: 'arcane', tool, arguments: { source: 'PRIVATE_TOOL_SOURCE' }, result: null, error: null, ...extra });
+      const result = code => ({ content: [{ type: 'text', text: JSON.stringify({ error: { code, message: 'PRIVATE_TOOL_MESSAGE token=sk-proj-PrivateToolSecret12345678' } }) }],
+        structuredContent: { error: { code, message: 'PRIVATE_STRUCTURED_MESSAGE' } }, _meta: { secret: 'PRIVATE_META' } });
+      notify('item/started', { threadId, turnId, item: call('failure-skill', 'skills_recommend', { status: 'inProgress' }) });
+      notify('item/completed', { threadId, turnId, item: call('failure-skill', 'skills_recommend', { result: result('INTEGRITY') }) });
+      notify('item/completed', { threadId, turnId, item: call('failure-forest', 'scene_build', { result: result('FOREST_SOURCES_REQUIRED') }) });
+      notify('item/completed', { threadId, turnId, item: call('failure-capture', 'studio_viewport_capture', { result: result('SDK_CUSTODY_UNCONFIRMED') }) });
+      notify('item/completed', { threadId, turnId, item: call('failure-provider', 'skills_get', { error: { message: 'PRIVATE_PROVIDER_ERROR C:/private/path password=secret' } }) });
+      notify('item/completed', { threadId, turnId, item: call('failure-unknown', 'skills_list', { result: result('UNKNOWN_PRIVATE_CODE') }) });
+      notify('item/completed', { threadId, turnId, item: call('failure-other', 'skills_get', { server: 'other', error: { message: 'PRIVATE_OTHER_ERROR' } }) });
+      return;
+    }
     if (mode === 'mcp-tool-items') {
       const call = (id, extra) => ({ id, type: 'mcpToolCall', status: 'inProgress', server: 'arcane', tool: 'scene_create', appContext: null, result: null, error: null, durationMs: null, ...extra });
       const args = { className: 'Part', name: 'Tree', parent: { root: 'Workspace', pathSegments: ['Forest'], instanceId: 'FIXTURE_SECRET' }, source: 'print("FIXTURE_SECRET")', properties: { Size: [1, 2, 3], Color: 'FIXTURE_SECRET' }, token: 'FIXTURE_SECRET' };

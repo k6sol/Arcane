@@ -1,4 +1,6 @@
 import { Buffer } from 'node:buffer';
+import { types as nodeTypes } from 'node:util';
+import { summarizeMcpToolFailure, mcpToolFailureEnvelope } from './tool-failure.js';
 
 /** Pure public-protocol projection. No transport, persistence, or native actions. */
 export interface NativeHistoryLimits { maxBytes: number; maxTurns: number; maxItems: number }
@@ -52,7 +54,7 @@ class InvalidShape extends Error {}
 class ByteLimit extends Error {}
 
 function record(value: unknown): RecordValue {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new InvalidShape();
+  if (value === null || typeof value !== 'object' || nodeTypes.isProxy(value) || Array.isArray(value)) throw new InvalidShape();
   const prototype = Object.getPrototypeOf(value);
   if (prototype !== Object.prototype && prototype !== null) throw new InvalidShape();
   return value as RecordValue;
@@ -71,6 +73,7 @@ function arrayField(value: unknown[], key: number | 'length'): unknown {
   return field(value as unknown as RecordValue, String(key));
 }
 function arrayLength(value: unknown[]): number {
+  if (nodeTypes.isProxy(value)) throw new InvalidShape();
   const length = arrayField(value, 'length');
   if (typeof length !== 'number' || !Number.isSafeInteger(length) || length < 0) throw new InvalidShape();
   return length;
@@ -291,8 +294,11 @@ function projectTurns(collected: { result: NativeHistoryResult; gap: GapRecorder
           }
           case 'mcpToolCall': {
             role = 'tool';
+            const failure=summarizeMcpToolFailure(item),envelope=mcpToolFailureEnvelope(failure);
+            if(failure?.kind==='arcane-code'&&envelope){text=readText(envelope);break;}
             const output = field(item, 'result');
             text = output == null ? '' : blocks(field(record(output), 'content'), 'text', turnId, itemId);
+            if(!text&&envelope)text=readText(envelope);
             break;
           }
           case 'dynamicToolCall': {

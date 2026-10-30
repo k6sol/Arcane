@@ -134,6 +134,61 @@ test('saved ChatGPT history uses the same labels: a named result, a recognised s
   assert.equal(details.open, false); assert.equal(enter.defaultPrevented, true);
 });
 
+test('finite live failures enrich the same DOM row and fresh saved Details without raw messages', async t => {
+  const failure={schemaVersion:1,kind:'arcane-code',tool:'skills_recommend',code:'INTEGRITY'} as const;
+  const tool={server:'arcane',tool:'skills_recommend',args:null};
+  let current=state([item(1,'failed-skill','failed',tool)]);
+  const connectionId=current.snapshot!.connectionId;
+  const doc=new DocumentFixture(true,new EventTarget());
+  const chat=new CodexChat(doc as unknown as Document,new CodexChatApi('a'.repeat(64),async()=>Response.json({state:current})));
+  await chat.start();t.after(()=>chat.stop());
+  const messages=doc.getElementById('codex-messages')!;
+  assert.match(messages.querySelector('.tool-details pre')!.textContent,/No recognized safe error detail/);
+  current=state([item(1,'failed-skill','failed',tool),item(2,'failed-skill','failed',{...tool,failure})]);
+  current.snapshot!.connectionId=connectionId;
+  await chat.refresh();
+  assert.equal(messages.querySelectorAll('.tool-activity').length,1,'same original item, not another tool call');
+  const details=messages.querySelector('.tool-details')!,pre=details.querySelector('pre')!;
+  assert.match(pre.textContent,/Code: INTEGRITY/);assert.match(pre.textContent,/Repair or update Arcane/);
+  assert.match(pre.textContent,/thread-1 · turn-1 · failed-skill/);
+  const row=messages.querySelector('.tool-activity')!;row.click();assert.equal(details.open,true);
+  const enter=new Event('keydown',{cancelable:true});Object.defineProperty(enter,'key',{value:'Enter'});row.dispatchEvent(enter);assert.equal(details.open,false);
+  const space=new Event('keydown',{cancelable:true});Object.defineProperty(space,'key',{value:' '});row.dispatchEvent(space);assert.equal(details.open,true);
+  const saved=renderCodexToolArticle(doc as unknown as Document,{scope:'thread-1 · turn-1 · failed-skill',text:JSON.stringify({toolFailure:failure})});
+  const savedArticle=saved.article as unknown as Element;
+  assert.equal(saved.change,null);assert.equal(savedArticle.dataset.toolState,'failed');
+  assert.match(savedArticle.querySelector('.tool-activity-text')!.textContent,/Choosing the right skills/);
+  assert.equal(savedArticle.querySelector('.tool-details pre')!.textContent,pre.textContent,'fresh history needs no live identity cache');
+});
+
+test('tool failure validation rejects forged pairs and keeps mismatched or successful saved results authoritative for display',()=>{
+  const failure={schemaVersion:1,kind:'arcane-code',tool:'skills_get',code:'INTEGRITY'} as const;
+  const tool={server:'arcane',tool:'skills_get',args:null,failure};
+  assert.doesNotThrow(()=>readCodexState(state([item(1,'f','failed',tool)])));
+  for(const bad of [{...failure,code:'VIEWPORT_FAILED'},{...failure,tool:'scene_build'},{...failure,secret:'PRIVATE'},
+    {...failure,kind:'mcp-error'}, {...failure,code:'PRIVATE_UNKNOWN'}]){
+    assert.throws(()=>readCodexState(state([item(1,'f','failed',{...tool,failure:bad})])));
+  }
+  assert.throws(()=>readCodexState(state([item(1,'f','completed',tool)])),'a diagnostic does not reclassify successful provider status');
+  let invoked=0;const hidden=Object.defineProperty({...failure},'code',{enumerable:true,get(){invoked++;return 'INTEGRITY';}});
+  assert.throws(()=>readCodexState(state([item(1,'f','failed',{...tool,failure:hidden})])));assert.equal(invoked,0);
+  const doc=new DocumentFixture(false,null),live={name:'skills_get',input:null,failure};
+  const mismatched=renderCodexToolArticle(doc as unknown as Document,{scope:'t · v · i',text:JSON.stringify({state:'failed',error:{message:'Other public failure'},command:{method:'scene.build'}}),toolCall:live}).article as unknown as Element;
+  assert.doesNotMatch(mismatched.querySelector('.tool-details pre')!.textContent,/INTEGRITY/,'different named results do not inherit a live diagnostic');
+  const succeeded=renderCodexToolArticle(doc as unknown as Document,{scope:'t · v · i',text:JSON.stringify({state:'succeeded',command:{method:'scene.build'}}),toolCall:live}).article as unknown as Element;
+  assert.equal(succeeded.dataset.toolState,'finished');assert.doesNotMatch(succeeded.querySelector('.tool-details pre')!.textContent,/INTEGRITY/);
+  const diagnostic={schemaVersion:1,operation:'stage',phase:'packet-receipt',reason:'proof-expired',packetOrdinal:12};
+  const publicStaging={state:'unknown',terminal:false,ambiguous:true,retry:false,error:{code:'STUDIO_STAGE_CONTINUITY',message:'Fixed public message.',diagnostic}};
+  const generic={schemaVersion:1,kind:'details-unavailable',tool:null,code:null} as const;
+  const staging=renderCodexToolArticle(doc as unknown as Document,{scope:'t · v · stage',text:JSON.stringify(publicStaging),toolState:'failed',
+    toolCall:{name:'assets_stage_studio_import',input:null,failure:generic}});
+  const stageArticle=staging.article as unknown as Element;
+  assert.match(stageArticle.querySelector('.tool-activity-reason')!.textContent,/Packet receipt, packet 13: the Studio connection check expired/);
+  assert.match(stageArticle.querySelector('.tool-details pre')!.textContent,/"phase":"packet-receipt"/);
+  assert.doesNotMatch(stageArticle.querySelector('.tool-activity-reason')!.textContent,/No recognized safe error/);
+  assert.equal(staging.change,null,'a staging unknown is neither a change nor a confirmed import');
+});
+
 test('the ChatGPT chat renders live tool lines from public state while the turn runs', async t => {
   const doc = new DocumentFixture(true, new EventTarget());
   const live = state([item(1, 't1', 'inProgress', create('Tree1')), item(2, 't2', 'inProgress', create('Tree2'))]);

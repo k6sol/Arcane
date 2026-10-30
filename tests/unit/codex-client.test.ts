@@ -14,6 +14,7 @@ import { PROJECT_MEMORY_GUIDANCE, projectMemorySection, readProjectMemory } from
 import {arcaneIsolationOverrides,arcaneThreadIsIsolated} from '../../packages/codex-client/src/mcp-isolation.js';
 import type { Approval, ArcaneMcpLaunchProfile, LimitOptions, SessionEventValue } from '../../packages/codex-client/src/types.js';
 import {referencePng,referenceInput} from '../../packages/codex-client/testing/reference-fixture.js';
+import {summarizeMcpToolFailure,readMcpToolFailure,mcpToolFailureEnvelope} from '../../packages/codex-client/src/tool-failure.js';
 
 const ROOT = resolve(process.cwd());
 const TEMP = join(ROOT, 'packages','codex-client','.test-output','fixtures');
@@ -873,6 +874,51 @@ test('live MCP tool items expose only a bounded, allowlisted Arcane identity',as
     ['fixture-mcp-4','mcpToolCall','inProgress',{server:'arcane',tool:'script_update',args:{ref:{root:'ServerScriptService',pathSegments:['Main']}}}],
   ]);
   for(const event of items)assert.ok(Buffer.byteLength(JSON.stringify(event))<4096);
+});
+
+test('actual stdio MCP failures retain finite codes and original scope without provider messages',async t=>{
+  const {session}=await open(t,'mcp-tool-failures');
+  await session.startTurn(INPUT);
+  await until(()=>session.snapshot().events.filter(event=>event.type==='item').length===7);
+  const items=session.snapshot().events.flatMap(event=>event.type==='item'?[event]:[]);
+  assert.deepEqual(items.map(event=>[event.itemId,event.status,event.tool?.failure??null]),[
+    ['failure-skill','inProgress',null],
+    ['failure-skill','failed',{schemaVersion:1,kind:'arcane-code',tool:'skills_recommend',code:'INTEGRITY'}],
+    ['failure-forest','failed',{schemaVersion:1,kind:'arcane-code',tool:'scene_build',code:'FOREST_SOURCES_REQUIRED'}],
+    ['failure-capture','failed',{schemaVersion:1,kind:'arcane-code',tool:'studio_viewport_capture',code:'SDK_CUSTODY_UNCONFIRMED'}],
+    ['failure-provider','failed',{schemaVersion:1,kind:'mcp-error',tool:'skills_get',code:null}],
+    ['failure-unknown','failed',{schemaVersion:1,kind:'details-unavailable',tool:'skills_list',code:null}],
+    ['failure-other','failed',{schemaVersion:1,kind:'mcp-error',tool:null,code:null}],
+  ]);
+  assert.ok(items.every(event=>event.threadId===THREAD&&event.turnId==='fixture-turn-1'));
+  const text=JSON.stringify(session.snapshot());
+  for(const secret of ['PRIVATE_','PrivateToolSecret','UNKNOWN_PRIVATE_CODE','C:/private','password='])assert.ok(!text.includes(secret),secret);
+  assert.equal(session.snapshot().droppedEvents,0);
+});
+
+test('finite MCP failure parsing refuses getters/proxies, mismatched codes and conflicting candidates',()=>{
+  const item=(code:string)=>({status:'failed',server:'arcane',tool:'skills_get',result:{structuredContent:{error:{code}}}});
+  assert.equal(summarizeMcpToolFailure(item('INTEGRITY'))?.code,'INTEGRITY');
+  assert.equal(summarizeMcpToolFailure(item('VIEWPORT_FAILED'))?.kind,'details-unavailable');
+  const conflict={...item('INTEGRITY'),result:{structuredContent:{error:{code:'INTEGRITY'}},content:[{type:'text',text:'{"error":{"code":"REGISTRY"}}'}]}};
+  assert.equal(summarizeMcpToolFailure(conflict)?.kind,'details-unavailable');
+  let invoked=0;const hidden=()=>{invoked++;throw new Error('must stay unread');};
+  const success=Object.defineProperty({status:'completed'},'result',{get:hidden});
+  assert.equal(summarizeMcpToolFailure(success),null);
+  for(const field of ['status','result','error']){
+    const input=Object.defineProperty({status:'failed',server:'arcane',tool:'skills_get'},field,{enumerable:true,get:hidden});
+    summarizeMcpToolFailure(input);
+  }
+  const coded=Object.defineProperty({schemaVersion:1,kind:'arcane-code',tool:'skills_get'},'code',{enumerable:true,get:hidden});
+  assert.equal(readMcpToolFailure(coded),null);
+  const proxy=new Proxy({},{getPrototypeOf:hidden,getOwnPropertyDescriptor:hidden,ownKeys:hidden});
+  assert.equal(summarizeMcpToolFailure(proxy),null);assert.equal(readMcpToolFailure(proxy),null);
+  assert.equal(summarizeMcpToolCall(proxy),null);
+  const revoked=Proxy.revocable({},{});revoked.revoke();assert.equal(summarizeMcpToolFailure(revoked.proxy),null);
+  const plain=Object.assign(Object.create(null),{schemaVersion:1,kind:'mcp-error',tool:null,code:null});
+  assert.equal(mcpToolFailureEnvelope(plain),'{"toolFailure":{"schemaVersion":1,"kind":"mcp-error","tool":null,"code":null}}');
+  assert.equal(readMcpToolFailure({...plain,secret:'PRIVATE'}),null);
+  assert.equal(invoked,0,'no getter or proxy trap ran');
 });
 
 test('MCP tool summaries refuse getters, oversize and non-plain arguments',()=>{

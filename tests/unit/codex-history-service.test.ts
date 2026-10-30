@@ -38,6 +38,9 @@ const history = mode => {
   const mcp={type:'mcpToolCall',id:'mcp',arguments:{secret:'PRIVATE_ARGUMENTS'},result:{content:[{type:'text',text:'Public tool output. password=fixturePassword123'}],structuredContent:{secret:'PRIVATE_STRUCTURED'}}};
   const publicItems=[question,answer,reasoning,{type:'commandExecution',id:'tool',command:'PRIVATE_COMMAND',aggregatedOutput:'password=fixturePassword123',status:'completed'},mcp,
     ...(mode==='unsupported-item'?[{type:'futureItem',id:'future',text:'PRIVATE_UNKNOWN'}]:[])];
+  if(mode==='tool-failures')publicItems.push(
+    {type:'mcpToolCall',id:'failed-skill',server:'arcane',tool:'skills_recommend',status:'failed',result:{content:[{type:'text',text:'PRIVATE_FAILURE_BODY'}],structuredContent:{error:{code:'INTEGRITY',message:'PRIVATE_FAILURE_PATH C:/private'}}}},
+    {type:'mcpToolCall',id:'failed-provider',server:'arcane',tool:'skills_get',status:'failed',result:null,error:{message:'PRIVATE_PROVIDER_ERROR password=secret'}});
   // Public metadata shape reported by the parent: one completed full turn, five native item kinds.
   const paginatedItems=[question,item('progress','Public assistant progress.'),mcp,reasoning,answer];
   let turns=mode==='missing-turns'||mode==='paginated-missing-turns'?undefined:
@@ -300,6 +303,30 @@ test('recorded history survives restart and GET/replayed load remains offline wi
   const replay=await f.load(restarted,scope.connectionId,THREAD,requestId);assert.equal(replay.replayed,true);assert.deepEqual(replay.record,loaded.record);
   assert.equal((await f.load(restarted,scope.connectionId)).record.errorCode,'STALE_CONNECTION');
   assert.equal(f.starts(),1);assert.equal((await f.logs()).length,count);
+});
+
+test('classified MCP failures survive actual SQLite reopen and cached HTTP history without replay',async t=>{
+  const f=await fixture(t,'tool-failures'),scope=await f.bind(f.service),requestId=randomUUID();
+  const loaded=await f.load(f.service,scope.connectionId,THREAD,requestId);
+  assert.equal(loaded.record.state,'acknowledged');
+  const entries=loaded.state.nativeHistory!.recorded!.result.entries;
+  assert.deepEqual(entries.filter(entry=>entry.ids.itemId.startsWith('failed-')).map(entry=>JSON.parse(entry.text).toolFailure),[
+    {schemaVersion:1,kind:'arcane-code',tool:'skills_recommend',code:'INTEGRITY'},
+    {schemaVersion:1,kind:'mcp-error',tool:'skills_get',code:null},
+  ]);
+  const db=new DatabaseSync(join(f.journal,'codex-actions.sqlite'));
+  try{
+    const stored=(db.prepare('SELECT payload FROM native_history').get() as {payload:string}).payload;
+    for(const secret of ['PRIVATE_FAILURE','PRIVATE_PROVIDER','C:/private','password=secret'])assert.ok(!stored.includes(secret));
+    assert.deepEqual(JSON.parse(stored).result.entries,entries);
+  }finally{db.close();}
+  await f.service.close();const reopened=f.open(f.projectPath,false),h=await http(t,reopened),before=(await f.logs()).length;
+  const cached=await h.call('/v1/codex/history');assert.equal(cached.status,200);
+  assert.deepEqual(JSON.parse(cached.text).nativeHistory,loaded.state.nativeHistory);
+  assert.equal(reopened.state().snapshot,null);
+  assert.equal((await f.load(reopened,scope.connectionId,THREAD,requestId)).replayed,true);
+  assert.equal((await f.load(reopened,scope.connectionId,'foreign-thread')).record.state,'rejected');
+  assert.equal((await f.logs()).length,before);assert.equal(f.starts(),1);
 });
 
 test('after human reconnect a recorded bound thread can refresh without selection, resume, inference or writes',async t=>{
