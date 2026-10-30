@@ -94,6 +94,11 @@ jobs:
           PYTHONDONTWRITEBYTECODE: '1'
           PYTHONUTF8: '1'
         run: python tests/unit/tree_structure_review_test.py
+      - name: Verify safe worker failure classification
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+          PYTHONUTF8: '1'
+        run: python tests/unit/asset_worker_failure_test.py
       - name: Acquire and verify the pinned official Blender runtime
         env:
           PYTHONDONTWRITEBYTECODE: '1'

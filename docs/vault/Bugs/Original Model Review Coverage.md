@@ -29,4 +29,10 @@ Status: same-job renderer, strict manifest/file binding, fixed preview API and d
 
 New natural-tree production jobs must emit the structure view before publication. Historical jobs can remain two-view jobs; a read never regenerates them. Rendering failures retain the review-render stage and fixed structure filename in the existing finite diagnostic protocol. The nature skill requests the view without changing its experimental status or context budget. Hosted native verification now includes the real original tree pipeline and retained review images on both platforms.
 
+## Headless rendering correction
+
+The first actual original job on `6bb9336` failed at the structure render; its three original workers closed with observed exits. A read-only diagnostic against an existing completed tree reproduced the specific Blender 4.5.3 behavior: rendering succeeded while Render Result exposed zero dimensions/channels/pixels through Python. The candidate now transfers each tile through one owned scene-linear FLOAT RGBA OpenEXR, with bounded size/header/dimensions, exact temporary-file identity and settings restoration/cleanup. It applies the display transform once when saving the final sheet. See [Blender Image API](https://docs.blender.org/api/4.5/bpy.types.Image.html) and [color-management implementation](https://developer.blender.org/docs/features/render_pipeline/color_management/).
+
+All 13 controlled review tests and three safe-classifier tests pass. The corrected read-only native diagnostic produced a real 512-square four-view sheet; it was visually inspected. That verifies the render bridge, not a newly completed original job. Full original generation/export/reopen and hosted Blender 5.2 Windows/Linux checks remain pending. Existing models still lack artistic acceptance; the structure view exposes remaining branch/canopy problems rather than fixing them by itself.
+
 Related: [[Delivery/G05 Blender Quality]], [[Bugs/Original Asset Authoring]], [[Bugs/Forest Blender Workflow]].

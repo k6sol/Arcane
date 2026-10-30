@@ -7,6 +7,11 @@ and restoration rules can also be exercised with explicit controlled doubles.
 import hashlib
 import json
 import math
+import os
+from pathlib import Path
+import stat
+import struct
+import tempfile
 
 
 PATH = "preview-structure.png"
@@ -192,7 +197,130 @@ def view_plan(points, name, width, height):
             "scale": scale, "clipStart": .001, "clipEnd": max(span * 20, 10)}
 
 
-def _render_tile(bpy, camera, plan, width, height):
+def _owned_exr(path, original):
+    current = path.lstat()
+    if (not stat.S_ISREG(current.st_mode) or current.st_nlink != 1
+            or (current.st_dev, current.st_ino) != (original.st_dev, original.st_ino)):
+        raise ValueError("Tree structure temporary image ownership changed")
+    return current
+
+
+def _check_exr(path, original, width, height):
+    """Bound the owned float RGBA carrier before Blender allocates decoded pixels."""
+    current = _owned_exr(path, original)
+    if not 1 <= width <= 1024 or not 1 <= height <= 1024 or not 8 < current.st_size <= width * height * 16 + 256 * 1024:
+        raise ValueError("Tree structure temporary image exceeded")
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(descriptor, "rb") as stream:
+        opened = os.fstat(stream.fileno())
+        if (opened.st_dev, opened.st_ino, opened.st_size) != (current.st_dev, current.st_ino, current.st_size):
+            raise ValueError("Tree structure temporary image ownership changed")
+        raw = stream.read(64 * 1024 + 1)
+    if len(raw) < 9 or struct.unpack_from('<I', raw)[0] != 20000630 or struct.unpack_from('<I', raw, 4)[0] not in (2, 2 | 0x400):
+        raise ValueError("Tree structure temporary image format changed")
+    cursor, attributes = 8, {}
+
+    def name():
+        nonlocal cursor
+        end = raw.find(b'\0', cursor, min(len(raw), cursor + 256))
+        if end < 0:
+            raise ValueError("Tree structure temporary image header changed")
+        value, cursor = raw[cursor:end], end + 1
+        return value
+
+    while True:
+        key = name()
+        if not key:
+            break
+        kind = name()
+        if not kind or key in attributes or len(attributes) >= 128 or cursor + 4 > len(raw):
+            raise ValueError("Tree structure temporary image header changed")
+        size = struct.unpack_from('<i', raw, cursor)[0]
+        cursor += 4
+        if size < 0 or cursor + size > min(len(raw), 64 * 1024):
+            raise ValueError("Tree structure temporary image header exceeded")
+        attributes[key] = (kind, raw[cursor:cursor + size])
+        cursor += size
+    window = struct.pack('<iiii', 0, 0, width - 1, height - 1)
+    if (attributes.get(b'dataWindow') != (b'box2i', window) or attributes.get(b'displayWindow') != (b'box2i', window)
+            or attributes.get(b'compression') != (b'compression', b'\0')):
+        raise ValueError("Tree structure temporary image dimensions changed")
+    kind, channels = attributes.get(b'channels', (None, b''))
+    found, offset = set(), 0
+    while offset < len(channels) and channels[offset] != 0:
+        end = channels.find(b'\0', offset, min(len(channels), offset + 256))
+        if end < 0 or end + 17 > len(channels):
+            raise ValueError("Tree structure temporary image channels changed")
+        channel = channels[offset:end]
+        pixel_type, _, reserved, x_sampling, y_sampling = struct.unpack_from('<iB3sii', channels, end + 1)
+        if channel not in {b'R', b'G', b'B', b'A'} or channel in found or pixel_type != 2 or reserved != b'\0\0\0' or x_sampling != 1 or y_sampling != 1:
+            raise ValueError("Tree structure temporary image channels changed")
+        found.add(channel)
+        offset = end + 17
+    if kind != b'chlist' or found != {b'R', b'G', b'B', b'A'} or channels[offset:] != b'\0':
+        raise ValueError("Tree structure temporary image channels changed")
+    return current
+
+
+def _scene_linear_pixels(bpy, directory, width, height):
+    """Render Result pixels can be empty in background Blender; use one owned EXR."""
+    scene = bpy.context.scene
+    settings = scene.render.image_settings
+    fields = ("file_format", "color_mode", "color_depth", "exr_codec")
+    original_settings = tuple(getattr(settings, field) for field in fields)
+    path, descriptor, original, image = None, None, None, None
+    try:
+        descriptor, filename = tempfile.mkstemp(prefix=".tree-structure-", suffix=".exr", dir=directory)
+        path = Path(filename)
+        original = os.fstat(descriptor)
+        os.close(descriptor)
+        descriptor = None
+        _owned_exr(path, original)
+        settings.file_format, settings.color_mode, settings.color_depth, settings.exr_codec = 'OPEN_EXR', 'RGBA', '32', 'NONE'
+        result = bpy.data.images.get("Render Result")
+        if result is None:
+            raise ValueError("Tree structure render result missing")
+        result.save_render(str(path), scene=scene)
+        saved = _check_exr(path, original, width, height)
+        image = bpy.data.images.load(str(path), check_existing=False)
+        current = _owned_exr(path, original)
+        if (current.st_size, current.st_mtime_ns) != (saved.st_size, saved.st_mtime_ns):
+            raise ValueError("Tree structure temporary image ownership changed")
+        if tuple(image.size) != (width, height) or image.channels != 4 or not image.is_float or len(image.pixels) != width * height * 4:
+            raise ValueError("Tree structure render dimensions changed")
+        return image.pixels[:]
+    finally:
+        failures = []
+
+        def attempt(action):
+            try:
+                action()
+            except BaseException as error:
+                failures.append(error)
+
+        if descriptor is not None:
+            attempt(lambda: os.close(descriptor))
+        if image is not None:
+            attempt(lambda: bpy.data.images.remove(image))
+        for field, value in zip(fields, original_settings):
+            attempt(lambda field=field, value=value: setattr(settings, field, value))
+        if path is not None:
+            def remove():
+                try:
+                    if original is None:
+                        raise ValueError("Tree structure temporary image ownership unavailable")
+                    _owned_exr(path, original)
+                except FileNotFoundError:
+                    return
+                path.unlink()
+            attempt(remove)
+        if failures:
+            raise ValueError("Tree structure temporary image cleanup failed") from failures[0]
+        if tuple(getattr(settings, field) for field in fields) != original_settings:
+            raise ValueError("Tree structure temporary image settings restoration failed")
+
+
+def _render_tile(bpy, directory, camera, plan, width, height):
     from mathutils import Vector
     import numpy as np
     scene = bpy.context.scene
@@ -203,10 +331,7 @@ def _render_tile(bpy, camera, plan, width, height):
     scene.render.resolution_x, scene.render.resolution_y = width, height
     bpy.context.view_layer.update()
     bpy.ops.render.render(write_still=False)
-    image = bpy.data.images.get("Render Result")
-    if image is None or tuple(image.size) != (width, height):
-        raise ValueError("Tree structure render dimensions changed")
-    pixels = np.array(image.pixels[:], dtype=np.float32).reshape(height, width, 4)
+    pixels = np.array(_scene_linear_pixels(bpy, directory, width, height), dtype=np.float32).reshape(height, width, 4)
     luminance = pixels[..., 0] * .2126 + pixels[..., 1] * .7152 + pixels[..., 2] * .0722
     if not np.isfinite(pixels).all() or float(luminance.max() - luminance.min()) < .05 or float(luminance.std()) < .005:
         raise ValueError("Review render is empty, uniform or nonfinite")
@@ -219,7 +344,7 @@ def _render_sheet(bpy, directory, camera, points, resolution):
     try:
         sheet = np.zeros((resolution, resolution, 4), dtype=np.float32)
         for name, x, y, width, height in sheet_layout(resolution):
-            sheet[y:y + height, x:x + width] = _render_tile(bpy, camera, view_plan(points, name, width, height), width, height)
+            sheet[y:y + height, x:x + width] = _render_tile(bpy, directory, camera, view_plan(points, name, width, height), width, height)
         half = resolution // 2
         sheet[half - 1:half + 1, :, :3] = .3
         sheet[:, half - 1:half + 1, :3] = .3
@@ -250,7 +375,7 @@ def render_tree_structure(bpy, request, directory, camera, objects, meshes, requ
     state = {"camera": scene.camera, "location": tuple(camera.location), "rotation": tuple(camera.rotation_euler),
              "cameraData": (camera.data.type, camera.data.ortho_scale, camera.data.clip_start, camera.data.clip_end),
              "render": (render.resolution_x, render.resolution_y, render.resolution_percentage, render.pixel_aspect_x, render.pixel_aspect_y),
-             "settings": (settings.file_format, settings.color_mode, settings.color_depth),
+             "settings": (settings.file_format, settings.color_mode, settings.color_depth, settings.exr_codec),
              "hidden": [(obj, obj.hide_render) for obj in scene.objects]}
     try:
         for obj, _ in state["hidden"]:
@@ -278,7 +403,7 @@ def render_tree_structure(bpy, request, directory, camera, objects, meshes, requ
             attempt(lambda name=name, value=value: setattr(camera.data, name, value))
         for name, value in zip(("resolution_x", "resolution_y", "resolution_percentage", "pixel_aspect_x", "pixel_aspect_y"), state["render"]):
             attempt(lambda name=name, value=value: setattr(render, name, value))
-        for name, value in zip(("file_format", "color_mode", "color_depth"), state["settings"]):
+        for name, value in zip(("file_format", "color_mode", "color_depth", "exr_codec"), state["settings"]):
             attempt(lambda name=name, value=value: setattr(settings, name, value))
         attempt(layer.update)
         if failed:
@@ -286,7 +411,7 @@ def render_tree_structure(bpy, request, directory, camera, objects, meshes, requ
         if (scene.camera != state["camera"] or tuple(camera.location) != state["location"] or tuple(camera.rotation_euler) != state["rotation"]
                 or tuple(getattr(camera.data, name) for name in ("type", "ortho_scale", "clip_start", "clip_end")) != state["cameraData"]
                 or tuple(getattr(render, name) for name in ("resolution_x", "resolution_y", "resolution_percentage", "pixel_aspect_x", "pixel_aspect_y")) != state["render"]
-                or tuple(getattr(settings, name) for name in ("file_format", "color_mode", "color_depth")) != state["settings"]
+                or tuple(getattr(settings, name) for name in ("file_format", "color_mode", "color_depth", "exr_codec")) != state["settings"]
                 or any(obj.hide_render != hidden for obj, hidden in state["hidden"])
                 or exact_source_fingerprint(objects, bpy.context.evaluated_depsgraph_get()) != before):
             raise ValueError("Tree structure review state restoration failed")

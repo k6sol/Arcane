@@ -35,6 +35,10 @@ class WorkerFailureTests(unittest.TestCase):
     def test_operator_context_and_known_generator_failures_are_classified(self):
         self.assertEqual(self.report(RuntimeError("Operator poll() failed, context is incorrect"))["reasonCode"], "BLENDER_CONTEXT")
         self.assertEqual(self.report(ValueError("Column is too short for its base and capital"))["reasonCode"], "PROCEDURAL_LIMIT")
+        self.scope["_failure_artifact"] = "preview-structure.png"
+        structure = self.report(ValueError("Tree structure render dimensions changed"))
+        self.assertEqual(structure["reasonCode"], "RENDER_CONTENT")
+        self.assertEqual(structure["artifactPath"], "preview-structure.png")
         self.assertEqual(self.report(ValueError("Review render is empty, uniform or nonfinite"))["reasonCode"], "RENDER_CONTENT")
 
     def test_only_written_audit_is_referenced_and_counters_are_retained(self):

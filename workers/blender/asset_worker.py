@@ -55,7 +55,7 @@ def failure_report(error):
         code = "MESH_AUDIT"
     elif text.endswith("mesh required repair") or text in ["Input mesh required structural repair", "Procedural mesh required structural repair"]:
         code = "MESH_REPAIR"
-    elif text == "Review render is empty, uniform or nonfinite":
+    elif text in ["Review render is empty, uniform or nonfinite", "Tree structure render dimensions changed"]:
         code = "RENDER_CONTENT"
     elif text == "Saved scene failed reopen validation":
         code = "SCENE_REOPEN"

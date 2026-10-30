@@ -10,6 +10,7 @@ import math
 from pathlib import Path
 import tempfile
 import sys
+import struct
 from types import SimpleNamespace as NS
 import unittest
 from unittest.mock import MagicMock, patch
@@ -68,7 +69,7 @@ def fixture(density=.7):
     review.enrich_tree_meshes(request, objects, rows, semantic, None)
     camera = NS(parent=None, rotation_mode='XYZ', location=(1, 2, 3), rotation_euler=(.1, .2, .3),
                 data=NS(type='ORTHO', ortho_scale=5, clip_start=.1, clip_end=100))
-    settings = NS(file_format='PNG', color_mode='RGB', color_depth='16')
+    settings = NS(file_format='PNG', color_mode='RGB', color_depth='16', exr_codec='ZIP')
     render = NS(resolution_x=129, resolution_y=129, resolution_percentage=75, pixel_aspect_x=1.1, pixel_aspect_y=.9,
                 image_settings=settings, filepath="original-side.png")
     proxy = NS(type="MESH", hide_render=True, get=lambda key: "collision")
@@ -292,6 +293,108 @@ class TreeStructureReviewTests(unittest.TestCase):
         self.assertEqual(camera.data.clip_end, 100)
         self.assertEqual(bpy.context.scene.render.resolution_y, 129)
         self.assertFalse(objects[1].hide_render)
+
+    def test_empty_render_result_transfers_only_original_scene_linear_rgba_and_removes_carrier(self):
+        with tempfile.TemporaryDirectory(prefix="arcane-exr-review-test-") as directory:
+            root = Path(directory)
+            settings = NS(file_format='PNG', color_mode='RGBA', color_depth='8', exr_codec='ZIP')
+            original = vars(settings).copy()
+            scene = NS(render=NS(image_settings=settings))
+            pixels = [0, .25, .5, 1, 2, 1, .5, 1, .1, .2, .3, 1, 4, 3, 2, 1]
+            loaded = NS(size=[2, 2], channels=4, is_float=True, pixels=pixels)
+            saved_paths = []
+
+            def save(filename, scene):
+                self.assertEqual(vars(settings), {"file_format": 'OPEN_EXR', "color_mode": 'RGBA', "color_depth": '32', "exr_codec": 'NONE'})
+                path = Path(filename)
+                self.assertEqual(path.parent, root)
+                self.assertTrue(path.name.startswith('.tree-structure-') and path.name.endswith('.exr'))
+                path.write_bytes(exr_header(2, 2))
+                saved_paths.append(path)
+
+            result = NS(size=[0, 0], channels=0, pixels=[], save_render=save)
+            images = NS(get=MagicMock(return_value=result), load=MagicMock(return_value=loaded), remove=MagicMock())
+            bpy = NS(context=NS(scene=scene), data=NS(images=images))
+            actual = review._scene_linear_pixels(bpy, root, 2, 2)
+            self.assertEqual(actual, pixels, "Scene-linear HDR values are not clipped or display transformed")
+            self.assertIsNot(actual, pixels, "Copied pixels survive removal of only the owned loaded image")
+            self.assertEqual(vars(settings), original)
+            images.load.assert_called_once_with(str(saved_paths[0]), check_existing=False)
+            images.remove.assert_called_once_with(loaded)
+            self.assertFalse(saved_paths[0].exists())
+            self.assertEqual(list(root.iterdir()), [])
+
+    def test_native_exr_transfer_and_load_failure_keep_original_error_and_restore_owned_state(self):
+        for phase in ("save", "load", "dimensions"):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory(prefix="arcane-exr-failure-test-") as directory:
+                root = Path(directory)
+                settings = NS(file_format='PNG', color_mode='RGB', color_depth='16', exr_codec='ZIP')
+                original = vars(settings).copy()
+                failure = OSError("controlled EXR " + phase)
+                loaded = NS(size=[3, 2], channels=4, is_float=True, pixels=[0] * 24)
+
+                def save(filename, scene):
+                    if phase == "save":
+                        raise failure
+                    Path(filename).write_bytes(exr_header(2, 2))
+
+                result = NS(save_render=save)
+                images = NS(get=MagicMock(return_value=result), load=MagicMock(side_effect=failure) if phase == "load" else MagicMock(return_value=loaded),
+                            remove=MagicMock())
+                bpy = NS(context=NS(scene=NS(render=NS(image_settings=settings))), data=NS(images=images))
+                with self.assertRaises(ValueError if phase == "dimensions" else OSError) as caught:
+                    review._scene_linear_pixels(bpy, root, 2, 2)
+                if phase != "dimensions":
+                    self.assertIs(caught.exception, failure)
+                self.assertEqual(vars(settings), original)
+                self.assertEqual(list(root.iterdir()), [])
+                if phase == "dimensions":
+                    images.remove.assert_called_once_with(loaded)
+                else:
+                    images.remove.assert_not_called()
+
+    def test_exr_header_refuses_overallocation_and_wrong_rgba_before_image_load(self):
+        for data in (exr_header(1024, 1024), exr_header(2, 2, pixel_type=1), b'not-exr', b'x' * (2 * 2 * 16 + 256 * 1024 + 1)):
+            with self.subTest(bytes=len(data)), tempfile.TemporaryDirectory(prefix="arcane-exr-limit-test-") as directory:
+                root = Path(directory)
+                settings = NS(file_format='PNG', color_mode='RGBA', color_depth='8', exr_codec='ZIP')
+                original = vars(settings).copy()
+                result = NS(save_render=lambda filename, scene: Path(filename).write_bytes(data))
+                images = NS(get=MagicMock(return_value=result), load=MagicMock(), remove=MagicMock())
+                bpy = NS(context=NS(scene=NS(render=NS(image_settings=settings))), data=NS(images=images))
+                with self.assertRaises(ValueError):
+                    review._scene_linear_pixels(bpy, root, 2, 2)
+                images.load.assert_not_called()
+                images.remove.assert_not_called()
+                self.assertEqual(vars(settings), original)
+                self.assertEqual(list(root.iterdir()), [])
+
+    def test_exr_cleanup_refusal_is_not_success_and_still_restores_settings_and_file(self):
+        with tempfile.TemporaryDirectory(prefix="arcane-exr-cleanup-test-") as directory:
+            root = Path(directory)
+            settings = NS(file_format='PNG', color_mode='RGBA', color_depth='8', exr_codec='ZIP')
+            original = vars(settings).copy()
+            loaded = NS(size=[2, 2], channels=4, is_float=True, pixels=[0] * 16)
+            failure = RuntimeError("controlled loaded-image cleanup refusal")
+            images = NS(get=lambda name: NS(save_render=lambda filename, scene: Path(filename).write_bytes(exr_header(2, 2))),
+                        load=MagicMock(return_value=loaded), remove=MagicMock(side_effect=failure))
+            bpy = NS(context=NS(scene=NS(render=NS(image_settings=settings))), data=NS(images=images))
+            with self.assertRaisesRegex(ValueError, "cleanup") as caught:
+                review._scene_linear_pixels(bpy, root, 2, 2)
+            self.assertIs(caught.exception.__cause__, failure)
+            self.assertEqual(vars(settings), original)
+            self.assertEqual(list(root.iterdir()), [])
+
+
+def exr_header(width, height, pixel_type=2):
+    """Synthetic header only: the native codec/load operation is an explicit double."""
+    def attribute(name, kind, value):
+        return name + b'\0' + kind + b'\0' + struct.pack('<i', len(value)) + value
+    channels = b''.join(name + b'\0' + struct.pack('<iB3sii', pixel_type, 0, b'\0\0\0', 1, 1) for name in (b'A', b'B', b'G', b'R')) + b'\0'
+    window = struct.pack('<iiii', 0, 0, width - 1, height - 1)
+    return (struct.pack('<II', 20000630, 2) + attribute(b'channels', b'chlist', channels)
+            + attribute(b'compression', b'compression', b'\0') + attribute(b'dataWindow', b'box2i', window)
+            + attribute(b'displayWindow', b'box2i', window) + b'\0')
 
 
 if __name__ == "__main__":
