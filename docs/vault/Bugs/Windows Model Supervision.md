@@ -7,13 +7,15 @@ tags: [arcane, blender, windows, diagnostics]
 
 The real current-boulder fixture in [native run 41025696581](https://github.com/k6sol/Arcane/actions/runs/41025696581), source `0e1744b`, passed on Linux and failed on Windows. Windows reached probe, generation, geometry validation, texture authoring and review-render events, then returned `SUPERVISION_UNRECORDED`. A terminal progress event does not override this failed result. Cleanup observed original worker closure and removed its owned temporary data; no successful identity capture or completed model export is inferred.
 
-The original supervisor produces that code when its spawned-worker decision stops the child. Current durable output does not retain the precise capture/query reason. Do not infer timeout, inaccessible metadata, malformed output or persistence failure from duration alone. The failing Windows artifact contained no review images.
+The original supervisor produces that code when its spawned-worker decision stops the child. The subsequent original call-through observations in [native run 41031570968](https://github.com/k6sol/Arcane/actions/runs/41031570968), source `6f8f3ea`, identify the immediate failure: the probe, Python probe and generation identity queries each timed out after about five seconds with no stdout/stderr bytes. Each original child was observed closed, no identity was captured, and owned temporary data was removed. The reason the CIM query exceeded its deadline remains unproved; this is query-timeout evidence, not evidence that Blender failed to start or that cleanup was lost. The failing Windows artifact contained no review images.
 
 The focused fixture update observes the original capture Promise and exact original process-query callback/handle without replacing a host, runner or result, issuing another query, replaying capture or changing limits. It records only bounded role/outcome/callback categories and a sanitized final journal before the existing success assertion. Parser reason remains unavailable when not exposed. All original geometry/export/preview/closure/negative gates remain.
 
-- [ ] Obtain the actual fixed-category Windows failure evidence on the updated fixture.
+- [x] Obtain the actual fixed-category Windows failure evidence on the updated fixture: all three original queries timed out in run 41031570968.
 - [ ] Correct the demonstrated cause without bypassing identity or original close proof.
 - [ ] Pass the genuine current-model native path on both platforms and inspect both review views.
 - [ ] Verify actual reviewed import and appearance in the designated Studio test place separately.
 
 The Linux boulder passed genuine source-to-export/reopen checks with three original worker roles observed closed and both 512px review images retained. Its visual mass and crack pattern still need improvement; protocol/native success is not artistic acceptance.
+
+The replacement query uses the exact owned PID and one retained Windows process handle to read creation time and executable path, without CIM enumeration or increasing the five-second deadline. New native timestamps are versioned separately from saved CIM identities: a legacy precision mismatch remains unknown, never proof that the recorded worker exited. Actual default-query tests and the original Blender quality fixture must pass in hosted Windows execution before this implementation is accepted. Source review alone does not establish performance, model quality or Studio import.
