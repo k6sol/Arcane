@@ -23,6 +23,24 @@ Use one dominant light direction plus purposeful practicals/fill. Establish a ne
 
 Atmosphere controls the supported distance haze; do not stack unrelated fog assumptions. Bloom is restrained spill, not a substitute for emissive geometry or illumination. Keep critical gameplay paths, enemies and GUI legible in night/horror looks. Depth of field and shake belong to the intended camera use and accessibility options, not every gameplay view. If a setting is refused, report the named manual/capability boundary rather than claiming the preset applied.
 
+Use terrain_generate for requested natural ground; keep local lighting or material edits scoped.
+
+## Apply supported controls, then inspect
+Use `environment_apply` with a relevant `preset` and explicit section overrides; these current preset starts are not universal art direction:
+| Condition | Preset | ClockTime |
+|---|---|---|
+| Clear day | clear_day | 13 |
+| Golden hour | golden_hour | 17.6 |
+| Foggy forest | foggy_forest | 9.5 |
+| Night | night | 0 |
+For horror/sci-fi or forest variants, read the current preset/declared forest-light values rather than guessing.
+
+Sections include `lighting` (ExposureCompensation, OutdoorAmbient, ColorShift_Top, ShadowSoftness, EnvironmentDiffuseScale, EnvironmentSpecularScale), `atmosphere` (Density, Haze, Glare, Decay), `bloom` (Intensity, Size, Threshold), `colorCorrection` (TintColor, Contrast, Saturation), `sunRays` and `depthOfField` (FarIntensity, FocusDistance, InFocusRadius). Tune one cause at a time. When Atmosphere is present, FogStart/FogEnd are ignored; inspect the actual haze instead.
+
+`technology: "Future"` and `terrainDecoration: true` are explicit supported choices, not prerequisites for every edit. Refused properties require the reported manual step. `materials` entries use `name`, `baseMaterial`, `studsPerTile`, `override` and supported ColorMap/NormalMap/RoughnessMap/MetalnessMap content; do not invent IDs or imply procedural Blender shaders transfer automatically.
+
+Use `studio_viewport_capture` in Edit with `frame: {ref, views: ["front","three_quarter"]}` for a neutral comparison; it does not start Play or certify gameplay. Preserve the requested camera/look and report refused capture settings.
+
 ## Acceptance
 Inspect a player-height route view, a wider composition and neutral closeups of important surfaces. Look for floating contacts, repeated clones, bad bark/stone scale, black crushed detail, blown highlights, alpha halos and material mismatches. Grounding should respect shape and terrain; do not uniformly bury every rock by a fixed percentage.
 

@@ -56,6 +56,23 @@ async function call(client: Client, name: string, args: Record<string, unknown> 
   const item = result.content.find(block => block.type === 'text'); assert.ok(item && item.type === 'text');
   return { result, data: JSON.parse(item.text) as Record<string, any> };
 }
+interface BundledSkillSource { id: string; path: string; sha256: string; references: { name: string; path: string; sha256: string }[] }
+async function intactSkillGet(client: Client, id: string, references: string[] = []): Promise<string> {
+  const reply = await call(client, 'skills_get', { ids: [id], references, allowExperimental: true, byteBudget: 16_384 });
+  assert.notEqual(reply.result.isError, true); assert.deepEqual(reply.data.ids, [id]); assert.deepEqual(reply.data.references, references);
+  const context: unknown = reply.data.context; assert.ok(typeof context === 'string');
+  assert.equal(reply.data.bytes, Buffer.byteLength(context)); assert.ok(reply.data.bytes <= 16_384);
+  const registry = JSON.parse(await readFile(join(ROOT, 'skills/registry.json'), 'utf8')) as { skills: BundledSkillSource[] };
+  const entry: BundledSkillSource | undefined = registry.skills.find(skill => skill.id === id); assert.ok(entry);
+  for (const source of [entry, ...references.map(reference => {
+    const [owner, name] = reference.split(':'); assert.equal(owner, id);
+    const found = entry.references.find(item => item.name === name); assert.ok(found); return found;
+  })]) {
+    const bytes = await readFile(join(ROOT, source.path)); assert.equal(createHash('sha256').update(bytes).digest('hex'), source.sha256);
+    assert.ok(context.includes(bytes.toString('utf8')), source.path);
+  }
+  return context;
+}
 async function dataFixture(t: test.TestContext) {
   const root = await directory(t); await cp(join(ROOT, 'skills'), join(root, 'skills'), { recursive: true });
   return { root, registry: new SkillRegistry({ fixtureRoot: root }) };
@@ -199,12 +216,15 @@ test('real tool inventories retain closed authority while the procedural descrip
   assert.equal(native.getInstructions(), instructions); assert.equal(network.mock.callCount(), 0);
 });
 
-test('router combines combat and server security rather than routing a multi-domain task to generic scene guidance', async () => {
+test('router combines combat and server security rather than routing a multi-domain task to generic scene guidance', async t => {
   const result = await recommendSkills(new SkillRegistry(), { ...INPUT,
     request: 'Implement melee combat weapon attacks and damage with RemoteEvent server validation and datastore saves.' });
   assert.ok(result.ids.includes('arcane-combat')); assert.ok(result.ids.includes('arcane-remote-security'));
-  assert.ok(result.ids.includes('arcane-networking')); assert.ok([...result.ids, ...result.deferredIds].includes('arcane-datastore-safety'));
+  assert.ok([...result.ids, ...result.deferredIds].includes('arcane-networking')); assert.ok([...result.ids, ...result.deferredIds].includes('arcane-datastore-safety'));
   assert.ok(!result.ids.includes('arcane-blender-props'));
+  assert.ok(result.bytes <= SKILL_ROUTER_LIMITS.defaultBytes);
+  const client = await linked(t);
+  for (const id of ['arcane-networking', 'arcane-datastore-safety']) await intactSkillGet(client, id);
 });
 
 test('router maps everyday VFX, GUI, scripting, systems, data and realism phrasing to the prescriptive skill first', async () => {
@@ -397,24 +417,55 @@ test('router maps genre phrasing to the matching prescriptive genre kit first', 
   }
 });
 
-test('router sends everyday gameplay-code briefs to the prescriptive systems, DataStore and security skills with their code references', async () => {
+test('router sends everyday gameplay-code briefs to the prescriptive systems, DataStore and security skills with their code references', async t => {
   // Pinned in the reviewer catalogue (tests/skills/evaluations.json routingCases) so routing and behavior definitions stay in step.
   const catalogue = JSON.parse(await readFile(join(ROOT, 'tests/skills/evaluations.json'), 'utf8')) as
     { routingCases: { id: string; request: string; firstSkill: string; alsoIncluded: string[]; references: string[] }[] };
   assert.ok(catalogue.routingCases.length >= 10);
+  const client = await linked(t);
   for (const { request, firstSkill: first, alsoIncluded, references } of catalogue.routingCases) {
     const result = await recommendSkills(new SkillRegistry(), { ...INPUT, request });
     const domain = result.selected.filter(row => row.reason.startsWith('Task relevance')).map(row => row.id);
     assert.equal(domain[0], first, request);
     assert.ok(result.context.includes(`## Loaded skill: ${first}\n`), request);
-    for (const id of alsoIncluded) assert.ok([...result.ids, ...result.deferredIds].includes(id), `${request}: ${id}`);
+    if (request === 'make a checkpoint obby') {
+      assert.equal(result.composition.intent, 'whole-game'); assert.equal(result.composition.primaryGenre, 'obby');
+      assert.deepEqual(result.ids, ['arcane-project-director', first]);
+      const systems = result.composition.phases.find(phase => phase.phase === 'systems'); assert.ok(systems);
+      for (const id of alsoIncluded) assert.ok(systems.ids.includes(id), `${request}: ${id}`);
+      await intactSkillGet(client, 'arcane-gameplay-systems', ['arcane-gameplay-systems:recipes']);
+    } else for (const id of alsoIncluded) assert.ok([...result.ids, ...result.deferredIds].includes(id), `${request}: ${id}`);
     // Code references load when they fit, otherwise they are named for skills_get; never silently dropped.
     for (const reference of references) assert.ok([...result.references, ...result.deferredReferences].includes(reference), `${request}: ${reference}`);
+    for (const reference of result.deferredReferences) await intactSkillGet(client, reference.split(':')[0]!, [reference]);
     assert.ok(result.bytes <= result.byteBudget && result.bytes === Buffer.byteLength(result.context), request);
   }
   const roomy = await recommendSkills(new SkillRegistry(), { ...INPUT, byteBudget: SKILL_ROUTER_LIMITS.maximumBytes, request: 'make a shop with DataStore saving' });
   assert.deepEqual(roomy.references, ['arcane-datastore-safety:template', 'arcane-gameplay-systems:recipes']);
   for (const code of ['GetRequestBudgetForRequestType', 'BindToClose', 'UpdateAsync', 'OnServerEvent', 'Net.allow']) assert.ok(roomy.context.includes(code), code);
+});
+
+test('habitat creation leads with natural guidance while a local feature merely in a habitat remains focused', async () => {
+  for (const request of ['Build a full forest with caves and a detailed spawn pillar.', 'Make a cave environment with a traversable interior.', 'Create a natural environment with clearings and routes.']) {
+    const result = await recommendSkills(new SkillRegistry(), { ...INPUT, request });
+    assert.equal(result.composition.intent, 'focused'); assert.equal(result.ids[0], 'arcane-natural-scenes', request);
+    assert.ok(result.bytes <= SKILL_ROUTER_LIMITS.defaultBytes && result.bytes === Buffer.byteLength(result.context));
+  }
+  for (const [request, first] of [
+    ['Add a detailed pillar in an existing forest.', 'arcane-architectural-features'],
+    ['Fix an enemy NPC that patrols and chases players in the forest.', 'arcane-characters'],
+    ['Add NPCs that patrol and chase players.', 'arcane-characters'],
+    ['Add enemies that patrol and chase players.', 'arcane-characters'],
+    ['Make realistic sound for my forest with birds and a river.', 'arcane-audio'],
+    ['Create environment settings UI.', 'arcane-interface'],
+    ['Create a forest ambience soundtrack.', 'arcane-audio'],
+  ] as const) {
+    const result = await recommendSkills(new SkillRegistry(), { ...INPUT, request });
+    assert.equal(result.composition.intent, 'focused'); assert.equal(result.ids[0], first, request);
+    assert.ok(result.bytes <= SKILL_ROUTER_LIMITS.defaultBytes);
+  }
+  const patrol = await recommendSkills(new SkillRegistry(), { ...INPUT, request: 'Add a patrol timer system.' });
+  assert.notEqual(patrol.ids[0], 'arcane-characters', 'patrol alone is not an NPC request');
 });
 
 test('script_update attaches advisory Luau findings without blocking or altering the forwarded write', async t => {

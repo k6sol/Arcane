@@ -13,6 +13,13 @@ Block traversable ground and silhouette first. Use terrain_generate for requeste
 
 For caves, inspect an entrance, roof, continuous floor, interior route and exit/dead-end design at player scale. Supported terrain_generate caves raise/carve an outcrop; read [scene-build](references/scene-build.md) for actual fields and fixtures. A dark hole or rock arch is not an explored cave. Do not carve beneath protected structures or fill entrances with scatter.
 
+## Tool plan and source bindings
+For `terrain_generate`, use `features` in order: `flatten` with `level`/`blend` for a clearing, `river` or `path` with continuous `points`, full `width` and intentional `depth`/`bank`. Heights are above `floor`, not absolute Y. Use `environment_apply` for the relevant lighting/atmosphere; `ClockTime`, haze and exposure must preserve the actual route's readability (arcane-photoreal).
+
+In `scene_build`, bind imported refs in `templates`; explicit blockout parts belong in `prototypes`. Resolve every forest layer before a write: missing sources refuse with `FOREST_SOURCES_REQUIRED`. A template name is not Blender provenance. The optional forest kit's family seed is `(kitSeed * 100 + 1) % 2**31`; author each family member with the same generator/seed and `variant: [i,n]`, named `<use>-<n>` (for example oak-1..4). Inspect every member; an agent cannot approve it.
+
+Scatter uses Poisson-disk `minSpacing`, optional `clusters`/`clusterSpread`, `clearing`, `avoid`, `avoidPaths`, `footprintRadius` and `seed`. Use `ground: true` where surface placement is intended. Generic prototypes may use scale/yaw/tint ranges; managed original templates keep their authored colour (no tint). Choose variation and counts from measured bounds, not a universal forest part quota. Consider `CastShadow: false` only for small decorative fill after checking its visual effect.
+
 ## Author convincing natural families
 Use original Blender geometry, UVs, textures and PBR. Choose assets_procedural only for faithfully supported forms; use the permitted native authoring route for other forms. Review assets_jobs and assets_preview, obtain the exact model's human approval, then follow the supported import flow. Toolbox/free models require an express request and the human-controlled setting. Unsupported authoring/import is a stated limitation, never permission to substitute.
 

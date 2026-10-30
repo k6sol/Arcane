@@ -9,7 +9,7 @@ license: MIT
 ## Enumerate what an attacker can request
 For each handler, identify the asset/value/state it can change, the trusted caller identity and the most expensive work it can trigger. The Player supplied to OnServerEvent is the caller; do not accept a second client-selected player as authority. Treat prompt/touch events and client-owned physics as inputs requiring validation too.
 
-Write the contract before the handler: direction, exact payload, server-derived fields, allowed game states, cooldown/rate budget, idempotence key and bounded reply. Prefer action-specific interfaces; if a project has a dispatcher, its allowed actions still need independent schemas and permissions. A generic function name is not validation.
+Choose RemoteEvent for reliable asynchronous intent; UnreliableRemoteEvent is only for dispensable updates. InvokeClient can fail or never return, so do not depend on it for authoritative decisions or critical cleanup. Write the contract before the handler: direction, exact payload, server-derived fields, allowed game states, cooldown/rate budget, idempotence key and bounded reply. Prefer action-specific interfaces; if a project has a dispatcher, its allowed actions still need independent schemas and permissions. A generic function name is not validation.
 
 ## Validate cheaply before effects
 1. Check types, expected keys, lengths, collection counts and finite bounded numbers, including vector components. Reject malformed or cyclic/oversized structures without recursively doing unbounded work.
@@ -21,9 +21,9 @@ Write the contract before the handler: direction, exact payload, server-derived 
 Rate-limit per player/action and expensive shared resource; bound both processing and rejection logs. Choose rates from legitimate input and burst behavior, not a universal magic number. Denials should not amplify into broadcast or expensive storage work. Give normal players actionable pending/denied feedback without exposing sensitive checks.
 
 ## Keep trust boundaries intact
-Clients own their presentation and may manipulate their character simulation. Server network ownership can help selected gameplay assemblies where appropriate; it does not turn all physics observations into proof. Avoid blanket bans or forced resets based on one anomaly. Keep secrets and server definitions out of replicated storage.
+Clients own their presentation and may manipulate their character simulation. Where supported, SetNetworkOwner(nil) can give selected gameplay assemblies server simulation; do not apply it indiscriminately or treat physics observations as proof. Avoid blanket bans or forced resets based on one anomaly. Keep secrets and server definitions out of replicated storage.
 
 Filter user-authored text through the supported platform path before showing it to other players. Purchase/receipt fulfillment requires the real server receipt and durable idempotence; a client purchase-finished notification is not payment proof. Persistent multi-key trades need a recovery design, not two independent balance writes.
 
 ## Acceptance includes ordinary play
-Use an isolated authorized fixture for wrong types, NaN/infinity, oversized payloads, foreign Instances, stale state, distant targets, replay, concurrency and floods. Assert unchanged protected value and bounded work on refusal. Also verify legal rapid input, latency and supported movement still succeed. Run only permitted playtests, preserve their cleanup, and describe residual risks; this checklist is not a claim of an exploit-free game.
+Use an isolated authorized fixture for wrong types, NaN/infinity, oversized payloads, foreign Instances, stale state, distant targets, replay, concurrency and floods. Assert unchanged protected value and bounded work on refusal. Also verify legal rapid input, latency and supported movement still succeed. Use arcane-playtest-qa for permitted playtests, preserve their cleanup, and describe residual risks; this checklist is not a claim of an exploit-free game.

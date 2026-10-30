@@ -212,119 +212,108 @@ test('quarantined entries cannot be loaded through experimental opt-in', async t
   assert.deepEqual(await searchSkills('fixture', { root: f.root }), []);
 });
 
+
+// Entrypoints carry selection/safety contracts; explicitly declared references
+// carry detailed field guides and recipes. Check both without loading unrelated
+// skills or treating technical examples as a completed game.
+async function readGuidance(id) {
+  const entry = (await loadRegistry(ROOT)).skills.find(skill => skill.id === id);
+  assert.ok(entry, id);
+  return [(await readContained(ROOT, entry.path)).text,
+    ...await Promise.all(entry.references.map(async ref => (await readContained(ROOT, ref.path)).text))].join('\n');
+}
+function containsGuidance(text, rules, label = '') {
+  for (const rule of rules) assert.ok(text.toLowerCase().includes(rule.toLowerCase()), `${label}: ${rule}`);
+}
+
 test('scene recipes are prescriptive: terrain ground, natural Poisson placement, anti-ring rule and batch tools', async () => {
-  const read = async id => (await readContained(ROOT, `skills/arcane/${id}/SKILL.md`)).text;
-  const nature = await read('arcane-natural-scenes'), architecture = await read('arcane-architectural-features'), world = await read('arcane-world-building');
-  for (const text of ['environment_apply', 'terrain', 'terrain_generate', '`flatten` the clearing', '`river`', '`path`', 'Never use a flat Part disc', 'Poisson-disk', 'scatter', 'clearing', 'Never use rings, grids, rows',
-    'Pine', 'Oak', 'Birch', 'tint', 'scale [0.75,1.25]', 'CastShadow false', 'ClockTime', 'atmosphere', '800-2500']) assert.ok(nature.includes(text), text);
-  for (const text of ['family seed = kit seed x 100 + 1', 'oak-1..4', 'variant family', '`<use>-<n>` variants', '`recipe`', 'agents never approve', 'ONE approved copy', '`blockouts`', 'never call that forest realistic']) assert.ok(nature.includes(text), text);
-  for (const text of ['Blender', 'UVs, textures and PBR', 'assets_preview', 'scene_delete', 'SpawnLocation', 'scene_update', 'Add a spiral stair only when requested', 'exact failing stage'])
-    assert.ok(architecture.includes(text), text);
-  assert.match(world, /Never place foliage in rings, grids or rows/);
-  assert.match(world, /Poisson-disk/);
+
+  const nature = await readGuidance('arcane-natural-scenes'), architecture = await readGuidance('arcane-architectural-features'), world = await readGuidance('arcane-world-building');
+  containsGuidance(nature, ['Blender', 'UV', 'PBR', 'terrain_generate', 'environment_apply', 'Poisson', 'scatter', 'clearing', 'avoidPaths', 'footprintRadius', 'grass', 'branch', 'assets_preview']);
+  containsGuidance(nature, ['FOREST_SOURCES_REQUIRED', 'before', 'explicit primitive prototypes']);
+  assert.match(nature, /not proof of Blender authorship|does not prove Blender provenance/i);
+  assert.doesNotMatch(nature, /else a blockout \(reported\)/, 'missing sources must not silently create primitive trees');
+  containsGuidance(architecture, ['Blender', 'UV', 'PBR', 'assets_preview', 'SpawnLocation', 'scene_update', 'spiral', 'requested']);
+  containsGuidance(world, ['Poisson', 'ground', 'route', 'original', 'Blender']);
+  assert.ok((await readSkill('arcane-natural-scenes')).includes('references/scene-build.md'), 'detailed placement guidance remains discoverable');
 });
 
 test('DataStore safety skill encodes the non-destructive persistence rules', async () => {
-  const text = (await readContained(ROOT, 'skills/arcane/arcane-datastore-safety/SKILL.md')).text;
-  for (const rule of ['Never wipe, rename', 'pcall', 'GetRequestBudgetForRequestType', 'UpdateAsync, not SetAsync', 'Session lock', 'BindToClose',
-    'Never run data-mutating code', 'Studio Access to API Services', 'must never be saved over with defaults']) assert.ok(text.includes(rule), rule);
+
+  const text = await readSkill('arcane-datastore-safety');
+  containsGuidance(text, ['Never wipe, rename', 'explicit request', 'pcall', 'GetRequestBudgetForRequestType', 'UpdateAsync, not SetAsync', 'unique session token', 'BindToClose', 'Studio Access to API Services', 'failed load', 'overwrites real data', 'cancelled transform', 'future versions']);
   const pack = await packSkills(['arcane-datastore-safety'], { root: ROOT, allowExperimental: true });
   assert.ok(pack.context.includes('## Loaded skill: arcane-datastore-safety'));
 });
 
-const readSkill = async id => (await readContained(ROOT, `skills/arcane/${id}/SKILL.md`)).text;
+async function readSkill(id) { return (await readContained(ROOT, `skills/arcane/${id}/SKILL.md`)).text; }
 // Built-in particle textures verified in a Studio install's content/textures/particles folder.
 const BUILT_IN_PARTICLES = new Set(['fire_main.dds', 'fire_sparks_main.dds', 'smoke_main.dds', 'sparkles_main.dds', 'explosion01_smoke_main.dds',
   'explosion01_core_main.dds', 'explosion01_shockwave_main.dds', 'forcefield_glow_main.dds', 'forcefield_vortex_main.dds', 'SquareParticle.png']);
 
 test('VFX skill gives exact emitter presets, verified built-in textures and runtime verification', async () => {
-  const vfx = await readSkill('arcane-vfx');
-  for (const text of ['scene_build', 'script_update', 'script_set_enabled', 'playtest_request', 'Never invent rbxassetid', 'Fire core', 'Embers', 'Smoke',
-    'Impact sparks', 'Magic aura', 'Waterfall sheet', 'Waterfall mist', 'Dust motes', 'Fireflies', 'Falling leaves', 'LightEmission', 'Spread', 'Drag',
-    'NumberSequence', 'ColorSequence', 'Attachment0', 'fx', 'creates effect instances directly', 'scene_create', 'frame {ref, views}',
-    'Beam', 'Trail', 'PointLight', 'SpotLight', 'Highlight', 'Emit(', 'arcane-photoreal']) assert.ok(vfx.includes(text), text);
-  assert.doesNotMatch(vfx, /cannot create|builds them from script|Arcane builds parts, not effect/i, 'effects are no longer script-built');
-  for (const text of ['Look professional', 'ZOffset', 'arcane-vfx:recipes', 'plain particles']) assert.ok(vfx.includes(text), text);
+
+  const vfx = await readGuidance('arcane-vfx');
+  containsGuidance(vfx, ['scene_build', 'scene_create', 'script_update', 'script_set_enabled', 'playtest_request', 'playtest_status', 'Beam', 'Trail', 'Attachment', 'NumberSequence', 'ColorSequence', 'LightEmission', 'Drag', 'fire', 'smoke', 'waterfall', 'burst', 'cleanup']);
+  const entry = await readSkill('arcane-vfx');
+  containsGuidance(entry, ['references/recipes.md', 'rate', 'lifetime', 'actual', 'server', 'reduced', 'not invent']);
   const recipes = await packSkills(['arcane-vfx'], { root: ROOT, allowExperimental: true, references: ['arcane-vfx:recipes'] });
-  for (const text of ['## Campfire', '## Waterfall', '## Bursts', '## Beams and trails', '## Attachment placement', 'Threshold 0.9-1.6', 'DepthOfField', 'SunRays', 'Atmosphere', 'ColorCorrection', '## Performance budgets', ':Emit(count)'])
-    assert.ok(recipes.context.includes(text), text);
-  for (const name of ['fire_main.dds', 'smoke_main.dds', 'sparkles_main.dds', 'fire_sparks_main.dds', 'SquareParticle.png']) assert.ok(vfx.includes(name), name);
-  for (const skill of (await loadRegistry(ROOT)).skills) {
-    for (const item of [skill, ...skill.references]) {
-      const text = (await readContained(ROOT, item.path)).text;
-      assert.doesNotMatch(text, /rbxassetid:\/\/\d/, `${item.path} must not invent asset ids`);
-      for (const [, file] of text.matchAll(/rbxasset:\/\/textures\/particles\/([\w.]+)/g)) assert.ok(BUILT_IN_PARTICLES.has(file), file);
-    }
+  containsGuidance(recipes.context, ['## Campfire', '## Waterfall', '## Bursts', '## Beams and trails', '## Attachment placement', '## Performance budgets', ':Emit(count)']);
+  for (const skill of (await loadRegistry(ROOT)).skills) for (const item of [skill, ...skill.references]) {
+    const text = (await readContained(ROOT, item.path)).text;
+    assert.doesNotMatch(text, /rbxassetid:\/\/\d/, `${item.path} must not invent asset ids`);
+    for (const [, file] of text.matchAll(/rbxasset:\/\/textures\/particles\/([\w.]+)/g)) assert.ok(BUILT_IN_PARTICLES.has(file), file);
   }
 });
 
 test('photoreal skill encodes mood presets with exact environment_apply fields, scale and imperfection rules', async () => {
-  const text = await readSkill('arcane-photoreal');
-  for (const mood of ['Clear day', 'Golden hour', 'Foggy forest', 'Night', 'Horror', 'Sci-fi']) assert.ok(text.includes(`| ${mood} |`), mood);
-  for (const field of ['ClockTime', 'ExposureCompensation', 'OutdoorAmbient', 'ColorShift_Top', 'ShadowSoftness', 'EnvironmentDiffuseScale', 'EnvironmentSpecularScale',
-    'Density', 'Haze', 'Decay', 'TintColor', 'Technology = Future', 'Decoration = true', 'MaterialVariant', 'SurfaceAppearance', 'DepthOfFieldEffect',
-    'FogStart/FogEnd are ignored', 'avatar 5.5 studs', 'Door 4 x 7.5', 'No identical neighbours', 'studio_viewport_capture', 'environment_apply', 'terrain_generate` first',
-    'preset', 'technology: "Future"', 'terrainDecoration: true', 'materials: [', 'clear_day', 'golden_hour', 'foggy_forest', 'night', 'horror', 'sci_fi']) assert.ok(text.includes(field), field);
-  assert.doesNotMatch(text, /Arcane cannot set/, 'Technology, Decoration and MaterialVariants are direct');
-  assert.doesNotMatch(text, /\bExposure \d/);
+
+  const text = await readGuidance('arcane-photoreal');
+  containsGuidance(text, ['ClockTime', 'ExposureCompensation', 'OutdoorAmbient', 'Density', 'Haze', 'Decay', 'TintColor', 'MaterialVariant', 'SurfaceAppearance', 'environment_apply', 'terrain_generate', 'studio_viewport_capture', 'PBR', 'scale', 'roughness']);
+  containsGuidance(await readSkill('arcane-photoreal'), ['reference', 'actual', 'not', 'geometry']);
+  assert.doesNotMatch(text, /Arcane cannot set|\bExposure \d/);
 });
 
 test('interface skill is a design system with tokens, responsive rules, accessible contrast and declared recipes', async () => {
-  const text = await readSkill('arcane-interface');
-  for (const rule of ['UICorner', 'UIStroke', 'UIGradient', 'UIPadding', 'UIListLayout', 'UIGridLayout', 'UIAspectRatioConstraint', 'UIScale', 'UISizeConstraint',
-    'UITextSizeConstraint', 'BuilderSans', 'Activated', '44 px', '4.5:1', 'ResetOnSpawn false', 'CoreUISafeInsets', 'script_set_enabled', 'click-gui', 'arcane-interface:recipes'])
-    assert.ok(text.includes(rule), rule);
-  for (const rule of ['scene_build', 'container: "ScreenGui"', 'scene.gui', 'prototypes', 'use` + `ui` overrides', 'script_update', 'cannot show a ScreenGui in Edit mode', 'SurfaceGui'])
-    assert.ok(text.includes(rule), rule);
-  assert.doesNotMatch(text, /cannot create GuiObjects|built at runtime by code/, 'GUI trees are built directly, not by scripts');
+
+  const text = await readGuidance('arcane-interface');
+  containsGuidance(text, ['UICorner', 'UIStroke', 'UIPadding', 'UIListLayout', 'UIGridLayout', 'UIAspectRatioConstraint', 'UIScale', 'UISizeConstraint', 'UITextSizeConstraint', 'Activated', '44', 'contrast', 'ResetOnSpawn', 'script_set_enabled', 'scene_build', 'ScreenGui', 'scene.gui', 'prototypes', 'script_update', 'SurfaceGui', 'AnchorPoint', 'FontFace']);
+  containsGuidance(await readSkill('arcane-interface'), ['server', 'pending', 'denied', 'respawn', 'focus', 'references/recipes.md', 'references/controller.md']);
   const pack = await packSkills(['arcane-interface'], { root: ROOT, allowExperimental: true, references: ['arcane-interface:recipes'] });
-  for (const recipe of ['## Main menu', '## HUD with health and stamina', '## Shop', '## Inventory grid', '## Notifications', '## Loading screen', '## Settings panel'])
-    assert.ok(pack.context.includes(recipe), recipe);
-  for (const rule of ['ScreenInsets', 'IgnoreGuiInset', 'DisplayOrder', 'AnchorPoint', 'UIFlexItem', 'FontFace', 'TextScaled', 'First-try check', 'arcane-interface:controller']) assert.ok(text.includes(rule), rule);
+  containsGuidance(pack.context, ['## Main menu', '## HUD with health and stamina', '## Shop', '## Inventory grid', '## Notifications', '## Loading screen', '## Settings panel']);
   const kit = await packSkills(['arcane-interface'], { root: ROOT, allowExperimental: true, references: ['arcane-interface:controller'] });
-  for (const code of ['TweenService', 'MouseEnter', 'InputBegan', 'SelectionGained', 'GroupTransparency', 'AbsoluteSize', 'Disconnect()', '"name": "HUD"'])
-    assert.ok(kit.context.includes(code), code);
+  containsGuidance(kit.context, ['TweenService', 'MouseEnter', 'InputBegan', 'SelectionGained', 'GroupTransparency', 'AbsoluteSize', 'Disconnect()']);
+  assert.doesNotMatch(text, /cannot create GuiObjects|built at runtime by code/);
 });
 
 test('scripting, security and systems skills are prescriptive and cross-linked instead of duplicated', async () => {
-  const luau = await readSkill('arcane-luau-architecture'), security = await readSkill('arcane-remote-security'), systems = await readSkill('arcane-gameplay-systems');
-  for (const rule of ['--!strict', 'Never trust the client', 'script_set_enabled', 'playtest_request', 'CollectionService', 'TweenService', 'RunService', 'task.wait',
-    'arcane-datastore-safety', 'arcane-remote-security', 'arcane-luau-architecture:patterns']) assert.ok(luau.includes(rule), rule);
+
+  const luau = await readGuidance('arcane-luau-architecture'), security = await readSkill('arcane-remote-security'), systems = await readSkill('arcane-gameplay-systems');
+  containsGuidance(luau, ['--!strict', 'script_update', 'script_set_enabled', 'CollectionService', 'TweenService', 'RunService', 'task.wait', 'arcane-datastore-safety', 'arcane-luau-architecture:patterns']);
   const patterns = await packSkills(['arcane-luau-architecture'], { root: ROOT, allowExperimental: true, references: ['arcane-luau-architecture:patterns'] });
-  for (const code of ['GetInstanceAddedSignal', 'OnServerEvent', 'os.clock()', 'task.cancel', 'Disconnect()', 'PlayerRemoving']) assert.ok(patterns.context.includes(code), code);
-  for (const rule of ['Rate limit', 'NaN', 'Proximity', 'Server-derived values', 'Idempotence', 'SetNetworkOwner(nil)', 'Anti-exploit']) assert.ok(security.includes(rule), rule);
-  for (const recipe of ['## Checkpoints', '## Round loop', '## Leaderstats', '## Doors and keys', '## NPC dialogue', '## Pathfinding NPC', 'scene_build',
-    'assert-player-attribute', 'arcane-rounds', 'arcane-npc', 'arcane-datastore-safety', 'ComputeAsync', 'leaderstats']) assert.ok(systems.includes(recipe), recipe);
-  for (const id of ['arcane-natural-scenes', 'arcane-architectural-features', 'arcane-world-building']) assert.ok((await readSkill(id)).includes('arcane-photoreal'), id);
+  containsGuidance(patterns.context, ['GetInstanceAddedSignal', 'OnServerEvent', 'os.clock()', 'task.cancel', 'Disconnect()', 'PlayerRemoving']);
+  containsGuidance(security, ['Rate-limit', 'NaN', 'distance', 'server', 'replay', 'SetNetworkOwner(nil)', 'legitimate', 'InvokeClient', 'UnreliableRemoteEvent']);
+  containsGuidance(systems, ['server', 'scene_build', 'script_update', 'script_set_enabled', 'arcane-remote-security', 'arcane-luau-architecture', 'arcane-npc', 'arcane-datastore-safety']);
 });
 
 test('characters skill covers rigs, verifiable default animations, pathfinding, states, dialogue and authority, and is cross-linked', async () => {
-  const text = await readSkill('arcane-characters'), systems = await readSkill('arcane-gameplay-systems');
-  for (const rule of ['CreateHumanoidModelFromDescription', 'HumanoidDescription', 'HumanoidRigType.R15', 'scene.characters', 'studio_asset_search', 'R15 rig',
-    'AnimationController', 'Animator', 'LoadAnimation', 'Never invent animation ids', 'character.Animate', 'TweenService', 'PathfindingService', 'AgentRadius',
-    'ComputeAsync', 'PathStatus.Success', 'PathWaypointAction.Jump', 'MoveToFinished', 'path.Blocked', 'Stuck detection', '| Idle |', '| Patrol |', '| Chase |',
-    '| Flee |', 'ProximityPrompt', 'scene_build', 'arcane-interface', 'SetNetworkOwner(nil)', 'server decides', 'script_set_enabled', 'playtest_request',
-    'assert-player-attribute', 'arcane-gameplay-systems', 'arcane-npc']) assert.ok(text.includes(rule), rule);
-  // Only the standard Animate defaults are named, never as a ready-made asset URL.
-  for (const [, id] of text.matchAll(/\b(\d{6,})\b/g)) assert.ok(['507766666', '507777826', '507767714', '507765000', '507767968', '507765644'].includes(id), id);
-  assert.ok(systems.includes('arcane-characters'));
+
+  const text = await readGuidance('arcane-characters'), entryText = await readSkill('arcane-characters');
+  containsGuidance(text, ['CreateHumanoidModelFromDescription', 'HumanoidDescription', 'HumanoidRigType.R15', 'Animator', 'LoadAnimation', 'PathfindingService', 'AgentRadius', 'ComputeAsync', 'PathStatus.Success', 'PathWaypointAction.Jump', 'ProximityPrompt', 'SetNetworkOwner', 'arcane-npc']);
+  containsGuidance(entryText, ['Blender', 'UV', 'PBR', 'actual', 'server', 'character.Animate', 'never guess', 'not', 'references/npc-rig.md', 'references/npc-ai.md', 'references/dialogue.md', 'references/pets.md']);
   const registry = await loadRegistry(ROOT), entry = registry.skills.find(skill => skill.id === 'arcane-characters');
   for (const keyword of ['npc', 'character', 'enemy', 'animation', 'rig', 'pathfinding', 'ai', 'pet', 'shopkeeper']) assert.ok(entry.keywords.includes(keyword), keyword);
   assert.deepEqual(entry.references.map(r => r.name), ['npc-rig', 'npc-ai', 'dialogue', 'pets']);
-  for (const rule of ['| Attack |', 'AdjustWeight', 'ModelStreamingMode', 'arcane-characters:npc-rig', ':npc-ai', ':dialogue', ':pets', 'ask the user for ids']) assert.ok(text.includes(rule), rule);
   const code = {
-    'npc-rig': ['CreateHumanoidModelFromDescription', 'AnimationPriority.Movement', 'AdjustWeight', 'Play(0.2', 'SetNetworkOwner, part, nil', 'ModelStreamingMode.Atomic', 'Heartbeat', 'MAX_NPCS', 'Died:Once'],
-    'npc-ai': ['CreatePath', 'AgentRadius', 'ComputeAsync', 'Blocked:Connect', 'PathWaypointAction.Jump', 'PathfindingLink', 'failures >= 3', 'TakeDamage', 'ChasedBy', '"Flee"'],
-    dialogue: ['ProximityPrompt', 'Triggered', 'OnServerEvent', 'typeof(', 'MAX_DISTANCE', 'MaxVisibleGraphemes', 'TalkedTo'],
-    pets: ['PlayerData.get', 'PlayerData.changed', 'GenerateGUID', 'MAX_EQUIPPED', 'AlignPosition', 'typeof(', 'never from the pet model'] };
+    'npc-rig': ['CreateHumanoidModelFromDescription', 'AnimationPriority.Movement', 'AdjustWeight', 'SetNetworkOwner', 'ModelStreamingMode.Atomic', 'Heartbeat', 'Died:Once'],
+    'npc-ai': ['CreatePath', 'AgentRadius', 'ComputeAsync', 'Blocked:Connect', 'PathWaypointAction.Jump', 'TakeDamage'],
+    dialogue: ['ProximityPrompt', 'Triggered', 'OnServerEvent', 'typeof(', 'MAX_DISTANCE', 'MaxVisibleGraphemes'],
+    pets: ['PlayerData.get', 'PlayerData.changed', 'GenerateGUID', 'MAX_EQUIPPED', 'AlignPosition', 'typeof('] };
   for (const [name, needles] of Object.entries(code)) {
-    // Each reference loads with its skill inside the default skills_get budget.
     const pack = await packSkills(['arcane-characters'], { root: ROOT, allowExperimental: true, references: [`arcane-characters:${name}`] });
-    assert.ok(pack.context.includes('--!strict'), name);
-    for (const needle of needles) assert.ok(pack.context.includes(needle), `${name}: ${needle}`);
+    assert.ok(pack.context.includes('--!strict'), name); containsGuidance(pack.context, needles, name);
     assert.doesNotMatch(pack.context, /rbxassetid:\/\/\d|:SetAsync\(|(?<![\w.:])wait\s*\(/, name);
   }
-  // Leaves the router room for a second domain skill (e.g. gameplay systems) within the default 10,240-byte load.
   const pair = await packSkills(['arcane-characters', 'arcane-gameplay-systems'], { root: ROOT, allowExperimental: true });
   assert.ok(pair.bytes <= 10_240, `characters + systems load is ${pair.bytes} bytes`);
 });
@@ -344,53 +333,52 @@ test('skill entrypoints stay lean enough for the default router budget', async (
 });
 
 test('genre kits are complete, lean, cross-linked blueprints with declared code references', async () => {
-  const kits = { tycoon: ['dropper', 'conveyor', 'Collector', 'claim', 'Rebirth', 'arcane-economy'], obby: ['Difficulty curve', 'Checkpoint', 'Hazards', 'Moving platforms', 'leaderstats', 'stubs only', 'ProcessReceipt'],
-    simulator: ['Sell', 'Bag', 'Eggs', 'pets', 'Zone', 'arcane-economy'], horror: ['atmosphere', 'Stalker', 'stinger', 'Jump scares', 'arcane-photoreal', 'arcane-audio', 'arcane-characters'],
-    arena: ['Lobby', 'Intermission', 'Vote', 'epoch', 'hit validation', 'rewind', 'arcane-rounds', 'arcane-combat'], racing: ['Checkpoints', 'laps', 'VehicleSeat', 'HingeConstraint', 'GetServerTimeNow', 'arcane-physics'],
-    rpg: ['Quests', 'Dialogue', 'inventory', 'XP', 'Level', 'arcane-inventory', 'arcane-characters'] };
-  const sections = ['## Architecture', '## Data model', '## Build order', '## Map with scene_build', '## GUI with scene_build', '## Test plan (playtest_request)', '## Performance budgets', '## Pitfalls'];
+
+  const kits = { tycoon: ['dropper', 'conveyor', 'collector', 'claim', 'rebirth', 'arcane-economy'], obby: ['checkpoint', 'hazard', 'platform', 'stage', 'death'],
+    simulator: ['sell', 'bag', 'egg', 'pet', 'zone', 'arcane-economy'], horror: ['threat', 'stalker', 'audio', 'recovery'],
+    arena: ['lobby', 'intermission', 'epoch', 'hit', 'arcane-rounds', 'arcane-combat'], racing: ['checkpoint', 'lap', 'VehicleSeat', 'HingeConstraint', 'GetServerTimeNow', 'arcane-physics'],
+    rpg: ['quest', 'dialogue', 'inventory', 'XP', 'level', 'arcane-inventory', 'arcane-characters'] };
   const registry = await loadRegistry(ROOT);
   for (const [genre, needles] of Object.entries(kits)) {
     const id = `arcane-${genre}-kit`, entry = registry.skills.find(s => s.id === id);
-    assert.ok(entry && entry.status === 'experimental' && !entry.approved, id);
-    assert.deepEqual(entry.references.map(r => r.name), ['patterns'], id);
+    assert.ok(entry && entry.status === 'experimental' && !entry.approved, id); assert.deepEqual(entry.references.map(r => r.name), ['patterns'], id);
     const pack = await packSkills([id], { root: ROOT, allowExperimental: true, references: [`${id}:patterns`] });
-    const text = await readSkill(id);
-    assert.ok(Buffer.byteLength(text) <= 6 * 1024, `${id} leaves router room`);
-    for (const rule of [...sections, 'UpdateAsync', 'session lock', 'arcane-datastore-safety', 'arcane-interface', 'scene_build', 'playtest_request', `${id}:patterns`, ...needles])
-      assert.ok(text.toLowerCase().includes(rule.toLowerCase()), `${id}: ${rule}`);
-    assert.match(text, /\| .+ \|/, `${id} has balancing numbers`);
-    assert.ok(pack.context.includes('```lua') && pack.context.includes('--!strict'), `${id} patterns carry code`);
+    const text = await readSkill(id); assert.ok(Buffer.byteLength(text) <= 6 * 1024, `${id} leaves router room`);
+    containsGuidance(text, ['complete', 'scene_build', 'script_update', 'script_set_enabled', 'playtest_request', 'playtest_status', 'arcane-playtest-qa', 'arcane-datastore-safety', 'patterns', 'actual', 'failure'], id);
+    containsGuidance(pack.context, ['UpdateAsync', 'session lock', ...needles], id);
+    assert.ok(pack.context.includes('```lua') && pack.context.includes('--!strict'), `${id} retains actual code fragments`);
+    const tuning = pack.context.split('## Conditional tuning examples')[1]; assert.ok(tuning, `${id} retains a tuning section`);
+    assert.match(tuning, /not universal limits/i, `${id} values remain conditional`);
+    assert.match(tuning, /^\|[^\n]*\d[^\n]*\|/m, `${id} retains concrete numerical examples in its tuning table`);
     assert.doesNotMatch(pack.context, /rbxassetid:\/\/\d|ProductId = \d/, `${id} invents no ids`);
   }
 });
 
 test('gameplay systems, DataStore safety and networking security carry prescriptive code with declared references', async () => {
+
   const systems = await readSkill('arcane-gameplay-systems'), store = await readSkill('arcane-datastore-safety'), security = await readSkill('arcane-remote-security');
-  for (const recipe of ['## Shop and currency', '## Inventory', '## Sprint and stamina', '## Health and damage', '## Teams', 'script_search',
-    'arcane-gameplay-systems:recipes', 'arcane-remote-security', 'arcane-luau-architecture']) assert.ok(systems.includes(recipe), recipe);
-  for (const rule of ['## Existing data first', 'same store names, key format', 'second save path', 'arcane-datastore-safety:template']) assert.ok(store.includes(rule), rule);
-  for (const rule of ['## Remote contract', '## Never accept from the client', 'InvokeClient', 'UnreliableRemoteEvent', 'Prices, currency amounts, damage']) assert.ok(security.includes(rule), rule);
+  containsGuidance(systems, ['inventory', 'stamina', 'health', 'teams', 'script_search', 'arcane-gameplay-systems:recipes', 'arcane-remote-security', 'arcane-luau-architecture']);
+  containsGuidance(store, ['store names', 'key format', 'single writer', 'arcane-datastore-safety:template']);
+  containsGuidance(security, ['contract', 'server', 'InvokeClient', 'UnreliableRemoteEvent', 'prices', 'damage']);
   const recipes = await packSkills(['arcane-gameplay-systems'], { root: ROOT, allowExperimental: true, references: ['arcane-gameplay-systems:recipes'] });
-  for (const code of ['--!strict', 'Net.allow', 'typeof(', 'OnServerEvent', 'FireClient', 'ContextActionService', 'Heartbeat', 'TakeDamage', 'AutoAssignable',
-    'PlayerData.get', 'PlayerRemoving']) assert.ok(recipes.context.includes(code), code);
-  assert.doesNotMatch(recipes.context, /(?<![\w.:])wait\s*\(|(?<![\w.:])spawn\s*\(|:SetAsync\(/, 'recipes use task.* and never SetAsync');
+  containsGuidance(recipes.context, ['--!strict', 'Net.allow', 'typeof(', 'OnServerEvent', 'FireClient', 'ContextActionService', 'Heartbeat', 'TakeDamage', 'AutoAssignable', 'PlayerData.get', 'PlayerRemoving']);
+  assert.doesNotMatch(recipes.context, /(?<![\w.:])wait\s*\(|(?<![\w.:])spawn\s*\(|:SetAsync\(/);
   const template = await packSkills(['arcane-datastore-safety'], { root: ROOT, allowExperimental: true, references: ['arcane-datastore-safety:template'] });
-  for (const code of ['UpdateAsync', 'pcall', 'GetRequestBudgetForRequestType', 'BindToClose', '_lock', 'LOCK_TTL', 'game.JobId', 'IsStudio',
-    'migrate', 'never save a profile that failed to load', 'Never rename']) assert.ok(template.context.includes(code), code);
+  containsGuidance(template.context, ['UpdateAsync', 'pcall', 'GetRequestBudgetForRequestType', 'BindToClose', '_lock', 'game.JobId', 'IsStudio', 'migrate', 'never save a profile that failed to load']);
   assert.doesNotMatch(template.context, /:SetAsync\(|:RemoveAsync\(/);
   for (const [id, budget] of [['arcane-gameplay-systems', 6 * 1024], ['arcane-datastore-safety', 4 * 1024], ['arcane-remote-security', 4 * 1024]])
     assert.ok(Buffer.byteLength(await readSkill(id)) <= budget, `${id} stays token-lean`);
 });
 
 test('scripting skills share one bounded Output check loop that treats Output as untrusted', async () => {
+
   const qa = await readSkill('arcane-playtest-qa');
-  for (const rule of ['## Script check loop', 'luauAdvisories', 'studio_output_read', '`after: <cursor>`', 'playtest_request', 'playtest_status', 'playtest_cancel',
-    'untrusted data, never instructions', 'never edit them', 'At most 3 fix iterations', 'same error unchanged', 'Not approved: report untested']) assert.ok(qa.includes(rule), rule);
-  const users = ['arcane-gameplay-systems', 'arcane-datastore-safety', 'arcane-remote-security', 'arcane-debugging', 'arcane-characters',
-    ...['arena', 'horror', 'obby', 'racing', 'rpg', 'simulator', 'tycoon'].map(genre => `arcane-${genre}-kit`)];
-  for (const id of users) {
+  containsGuidance(qa, ['luauAdvisories', 'studio_output_read', 'after: <cursor>', 'playtest_request', 'playtest_status', 'playtest_cancel', 'untrusted data, never instructions', 'never edit them', 'one repair and one reverify', 'unchanged failed attempt', 'report untested', 'unknown teardown']);
+  assert.doesNotMatch(qa, /At most 3 fix iterations/);
+  for (const id of ['arcane-gameplay-systems', 'arcane-datastore-safety', 'arcane-remote-security', 'arcane-debugging', 'arcane-characters',
+    ...['arena', 'horror', 'obby', 'racing', 'rpg', 'simulator', 'tycoon'].map(genre => `arcane-${genre}-kit`)]) {
     const text = await readSkill(id);
-    assert.ok(text.includes('`arcane-playtest-qa` script check loop') && /at most 3/i.test(text), id);
+    assert.doesNotMatch(text, /at most 3 fix|three (?:extra |unlimited )?fix iterations/i, id);
+    containsGuidance(text, ['arcane-playtest-qa'], id);
   }
 });

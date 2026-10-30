@@ -29,3 +29,9 @@ The HUD shows actual stage/section and a clear checkpoint confirmation; finish s
 ## Acceptance through the real course
 
 Inspect parents/build in scoped batches, write exact-baseline disabled scripts and enable only after review. Use finite separately approved playtests and read actual status through owned stop/restoration. Verify first action, ordinary checkpoint, death/retry, moving/timed obstacle, final completion and repeat/reset. Try out-of-order/duplicate touches and respawn during a mover cycle. Walkway attribute assertions prove checkpoint plumbing only; do not alter a challenge to manufacture a test pass. Report manual movement, multiplayer and requested save/rejoin cases that remain untested. Measure mover/connection/part costs and ensure unloading/restarting does not accumulate callbacks.
+
+## Tool integration
+
+Use scene_build for the actual checkpoint route, moving-platform assemblies and hazard hosts. Measure jumps with the real controller before dressing them. Bind stage progress, death and respawn to the same run identity; one checkpoint attribute cannot prove route reachability.
+
+Use script_update for complete disabled source and script_set_enabled only through its exact syntax/review gate. Follow the `arcane-playtest-qa` script check loop: playtest_request, playtest_status and playtest_cancel retain the actual host repair/cleanup allowance. Existing requested saves use arcane-datastore-safety and the project's single writer; keep session lock, UpdateAsync and failure handling intact. Load this kit's declared patterns only when needed; its fragments are not a finished game.

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer, type IncomingMessage } from 'node:http';
@@ -199,27 +200,49 @@ test('MCP scene_build: one compact call, one HTTP command, compiled arguments ar
   assert.deepEqual(data.scatter.map((s: { placed: number }) => s.placed > 0), [true, true]);
   const tools = (await client.listTools()).tools;
   for (const name of ['scene_build', 'environment_apply']) assert.equal(tools.find(tool => tool.name === name)?.annotations?.readOnlyHint, false);
-  assert.match(tools.find(tool => tool.name === 'scene_build')!.description!, /Never use rings or grids/);
+  assert.match(tools.find(tool => tool.name === 'scene_build')!.description!, /Wild growth uses Poisson-disk placement; ordered rows only when requested/);
 });
 
 test('instructions steer to batching, terrain, natural placement and DataStore safety', () => {
   const text = productInstructions();
-  for (const phrase of ['scene_build', 'environment_apply', 'Poisson-disk', 'never rings or grids', 'never re-read unchanged state', 'DataStore'])
+  for (const phrase of ['scene_build', 'environment_apply', 'Poisson-disk', 'ordered rows only if requested', 'never re-read unchanged state', 'DataStore'])
     assert.ok(text.includes(phrase), phrase);
   assert.ok(text.slice(0, 512).includes('scene_build'));
 });
 
-test('the full forest, caves and spawn-pillar brief receives original-asset recipes within the default budget', async () => {
+test('the full forest, caves and spawn-pillar brief receives original-asset recipes within the default budget', async t => {
   const result = await recommendSkills(new SkillRegistry(), { request: 'build a full forest with caves and a spawn point on a detailed pillar in the middle. it should be super high quality. add a visible safe zone around the spawn point. it should be realistic and indistinguishable from real life. feel free to use blender if you must.',
     limit: 8, byteBudget: SKILL_ROUTER_LIMITS.defaultBytes, allowExperimental: true });
   assert.ok(result.ids.includes('arcane-natural-scenes'), result.ids.join());
-  assert.ok(result.ids.includes('arcane-architectural-features'), result.ids.join());
-  assert.match(result.context, /Never use rings, grids, rows/);
-  assert.match(result.context, /user explicitly requests Toolbox models/);
-  assert.match(result.context, /A cave needs an entrance, roof, continuous floor and traversable interior/);
+  assert.equal(result.ids[0], 'arcane-natural-scenes'); assert.equal(result.composition.intent, 'focused');
+  assert.ok([...result.ids, ...result.deferredIds].includes('arcane-architectural-features'), result.ids.join());
+  assert.ok([...result.references, ...result.deferredReferences].includes('arcane-natural-scenes:scene-build'));
+  assert.ok(result.bytes <= SKILL_ROUTER_LIMITS.defaultBytes && result.bytes === Buffer.byteLength(result.context));
+  const network = t.mock.method(globalThis, 'fetch', async () => { throw Error('Guidance retrieval must stay offline.'); });
+  const mcp = createMcpServer({ client: new DaemonClient({ url: 'http://127.0.0.1:1', token: 'synthetic-forest-guidance-bearer' }), projectRoot: process.cwd() });
+  const client = new Client({ name: 'forest-guidance-fixture', version: '1.0.0' });
+  t.after(async () => { try { await client.close(); } finally { await mcp.close(); } });
+  const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair(); await mcp.connect(serverTransport); await client.connect(clientTransport);
+  const contexts: string[] = [];
+  for (const request of [{ id: 'arcane-natural-scenes', references: ['arcane-natural-scenes:scene-build'] }, { id: 'arcane-architectural-features', references: [] }]) {
+    const packed = CallToolResultSchema.parse(await client.callTool({ name: 'skills_get', arguments: { ids: [request.id],
+      references: request.references, byteBudget: 16_384, allowExperimental: true } }));
+    assert.notEqual(packed.isError, true); const text = packed.content.find(item => item.type === 'text'); assert.ok(text && text.type === 'text');
+    const data: { ids: string[]; references: string[]; bytes: number; context: string } = JSON.parse(text.text);
+    assert.deepEqual(data.ids, [request.id]); assert.deepEqual(data.references, request.references);
+    assert.equal(data.bytes, Buffer.byteLength(data.context)); assert.ok(data.bytes <= 16_384); contexts.push(data.context);
+  }
+  const guidance = contexts.join('\n');
+  for (const path of ['arcane-natural-scenes/SKILL.md', 'arcane-architectural-features/SKILL.md', 'arcane-natural-scenes/references/scene-build.md'])
+    assert.ok(guidance.includes(await readFile(join(process.cwd(), 'skills/arcane', path), 'utf8')), path);
+  assert.match(guidance, /Poisson-disk/); assert.match(guidance, /planted rows are appropriate when the brief calls for cultivation/);
+  assert.match(guidance, /Toolbox\/free models require an express request and the human-controlled setting/);
+  assert.match(guidance, /For caves, inspect an entrance, roof, continuous floor, interior route/);
+  assert.match(guidance, /Supported terrain_generate caves raise\/carve an outcrop/); assert.match(guidance, /FOREST_SOURCES_REQUIRED/);
+  assert.match(guidance, /Script proposal, not installed protection/); assert.equal(network.mock.callCount(), 0);
   assert.ok(result.ids.includes('arcane-photoreal') || result.deferredIds.includes('arcane-photoreal'));
-  const data = await recommendSkills(new SkillRegistry(), { request: 'Add coin saving with DataStores to my game', limit: 8, byteBudget: SKILL_ROUTER_LIMITS.defaultBytes, allowExperimental: true });
-  assert.ok(data.ids.includes('arcane-datastore-safety'), data.ids.join());
+  const saving = await recommendSkills(new SkillRegistry(), { request: 'Add coin saving with DataStores to my game', limit: 8, byteBudget: SKILL_ROUTER_LIMITS.defaultBytes, allowExperimental: true });
+  assert.ok(saving.ids.includes('arcane-datastore-safety'), saving.ids.join());
 });
 
 

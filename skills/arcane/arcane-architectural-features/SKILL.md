@@ -23,5 +23,10 @@ Keep collision simpler than ornament and preserve doorway, headroom, turning and
 ## Landmarks and spawns when requested
 Inspect the existing SpawnLocation before an exact-baseline update; keep it upright, anchored and correctly seated, with player headroom. Avoid duplicate spawns. scene_delete is only for authorized removals and uses Studio Undo, not receipt_restore. Derive vegetation exclusion and grading from the final footprint, and keep approaches open. A visible safe-zone boundary must correspond to actual server-side protection if that function is requested.
 
+## Use the feature tools deliberately
+For a requested plinth, `scene_build` kit fields include `at`, `radius`, `tiers`, `style`, `height`, `column`, `material` and `weathering`. Select smooth/fluted/platform to match the design; the kit is not a bespoke-building generator. Set `spawn: false` when no spawn was requested: its default is true. If included, inspect the returned `kits` spawn `top` and actual SpawnLocation bounds; use `scene_update` with the exact baseline for corrections.
+
+A `safeZone` report includes a Script proposal, not installed protection. Review/write it through `script_update`, read it back, and use `script_set_enabled` only through the existing review flow. A `life` option supplies visual elements and silent audio hooks, not licensed sound playback. On authoring/import failure, report the exact failing stage and supported reason before deciding the next step; never replay an ambiguous mutation.
+
 ## Acceptance
 Review neutral front/side/three-quarter form, actual dimensions, bevels/normals, UV seams, texture scale and material joins. In the engine inspect eye-height approaches and interiors, then traverse every advertised entrance, landing and connection. Exercise moving mechanisms and spawn/respawn where included; detect snagging, unsupported spans, floor gaps and camera clipping. Check repeated modules for cumulative drift. Record actual import/persistence limits and unresolved functionality; neither export success nor a beauty render proves a usable building.

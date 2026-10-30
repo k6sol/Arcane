@@ -18,10 +18,17 @@ Author finished models, UVs, textures and PBR in Blender using a faithful suppor
 
 Use terrain_generate for requested landforms, routes, water and clearing transitions; environment_apply serves supported lighting/atmosphere and simple fills. Batch repeated placement with scene_build templates/prototypes and appropriate scatter. Wild growth benefits from clustering and variable spacing; farms, avenues or formal gardens can intentionally use rows. Keep ordered structures aligned instead of randomizing load-bearing parts.
 
+## Translate layout into bounded placement
+Use `scene_build.templates` for exact imported refs and `prototypes` for explicit part assemblies. Resolve forest sources before dispatch; `FOREST_SOURCES_REQUIRED` is a refusal, not a request to insert generic trees. Scatter `minSpacing` uses Poisson-disk sampling; `clusters`/`clusterSpread`, `clearing`, `avoid` and `seed` provide controlled habitat variation. Neither ordered planting nor an architectural grid is forbidden.
+
+Record each layer's conservative `footprintRadius`, full `avoidPaths` widths and intended count; inspect actual placement/refusal counts. Templates preserve original material colour instead of accepting prototype tint. Use ordered `terrain_generate.features` for flatten/path/river transitions and `environment_apply` section overrides only within the requested area/look; inspect global lighting changes before applying them (arcane-photoreal).
+
 ## Connect art to functionality
 Reserve interaction, combat, vehicle, camera and NPC navigation clearance before small dressing. Route and objective markers must agree with actual gameplay locations. Avoid visually promising doors, climbable ledges, collectibles or safe areas that have no corresponding behavior unless intentionally decorative and legible as such.
 
 Copy continuous routes into every scatter layer's avoidPaths with full widths. Derive footprintRadius from conservative template extents and check placed/requested counts. Separate gameplay collision from render detail and preserve existing content outside the authorized area. Use the current receipt/Undo mechanism correctly; an ambiguous mutation is inspected, never replayed automatically.
+
+Finish ground materials, grass or biome-appropriate cover, route edges and contacts with landmarks as part of the environment.
 
 ## Acceptance
 Traverse the complete critical loop from the actual spawn to objective and return/recovery path, including elevation changes, doors, water edges and boundaries. Inspect landmark readability at player height, clipping, floating props, material repetition, dark choke points and blocked camera views. Check a representative dense state rather than an empty overview.

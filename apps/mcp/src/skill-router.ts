@@ -24,7 +24,7 @@ export function sceneUpdateDescription(): string {
 }
 export function sceneBuildDescription(): string {
   // Field meanings: the arcane-natural-scenes:scene-build skill reference (kept out of the per-turn tool list).
-  return `Write: one atomic hierarchy (one undo step/receipt) under a returned parent ref; container ${BUILD_GROUP_CLASSES.join("/")}, or ScreenGui (parent StarterGui; GUI items; screen = its props). prototypes: reusable parts local to a ground-level origin, or ui trees. items: groups, parts, placements (use/at/yaw/scale/tint/ground), effects (className + fx in a part/Attachment) or GUI (scene.gui; className + ui; use stamps a ui prototype), fx/ui as on scene_create (refs = item keys); key = local id, in = earlier key. scatter: seeded Poisson spacing, clusters, clearings, keep-out routes; Never use rings or grids for foliage. Forest layers require declared intended prototypes/templates (numbered variants supported); unresolved sources refuse with FOREST_SOURCES_REQUIRED before writes, never implicit substitutes. Generate/review/import original models first when required; declaring a template alone does not prove Blender provenance. Explicit primitive blockouts use explicit prototypes. Fields: skills_get arcane-natural-scenes:scene-build. Anchored defaults true. Limits: ${SCENE_BUILD_LIMITS.items} items, ${SCENE_BUILD_LIMITS.prototypes} prototypes x ${SCENE_BUILD_LIMITS.prototypeParts} parts, ${SCENE_BUILD_LIMITS.instances} instances, 250 KiB. Verified before parenting. Returns counts/root/keyed refs; receipt_restore removes an unchanged build. Plugin 0.2.0+, write grant, edit mode. Never auto-retry; receipt_status on ambiguity.`;
+  return `Write: one atomic hierarchy (one undo step/receipt) under a returned parent ref; container ${BUILD_GROUP_CLASSES.join("/")}, or ScreenGui (parent StarterGui; GUI items; screen = its props). prototypes: reusable parts local to a ground-level origin, or ui trees. items: groups, parts, placements (use/at/yaw/scale/tint/ground), effects (className + fx in a part/Attachment) or GUI (scene.gui; className + ui; use stamps a ui prototype), fx/ui as on scene_create (refs = item keys); key = local id, in = earlier key. scatter: seeded Poisson spacing, clusters, clearings, keep-out routes; Wild growth uses Poisson-disk placement; ordered rows only when requested. Forest layers require declared intended prototypes/templates (numbered variants supported); unresolved sources refuse with FOREST_SOURCES_REQUIRED before writes, never implicit substitutes. Generate/review/import original models first when required; declaring a template alone does not prove Blender provenance. Explicit primitive blockouts use explicit prototypes. Fields: skills_get arcane-natural-scenes:scene-build. Anchored defaults true. Limits: ${SCENE_BUILD_LIMITS.items} items, ${SCENE_BUILD_LIMITS.prototypes} prototypes x ${SCENE_BUILD_LIMITS.prototypeParts} parts, ${SCENE_BUILD_LIMITS.instances} instances, 250 KiB. Verified before parenting. Returns counts/root/keyed refs; receipt_restore removes an unchanged build. Plugin 0.2.0+, write grant, edit mode. Never auto-retry; receipt_status on ambiguity.`;
 }
 export function environmentDescription(): string {
   return `Write: in one undo step, fill Workspace.Terrain with ordered ${TERRAIN_SHAPES.join('/')} shapes (Air carves; later shapes overwrite earlier) and/or set Lighting plus Atmosphere, Bloom, ColorCorrection, SunRays, DepthOfField and the built-in Sky (reused or created under Lighting; Sky textures are never set). Colors are [r,g,b] or "#rrggbb". Terrain needs the Workspace grant; lighting/effects need the Lighting grant. Max ${ENVIRONMENT_LIMITS.terrainShapes} shapes, ${ENVIRONMENT_LIMITS.extent}-stud extent. Lighting is verified and rolled back on failure before terrain is written. Revert with Studio Undo (receipt_restore is refused; the receipt lists prior lighting values). For natural landforms, clearings and rivers use terrain_generate. Needs plugin 0.2.0+. Never auto-retry.`;
@@ -99,12 +99,24 @@ const CODE_REFERENCES: Record<string, string> = { 'arcane-gameplay-systems': 're
   'arcane-luau-architecture': 'patterns', 'arcane-natural-scenes': 'scene-build' };
 const GENRES: Record<string, string> = { platformer: 'obby', obstacle: 'obby', parkour: 'obby', rpg: 'melee-rpg',
   melee: 'melee-rpg', cozy: 'cozy-social', social: 'cozy-social', race: 'racing' };
+const NPC_CONTEXT = tokens('npc npcs enemy enemies character characters mob mobs monster zombie guard villager shopkeeper creature');
 function rank(skill: Metadata, terms: Set<string>): number {
   const identity = tokens(skill.id.replace(/^arcane-/, '').replaceAll('-', ' '));
-  const title = tokens(skill.title), description = tokens(skill.description), hints = tokens(HINTS[skill.id] ?? '');
+  const npcJob = [...terms].some(term => NPC_CONTEXT.has(term));
+  const title = tokens(skill.title), description = tokens(skill.description), hints = tokens((HINTS[skill.id] ?? '') +
+    (skill.id === 'arcane-characters' && npcJob ? ' patrol chase' : ''));
   let score = 0;
   for (const term of terms) score += hints.has(term) ? 12 : identity.has(term) ? 8 : title.has(term) ? 4 : description.has(term) ? 1 : 0;
   return score;
+}
+/** Lead a requested habitat, without treating a feature merely located there as a habitat build. */
+function primaryHabitat(request: string): boolean {
+  let action = request.normalize('NFKC').toLowerCase().trim();
+  for (let pass = 0; pass < 3; pass++) action = action.replace(/^(?:please|can you|could you|help me|i want you to|i want to|i need you to|i would like you to)\s+/, '');
+  const creation = /^(?:build|create|make|design|generate|assemble|add)\s+(.+)/s.exec(action);
+  if (!creation) return false;
+  const target = creation[1]!.split(/[,;.!?\n]|\b(?:with|featuring|including|for|inside|within|using|of|in|to)\b/, 1)[0]!.trim();
+  return /^(?:(?:a|an|the|my|our|full|whole|complete|detailed|natural|realistic|photorealistic|lush|dense|small|large|outdoor)\s+){0,8}(?:forests?|caves?|caverns?|woodlands?|jungles?|environments?)(?:\s+(?:scene|environment))?$/.test(target);
 }
 
 type GameGenre = 'obby' | 'tycoon' | 'simulator' | 'horror' | 'shooter' | 'melee-rpg' | 'racing' | 'cozy-social' | 'strategy' | 'party' | 'puzzle' | 'roleplay' | 'adventure';
@@ -198,10 +210,11 @@ export async function recommendSkills(registry: SkillRegistry, input: SkillRecom
   const catalogue = await registry.list({ limit: SKILL_ROUTER_LIMITS.catalogue, allowExperimental: input.allowExperimental });
   if (catalogue.truncated) fail('SKILL_CATALOGUE_LIMIT', 'Bundled skill catalogue exceeds the bounded router inventory.');
   const game = gameIntent(input.request), terms = tokens(game?.brief ?? input.request);
+  const primary = !game && primaryHabitat(input.request) ? 'arcane-natural-scenes' : null;
   const ranked = catalogue.items.filter(skill => !CORE.includes(skill.id as typeof CORE[number]))
-    .map(skill => { const score = rank(skill, terms), boost = input.boosts?.[skill.id]; return { skill, score: score > 0 && typeof boost === 'number' && boost > 0 ? score + Math.min(4, boost) : score }; })
+    .map(skill => { const score = rank(skill, terms) + (skill.id === primary ? 1 : 0), boost = input.boosts?.[skill.id]; return { skill, score: score > 0 && typeof boost === 'number' && boost > 0 ? score + Math.min(4, boost) : score }; })
     .filter(row => row.score > 0)
-    .sort((a, b) => b.score - a.score || a.skill.id.localeCompare(b.skill.id));
+    .sort((a, b) => Number(b.skill.id === primary) - Number(a.skill.id === primary) || b.score - a.score || a.skill.id.localeCompare(b.skill.id));
   // Preserve domain space for small budgets/limits; core process is also always
   // delivered in initialize.instructions, even when no eligible registry skill exists.
   const coreSlots = ranked.length ? Math.min(CORE.length, Math.max(0, input.limit - Math.min(2, ranked.length))) : input.limit;

@@ -454,10 +454,11 @@ test('instructions: original assets are the default and Toolbox models require e
   assert.doesNotMatch(ARCANE_TASK_INSTRUCTIONS, /studio_asset_search first|studio_asset_generate only when nothing suitable exists/);
   for (const skill of ['arcane-natural-scenes', 'arcane-architectural-features', 'arcane-photoreal', 'arcane-world-building']) {
     const body = readFileSync(join(process.cwd(), 'skills/arcane', skill, 'SKILL.md'), 'utf8');
-    assert.match(body, /user explicitly requests Toolbox models/, skill);
-    assert.match(body, /studio_asset_search/, skill); assert.match(body, /studio_asset_insert/, skill); assert.match(body, /studio_viewport_capture/, skill);
+    assert.match(body, /Toolbox[^.]*require an express request/, skill);
+    assert.match(body, /Blender/, skill); assert.match(body, /human(?:-reviewed| approval| review)/, skill);
     assert.doesNotMatch(body, /Creator Store asset first|Real assets first/, skill);
   }
+  for (const tool of ['studio_asset_search', 'studio_asset_insert', 'studio_viewport_capture'] as const) assert.ok(ARCANE_TOOL_NAMES.includes(tool), tool);
 });
 
 // The default fixture above explicitly enables models for legacy native tool tests.

@@ -27,3 +27,9 @@ Tension should have contrast and relief. Use authored event conditions and coold
 Prioritize positional cues, intelligible objective/interaction prompts, threat tells and subtitles. Vary ambience, silence and stingers without deafening peaks; provide motion/flash alternatives and restore owned camera/audio state after interruption. Use actual authorized sound/animation IDs, never invented ones. The HUD can be quiet while still explaining the next action, battery/resource limits and retry.
 
 Build through current scoped tools, exact source baselines and reviewed disabled scripts. Request finite playtests for separate human approval and follow status through input release/owned stop/restoration. Prove a real objective chain, detection/escape/catch, checkpoint retry and completion, then observe pacing without developer narration. Check hiding while seen, blocked routes, repeated triggers, concurrent players and low-frame-rate readability. A scare-frame assertion or source review does not prove suspense, navigation or chase fairness. Report untested media, threat behavior and remaining chapters rather than labelling an atmospheric blockout finished.
+
+## Tool integration
+
+Use scene_build for measured routes, doors, hiding/interaction hosts and authored lighting/effects. Keep threat perception and damage authoritative; connect the actual NPC rig, animation, audio and GUI states. Test both a quiet route and the escalation/recovery path.
+
+Use script_update for complete disabled source and script_set_enabled only through its exact syntax/review gate. Follow the `arcane-playtest-qa` script check loop: playtest_request, playtest_status and playtest_cancel retain the actual host repair/cleanup allowance. Existing requested saves use arcane-datastore-safety and the project's single writer; keep session lock, UpdateAsync and failure handling intact. Load this kit's declared patterns only when needed; its fragments are not a finished game.
