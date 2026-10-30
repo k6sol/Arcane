@@ -5,29 +5,23 @@ tags: [arcane]
 ---
 # Current state
 
-Recorded 30 October 2026. Revalidate Git, hosted runs and installed identity before acting.
+Recorded 30 October 2026. Revalidate Git, hosted runs and installed identity. Prepared code candidate: `6da527c`; hosted acceptance is pending.
 
-| Area | Observed evidence | Boundary |
+| Area | Verified evidence | Remaining boundary |
 |---|---|---|
-| Main | `499261b`; all seven component/package jobs passed in 41011110058 | Both native jobs passed on `9151892` in 41010961594; later main changed only one unit fixture and notes |
-| Forest source fix | `bb9f539` refuses unresolved forest sources with `FOREST_SOURCES_REQUIRED` before daemon dispatch | Explicitly supplied primitives remain possible for requested blockouts; template names are not Blender provenance |
-| Skills | All 62 revised; technical field/preset guides restored and registry hashes aligned; official format validation passes | Experimental policy unchanged; output quality and real installed behavior are not established by source checks |
-| Routing correction | Whole games receive director/genre guidance and bounded specialist phases; focused habitat/NPC work retains its proper domain | Default context remains 10,240 bytes; required deferred bodies must be read progressively |
-| Progress and Details | Incomplete build heading and finite live/saved tool failure display are implemented; existing staging phase/reason remains | Unknown provider errors stay unavailable; no guessed message, raw secret or automatic replay |
-| Latest inspected components | Isolated code `87188b7` compiles all 642 product sources; 312 focused tests passed, one expected browser-only skip | Covers actual Windows query, routing, stdio/SQLite reporting, encrypted outbox and gateway validation; full hosted/native/customer checks remain separate |
-| Native foliage | Actual corrected contact views passed on both platforms in 41025696581; authenticated artifacts/source pins and images inspected | 39 geometry cases, 24 export probes and three negative controls; component evidence is not a full-tree or Studio-quality pass |
-| Native boulder | Same run: Linux genuine generation, textures, export/reopen and owned closure passed | Original Windows flag refusal identified and single-definition import correction added; actual local Windows identity/Unicode tests pass. Hosted source `4511a4f` still timed out; bounded progress locates the next reached stage without raising its limit |
-| Running desktop | Old installed directory begins `66f74350`; no new installation/restart | A source push does not update the installed app or create a banner |
-| Actual chat diagnostic | Sol 6.1 low; draft retained after connect unknown acknowledgement with `FRAME_LIMIT` | Dispatch not confirmed; no resend or Studio writes. Original skill-selection cause is still unknown |
-| Interface | Exact supplied HTML retained; folder usability proposal complete | Implementation/rendered reference matching remains open |
-| Connection frame | Actual SDK fixture passed: 51 native tools, 113,789-byte status projection; standalone 41 tools, 96,878 bytes | Original 1 MiB limit remains; this catalogue alone does not establish the older installed overflow cause |
+| Main | Signed `34ac27f`; all seven component/package jobs passed in 41050597788 and both native Blender jobs passed in 41050597728 | These are the exact tested source; the running desktop has not been updated |
+| Connection discovery | One actual native inventory overflow was reproduced; one-server pagination then read all seven servers and 357 tools with original closure | Published `105de62` passed 330 focused local cases but its full run reported three separate unit failures; see below |
+| Local candidate | All 643 product sources compile; strengthened lifecycle cases pass 36/36; joint chat/playtest cases pass 4/4 with pinned Luau | Timeout diagnostics are observational; the original hosted scenario timeout phase remains unproved |
+| Import pacing | Queue-first I/O yield preserves all original proof, authority and deadline checks; 57 staging cases and the unchanged 20 MiB PBR case pass | Actual Studio appearance, upload and Asset Manager registration remain unverified |
+| Original models | Real local Blender 4.5.3 LTS authored boulder and oak, UV/PBR, GLB/FBX, round-trip/reopen and three original worker closures | Neither model is accepted as final art; no Studio import or human model approval occurred |
+| Bark cap UVs | Same-input 10,310-triangle oak: mirrored bark faces 22 to 0, with identical exported bark geometry; 38 pure generator cases pass | Stretch warnings, two folded bark faces and canopy quality remain open |
+| Skills and forest sources | All 62 revised; technical guides/hashes aligned; unresolved forest sources refuse before dispatch | No implicit primitive substitution or unrequested Toolbox models; references/templates alone do not prove Blender authorship |
+| Running desktop | Existing installed directory begins `66f74350`; original diagnostic prompt remains retained | No installation, restart, manual acknowledgement or prompt replay; a source push does not create an update banner |
+| Interface | Exact supplied HTML retained; usability proposal recorded | Claude's external redesign assignment still needs its actual acknowledgement and rendered acceptance |
+| Knowledge | Committed notes and skill sources project into the existing Obsidian vault | Preserve personal notes and settings; use exact-revision check then apply |
 
-Current priorities: [[Bugs/Forest Blender Workflow]], [[Bugs/Windows Model Supervision]], [[Skills/Production Upgrade]] and [[Operations/Requirements Ledger]]. The ten [[Delivery/Goal Board|release goals]] remain active. Scoped prompt/visual tests are authorized in the open app and designated Test baseplate; preserve existing content and unrelated places. Do not close/restart the running app without applicable authorization. Arcane only; never work on ArchLiquid.
+The `105de62` hosted failures were a lifecycle fixture that synchronized on a concurrently written audit, a measured-scenario timeout, and a large-PBR receipt continuity expiry. The candidate replaces the fixture's synchronization with actual dispatch/held-turn witnesses, records finite scenario phase/VM timings, and gives an already queued packet an I/O turn before unchanged receipt checks. No retry, invented heartbeat, relaxed assertion or larger deadline was added.
 
-Local resource headroom materially improved and passed the unchanged physical/commit thresholds. Focused local execution resumed in an isolated detached checkout; shared work and the running app were preserved. No local Blender generation, Studio import, installation or restart is established by the compiler and diagnostic tests.
+Priorities: [[Bugs/Native Connection Inventory]], [[Bugs/Studio Packet Poll Fairness]], [[Bugs/Natural Bark UV Caps]], [[Bugs/Forest Blender Workflow]] and the [[Delivery/Goal Board|ten release goals]]. All whole-product goals remain active. [[Operations/Requirements Ledger]] retains the complete user requirements.
 
-Latest local asset evidence: an original Windows Blender 4.5.3 LTS boulder completed UV/PBR, GLB/FBX export, round-trip/reopen and three owned-worker closures. Both actual renders were inspected and remain artistically unaccepted; a UV angle-distortion warning remains. This supersedes the earlier statement that no local Blender generation had run. No Studio import or desktop installation/restart occurred.
-
-Hosted source `c063be4` passed five component lanes and Linux native checks; the Windows unit shard and early native gate both fail the same original process query. Fixed progress reaches serialization before its unchanged five-second timeout. The fixed-shape serializer compiles with all 642 product sources and passes 22 local identity cases, including actual Windows Unicode and original close checks. Fresh hosted verification is pending.
-
-Both native Blender jobs passed on `34ac27f` in run 41050597728. A separate actual native connection reproduced inbound FRAME_LIMIT during MCP inventory; one-server pagination then read seven servers and 357 tools within the unchanged limit and closed the original process. See [[Bugs/Native Connection Inventory]]. No model turn, Studio operation, installed-app update or retained-prompt replay occurred.
+Scoped prompt/visual testing is authorized in the open app and designated Test place. Preserve existing work and unrelated places; do not close/restart the running app without applicable authorization. Arcane only. Main release evidence, controlled tests, actual native model output and customer/Studio acceptance are distinct.

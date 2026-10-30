@@ -31,3 +31,7 @@ Verify the exact instruction/skill delivery change, then test realistic tree, ro
 [[Delivery/Goal Board]] · [[Operations/Evidence Ledger]]
 
 Current next acceptance: [[Bugs/Foliage Texture Attachment]] retains the 39 verified geometry cases and adds full original-module controls, actual exported-UV/embedded-PNG filtered-alpha checks and cutout contact views. This is a narrow attachment correction; whole trees, rocks and architectural model quality still require real output evaluation. No whole-goal checkbox changes.
+
+## Actual original model review
+
+The real local boulder and oak completed Blender 4.5.3 LTS geometry, UV/PBR, GLB/FBX, reopen and worker closure. Both models were viewed and remain artistically unaccepted. [[Bugs/Natural Bark UV Caps]] verifies one exact defect corrected from 22 mirrored faces to zero with unchanged exported geometry and 38 pure generator cases. Canopy/branch form, remaining UV stretch/folds, credible rock forms, architecture and whole-scene quality remain open. No whole-goal acceptance checkbox changes.

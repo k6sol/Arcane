@@ -5,7 +5,7 @@ tags: [arcane]
 ---
 # Complete connected import and scene editing
 
-Status: **Queued**. Priority and original scope: Complete connected import and scene editing — P0, queued.
+Status: **In progress**. Priority: P0.
 
 Deliver: approved mesh, texture and PBR artifacts map correctly into the intended project through the modular Arcane plugin; transforms/materials/collision survive conversion; later revisions update the same mapping. Explicit authorized deletion works with accurate scope and recovery.
 
@@ -29,3 +29,7 @@ No whole-goal completion evidence recorded yet. Add actual revision/run/artifact
 Resolve listed dependencies, then reproduce the missing outcome before editing.
 
 [[Delivery/Goal Board]] · [[Operations/Evidence Ledger]]
+
+## Current controlled acceptance
+
+[[Bugs/Studio Packet Poll Fairness]] preserves strict continuity and ownership while allowing genuine plugin I/O after the next original packet is queued. Local verification covers 57 staging/MCP/diagnostic cases, the unchanged 20 MiB PBR stage/seal/reconstruct/recover case and a 141-packet zero-idle pacing transfer. Actual Studio rendering, reviewed model import, upload/Asset Manager registration, later revisions and authorized scene deletion still require their own acceptance.

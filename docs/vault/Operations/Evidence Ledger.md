@@ -99,3 +99,9 @@ Functional code [87188b7](https://github.com/k6sol/Arcane/commit/87188b74c7d9a0d
 ## 30 October: original native discovery and Blender verification
 
 Both actual Blender jobs passed in [run 41050597728](https://github.com/k6sol/Arcane/actions/runs/41050597728) on signed `34ac27f`. Local original Blender authoring/export/reopen and worker closure were independently observed; visual rock quality remains unaccepted. Fresh native discovery reproduced FRAME_LIMIT at MCP inventory, then the one-server pagination candidate completed seven servers/357 tools with original closure and no model turn. These are scoped native proofs, not installed chat, Studio import or full-product acceptance. See [[Bugs/Native Connection Inventory]].
+
+## 30 October: queue-first import and original oak cap verification
+
+Main `34ac27f` was fast-forwarded only after seven component/package and two native Blender jobs passed (41050597788 and 41050597728). Local candidate source `6da527c` retains actual native one-server discovery of seven servers/357 tools, a 643-source compile, 36 strengthened lifecycle cases, 57 staging cases, the unchanged full PBR case and four joint scenario cases. The original hosted scenario timeout phase remains unproved; finite observations are now retained.
+
+The actual same-input Blender oak on `a8d02bd` changed mirrored bark faces 22 to 0 with identical exported bark geometry. All 38 pure generator cases and real export/reopen/original-closure checks passed, and both new views were inspected. Remaining stretch/folds and canopy/art are not accepted. [[Bugs/Natural Bark UV Caps]] and [[Bugs/Studio Packet Poll Fairness]] retain the scope. No running-app update/restart, retained-prompt replay, human model approval or Studio import occurred.

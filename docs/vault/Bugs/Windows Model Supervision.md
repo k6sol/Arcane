@@ -29,7 +29,7 @@ The first exact-handle implementation was exercised in [native run 41037253135](
 The subsequent fixed observation in [native run 41041175344](https://github.com/k6sol/Arcane/actions/runs/41041175344), source `b982aea`, identifies OpenProcess SetLastError=false after library and entrypoint checks passed. Defining the method once through its complete import attribute preserves all required flags. Modern native emitter source corroborates the prior duplicate-map explanation; the actual readback remains authoritative.
 
 - [x] Verify actual local Windows capture, repeated exact creation identity, live attestation, observed original-child close and a Unicode executable path using the unchanged five-second query bound. The tested query code is `6a5d99e`; two real default-adapter cases passed.
-- [ ] Pass genuine Windows Blender generation/export/reopen with owned closure.
+- [x] Pass genuine Windows Blender generation/export/reopen with owned closure.
 - [ ] Verify reviewed model import and appearance in the designated Studio place.
 
 The hosted query on source `4511a4f` still timed out with no output; that separate result remains unresolved. Fixed bounded stage progress is now emitted to stderr, while incidental PowerShell progress display is suppressed so it cannot obscure the closed diagnostic grammar. Actual local query traces decode completely and return in about 1.3 seconds. No deadline, output limit, success JSON, native flag check or cleanup proof was relaxed. ConvertTo-Json module loading is a hypothesis for the remaining hosted delay, not an established cause.
@@ -41,3 +41,7 @@ Run 41046371741 on `c063be4` reaches the final serialization stage in both origi
 The correction serializes only the existing version-two observation envelope without PowerShell JSON module discovery. Native flags, same-handle reads, Unicode paths, output/deadline caps and original closure checks remain unchanged. All 642 product sources compile; 22 identity tests pass locally, including actual Windows capture, close and a path containing BMP and supplementary Unicode. Fresh hosted checks remain required.
 
 A separate real local Blender 4.5.3 LTS run completed generation, UV/PBR, both review renders, GLB/FBX export, round-trip and saved-scene reopen. All three original worker roles were observed closed. The model has 5,488 render triangles and 512px original PBR images, with an angle-distortion UV warning. Both actual views were inspected: the rounded mass and uniform crack pattern are not accepted as production art. This is no proof of Studio import or the installed chat journey.
+
+## Verified query and original model closure
+
+Signed main `34ac27f` passed both native Blender jobs in [run 41050597728](https://github.com/k6sol/Arcane/actions/runs/41050597728), as well as all seven component/package jobs in 41050597788. Genuine local Blender boulder and oak generation/export/reopen also completed with all three original worker roles observed closed. The same-oak cap comparison in [[Bugs/Natural Bark UV Caps]] is local Windows evidence; actual reviewed Studio import remains open.

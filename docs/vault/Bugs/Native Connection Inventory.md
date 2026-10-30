@@ -20,3 +20,7 @@ The changed actual native discovery succeeded with all seven servers and 357 too
 Related: [[Delivery/G02 Reliable Chat]], [[Delivery/G08 Diagnostics]], [[Bugs/Forest Blender Workflow]], [[Bugs/Windows Model Supervision]].
 
 Local verification: all 643 product sources compiled, and 330 focused chat, inventory, isolation, lifetime and diagnostic tests passed. Hosted verification of this correction and installed-app acceptance remain pending.
+
+## Verification follow-up
+
+The `105de62` full hosted run exposed three separate unit failures, so it was not promoted. The strengthened lifecycle fixture observes genuine dispatch and peer-held turns; all 36 lifecycle cases pass locally. Four joint chat/playtest cases pass with unchanged deadlines and new finite timing diagnostics; the original hosted timeout phase is still unproved. [[Bugs/Studio Packet Poll Fairness]] addresses the measured large-PBR freshness expiry. Fresh full hosted verification is required before customer acceptance.
