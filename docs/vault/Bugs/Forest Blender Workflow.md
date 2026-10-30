@@ -42,3 +42,11 @@ Corrected foliage component views passed on Windows and Linux in native run 4102
 ## Original Windows authoring proof
 
 The actual local asset pipeline completed one original boulder through Blender 4.5.3 LTS, UV/PBR, GLB/FBX export, round-trip, saved-scene reopen and original-worker closure. Both real review views were inspected. Geometry/export success does not establish acceptable rock art: rounded mass and repetitive cracks still need improvement. Studio import, the complete forest composition and the updated installed-app prompt remain unverified.
+
+## Packaged skill selection and unrelated genre guidance
+
+The exact forest/well/building request succeeds through the authenticated installed5b package's actual MCP server and real in-memory SDK. Default settings load arcane-natural-scenes at6,001 bytes within10,240; no daemon/Studio network call occurs. This is an isolated packaged-tool result, not an authenticated customer model turn and not an explanation of the older failed skill step.
+
+That reproduction exposed a separate routing defect: the generic word building matched the racing kit's description and put it in deferred guidance. Known genre kits now require their genre/signature-mechanic hints before relevance scoring; description-only matches and learned boosts cannot introduce an unrelated blueprint. Explicit racing, obby and horror requests remain eligible. Core routing, whole-game phases, registry approvals, experimental opt-in and all budget/integrity boundaries remain unchanged.
+
+Verification:645 sources compile; all46 router/bundled-skill cases pass without skips, including actual SDK defaults for the exact request, positive genre/mechanic cases, whole-game routing, hostile project roots, checksum/policy rejection and real stdio metadata. Hosted acceptance for the routing change remains required; no Studio operation or old-prompt replay occurred.

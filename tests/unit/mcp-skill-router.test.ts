@@ -723,6 +723,27 @@ test('focused mechanics, UI, scenes, custom assets and prototypes retain focused
   assert.ok([...forest.ids, ...forest.deferredIds].includes('arcane-natural-scenes')); assert.ok(!forest.ids.includes('arcane-racing-kit'));
 });
 
+test('SDK focused habitats do not acquire unrelated genre blueprints from generic description words', async t => {
+  const client = await linked(t);
+  const request = 'make a small forest with a well in and a small building';
+  const { result, data } = await call(client, 'skills_recommend', { request });
+  assert.notEqual(result.isError, true); assert.equal(data.available, true);
+  assert.equal(data.ids[0], 'arcane-natural-scenes');
+  assert.equal(data.byteBudget, SKILL_ROUTER_LIMITS.defaultBytes); assert.ok(data.bytes <= data.byteBudget);
+  assert.deepEqual([...data.ids, ...data.deferredIds].filter(id => id.endsWith('-kit')), []);
+  const boosted = await recommendSkills(new SkillRegistry(), { ...INPUT, request, boosts: { 'arcane-racing-kit': 4 } });
+  assert.ok(![...boosted.ids, ...boosted.deferredIds].includes('arcane-racing-kit'), 'preferences cannot turn an unrelated description match into racing intent');
+  for (const [brief, expected] of [
+    ['Add a drivable car with laps and checkpoints.', 'arcane-racing-kit'],
+    ['Build ordered checkpoints for an obstacle course.', 'arcane-obby-kit'],
+    ['Create a haunted forest with scares.', 'arcane-horror-kit'],
+  ] as const) {
+    const reply = await call(client, 'skills_recommend', { request: brief });
+    assert.notEqual(reply.result.isError, true);
+    assert.ok([...reply.data.ids, ...reply.data.deferredIds].includes(expected), brief);
+  }
+});
+
 test('whole-game count and byte pressure keep the director and report actual partial guidance without truncation', async () => {
   const registry = new SkillRegistry(), request = 'Build a complete racing game.';
   const one = await recommendSkills(registry, { ...INPUT, request, limit: 1 });

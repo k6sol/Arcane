@@ -122,6 +122,9 @@ function rank(skill: Metadata, terms: Set<string>, petFollower: boolean): number
   const title = tokens(skill.title), description = tokens(skill.description), hints = tokens((HINTS[skill.id] ?? '') +
     (skill.id === 'arcane-characters' && npcJob ? ' patrol chase' : '') +
     (skill.id === 'arcane-gameplay-systems' && functionalShop ? ' work working functional functionality' : ''));
+  // A whole-genre blueprint needs a genre or signature-mechanic match. Generic
+  // description words such as "building" must not introduce an unrelated kit.
+  if (GAME_GENRES.some(genre => genre.kit === skill.id) && ![...terms].some(term => hints.has(term))) return 0;
   let score = 0;
   for (const term of terms) score += hints.has(term) ? 12 : identity.has(term) ? 8 : title.has(term) ? 4 : description.has(term) ? 1 : 0;
   // Follower behavior needs the character contract below the primary pet/system hints, not a walking-rig promise.
