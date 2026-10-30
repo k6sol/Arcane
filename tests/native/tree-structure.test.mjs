@@ -10,6 +10,7 @@ import { validateManifestFiles, workerScripts, workerSourcePath } from '../../di
 import { readRegularFile } from '../../dist/packages/asset-pipeline/src/paths.js';
 import { parseWorkerRecords } from '../../dist/packages/asset-pipeline/src/worker-journal.js';
 import { decodeMaterialPng, materialPngPixels } from '../../dist/packages/asset-pipeline/src/material-png.js';
+import { captureFailureAudit } from './tree-structure-evidence.mjs';
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -35,6 +36,7 @@ test('original Blender tree retains its exact-source structure sheet through exp
   const retained = join(repository, 'runtime/ci-tree-structure-artifacts'); await mkdir(retained, { recursive: true });
   const evidence = { schemaVersion: 1, kind: 'arcane-original-tree-structure', runtimeReceiptSha256: sha(receiptBytes),
     request: normalizeRequest(input), stages: [], result: null, workers: [], artifacts: [], sources: {},
+    failureAudit: { schemaVersion: 1, state: 'not-read', reason: 'closure-unconfirmed' },
     modelArtQualityAccepted: false, studioImported: false, uploaded: false };
   try {
     const workerRoot = join(repository, 'workers/blender');
@@ -50,6 +52,11 @@ test('original Blender tree retains its exact-source structure sheet through exp
     const workers = parseWorkerRecords(journal.workers); assert.ok(workers && workers.length <= 6);
     evidence.workers = workers.map(worker => ({ role: worker.role, state: worker.state, closure: worker.closure ?? null }));
     assert.ok(workers.every(worker => worker.state === 'closed' && worker.closure === 'exit-observed'));
+    if (result.state === 'succeeded') evidence.failureAudit = { schemaVersion: 1, state: 'not-needed' };
+    else {
+      try { evidence.failureAudit = await captureFailureAudit(job.directory, evidence.request.name, readRegularFile); }
+      catch { evidence.failureAudit = { schemaVersion: 1, state: 'unavailable', reason: 'capture-failed' }; }
+    }
     assert.equal(result.state, 'succeeded', JSON.stringify(evidence.result));
     for (const role of ['generate', 'probe', 'python-probe']) assert.equal(workers.filter(worker => worker.role === role).length, 1);
     assert.equal(result.manifestPath, join(job.directory, 'manifest.json'));

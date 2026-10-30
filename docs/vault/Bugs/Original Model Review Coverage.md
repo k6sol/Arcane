@@ -42,3 +42,9 @@ Related: [[Delivery/G05 Blender Quality]], [[Bugs/Original Asset Authoring]], [[
 The corrected original pipeline completed on signed `3e2ea8f` with local Blender 4.5.3 LTS: the same seed-31 oak, 16,000-triangle budget, 512-square previews and 16 samples passed UV/PBR, hero/side/structure renders, GLB/FBX, round-trip, saved-scene reopen and host validation. All three original workers closed with observed exits. Structure metadata binds original request bytes and finalized bark geometry. Both actual structure and canopy hero views were inspected; the model remains artistically unaccepted.
 
 Current-code deep validation separately passed this tree and the retained pre-feature tree, preserving exact old audit rows without regeneration. These supersede the earlier local-original-job boundary; hosted Blender 5.2 and installed/customer acceptance remain pending. No Studio operation, upload, model approval or app restart occurred.
+
+## Hosted mesh-audit boundary
+
+Candidate `871d3ad` failed the original tree test on both hosted Blender 5.2 platforms before previews: `MESH_AUDIT`, one invalid mesh, 10,310 render triangles within a 16,000 budget. The original report did not retain the per-mesh defect; its cause remains unknown. The exact CI request subsequently passed local Blender 4.5.3 using an isolated snapshot of the same committed worker, preserving concurrent source changes.
+
+The native test now captures bounded structural/UV measurements and closed error categories from the actual failed audit only after original worker exits are confirmed. It copies no raw names, paths or exception text, and capture failure never replaces the original failed assertion. Four controlled evidence cases pass. Original request, deadlines, budgets, preview, deep-audit and closure assertions remain unchanged. This improves the next failure record; it does not fix or reclassify the earlier native failure as passing.
