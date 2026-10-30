@@ -1913,7 +1913,8 @@ export function retriedRows(rows:readonly Pick<BuildProgressRow,'tool'|'state'>[
 /**
  * The group header for a turn's calls. Live: "Build progress" plus the running step, "N of M" steps ended, retries and the
  * elapsed time. Ended: one line, e.g. "Built in 2m 14s · 9 steps · 1 retried". A failed call counts as retried when a later
- * call of the same tool finished; otherwise it is failed. `elapsed` is null when the time was not observed (saved history).
+ * call of the same tool finished; otherwise it is failed. Ended groups with unresolved failures or unfinished calls are
+ * incomplete, rather than claiming a successful build. `elapsed` is null when the time was not observed (saved history).
  */
 export function buildProgressSummary(rows:readonly BuildProgressRow[],live:boolean,elapsed:number|null):BuildProgressSummary {
   const steps=rows.length,plural=(n:number,word:string)=>n+' '+word+(n===1?'':'s');
@@ -1925,7 +1926,7 @@ export function buildProgressSummary(rows:readonly BuildProgressRow[],live:boole
     return {title:building?'Build progress':'Working',meta,state:'started',steps,done,retried,failed};
   }
   const unfinished=steps-done;
-  const lead=(failed&&failed===steps?'Stopped':building?'Built':'Done')+(time?' in '+time:'');
+  const lead=(failed&&failed===steps?'Stopped':failed||unfinished?'Incomplete':building?'Built':'Done')+(time?' in '+time:'');
   const title=[lead,plural(steps,'step'),retried?retried+' retried':'',failed?failed+' failed':'',unfinished?unfinished+' unfinished':''].filter(Boolean).join(' · ');
   return {title,meta:'',state:failed||unfinished?'failed':'finished',steps,done,retried,failed};
 }

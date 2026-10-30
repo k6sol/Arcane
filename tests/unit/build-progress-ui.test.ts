@@ -79,7 +79,33 @@ test('counts, times and the turn summary', () => {
   assert.deepEqual([...retriedRows(rows)], [2], 'the failed forest build is the retried row');
   assert.equal(buildProgressSummary([row('script_read', 'finished'), row('scene_search', 'finished')], false, 4000).title, 'Done in 4s · 2 steps', 'read-only turns are not "built"');
   assert.deepEqual(buildProgressSummary([row('scene_build', 'failed'), row('terrain_generate', 'failed')], false, 3000), { title: 'Stopped in 3s · 2 steps · 2 failed', meta: '', state: 'failed', steps: 2, done: 2, retried: 0, failed: 2 });
-  assert.equal(buildProgressSummary([row('scene_build', 'finished'), row('terrain_generate', 'started')], false, null).title, 'Built · 2 steps · 1 unfinished');
+  assert.equal(buildProgressSummary([row('scene_build', 'finished'), row('terrain_generate', 'started')], false, null).title, 'Incomplete · 2 steps · 1 unfinished');
+});
+
+test('completed progress is incomplete when failures remain after successful retries', () => {
+  const row = (tool: string, state: 'started' | 'finished' | 'failed', text = tool) => ({ tool, state, text });
+  const rows = [row('skills_recommend', 'failed'), row('terrain_generate', 'finished'), row('scene_build', 'failed'),
+    row('scene_build', 'finished'), row('environment_apply', 'finished'), row('studio_viewport_capture', 'failed')];
+  assert.deepEqual(buildProgressSummary(rows, false, 45_000), {
+    title: 'Incomplete in 45s · 6 steps · 1 retried · 2 failed', meta: '', state: 'failed', steps: 6, done: 6, retried: 1, failed: 2,
+  });
+  assert.equal(buildProgressSummary(rows, false, null).title, 'Incomplete · 6 steps · 1 retried · 2 failed', 'history does not invent elapsed time');
+  assert.deepEqual([...retriedRows(rows)], [2], 'the recovered build does not erase unrelated skill/capture failures');
+  assert.deepEqual(buildProgressSummary(rows, true, 45_000), {
+    title: 'Build progress', meta: '6 of 6 · 1 retried · 2 failed · 45s', state: 'started', steps: 6, done: 6, retried: 1, failed: 2,
+  }, 'the live turn remains running even if every currently observed call has ended');
+  assert.deepEqual(buildProgressSummary([row('skills_recommend', 'failed'), row('sessions', 'finished')], false, 5000), {
+    title: 'Incomplete in 5s · 2 steps · 1 failed', meta: '', state: 'failed', steps: 2, done: 2, retried: 0, failed: 1,
+  }, 'read-only failures also cannot claim Done');
+  assert.deepEqual(buildProgressSummary([row('scene_build', 'finished'), row('studio_viewport_capture', 'started')], false, null), {
+    title: 'Incomplete · 2 steps · 1 unfinished', meta: '', state: 'failed', steps: 2, done: 1, retried: 0, failed: 0,
+  }, 'an ended turn does not manufacture completion of an unfinished call');
+  assert.equal(buildProgressSummary([row('scene_build', 'failed'), row('scene_build', 'finished')], false, 5000).title,
+    'Built in 5s · 2 steps · 1 retried', 'successful recovery keeps its existing Built summary');
+  assert.equal(buildProgressSummary([row('skills_recommend', 'failed'), row('studio_viewport_capture', 'failed')], false, 5000).title,
+    'Stopped in 5s · 2 steps · 2 failed', 'a wholly failed group retains Stopped');
+  assert.equal(buildProgressSummary([row('sessions', 'finished'), row('script_read', 'finished')], false, 5000).title,
+    'Done in 5s · 2 steps', 'successful read-only work retains Done');
 });
 
 test('friendly labels, failure reasons, images and shape-recognised results', () => {
