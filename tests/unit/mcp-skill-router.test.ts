@@ -445,6 +445,45 @@ test('router sends everyday gameplay-code briefs to the prescriptive systems, Da
   for (const code of ['GetRequestBudgetForRequestType', 'BindToClose', 'UpdateAsync', 'OnServerEvent', 'Net.allow']) assert.ok(roomy.context.includes(code), code);
 });
 
+test('script diagnosis includes authentic QA guidance without redirecting non-code repairs or widening the default budget', async t => {
+  const network = t.mock.method(globalThis, 'fetch', async () => { throw Error('Routing and progressive guidance must stay offline.'); });
+  const client = await linked(t), registry = new SkillRegistry();
+  const original = await readFile(join(ROOT, 'skills/registry.json'));
+  for (const [request, first] of [
+    ['my sword script errors when I click', 'arcane-debugging'],
+    ['my module code has an error', 'arcane-luau-architecture'],
+  ] as const) {
+    const { result, data } = await call(client, SKILLS_RECOMMEND_TOOL, { request });
+    assert.notEqual(result.isError, true); assert.equal(data.ids[0], first, request);
+    assert.ok([...(data.ids as string[]), ...(data.deferredIds as string[])].includes('arcane-playtest-qa'), request);
+    assert.equal(data.byteBudget, SKILL_ROUTER_LIMITS.defaultBytes);
+    assert.ok(data.bytes <= 10_240 && data.bytes === Buffer.byteLength(data.context));
+    assert.equal(data.composition.intent, 'focused'); assert.equal(data.approvalChanged, false);
+    // Read the real integrity-checked body even if byte trimming deferred it; metadata is not loaded guidance.
+    await intactSkillGet(client, 'arcane-playtest-qa');
+    for (const reference of data.deferredReferences as string[]) await intactSkillGet(client, reference.split(':')[0]!, [reference]);
+  }
+  const primary = await registry.get({ ids: ['arcane-debugging'], references: [], byteBudget: SKILL_ROUTER_LIMITS.maximumBytes, allowExperimental: true });
+  const { result: tightResult, data: tight } = await call(client, SKILLS_RECOMMEND_TOOL,
+    { request: 'my sword script errors when I click', byteBudget: primary.bytes });
+  assert.notEqual(tightResult.isError, true); assert.deepEqual(tight.ids, ['arcane-debugging']);
+  assert.equal(tight.context, primary.context); assert.equal(tight.bytes, primary.bytes);
+  assert.ok((tight.deferredIds as string[]).includes('arcane-playtest-qa'));
+  for (const request of [
+    'Fix the inventory GUI close button error.',
+    'Build a small forest with river errors.',
+    'Diagnose an error.',
+    'Create a ModuleScript.',
+  ]) {
+    const { result, data } = await call(client, SKILLS_RECOMMEND_TOOL, { request });
+    assert.notEqual(result.isError, true);
+    assert.ok(![...(data.ids as string[]), ...(data.deferredIds as string[])].includes('arcane-playtest-qa'), request);
+    assert.ok(data.bytes <= SKILL_ROUTER_LIMITS.defaultBytes);
+  }
+  assert.deepEqual(await readFile(join(ROOT, 'skills/registry.json')), original);
+  assert.equal(network.mock.callCount(), 0);
+});
+
 test('habitat creation leads with natural guidance while a local feature merely in a habitat remains focused', async () => {
   for (const request of ['Build a full forest with caves and a detailed spawn pillar.', 'Make a cave environment with a traversable interior.', 'Create a natural environment with clearings and routes.']) {
     const result = await recommendSkills(new SkillRegistry(), { ...INPUT, request });

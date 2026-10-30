@@ -100,6 +100,8 @@ const CODE_REFERENCES: Record<string, string> = { 'arcane-gameplay-systems': 're
 const GENRES: Record<string, string> = { platformer: 'obby', obstacle: 'obby', parkour: 'obby', rpg: 'melee-rpg',
   melee: 'melee-rpg', cozy: 'cozy-social', social: 'cozy-social', race: 'racing' };
 const NPC_CONTEXT = tokens('npc npcs enemy enemies character characters mob mobs monster zombie guard villager shopkeeper creature');
+const SCRIPT_CONTEXT = tokens('script scripting luau module modulescript code');
+const DEBUG_CONTEXT = tokens(HINTS['arcane-debugging'] ?? '');
 function rank(skill: Metadata, terms: Set<string>): number {
   const identity = tokens(skill.id.replace(/^arcane-/, '').replaceAll('-', ' '));
   const npcJob = [...terms].some(term => NPC_CONTEXT.has(term));
@@ -107,6 +109,9 @@ function rank(skill: Metadata, terms: Set<string>): number {
     (skill.id === 'arcane-characters' && npcJob ? ' patrol chase' : ''));
   let score = 0;
   for (const term of terms) score += hints.has(term) ? 12 : identity.has(term) ? 8 : title.has(term) ? 4 : description.has(term) ? 1 : 0;
+  // Script diagnosis needs verification guidance below the debug/Luau hints, even when QA metadata has no lexical match.
+  if (score === 0 && skill.id === 'arcane-playtest-qa' && [...terms].some(term => SCRIPT_CONTEXT.has(term)) &&
+      [...terms].some(term => DEBUG_CONTEXT.has(term))) return 6;
   return score;
 }
 /** Lead a requested habitat, without treating a feature merely located there as a habitat build. */
