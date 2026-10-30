@@ -204,10 +204,18 @@ test('production manifest-to-viewer wiring in isolated Edge DOM', { skip: !proce
   await t.test('real manifest button selects exact job and controls only its current renderer', async t => {
     const f = await fixture(browser, t, assets, emit), { page } = f;
     await startProduct(page);
+    // Canvas readiness and review preparation settle independently. Observe
+    // the actual prepare response before asserting the complete request list.
+    const loadManifest = async () => {
+      await Promise.all([
+        page.waitForResponse(response => response.url() === origin + '/v1/assets/review/prepare' && response.request().method() === 'POST'),
+        page.locator('#asset-load-manifest').click(),
+      ]);
+    };
     assert.equal(f.network.filter(path => path.startsWith('/v1/')).length, 0, 'no artifact or manifest fetch before explicit click');
     assert.equal(f.network.includes('/asset-viewer-runtime.mjs'), false);
     assert.equal(await page.locator('#asset-viewer canvas').count(), 0);
-    await page.locator('#asset-load-manifest').click();
+    await loadManifest();
     await page.waitForFunction(() => viewerMeter.renderers.length === 1 && !workbench.assetBusy);
     assert.deepEqual(f.network.filter(path => path.startsWith('/v1/')), [
       '/v1/assets/manifest?jobId=' + JOB, '/v1/assets/artifact?jobId=' + JOB + '&path=asset.glb', '/v1/assets/review/prepare',
@@ -239,7 +247,7 @@ test('production manifest-to-viewer wiring in isolated Edge DOM', { skip: !proce
     await page.locator('#asset-job-picker').selectOption(NEXT_JOB);
     assert.equal(await page.locator('#asset-viewer canvas').count(), 0);
     f.select(glb(), manifest(glb(), NEXT_JOB));
-    await page.locator('#asset-load-manifest').click();
+    await loadManifest();
     await page.waitForFunction(() => viewerMeter.renderers.length === 2 && !workbench.assetBusy);
     await page.evaluate(() => { for (const node of oldControls) for (const event of ['click', 'change', 'input']) node.dispatchEvent(new Event(event)); });
     await viewerControl.view(page, 'top');
