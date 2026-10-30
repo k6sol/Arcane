@@ -478,6 +478,8 @@ test('failed MCP details use finite envelopes in legacy and paged history withou
     { type:'mcpToolCall',id:'skill',server:'arcane',tool:'skills_recommend',status:'failed',result:{content:[{type:'text',text:'PRIVATE_ERROR_BODY'}],structuredContent:{error:{code:'INTEGRITY',message:'PRIVATE_PATH C:/secret'}},_meta:{secret:'PRIVATE_META'}} },
     { type:'mcpToolCall',id:'provider',server:'arcane',tool:'skills_get',status:'failed',result:null,error:{message:'PRIVATE_PROVIDER_ERROR password=secret'} },
     { type:'mcpToolCall',id:'forest',server:'arcane',tool:'scene_build',status:'failed',result:{content:[{type:'text',text:'{"error":{"code":"FOREST_SOURCES_REQUIRED","message":"PRIVATE_FOREST"}}'}]} },
+    { type:'mcpToolCall',id:'blender',server:'arcane',tool:'studio_asset_generate',status:'failed',result:{content:[{type:'text',text:'{"error":{"code":"BLENDER_REQUIRED","message":"PRIVATE_BLENDER"}}'}]} },
+    { type:'mcpToolCall',id:'reconstruction',server:'arcane',tool:'assets_place_studio_import',status:'failed',result:{content:[{type:'text',text:'{"error":{"code":"STUDIO_RECONSTRUCTION_REQUIRED","message":"PRIVATE_RECONSTRUCTION"}}'}]} },
     { type:'mcpToolCall',id:'unknown',server:'arcane',tool:'skills_get',status:'failed',result:null,error:null },
   ];
   const legacy=parseCodexThreadRead(read([turn(items)]),SCOPE);
@@ -487,6 +489,8 @@ test('failed MCP details use finite envelopes in legacy and paged history withou
     {schemaVersion:1,kind:'arcane-code',tool:'skills_recommend',code:'INTEGRITY'},
     {schemaVersion:1,kind:'mcp-error',tool:'skills_get',code:null},
     {schemaVersion:1,kind:'arcane-code',tool:'scene_build',code:'FOREST_SOURCES_REQUIRED'},
+    {schemaVersion:1,kind:'arcane-code',tool:'studio_asset_generate',code:'BLENDER_REQUIRED'},
+    {schemaVersion:1,kind:'arcane-code',tool:'assets_place_studio_import',code:'STUDIO_RECONSTRUCTION_REQUIRED'},
     {schemaVersion:1,kind:'details-unavailable',tool:'skills_get',code:null},
   ]);
   assert.deepEqual(legacy.entries[1]!.ids,{threadId:THREAD,sessionId:SESSION,turnId:TURN,itemId:'provider'});

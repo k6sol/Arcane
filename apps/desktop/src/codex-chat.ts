@@ -99,7 +99,8 @@ const MCP_SKILL_FAILURES=['BUNDLE_INTEGRITY','INTEGRITY','REGISTRY','FRONTMATTER
 const MCP_VIEWPORT_FAILURES=['VIEWPORT_TOOL_UNSUPPORTED','VIEWPORT_INVALID','VIEWPORT_FAILED','VIEWPORT_CAMERA_UNKNOWN',
   'BUSY','STALE_PROOF','BINDING_CHANGED','MODE_MISMATCH','DISCONNECTED','TIMEOUT','FENCED','SDK_CUSTODY_UNCONFIRMED'] as const;
 const MCP_FAILURE_PAIRS:Record<Exclude<McpFailureTool,null>,readonly McpToolFailureCode[]>={skills_recommend:MCP_SKILL_FAILURES,skills_list:MCP_SKILL_FAILURES,
-  skills_get:MCP_SKILL_FAILURES,studio_viewport_capture:MCP_VIEWPORT_FAILURES,scene_build:['FOREST_SOURCES_REQUIRED']};
+  skills_get:MCP_SKILL_FAILURES,studio_viewport_capture:MCP_VIEWPORT_FAILURES,scene_build:['FOREST_SOURCES_REQUIRED'],
+  studio_asset_generate:['BLENDER_REQUIRED'],assets_place_studio_import:['STUDIO_RECONSTRUCTION_REQUIRED','PLUGIN_UPDATE_REQUIRED','SESSION']};
 function readMcpFailure(value:unknown):McpToolFailureSummary|null {
   try{
     if(!dataObject(value,['schemaVersion','kind','tool','code'])||value.schemaVersion!==1||!(value.tool===null||typeof value.tool==='string'&&Object.hasOwn(MCP_FAILURE_PAIRS,value.tool)))return null;
@@ -119,6 +120,10 @@ function mcpFailureMessage(failure:McpToolFailureSummary):string {
   if(failure.kind==='mcp-error')return 'The tool failed without a usable public result. Detailed reason is unavailable.';
   if(failure.kind!=='arcane-code'||code===null)return 'The tool failed. No recognized safe error detail is available.';
   if(code==='FOREST_SOURCES_REQUIRED')return 'Forest model sources are missing. Generate, review and import them before using their templates.';
+  if(code==='BLENDER_REQUIRED')return 'Blender authoring is required. Create geometry, UVs and PBR there before preview and import.';
+  if(code==='STUDIO_RECONSTRUCTION_REQUIRED')return 'Mesh reconstruction is missing. Prepare, stage and reconstruct this asset before placement.';
+  if(code==='PLUGIN_UPDATE_REQUIRED')return 'The Studio plugin cannot place meshes. Update the plugin before importing.';
+  if(code==='SESSION')return 'This Studio session is unavailable. Check the live session used for mesh reconstruction.';
   if(code==='BUDGET_EXCEEDED')return 'The skill request exceeded its context budget. Select fewer relevant skills or references.';
   if(['UNKNOWN_SKILL','UNAPPROVED','REFERENCES','SKILL_ROUTE_INPUT','SKILL_CATALOGUE_LIMIT'].includes(code))return 'The skill request or reference is unavailable under the current selection policy.';
   if((MCP_SKILL_FAILURES as readonly string[]).includes(code))return 'Bundled skill content could not be verified. Repair or update Arcane before using it.';

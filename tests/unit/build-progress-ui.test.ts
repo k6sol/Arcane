@@ -20,7 +20,9 @@ test('actual finite MCP envelopes decode to safe failure reasons without receipt
   const captures=['VIEWPORT_TOOL_UNSUPPORTED','VIEWPORT_INVALID','VIEWPORT_FAILED','VIEWPORT_CAMERA_UNKNOWN','BUSY','STALE_PROOF','BINDING_CHANGED',
     'MODE_MISMATCH','DISCONNECTED','TIMEOUT','FENCED','SDK_CUSTODY_UNCONFIRMED'];
   const pairs=[...['skills_recommend','skills_list','skills_get'].flatMap(tool=>skills.map(code=>({tool,code}))),
-    ...captures.map(code=>({tool:'studio_viewport_capture',code})),{tool:'scene_build',code:'FOREST_SOURCES_REQUIRED'}];
+    ...captures.map(code=>({tool:'studio_viewport_capture',code})),{tool:'scene_build',code:'FOREST_SOURCES_REQUIRED'},
+    {tool:'studio_asset_generate',code:'BLENDER_REQUIRED'},
+    ...['STUDIO_RECONSTRUCTION_REQUIRED','PLUGIN_UPDATE_REQUIRED','SESSION'].map(code=>({tool:'assets_place_studio_import',code}))];
   for(const {tool,code} of pairs){
     const text=mcpToolFailureEnvelope({schemaVersion:1,kind:'arcane-code',tool,code});assert.ok(text);
     const read=readToolResultText(text),activity=describeToolActivity(read.name!,read.input,read.result,read.state);

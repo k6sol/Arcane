@@ -96,11 +96,13 @@ export interface McpToolCallArgs {
   enabled?: boolean; properties?: Record<string, true>;
 }
 /** Public identity of a live native MCP tool call item; args only for the Arcane server. */
-export type McpFailureTool = 'skills_recommend'|'skills_list'|'skills_get'|'studio_viewport_capture'|'scene_build'|null;
+export type McpFailureTool = 'skills_recommend'|'skills_list'|'skills_get'|'studio_viewport_capture'|'scene_build'
+  |'studio_asset_generate'|'assets_place_studio_import'|null;
 export type McpToolFailureCode = 'BUNDLE_INTEGRITY'|'INTEGRITY'|'REGISTRY'|'FRONTMATTER'|'DESCRIPTION'|'LICENCE'|'FILE_LIMIT'|'INVALID_PATH'|'PATH_ESCAPE'
   |'BUDGET_EXCEEDED'|'UNKNOWN_SKILL'|'UNAPPROVED'|'REFERENCES'|'SKILL_ROUTE_INPUT'|'SKILL_CATALOGUE_LIMIT'
   |'VIEWPORT_TOOL_UNSUPPORTED'|'VIEWPORT_INVALID'|'VIEWPORT_FAILED'|'VIEWPORT_CAMERA_UNKNOWN'|'BUSY'|'STALE_PROOF'|'BINDING_CHANGED'|'MODE_MISMATCH'
-  |'DISCONNECTED'|'TIMEOUT'|'FENCED'|'SDK_CUSTODY_UNCONFIRMED'|'FOREST_SOURCES_REQUIRED';
+  |'DISCONNECTED'|'TIMEOUT'|'FENCED'|'SDK_CUSTODY_UNCONFIRMED'|'FOREST_SOURCES_REQUIRED'
+  |'BLENDER_REQUIRED'|'STUDIO_RECONSTRUCTION_REQUIRED'|'PLUGIN_UPDATE_REQUIRED'|'SESSION';
 export interface McpToolFailureSummary {
   readonly schemaVersion:1;readonly kind:'arcane-code'|'mcp-error'|'details-unavailable';readonly tool:McpFailureTool;readonly code:McpToolFailureCode|null;
 }

@@ -166,6 +166,8 @@ createInterface({ input: process.stdin }).on('line', line => {
       notify('item/started', { threadId, turnId, item: call('failure-skill', 'skills_recommend', { status: 'inProgress' }) });
       notify('item/completed', { threadId, turnId, item: call('failure-skill', 'skills_recommend', { result: result('INTEGRITY') }) });
       notify('item/completed', { threadId, turnId, item: call('failure-forest', 'scene_build', { result: result('FOREST_SOURCES_REQUIRED') }) });
+      notify('item/completed', { threadId, turnId, item: call('failure-blender', 'studio_asset_generate', { result: result('BLENDER_REQUIRED') }) });
+      notify('item/completed', { threadId, turnId, item: call('failure-reconstruction', 'assets_place_studio_import', { result: result('STUDIO_RECONSTRUCTION_REQUIRED') }) });
       notify('item/completed', { threadId, turnId, item: call('failure-capture', 'studio_viewport_capture', { result: result('SDK_CUSTODY_UNCONFIRMED') }) });
       notify('item/completed', { threadId, turnId, item: call('failure-provider', 'skills_get', { error: { message: 'PRIVATE_PROVIDER_ERROR C:/private/path password=secret' } }) });
       notify('item/completed', { threadId, turnId, item: call('failure-unknown', 'skills_list', { result: result('UNKNOWN_PRIVATE_CODE') }) });

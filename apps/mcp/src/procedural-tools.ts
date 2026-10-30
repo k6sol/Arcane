@@ -176,6 +176,7 @@ export function registerProceduralPlaceTool(server: McpServer, client: DaemonCli
       const status = await client.assetsStudioReconstructionStatus(a.jobId, { timeoutMs: Math.min(15_000, left()), signal: extra.signal });
       const digest = status.reconstruction?.state === 'succeeded' ? status.reconstruction.receipt?.transferDigest : undefined;
       if (!digest) return ok(client, { jobId: a.jobId, reconstruction: status.reconstruction?.state ?? null,
+        error: { code: 'STUDIO_RECONSTRUCTION_REQUIRED', message: 'No completed mesh reconstruction is recorded for this asset. Prepare, stage and reconstruct the reviewed asset before placement.' },
         nextStep: 'No succeeded reconstruction is recorded for this job. Run assets_prepare_studio_import, assets_stage_studio_import and assets_reconstruct_studio_import first.' }, true);
       const sessions = await client.sessions({ timeoutMs: Math.min(10_000, left()), signal: extra.signal });
       const session = sessions.sessions.find(s => s.id === a.sessionId);

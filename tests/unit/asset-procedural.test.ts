@@ -196,3 +196,29 @@ test('assets_place_studio_import uses the host-recorded transfer digest and refu
   assert.equal(old.isError, true); assert.match(JSON.stringify(old.structuredContent), /PLUGIN_UPDATE_REQUIRED/); assert.equal(calls.length, 1);
   await client.close(); await server.close();
 });
+
+test('placement reports its missing reconstruction before session lookup or mutation', async t => {
+  let reconstruction: unknown = null, sessionReads = 0, mutations = 0;
+  const fake = { assetAudience: 'native-session', redact: (v: unknown) => v,
+    assetsStudioReconstructionStatus: async () => ({ jobId: 'x', projectId: 'y', reconstruction }),
+    sessions: async () => { sessionReads++; throw new Error('must not read sessions'); },
+    execute: async () => { mutations++; throw new Error('must not place'); },
+  };
+  const server = new McpServer({ name: 'fixture', version: '0' }); registerProceduralPlaceTool(server, fake as unknown as DaemonClient);
+  const [a, b] = InMemoryTransport.createLinkedPair(); const client = new Client({ name: 'c', version: '0' });
+  t.after(async () => { await client.close(); await server.close(); });
+  await server.connect(a); await client.connect(b);
+  const args = { jobId: '11111111-1111-4111-8111-111111111111', sessionId: 'session-1',
+    parent: { instanceId: 'folder', sessionId: 'session-1', root: 'Workspace', pathSegments: ['Templates'], className: 'Folder' },
+    name: 'OakTemplate', position: [0, 0, 0] };
+  for (reconstruction of [null, { state: 'pending' }, { state: 'failed' }, { state: 'unknown' }, { state: 'succeeded', receipt: null }]) {
+    const result = await client.callTool({ name: 'assets_place_studio_import', arguments: args });
+    assert.equal(result.isError, true);
+    const data = result.structuredContent as { error: { code: string; message: string }; reconstruction: string | null };
+    assert.equal(data.error.code, 'STUDIO_RECONSTRUCTION_REQUIRED');
+    assert.match(data.error.message, /Prepare, stage and reconstruct/);
+    assert.equal(data.reconstruction, (reconstruction as { state: string } | null)?.state ?? null);
+    assert.deepEqual(JSON.parse((result.content as { type: string; text: string }[])[0]!.text), data);
+  }
+  assert.equal(sessionReads, 0); assert.equal(mutations, 0);
+});

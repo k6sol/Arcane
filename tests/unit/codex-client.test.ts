@@ -879,12 +879,14 @@ test('live MCP tool items expose only a bounded, allowlisted Arcane identity',as
 test('actual stdio MCP failures retain finite codes and original scope without provider messages',async t=>{
   const {session}=await open(t,'mcp-tool-failures');
   await session.startTurn(INPUT);
-  await until(()=>session.snapshot().events.filter(event=>event.type==='item').length===7);
+  await until(()=>session.snapshot().events.filter(event=>event.type==='item').length===9);
   const items=session.snapshot().events.flatMap(event=>event.type==='item'?[event]:[]);
   assert.deepEqual(items.map(event=>[event.itemId,event.status,event.tool?.failure??null]),[
     ['failure-skill','inProgress',null],
     ['failure-skill','failed',{schemaVersion:1,kind:'arcane-code',tool:'skills_recommend',code:'INTEGRITY'}],
     ['failure-forest','failed',{schemaVersion:1,kind:'arcane-code',tool:'scene_build',code:'FOREST_SOURCES_REQUIRED'}],
+    ['failure-blender','failed',{schemaVersion:1,kind:'arcane-code',tool:'studio_asset_generate',code:'BLENDER_REQUIRED'}],
+    ['failure-reconstruction','failed',{schemaVersion:1,kind:'arcane-code',tool:'assets_place_studio_import',code:'STUDIO_RECONSTRUCTION_REQUIRED'}],
     ['failure-capture','failed',{schemaVersion:1,kind:'arcane-code',tool:'studio_viewport_capture',code:'SDK_CUSTODY_UNCONFIRMED'}],
     ['failure-provider','failed',{schemaVersion:1,kind:'mcp-error',tool:'skills_get',code:null}],
     ['failure-unknown','failed',{schemaVersion:1,kind:'details-unavailable',tool:'skills_list',code:null}],
@@ -900,6 +902,11 @@ test('finite MCP failure parsing refuses getters/proxies, mismatched codes and c
   const item=(code:string)=>({status:'failed',server:'arcane',tool:'skills_get',result:{structuredContent:{error:{code}}}});
   assert.equal(summarizeMcpToolFailure(item('INTEGRITY'))?.code,'INTEGRITY');
   assert.equal(summarizeMcpToolFailure(item('VIEWPORT_FAILED'))?.kind,'details-unavailable');
+  for(const tool of ['studio_asset_generate','assets_place_studio_import']){
+    const value={...item('INTEGRITY'),tool};
+    assert.equal(summarizeMcpToolFailure(value)?.kind,'details-unavailable','codes remain bound to the tool that can emit them');
+    assert.equal(summarizeMcpToolFailure({...value,server:'other'})?.tool,null,'a matching foreign tool is not Arcane evidence');
+  }
   const conflict={...item('INTEGRITY'),result:{structuredContent:{error:{code:'INTEGRITY'}},content:[{type:'text',text:'{"error":{"code":"REGISTRY"}}'}]}};
   assert.equal(summarizeMcpToolFailure(conflict)?.kind,'details-unavailable');
   let invoked=0;const hidden=()=>{invoked++;throw new Error('must stay unread');};

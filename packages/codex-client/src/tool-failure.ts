@@ -9,6 +9,8 @@ const VIEWPORT_CODES = ['VIEWPORT_TOOL_UNSUPPORTED','VIEWPORT_INVALID','VIEWPORT
 const PAIRS: Record<Exclude<McpFailureTool,null>, readonly McpToolFailureCode[]> = {
   skills_recommend:SKILL_CODES,skills_list:SKILL_CODES,skills_get:SKILL_CODES,studio_viewport_capture:VIEWPORT_CODES,
   scene_build:['FOREST_SOURCES_REQUIRED'],
+  studio_asset_generate:['BLENDER_REQUIRED'],
+  assets_place_studio_import:['STUDIO_RECONSTRUCTION_REQUIRED','PLUGIN_UPDATE_REQUIRED','SESSION'],
 };
 const plain = (value:unknown):value is Record<string,unknown> => value !== null && typeof value==='object' && !nodeTypes.isProxy(value)
   && !Array.isArray(value) && [Object.prototype,null].includes(Object.getPrototypeOf(value));
