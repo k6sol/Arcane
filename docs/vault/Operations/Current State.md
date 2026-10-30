@@ -5,17 +5,17 @@ tags: [arcane]
 ---
 # Current state
 
-Recorded 30 October 2026. Main and selected installed source are SSH-verified `5b84a41be92c60cc35fb4c37ab0a989565d4776d`, with all nine required hosted jobs passing. Installation completed with observed exit zero and both pipes closed; the older running window visibly offers Restart to update. It was not restarted. Latest functional source remains `e91780f` plus material diagnostics `753459d`; native test baseline correction `6b058f7` needs fresh exact-source checks before promotion or installation.
+Recorded 30 October 2026. Main and selected installed source are SSH-verified `5b84a41be92c60cc35fb4c37ab0a989565d4776d`, with all nine required hosted jobs passing. Installation completed with observed exit zero and both pipes closed; the older running window visibly offers Restart to update. It was not restarted. Newer model/diagnostics source `669adff` now passes both pinned native platforms, with component/package checks still active. Routing follow-up `da17890` passes local SDK tests and awaits fresh component acceptance; native workflow inputs are unchanged.
 
 ## Source, delivery and live checks
 
 | Item | Authoritative evidence | Boundary |
 |---|---|---|
 | Main | `5b84a41` passed seven component/package jobs in [41087633471](https://github.com/k6sol/Arcane/actions/runs/41087633471) and both pinned native jobs in [41087633487](https://github.com/k6sol/Arcane/actions/runs/41087633487), ordinary fast-forward | No updated customer journey follows from green checks |
-| New verification work | `e91780f` oak distribution and `753459d` diagnostics pass local gates; `6b058f7` updates the full reviewed foliage control pins | Prior48 native run41091574377 failed before Blender launch on stale pins; fresh corrected candidate must pass all required jobs |
+| New verification work | Corrected `669adff` passes both native jobs in [41094897137](https://github.com/k6sol/Arcane/actions/runs/41094897137); all six authenticated Windows/Linux tree images inspected | Component run41094897923 remains active. Routing follow-up needs its own component gates; unchanged native inputs permit scoped source equivalence |
 | Desktop | `5b84a41` archive, closed payload, source and startup receipts authenticated; immutable installation selected with original exit zero and both pipes closed | Actual old window shows update banner after selection. No restart, draft replay or updated customer chat acceptance |
 | Plugin | Canonical `5b84a41` archive, manifest and all three source-generated files verified; modular identity unchanged | No plugin installation or Studio operation in this delivery |
-| Vault | Latest committed48 projection synced:174 managed files, no conflicts; this delivery note awaits the next explicit revision sync | Personal notes/settings preserved; source notes remain authoritative |
+| Vault | Committed669 projection synced:174 managed files, no conflicts; this routing checkpoint awaits its explicit committed revision sync | Personal notes/settings preserved; source notes remain authoritative |
 
 ## Verified functionality
 
@@ -27,7 +27,9 @@ Recorded 30 October 2026. Main and selected installed source are SSH-verified `5
 - `5b84a41` compiles645 sources. All50 affected source-contract/live-activity cases execute and pass, including separately enabled owned Edge. Prior12 progress/browser,19 foliage diagnostics,13 review,4 failure-evidence and3 classifier cases passed at their recorded source scopes.
 - Controlled full-PBR import staging preserves queue fairness, exact authority, continuity and deadlines. Placement is separate from persistent upload/Asset Manager registration.
 - Measured material diagnostics on `753459d` pass645-source compilation,22 affected TypeScript cases,6 Python classifier methods, actual Blender audit classification and9 hosted-service diagnostics tests. Specific reasons require exclusively measured material errors, consistent counters and written audit; old journal reason strings stay unchanged. Hosted deployment is separate.
-- Oak spray `e91780f` passes4 layout methods on host Python and Blender's bundled NumPy, sampled same-host birch byte/RNG preservation and one full original Blender4.5 tree pipeline with three inspected previews and observed closures. All eight actual exported geometry accessors match before/after byte-for-byte; only the intended oak texture output changes. Pinned5.2 and art acceptance for this source remain pending.
+- Oak spray `e91780f` passes4 layout methods on host Python and Blender's bundled NumPy, sampled same-host birch byte/RNG preservation and one full original Blender4.5 tree pipeline with three inspected previews and observed closures. All eight actual exported geometry accessors match before/after byte-for-byte; only the intended oak texture output changes. Subsequent669 native verification is recorded below; art acceptance remains open.
+- Corrected669 pinned5.2 verification now passes on both platforms, including measured material diagnostics, four oak layout methods, foliage controls and the complete original tree pipeline. Archives and PNG hashes authenticated; original worker exits observed. This clears native acceptance at its recorded source scope; art/visible-alpha and Studio/customer acceptance remain open.
+- Exact forest/well/building request succeeds through the installed5b package's actual MCP SDK server with no network calls. It exposed unrelated racing guidance from a generic description match. Signed routing fix `da17890` requires genre/signature-mechanic relevance for known kits;645-source compilation and46 full router/bundled-skill cases pass. Registry approvals, context budgets and whole-game behavior stay unchanged. The original old-app skill error remains unexplained.
 
 ## Remaining failures and acceptance
 
