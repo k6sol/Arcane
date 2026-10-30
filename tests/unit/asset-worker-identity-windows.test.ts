@@ -14,14 +14,19 @@ type Exit = { code: number | null; signal: NodeJS.Signals | null };
 
 // Observe only the original query callback; never publish process output or retry it.
 const QUERY_STAGES = ['setup', 'emit-imports', 'wrapper', 'type-readback', 'open', 'first-wait', 'times', 'path', 'final-wait', 'close', 'serialize'] as const;
+const METADATA_STAGES = ['unavailable', 'type-create', 'method-lookup', 'attribute-read', 'attribute-count', 'library', 'entrypoint', 'last-error', 'exact-spelling', 'charset', 'calling-convention', 'preserve-signature'] as const;
 function observeQueries(t: TestContext) {
   const original = defaultProcessQueryHost.execFile; let reports = 0;
   const report = (started: number, outcome: 'ok' | 'exit4' | 'timeout' | 'max-buffer' | 'failed' | 'threw', stdout: unknown, stderr: unknown) => {
     try {
       if (reports >= 6) return;
       const stage = typeof stderr === 'string' ? /^ARCANE_WORKER_QUERY_STAGE:(0|[1-9]|10)$/.exec(stderr) : null;
+      const metadata = typeof stderr === 'string' ? /^ARCANE_WORKER_QUERY_STAGE:3:([1-9]|10|11):([0-5])$/.exec(stderr) : null;
+      const validMetadata = metadata && (Number(metadata[1]) === 1 ? Number(metadata[2]) === 5 : Number(metadata[2]) < 5);
       t.diagnostic(JSON.stringify({ schemaVersion: 1, kind: 'original-worker-query', sequence: ++reports, outcome,
-        stage: stage ? QUERY_STAGES[Number(stage[1])] ?? 'unavailable' : 'unavailable',
+        stage: validMetadata ? 'type-readback' : stage ? QUERY_STAGES[Number(stage[1])] ?? 'unavailable' : 'unavailable',
+        metadataStage: metadata && validMetadata ? METADATA_STAGES[Number(metadata[1])] ?? 'unavailable' : 'unavailable',
+        importIndex: metadata && validMetadata ? Number(metadata[2]) : null,
         stdoutBytes: typeof stdout === 'string' ? Math.min(QUERY_MAX_OUTPUT_BYTES + 1, Buffer.byteLength(stdout, 'utf8')) : 0,
         stderrBytes: typeof stderr === 'string' ? Math.min(QUERY_MAX_OUTPUT_BYTES + 1, Buffer.byteLength(stderr, 'utf8')) : 0,
         elapsedMs: Math.max(0, Math.min(QUERY_WATCHDOG_MS * 2, Math.round(performance.now() - started))) }));
