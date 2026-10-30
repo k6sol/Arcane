@@ -146,6 +146,9 @@ class MeshData:
         self.uv_report = None
         # Natural rock forms only: per-vertex bake inputs and chart rects (see plan_natural_rock).
         self.bake = None
+        # Natural broadleaf cards retain their exact emitted wood attachment.
+        # This is local geometry metadata, never a source of import authority.
+        self.attachments = None
 
     def vertex(self, co):
         self.vertices.append((float(co[0]), float(co[1]), float(co[2])))
@@ -1140,22 +1143,70 @@ def plan_broadleaf(params, seed, budget_total):
                     total -= costs[x["id"]]
                     stack.extend(c for c in kept if c["parent"] == x["id"])
         return total <= limit, dropped
-    floor = 4
-    attempts = [(p, 9) for p in WOOD_PRESETS[:floor + 1]] + [(p, 2) for p in WOOD_PRESETS[floor:]] + [(WOOD_PRESETS[-1], 1)]
-    for preset, lowest in attempts:
-        ok, dropped = fit(preset, lowest)
-        if ok:
-            break
-    if not ok:
-        raise ValueError("Procedural mesh exceeded its triangle budget or is empty")
-    chosen = preset
-    for a in kept:
-        if a["id"] in dropped:
-            a["kept"], a["dropped"] = False, True
-    sockets()
+    axis_presets, foliage_capacity = None, None
+    if not conifer and density > 0:
+        # Reserve the full, bounded card family, independent of positive density.
+        # The rest is available to real wood, including the existing union margin;
+        # a fixed 45% wood partition discarded all tertiary limbs in the 9 m oak.
+        foliage_capacity = min(CANOPY[params["species"]]["cards"], max(1, int(budget_total * .36) // leaf_triangles()))
+        limit = int((budget_total - (foliage_capacity + 1) * leaf_triangles()) / UNION_RESERVE)
+        axis_presets = {a["id"]: 4 if a["order"] <= 1 else len(WOOD_PRESETS) - 1 for a in kept}
+        # Keep root/scaffold detail when it fits. Small budgets can select a leaner
+        # core before pruning; the trunk is never removed.
+        for core in (4, 6, 7):
+            for a in kept:
+                if a["order"] <= 1:
+                    axis_presets[a["id"]] = core
+            if sum(cost(a, WOOD_PRESETS[core]) for a in kept if a["order"] <= 1) < limit * .9:
+                break
+        def total_cost():
+            return sum(cost(a, WOOD_PRESETS[axis_presets[a["id"]]]) for a in kept if a["kept"])
+        for a in sorted(kept, key=lambda a: (-a["order"], a["radii"][0], a["id"])):
+            if total_cost() <= limit:
+                break
+            if a["order"] == 0:
+                break
+            stack = [a]
+            while stack:
+                child = stack.pop()
+                if child["kept"]:
+                    child["kept"], child["dropped"] = False, True
+                    stack.extend(c for c in kept if c["parent"] == child["id"])
+            sockets()
+        if total_cost() > limit:
+            raise ValueError("Procedural mesh exceeded its triangle budget or is empty")
+        # Spend remaining wood room on useful local detail, rather than applying
+        # the coarsest global preset to the whole tree. Socket rings are already
+        # fixed from the retained hierarchy, so each cost is the emitted cost.
+        total = total_cost()
+        for a in sorted((a for a in kept if a["kept"]), key=lambda a: (a["order"], -a["radii"][0], a["id"])):
+            old = cost(a, WOOD_PRESETS[axis_presets[a["id"]]])
+            for index in range(axis_presets[a["id"]] + 1):
+                new = cost(a, WOOD_PRESETS[index])
+                if total - old + new <= limit:
+                    axis_presets[a["id"]] = index
+                    total += new - old
+                    break
+        chosen = WOOD_PRESETS[axis_presets[0]]
+    else:
+        # Historical bare wood and conifers retain their own fitted allocation.
+        floor = 4
+        attempts = [(p, 9) for p in WOOD_PRESETS[:floor + 1]] + [(p, 2) for p in WOOD_PRESETS[floor:]] + [(WOOD_PRESETS[-1], 1)]
+        for preset, lowest in attempts:
+            ok, dropped = fit(preset, lowest)
+            if ok:
+                break
+        if not ok:
+            raise ValueError("Procedural mesh exceeded its triangle budget or is empty")
+        chosen = preset
+        for a in kept:
+            if a["id"] in dropped:
+                a["kept"], a["dropped"] = False, True
+        sockets()
 
     bark, leaves = MeshData(), MeshData()
     samples, junctions, trunk_vertices, trunk_faces = [], [], 0, 0
+    skin, axis_details = [], []
     strength = profile["flare"]
     turn = rng.uniform(0, 2 * math.pi)
     # Bark-only stream: the strip boundary jitter must not shift the canopy's random draws.
@@ -1163,8 +1214,9 @@ def plan_broadleaf(params, seed, budget_total):
     for a in axes:
         if not a["kept"]:
             continue
-        stations = wood_stations(a, a.get("joint"), chosen[2], a["order"] == 0)
-        n = wood_sides(a["radii"][0], a["order"], chosen[0], chosen[1])
+        detail = WOOD_PRESETS[axis_presets[a["id"]]] if axis_presets is not None else chosen
+        stations = wood_stations(a, a.get("joint"), detail[2], a["order"] == 0)
+        n = wood_sides(a["radii"][0], a["order"], detail[0], detail[1])
         spine = [mul(c, scale) for _, c, _, _ in stations]
         radii = [r * scale for _, _, r, _ in stations]
         heights = [c[2] for _, c, _, _ in stations]
@@ -1175,7 +1227,17 @@ def plan_broadleaf(params, seed, budget_total):
         joint = a.get("joint")
         collar = (joint["rp"] * scale, joint["emerge"] * scale) if joint else None
         uv = bark_tile(params["species"], a["order"], spine, radii[0], n, bark_rng, a.get("kind") == "dead")
+        first = len(bark.vertices)
         bark.tube(spine, radii, n, tip=True, flare=flare, collar=collar, blunt=True, tangents=[t for _, _, _, t in stations], wood_uv=uv)
+        axis_details.append({"id": a["id"], "order": a["order"], "sides": n, "stations": len(stations), "preset": list(detail)})
+        if axis_presets is not None and a["order"] > 0:
+            # Only real outer branch rings can carry foliage. Pruned chains remain
+            # shape guides; they never become attachment points or invented rods.
+            for i in range(max(1, len(stations) // 2), len(stations) - 1):
+                for j in range(n):
+                    skin.append((bark.vertices[first + i * n + j], stations[i][3],
+                                 {"radius": max(TUBE_MIN_RADIUS, radii[i]), "axis": a["id"],
+                                  "vertex": first + i * n + j, "ring": first + i * n, "sides": n}))
         samples += list(zip(spine, radii))
         if joint:
             junctions.append((spine[0], radii[0], joint["rp"] * scale))
@@ -1183,13 +1245,16 @@ def plan_broadleaf(params, seed, budget_total):
             trunk_vertices, trunk_faces = len(bark.vertices), len(bark.faces)
     bark.wood = {"trunkVertices": trunk_vertices, "trunkFaces": trunk_faces, "samples": samples, "junctions": junctions, "scale": scale,
                  "triangleLimit": int(math.floor(bark.triangles() * UNION_RESERVE)),
-                 "preset": list(chosen), "woodAxes": sum(a["kept"] for a in axes), "uvBands": bark_uv_bands(params["species"])}
+                 "preset": list(chosen), "woodAxes": sum(a["kept"] for a in axes), "uvBands": bark_uv_bands(params["species"]),
+                 "axisDetails": axis_details}
 
     if density == 0:
         return bark, leaves
     remaining = max(0, budget_total - bark.wood["triangleLimit"])
     # Atlas cards each carry a whole leaf spray: fewer, larger cards than the budget would allow.
     capacity = min(remaining // leaf_triangles(), CANOPY[params["species"]]["cards"])
+    if foliage_capacity is not None:
+        capacity = min(capacity, foliage_capacity)
     wanted = math.ceil(capacity * density)
     if conifer:
         if wanted <= 0:
@@ -1220,7 +1285,11 @@ def plan_broadleaf(params, seed, budget_total):
             shoots += [(mul(a["points"][i], scale), polyline_tangent(a["points"], i)) for i in range(count // 2, count - 1)]
     if not chains or wanted <= 0:
         raise ValueError("Tree has no foliage anchors within budget")
-    canopy(leaves, CANOPY[params["species"]], chains, tips, limbs, capacity, wanted, rng, shoots)
+    if not skin:
+        raise ValueError("Tree has no emitted outer wood within budget")
+    canopy(leaves, CANOPY[params["species"]], chains, tips, limbs, capacity, wanted, rng, shoots, skin)
+    if bark.wood["triangleLimit"] + leaves.triangles() > budget_total:
+        raise ValueError("Procedural mesh exceeded its triangle budget or is empty")
     return bark, leaves
 
 
@@ -1229,9 +1298,9 @@ def plan_broadleaf(params, seed, budget_total):
 # clusters on the pruned twigs and the order-2/3 remainders. Each card shows one tile of the
 # species leaf-spray atlas (textures.tree_surface), so many leaves ride on few cards. Card size
 # comes from the density-1 capacity, so density only chooses how many clusters (a spread-out
-# prefix) are kept and coverage scales linearly. Cluster centres: wood tips first (they never
-# poke out), then a farthest-point order over the crown shell interleaved with interior clusters
-# for depth. Deep and inner clusters use the atlas's shade row, the rest the sunlit row.
+# prefix) are kept and coverage scales linearly. Farthest-ordered wood-tip targets are
+# interleaved with crown-shell and interior targets; roots belong to emitted branch skin.
+# Deep and inner clusters use the atlas's shade row, the rest the sunlit row.
 CANOPY = {
     # size: cluster size range; per: cards per unit cluster; up/droop: facing bias; cap: dome
     # half-angle (deg); flat: dome depth along its pole; spread: dome radius per card length and
@@ -1288,8 +1357,9 @@ class TwigAnchors:
     spray card is rooted on one, so no spray floats free of a twig; reuse is penalised so sprays
     spread along the twigs instead of stacking on one point."""
 
-    def __init__(self, items, cell):
+    def __init__(self, items, cell, skin=None):
         self.items, self.cell, self.grid, self.uses = items, cell, {}, [0] * len(items)
+        self.skin = skin
         for index, (p, _) in enumerate(items):
             self.grid.setdefault(self.key(p), []).append(index)
 
@@ -1304,7 +1374,7 @@ class TwigAnchors:
         return self.items[best]
 
 
-def canopy(leaves, style, chains, tips, limbs, capacity, wanted, rng, shoots=()):
+def canopy(leaves, style, chains, tips, limbs, capacity, wanted, rng, shoots=(), skin=None):
     points = []
     for order, chain in chains:
         points += chain[1::2] if len(chain) > 2 else chain[-1:]
@@ -1356,40 +1426,61 @@ def canopy(leaves, style, chains, tips, limbs, capacity, wanted, rng, shoots=())
     radii = (high[0] - low[0] + high[1] - low[1]) / 4, (high[2] - low[2]) / 2
     silhouette = math.pi * radii[0] * radii[1]
     spray = math.sqrt(style["area"] * silhouette / (max(1, capacity) * style["aspect"]))
-    roots = TwigAnchors(twigs + list(shoots), spray)
+    roots = TwigAnchors([(p, tangent) for p, tangent, _ in skin] if skin is not None else twigs + list(shoots), spray,
+                        {p: metadata for p, _, metadata in skin} if skin is not None else None)
+    if skin is not None:
+        leaves.attachments = []
     seed_tips = [tips[i] for i in farthest_order(tips, len(tips))]
     shell_order = [shell[i] for i in farthest_order(shell, len(shell), seed_tips)] if shell else []
     inner_order = [inner[i] for i in farthest_order(inner, len(inner), seed_tips + shell_order[:8])] if inner else []
-    # Clusters until the density-1 capacity is used; density keeps a prefix of this order.
+    # Bound tip cover so a larger, genuinely branched tree cannot spend its whole
+    # density prefix on tip clusters. Deficit scheduling is measured in cards,
+    # not cluster count; shell/interior keep their declared relative share.
     queue, si, ii, ti, used = [], 0, 0, 0, 0
+    counts = {"tip": 0, "shell": 0, "inner": 0}
+    weights = {"tip": .2, "shell": .8 * style["shell"], "inner": .8 * (1 - style["shell"])}
     while used < capacity:
-        if ti < len(seed_tips):
-            p, kind = seed_tips[ti], "tip"
-            ti += 1
-        elif ii < len(inner_order) and (si >= len(shell_order) or ii * style["shell"] < (si + ti) * (1 - style["shell"])):
-            p, kind = inner_order[ii], "inner"
-            ii += 1
-        elif si < len(shell_order):
-            p, kind = shell_order[si], "shell"
-            si += 1
-        else:
-            # Every candidate is used (very small trees): cycle again with fresh jitter.
+        available = (["tip"] if ti < len(seed_tips) else []) + (["shell"] if si < len(shell_order) else []) + (["inner"] if ii < len(inner_order) else [])
+        if not available:
             si = ii = 0
-            ti = len(seed_tips)
             if not shell_order and not inner_order:
                 ti = 0
             continue
+        kind = min(available, key=lambda k: (counts[k] / max(weights[k], 1e-9), ("tip", "shell", "inner").index(k)))
+        if kind == "tip":
+            p, kind = seed_tips[ti], "tip"
+            ti += 1
+        elif kind == "inner":
+            p, kind = inner_order[ii], "inner"
+            ii += 1
+        else:
+            p, kind = shell_order[si], "shell"
+            si += 1
         size = rng.uniform(*style["size"]) * (.82 if kind == "inner" else 1.0)
         n = max(4, int(round(style["per"] * size * size)))
         queue.append((p, kind, size, n))
+        counts[kind] += n
         used += n
-    remaining = wanted
+    # Plan the complete card family before taking the density prefix. A partial
+    # final cluster must not change its dome/roots when density changes.
+    remaining = capacity
+    leaves.canopy_kinds = []
     for p, kind, size, n in queue:
         if remaining <= 0:
             break
         n = min(n, remaining)
         remaining -= n
         cluster(leaves, style, p, kind, spray, n, centre, depth(p), rng, roots)
+        leaves.canopy_kinds.extend([kind] * n)
+    leaves.vertices = leaves.vertices[:wanted * 8]
+    leaves.faces = leaves.faces[:wanted * 12]
+    leaves.smooth = leaves.smooth[:wanted * 12]
+    leaves.uvs = leaves.uvs[:wanted * 12]
+    if leaves.normals is not None:
+        leaves.normals = leaves.normals[:wanted * 8]
+    if leaves.attachments is not None:
+        leaves.attachments = leaves.attachments[:wanted]
+    leaves.canopy_kinds = leaves.canopy_kinds[:wanted]
 
 
 def cluster(leaves, style, p, kind, spray, n, centre, deep, rng, roots):
@@ -1448,11 +1539,60 @@ def cluster(leaves, style, p, kind, spray, n, centre, deep, rng, roots):
         first = len(leaves.vertices)
         leaves.card(base, t, face, length, width, max(.0008, width * .01), rect, bend=style["bend"] * rng.uniform(.4, 1.6),
                     droop=style["tipdrop"] * rng.uniform(.5, 1.5), cup=style["cup"])
+        if roots.skin is not None:
+            leaves.attachments.append({"first": first, "root": root, "kind": kind, **roots.skin[root]})
         # Soft mass shading: outward from the cluster's core, leaning to the crown's outside and sky,
         # plus a per-spray tilt so neighbouring sprays catch the light differently.
         mottle = mul(face, rng.uniform(-.1, .35))
         for v in leaves.vertices[first:]:
             leaves.normals.append(norm(add(add(add(norm(sub(v, core)), mul(out, style["soft"])), mul(UP, .25)), mottle)))
+
+
+def attach_leaf_cards(data, nearest):
+    """Recheck each planned skin root against the actual emitted/unioned bark.
+
+    Only the small local fairing displacement is allowed. Never repair a missing
+    limb by moving a spray to the trunk or inventing a connecting rod. The caller
+    supplies the native mesh query; the checked translation keeps UVs/topology.
+    """
+    moves = []
+    for attachment in data.attachments or ():
+        first, root, radius = attachment["first"], attachment["root"], attachment["radius"]
+        hit = nearest(root)
+        if hit is None or len(hit) != 3 or any(not math.isfinite(v) for v in hit):
+            raise ValueError("Foliage has no emitted wood skin at its planned root")
+        delta = sub(tuple(hit), root)
+        if math.sqrt(dot(delta, delta)) > max(2e-5, radius * .5):
+            raise ValueError("Foliage root moved outside its emitted branch skin")
+        moves.append((first, delta))
+    # Validate every attachment before changing any card.
+    for first, delta in moves:
+        data.vertices[first:first + 8] = [add(v, delta) for v in data.vertices[first:first + 8]]
+
+
+def rebind_leaf_cards(parts):
+    """Carry an exact wood-vertex binding through variant deformation and floor shift.
+
+    Bark vertices are neither deleted nor reordered by the variant transform.
+    Whole-card damage is remapped before that transform; no nearest-guide guess
+    can silently change which original branch carries a surviving card.
+    """
+    bark = next((data for key, _, data in parts if key == "bark"), None)
+    for key, _, data in parts:
+        if key != "leaves" or data.attachments is None:
+            continue
+        if bark is None:
+            raise ValueError("Foliage has no emitted wood skin")
+        for attachment in data.attachments:
+            first = attachment["first"]
+            root = bark.vertices[attachment["vertex"]]
+            base = mul(add(data.vertices[first], data.vertices[first + 5]), .5)
+            delta = sub(root, base)
+            data.vertices[first:first + 8] = [add(v, delta) for v in data.vertices[first:first + 8]]
+            ring = bark.vertices[attachment["ring"]:attachment["ring"] + attachment["sides"]]
+            centre = tuple(sum(v[k] for v in ring) / len(ring) for k in range(3))
+            attachment["root"] = root
+            attachment["radius"] = max(math.dist(v, centre) for v in ring)
 
 
 # ------------------------------------------------------- natural conifer ---
@@ -2723,7 +2863,21 @@ def plan(request):
     else:
         parts = [("foliage", "primary", plan_foliage(params, seed, budget))]
     if post is not None:
+        foliage = next((data for key, _, data in parts if key == "leaves" and data.attachments is not None), None)
+        if foliage is not None:
+            # Damage removes whole cards and remaps their vertices, while their
+            # authored normals/UVs survive unchanged. Use that exact card identity
+            # to carry bindings through the ORIGINAL single deformation call;
+            # pre-damaging would incorrectly change its global height bounds.
+            def identity(first):
+                return (tuple(foliage.normals[first:first + 8]), tuple(foliage.uvs[first // 8 * 12:first // 8 * 12 + 12]))
+            bindings = {identity(a["first"]): a for a in foliage.attachments}
+            if len(bindings) != len(foliage.attachments):
+                raise ValueError("Foliage card bindings are not unique")
         variation.deform(parts, post)
+        if foliage is not None:
+            foliage.attachments = [{**bindings[identity(i)], "first": i} for i in range(0, len(foliage.vertices), 8)]
+            foliage.canopy_kinds = [a["kind"] for a in foliage.attachments]
     total = sum(p[2].triangles() for p in parts)
     if total > budget or any(not p[2].faces for p in parts):
         raise ValueError("Procedural mesh exceeded its triangle budget or is empty")
@@ -2734,6 +2888,7 @@ def plan(request):
         if p[2].wood is not None:
             p[2].wood["samples"] = [((c[0], c[1], c[2] - floor), r) for c, r in p[2].wood["samples"]]
             p[2].wood["junctions"] = [((c[0], c[1], c[2] - floor), r, rp) for c, r, rp in p[2].wood["junctions"]]
+    rebind_leaf_cards(parts)
     if params.get("finish") == "natural":
         engine_uvs(request, parts)
     return parts
@@ -3250,7 +3405,21 @@ def build(request, make_material, make_collection, select, make_box):
     group = make_collection("COL_Procedural")
     colors = {"primary": request["color"], "secondary": params.get("secondaryColor") or request["color"]}
     main = []
+    bark_skin = None
     for key, color_key, data in plan(request):
+        if data.attachments is not None:
+            if bark_skin is None:
+                raise ValueError("Foliage has no emitted wood skin")
+            # Query this build's final union/fallback mesh, before any leaf mesh
+            # exists. Arbitrary fallback polygons must be triangulated by BVH.
+            from mathutils import Vector
+            import mathutils.bvhtree
+            tree = mathutils.bvhtree.BVHTree.FromPolygons([v.co for v in bark_skin.vertices],
+                                                      [tuple(f.vertices) for f in bark_skin.polygons], all_triangles=False)
+            def nearest(root):
+                location, _, _, _ = tree.find_nearest(Vector(root))
+                return tuple(location) if location is not None else None
+            attach_leaf_cards(data, nearest)
         metallic, roughness = MATERIALS[key]
         if params.get("finish") == "natural" and key in ("leaves", "foliage", "stone"):
             roughness = .8
@@ -3297,6 +3466,8 @@ def build(request, make_material, make_collection, select, make_box):
             obj["arcane_uv_intent"], obj["arcane_uv_texture"] = data.uv_report["intent"], data.uv_report["textureSize"]
         mesh.materials.append(mat)
         main.append(obj)
+        if key == "bark":
+            bark_skin = mesh
     bpy.context.view_layer.update()
     points = [v.co for obj in main for v in obj.data.vertices]
     low = [min(p[k] for p in points) for k in range(3)]

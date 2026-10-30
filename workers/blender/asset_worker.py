@@ -57,6 +57,9 @@ def failure_report(error):
         code = "MESH_REPAIR"
     elif text in ["Review render is empty, uniform or nonfinite", "Tree structure render dimensions changed"]:
         code = "RENDER_CONTENT"
+    elif text in ["Foliage has no emitted wood skin", "Foliage has no emitted wood skin at its planned root",
+                  "Foliage root moved outside its emitted branch skin"]:
+        code = "FOLIAGE_ATTACHMENT"
     elif text == "Saved scene failed reopen validation":
         code = "SCENE_REOPEN"
     elif text.endswith(" export round trip failed"):

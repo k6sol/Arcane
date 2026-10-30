@@ -79,6 +79,10 @@ test('malformed and arbitrary worker failures fall back to stage plus observed e
   assert.equal(structure.diagnostic?.artifactPath, 'preview-structure.png');
   assert.deepEqual(decodeAssetJobError({ code: structure.code, message: structure.message, diagnostic: structure.diagnostic }).diagnostic, structure.diagnostic);
   assert.equal(workerFailure(output({ ...report, artifactPath: '../private.blend' }), 'export').diagnostic?.reasonCode, 'WORKER_EXIT');
+  const attachment = workerFailure(output({ schemaVersion: 1, stage: 'blockout', reasonCode: 'FOLIAGE_ATTACHMENT', exceptionType: 'ValueError' }), 'generate');
+  assert.equal(attachment.diagnostic?.reasonCode, 'FOLIAGE_ATTACHMENT');
+  assert.match(attachment.message, /final emitted branch surface/);
+  assert.deepEqual(decodeAssetJobError({ code: attachment.code, message: attachment.message, diagnostic: attachment.diagnostic }).diagnostic, attachment.diagnostic);
 });
 
 test('journal decoder accepts legacy errors and rejects forged diagnostic text, paths and unbounded counters', () => {

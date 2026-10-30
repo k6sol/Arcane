@@ -6,6 +6,12 @@ import {DIAGNOSTIC_MAX_BYTES} from '../../packages/diagnostics/src/report.js';
 
 const input = {schemaVersion: 1, eventId: '8e6bc8a1-a0ea-4823-8998-0f82d14469ba', occurredAt: 1792500000000,
   component: 'blender', stage: 'texture-authoring', code: 'MEMORY_LIMIT', context: {exceptionType: 'MemoryError', exitCode: 1, triangleBudget: 16000}};
+
+test('a foliage contact refusal retains its finite stage and reason in the central report contract',()=>{
+  const event=diagnosticEvent({...input,stage:'blockout',code:'FOLIAGE_ATTACHMENT'});
+  assert.equal(event.stage,'blockout');assert.equal(event.code,'FOLIAGE_ATTACHMENT');
+  assert.equal(DIAGNOSTIC_REASONS[event.code],'Foliage could not remain attached to the final emitted branch surface.');
+});
 test('a report identifies the real failing stage, safe exception class and useful numeric context', () => {
   const event = diagnosticEvent(input);
   assert.equal(event.stage, 'texture-authoring'); assert.equal(event.code, 'MEMORY_LIMIT');

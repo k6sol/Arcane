@@ -96,6 +96,11 @@ jobs:
         run: python tests/unit/tree_structure_review_test.py
       - name: Verify bounded native tree failure evidence
         run: node --test tests/native/tree-structure-evidence.test.mjs
+      - name: Verify branch budgets and emitted foliage attachments
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+          PYTHONUTF8: '1'
+        run: python tests/unit/tree_budget_allocation_test.py
       - name: Verify safe worker failure classification
         env:
           PYTHONDONTWRITEBYTECODE: '1'

@@ -138,6 +138,7 @@ const REASONS: Record<string, string> = {
   MESH_REPAIR: 'Generated mesh required structural repair and was rejected.',
   MESH_AUDIT: 'Structural mesh validation rejected the generated geometry; inspect the per-mesh audit.',
   RENDER_CONTENT: 'Review render was empty, uniform or contained nonfinite pixels.',
+  FOLIAGE_ATTACHMENT: 'Foliage could not remain attached to the final emitted branch surface.',
   SCENE_REOPEN: 'Reopened scene geometry differs from the validated generated scene.',
   EXPORT_ROUNDTRIP: 'Reimported export geometry failed triangle-count or finite-position validation.',
   IMPORT_IDENTITY: 'Exported object or anchor identities failed verification.',

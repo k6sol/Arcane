@@ -117,7 +117,7 @@ def request(params, budget=20000, seed=7):
 
 
 # Natural broadleaf (bark, leaves) triangle counts at 16000, seed 7, height 9, three levels.
-BASELINE = {("oak", 0.7): (6178, 3864), ("oak", 0.0): (10934,), ("birch", 0.7): (6468, 3528), ("birch", 0.0): (12362,)}
+BASELINE = {("oak", 0.7): (9514, 3864), ("oak", 0.0): (10934,), ("birch", 0.7): (9952, 3528), ("birch", 0.0): (12362,)}
 
 
 class GeneratorContract(unittest.TestCase):
