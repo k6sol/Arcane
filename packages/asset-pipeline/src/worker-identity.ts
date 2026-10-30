@@ -72,7 +72,7 @@ export const WORKER_QUERY_SCRIPT = [
   "  [Reflection.FieldInfo[]]$fields = @('EntryPoint','SetLastError','ExactSpelling','CharSet','CallingConvention') | ForEach-Object { $attributeType.GetField($_) }",
   "  $imports = @{}",
   "  function Bind([string]$name, [type]$returnType, [type[]]$parameters) {",
-  "    $method = $typeBuilder.DefinePInvokeMethod($name, 'kernel32.dll', $name, [Reflection.MethodAttributes]'Public,Static,PinvokeImpl', [Reflection.CallingConventions]::Standard, $returnType, $parameters, [Runtime.InteropServices.CallingConvention]::Winapi, [Runtime.InteropServices.CharSet]::Unicode)",
+  "    $method = $typeBuilder.DefineMethod($name, [Reflection.MethodAttributes]'Public,Static,PinvokeImpl', [Reflection.CallingConventions]::Standard, $returnType, $parameters)",
   "    [object[]]$values = @($name, $true, $true, [Runtime.InteropServices.CharSet]::Unicode, [Runtime.InteropServices.CallingConvention]::Winapi)",
   "    $method.SetCustomAttribute([Reflection.Emit.CustomAttributeBuilder]::new($constructor, [object[]]@('kernel32.dll'), $fields, $values))",
   "    $method.SetImplementationFlags($method.GetMethodImplementationFlags() -bor [Reflection.MethodImplAttributes]::PreserveSig)",
