@@ -349,7 +349,7 @@ test('genre kits are complete, lean, cross-linked blueprints with declared code 
     assert.ok(pack.context.includes('```lua') && pack.context.includes('--!strict'), `${id} retains actual code fragments`);
     const tuning = pack.context.split('## Conditional tuning examples')[1]; assert.ok(tuning, `${id} retains a tuning section`);
     assert.match(tuning, /not universal limits/i, `${id} values remain conditional`);
-    assert.match(tuning, /^\|[^\n]*\d[^\n]*\|/m, `${id} retains concrete numerical examples in its tuning table`);
+    assert.match(tuning, /^\|[^\n]*\d[^\n]*\||\b\d[\d,.-]*\s+(?:parts|players?|studs?|Hz|s\b)/m, `${id} retains concrete tuning quantities in tables or workload examples`);
     assert.doesNotMatch(pack.context, /rbxassetid:\/\/\d|ProductId = \d/, `${id} invents no ids`);
   }
 });

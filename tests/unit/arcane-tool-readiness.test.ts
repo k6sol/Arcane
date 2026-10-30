@@ -63,7 +63,7 @@ test('native asset readiness requires adoption, conversion, preparation, staging
  assert.throws(()=>requireArcaneBuildTools([row(ARCANE_TOOL_NAMES),inherited],true),{code:'MCP_CAPABILITIES'});
 });
 test('managed task instructions keep builds fast, token-lean, natural and DataStore-safe',()=>{
- for(const text of ['scene_build','environment_apply','plan once','few large batches','never re-read unchanged state','never rings or grids','Terrain ground','PLUGIN_UPDATE_REQUIRED',
+ for(const text of ['scene_build','environment_apply','plan once','few large batches','never re-read unchanged state','Poisson-disk scatter','ordered rows only if requested','Terrain ground','PLUGIN_UPDATE_REQUIRED',
    'never wipe, rename or migrate existing keys','UpdateAsync','session locking','BindToClose'])assert.ok(ARCANE_TASK_INSTRUCTIONS.toLowerCase().includes(text.toLowerCase()),text);
  assert.ok(ARCANE_TOOL_NAMES.includes('scene_build')&&ARCANE_TOOL_NAMES.includes('environment_apply'));
  for(const text of ['conversation context','shorthand and follow-ups','Reply naturally','omit internal reviews'])assert.ok(ARCANE_TASK_INSTRUCTIONS.includes(text),text);

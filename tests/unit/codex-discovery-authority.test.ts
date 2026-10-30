@@ -16,7 +16,7 @@ import {connectCodexProposalWorker} from '../../packages/codex-client/src/index.
 const TOKEN = 'a4'.repeat(32), AMBIENT = 'b5'.repeat(32);
 const DAEMON = 'http://127.0.0.1:47831';
 const MODULES = [
-  ...['index', 'mcp-profile', 'mcp-isolation', 'session', 'transport', 'types', 'validation', 'history', 'reference-images', 'rate-limits','proposal-result','tool-call'].map(name => 'codex-client/src/' + name + '.js'),
+  ...['index', 'mcp-profile', 'mcp-isolation', 'session', 'transport', 'types', 'validation', 'history', 'reference-images', 'rate-limits','proposal-result','tool-call','tool-failure'].map(name => 'codex-client/src/' + name + '.js'),
   ...['scenario-image', 'scenario-limits'].map(name => 'studio-test-controller/src/' + name + '.js'),
   'protocol/src/arcane-tools.js', // Imported by the unmodified production isolation module.
 ];
