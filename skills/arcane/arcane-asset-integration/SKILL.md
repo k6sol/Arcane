@@ -1,17 +1,29 @@
 ---
 name: arcane-asset-integration
-description: "Validate and import Roblox models, textures, audio and animations while preserving ownership, stable mappings and gameplay children."
+description: "Integrate and revise original assets through the actual supported Arcane import route while preserving provenance, ownership, mappings, authored gameplay children and honest persistence state."
 license: MIT
 ---
 
-# Ownership-aware assets and reimport
+# Assets that survive the handoff
 
-## Prove the actual route
-Inspect format, creator context, target universe and supported upload/import capabilities. Model/package return values and raw mesh IDs are not interchangeable. Use a small asymmetric fixture to prove hierarchy, axes, scale and materials before processing a large batch. In live Studio, Creator Store models go through `studio_asset_search` + `studio_asset_insert` (free only, scripts stripped, fitted, grounded, one receipt); local meshes only through the advertised `assets_*` import tools and their returned proofs.
+## Prove the supported contract
+Identify the exact project/conversation, target session, format and intended use: static prop, animated rig, wearable, audio or texture. Read advertised capabilities and current tool responses. A route supporting static embedded GLB does not imply support for rigs, animation, arbitrary shaders or uploads. A model/package result and a raw asset ID are different things.
 
-Record source/export hashes, logical object IDs, pivots, moving pieces, collision data and licences in a manifest. Reuse unchanged uploads only within valid ownership/permission scope. Do not consider operation completion equivalent to moderation approval or actual loading.
+Author original model geometry, UVs, textures and PBR in Blender. Keep editable source and a manifest of logical object IDs, source/export hashes, units, axes, pivots, moving pieces, sockets, collision and map roles. Toolbox/free assets require an express request and the applicable human setting; inspect their provenance and strip/review scripts under the actual route. General game-building or realism authorization is insufficient.
 
-Update the existing mapping; preserve separately owned scripts, attachments and constraints. Removed source objects require deliberate handling, not blind deletion. Quarantine/review inserted marketplace scripts before enabling them.
+Use a small asymmetric asset to validate orientation, measured scale, UV/material mapping and collision before a large batch, without adding unrequested people or scale figures. Preserve useful existing geometry and independent gameplay children.
 
-## Verification
-Inspect measured bounds and multi-view engine captures, interact with the imported object and test a changed-only reimport. Simulate permission failure, interrupted operation and deleted/reparented children. Reconcile existing operation IDs before retry. Publishing follows the user's policy and required rights certification.
+## Follow the real state transitions
+For managed Blender generation use assets_start or assets_procedural, inspect assets_jobs and assets_preview, and retain exact-model human approval. Native original GLB authoring requires real filesystem/process capability, workspace permission and the advertised assets_adopt_glb then assets_convert_glb route. No skill supplies these capabilities.
+
+Only when advertised and authorized, follow assets_prepare_studio_import, assets_stage_studio_import, assets_reconstruct_studio_import and assets_place_studio_import. Preparation is a plan; sealed packets are CPU evidence; detached reconstruction is not scene placement or visual acceptance. The host owns target, baseline and source authority. Do not fabricate receipts or supply IDs/hashes as permission.
+
+After a timeout/unknown result inspect the corresponding assets_jobs or staging/reconstruction/revision status. Unknown is not confirmed failure or success and does not authorize replay, duplicate adoption, reconstruction or placement. Preserve the original workspace/conversation and unsupported-conversion refusals.
+
+## Revisions and resource lifetime
+Use assets_apply_studio_revision only for its actual prepared converted-model baseline flow after staging/reconstruction; inspect assets_studio_revision_status on ambiguity. Update stable logical mappings instead of placing a duplicate root. Preserve separately authored scripts, attachments, constraints and gameplay state. Removals require deliberate review, not broad deletion.
+
+Session meshes and editable PBR images are not durable published assets. The human Keep action can upload geometry to their account under its own confirmation; it does not establish image-map persistence. Agents cannot approve the model, trigger that human upload or certify publication rights. Moderation, ownership permissions, loading and saved/reopened behavior remain separate checks.
+
+## Acceptance
+Inspect actual engine bounds, axes, pivot, textures/alpha and collision in multiple views; exercise the relevant gameplay consumer. Test a changed-only revision, conflicting/reparented child and interrupted/permission-refused path without automatic retry. Reopen or enter Play only within authorization and verify any persistence claim there. Report exact failed stage/reason, supported subset, preserved children and unresolved resource lifetime. A successful operation record or beauty render is not the final functional asset gate.

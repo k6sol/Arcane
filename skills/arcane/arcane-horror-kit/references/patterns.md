@@ -1,5 +1,15 @@
 # Horror code patterns (--!strict, server decides, client renders)
 
+## Integration boundary: timing fragments are not a horror director
+
+The retained samples assume actual Config, helpers, rigs and authorized media. They do not supply a finished threat/objective system or prove suspense. Begin with readable danger, a useful objective and fair recovery, then author the requested route/chapter variation and resolution. Do not transplant a stalker/jump-scare formula into a different horror brief.
+
+Own every loop, delayed scare, path callback, camera offset and audio duck by the current player/scene epoch. The shown while loops require cancellation/teardown integration. Repeated triggers, death, map unload and interrupted hiding must release only their own state and restore controls; a character cannot remain anchored after the sequence ends. Verify finite direction/zero-distance perception, actual occlusion, remembered last-known position and a way to disengage. The hiding paragraph and simplified canSee fragment are not a completed seen-entry exception.
+
+Audio ducking/recovery must handle overlapping/interrupted cues without accumulating lower volume or restoring another system's changed mix. Use real authorized sounds and actual rig/animation assets; a placeholder Stingers folder or shake helper does not count as delivery. Keep essential clues visible and subtitled, with reduced motion/flash options and no total-darkness test shortcut.
+
+Play a complete objective chain, actual detection/escape/catch and checkpoint retry, then observe tension/relief without narration. Test blocked paths, seen hiding, duplicate trigger, cooperative shared objects and unloading during delayed playback. A LastScare attribute or ScareFrame assertion proves only that signal, not navigation, fair pursuit, a finished chapter roster or player fear.
+
 Scripts start disabled (`scene_create` + `script_update`), then `script_read` + `script_set_enabled`. Rig, pathfinding (`pcall` around `ComputeAsync`, waypoint walking, stuck recovery) and animation: `arcane-characters`.
 
 ## HorrorConfig
@@ -107,3 +117,21 @@ end
 
 ## Hiding
 A ProximityPrompt on each locker (`Hide`, HoldDuration 0.3): the server checks distance, sets `Hidden = true`, anchors the HumanoidRootPart inside the locker; leaving reverses it. If the stalker saw the player enter within 2 s, `Hidden` does not protect.
+
+## Conditional tuning examples from the original kit
+
+These inherited figures describe one starting configuration, not universal limits, verified performance or required mechanics. Choose relevant values for the actual brief, bind total resources to the intended audience/device and measure them in real play. Vehicle/platform motion, threat readability and commerce/persistence still require the integration checks above. Do not weaken supported-tool or production bounds to fit an example.
+
+### Tension and pacing (Director)
+| Phase | Duration | Allowed |
+|---|---|---|
+| Calm | 60-120 s | ambient creaks, distant sounds |
+| Build | 30-60 s | close stingers, light flicker |
+| Peak | 10-30 s | jump scare or chase |
+| Relief | 20-40 s | safe room, no scares |
+- Tension 0-100: +2/s in dark, +10 on noise, -5/s in light or safe room. Peak when >= 70 and >= 90 s since last peak.
+- Jump scares: max 1 per 3 min per player, never twice from the same trigger, preceded by 2-4 s of silence (duck ambience -12 dB). Visual 0.6-1.2 s; stinger peak <= Volume 1.2 in SFX group.
+- Fake-outs (sound only) 2:1 to real scares.
+
+### Performance budgets
+<= 20 shadow-casting lights visible at once (others Shadows false), <= 12 looping 3D sounds, 1 stalker per 4-6 players, path recompute <= 2/s, Atmosphere Density 0.45-0.6 (not fog walls), <= 15k parts with StreamingEnabled.

@@ -1,26 +1,27 @@
 ---
 name: arcane-blender-props
-description: "Author game-ready Blender props and mechanical models from references with controlled silhouette, scale, moving parts and engine validation."
+description: "Author original Blender props and mechanical models with purposeful form, UV/PBR detail, moving-part contracts and verified game-scale interaction."
 license: MIT
 ---
 
-# Reference-driven Blender props
+# Original props from silhouette to use
 
-## Define a modelable brief
-Read references, intended use, dimensions, viewpoint and moving/interactable components. Mark essential silhouette and proportion relationships; resolve missing dimensions with transparent assumptions rather than silently inventing a complex design.
+## Turn the brief into geometry
+Identify the object's role, real or stylized dimensions, principal viewpoints, contact surfaces and moving/interactable pieces. Read existing references and approved project art. Make missing proportions explicit; do not replace a difficult requested shape with an unrelated stock assembly.
 
-Create primary/secondary blockout forms and fixed review views before small fasteners/wear. Build mechanical separations as actual named geometry with sensible pivots, not texture illusions. Bevels/normals and material variation must work at expected game scale.
+Block primary masses, then secondary construction, then tertiary detail. Check front, side and three-quarter silhouettes before fasteners or wear. Model meaningful thickness, bevel scale, negative spaces and structural joins. Separate doors, hinges, wheels, grips or removable parts as named geometry with deliberate pivots. Surface noise cannot repair a wrong profile or fused moving mechanism.
 
-Use reproducible scripts or modifiers where they improve iteration; preserve a source file/checkpoints. Validate transforms, degenerate geometry, names, UV requirements and chosen budgets. A material-only change does not fix poor geometry.
+For a set, share a construction language and material family while varying function and silhouette. Plan attachment sockets, collision clearance, interaction origin, orientation and floor/grip pivot with the gameplay consumer. An attractive vehicle shell or weapon prop is not a working vehicle or combat system.
 
-## Verification
-Render multiple controlled views and check measured dimensions. Export through a verified target route, inspect axis/scale/materials in Studio and test interaction clearance. Keep approved geometry stable during revisions. Do not call a beautiful render an imported, usable asset.
+## Choose a faithful available route
+Models, UVs, textures and PBR are authored in Blender. Use assets_start for supported bounded custom assemblies, or assets_procedural only when its generator/spec can faithfully express the brief. For a spec, read [model-spec](references/model-spec.md) through its declared skills_get reference arcane-blender-props:model-spec before building the graph. Guidance or experimental opt-in grants no execution or approval authority.
 
-## Model specs in Arcane
-Choose the route from the requested geometry, proportions, materials and moving parts. Use `assets_start` custom assemblies/closed meshes or `assets_procedural` generators/specs when their bounded representation can faithfully express the brief. A missing dedicated generator does not make a stock assembly or a different scene an acceptable substitute.
+If the actual native client has filesystem/process capability, workspace permission and advertised native GLB tools, author the original Blender source, retain checkpoints, and export an owned project-relative GLB with embedded resources. Use assets_adopt_glb, then assets_convert_glb for the managed parent in the original conversation/workspace scope. MCP-only clients gain no Python, shell or Blender process access from this skill. If neither representation is faithful and available, report the concrete limitation instead of substituting primitives or Toolbox/free assets; those assets require an express request.
 
-For a faithful part graph, use `assets_procedural` with `generator.kind:"spec"`. Load its declared format first with `skills_get`, ids `["arcane-blender-props"]`, references `["arcane-blender-props:model-spec"]` and `allowExperimental:true`. This is the bundled recommendation policy's explicit opt-in to experimental guidance, not skill approval or execution permission. Build, inspect the review sheet and measured metrics from `assets_preview`, then refine the geometry/spec; material tweaks alone do not fix a wrong silhouette.
+## Surface and delivery
+Place UV seams on construction boundaries where possible. Check a density/checker view for stretch, mirrored normal artifacts and padding. Author purposeful base colour, roughness, metalness and normal detail at expected viewing distance; bake procedural nodes when the supported export needs images. Inspect actual embedded maps and material factors, not only the Blender shader.
 
-When the actual native client has filesystem/process capabilities, current workspace permission for authoring, and advertised native GLB tools, author original geometry, UVs and PBR in Blender from the brief/references. Retain the original source/checkpoints and export an owned project-relative GLB with embedded resources. Use `assets_adopt_glb` for that file, then `assets_convert_glb` for the managed adopted parent. Preserve the original workspace/conversation scope and unsupported-conversion refusals; do not weaken validation, re-adopt or replay after an unknown acknowledgement. Inspect `assets_jobs` in the same scope instead. Conversion completion is neither human approval nor Studio acceptance; follow exact-model human review and the existing host-scoped delivery flow.
+Poll assets_jobs after acknowledgement or ambiguity; never start a duplicate automatically. Inspect assets_preview geometry sheets and measured dimensions. Human approval belongs to the exact reviewed model. Follow the current prepare/stage/reconstruct/place or revision flow and its capability/refusal boundaries; no step alone proves engine acceptance or persistence.
 
-MCP-only clients do not gain shell, Python or Blender execution from this skill. If no faithful bounded recipe and no permitted native authoring route are available, report that concrete capability limit. Do not silently replace the requested object with a forest, template or Toolbox asset; Toolbox models still require an explicit user request. Preview and actual engine evidence must support any quality or import claim.
+## Acceptance
+Measure key dimensions, rotated bounds and pivot; inspect neutral multi-view shading, topology, UV seams and exported maps. In the engine, compare axes/scale/material response and test the intended interaction through its full travel: open/close, equip/use, rotation, collision and approach clearance as applicable. Preserve approved geometry on material-only revisions and independently owned scripts/attachments on reimport. State untested functionality, failed stage/reason and session-only resources explicitly; a polished render is not a functioning imported prop.

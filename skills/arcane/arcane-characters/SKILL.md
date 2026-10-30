@@ -1,45 +1,29 @@
 ---
 name: arcane-characters
-description: "NPCs and characters that look and behave well: R15 rigs from HumanoidDescription, default animations, AnimationController creatures, pathfinding, idle/patrol/chase/attack/flee state machines, ProximityPrompt dialogue, a pet or follower that follows the player, network ownership and server authority."
+description: "Build original characters and NPC presentation that fit their gameplay roles, with a genuine rig, readable animation, server-owned behavior and tested dialogue/follower integration."
 license: MIT
 ---
 
-# NPCs and characters
+# Characters with a role, body and working behavior
 
-Compiled code: `skills_get` ids ["arcane-characters"], allowExperimental true, one reference at a time: `arcane-characters:npc-rig` ([npc-rig](references/npc-rig.md): spawner, Animator blending, throttled manager), `:npc-ai` ([npc-ai](references/npc-ai.md): pathing Mover, state Brain), `:dialogue` ([dialogue](references/dialogue.md): server + UI client), `:pets` ([pets](references/pets.md): saved pets, followers).
+## Define the character's job
+Determine whether the request is a player appearance, ambient actor, enemy, quest giver, creature or companion. Specify silhouette, scale, personality, movement envelope, interaction distance and the gameplay facts it must communicate. For a full game, give important roles distinct readable shapes and motion while sharing the art direction. Do not add decorative characters or scale figures to unrelated asset tasks.
 
-## Rigs
-- Server Script: `Players:CreateHumanoidModelFromDescription(desc, Enum.HumanoidRigType.R15)` gives a full R15 Model (Motor6Ds, Humanoid); `PivotTo` a marker, parent to `workspace.NPCs`.
-- `scene.characters` lets `scene_build`/`scene_create` make only `Humanoid`, `HumanoidDescription` (colours, scales; e.g. in `ServerStorage.Looks`), `AnimationController` and `Animator`. No joints, so a parts Model is not a walking rig. ProximityPrompt, PathfindingModifier and PathfindingLink come from scripts.
-- One palette per role. Clothing/accessory ids only from the user or `studio_asset_search`; a Creator Store `R15 rig` only on request.
+Author custom bodies, UVs, textures and PBR in Blender when needed; use a faithful available authoring route and retain source. A permitted existing platform rig/description can supply its actual supported skeleton. Clothing, accessories and animation IDs must come from the user, project or an expressly authorized source; never guess IDs or search Toolbox/free assets by default.
 
-## Animation
-- Never invent animation ids. Verifiable R15 `Animate` defaults: idle 507766666, walk 507777826, run 507767714, jump 507765000, fall 507767968, climb 507765644; confirm via `character.Animate.walk.WalkAnim.AnimationId` in a playtest. Otherwise (custom/R6 packs, attacks, emotes) ask the user for ids, or use TweenService on a welded anchored root.
-- `LoadAnimation` once per clip on the `Animator`; priority Idle < Movement < Action; blend walk/run with `AdjustWeight`, `AdjustSpeed(speed / 16)`.
+Inspect the real hierarchy and animation controller. scene.characters can create supported Humanoid/description/controller instances, but a parts Model without the necessary joints is not a walking rig. Static mesh conversion does not establish skinning or animation import support. Report an unsupported rig route rather than disguising a rigid tween as a completed walking character.
 
-## Pathfinding
-- `PathfindingService:CreatePath` with `AgentRadius`/`AgentHeight` sized to the rig, `Costs` (`Danger = math.huge` modifiers). `pcall` `ComputeAsync`; only `PathStatus.Success` continues. `PathWaypointAction.Jump` jumps; re-issue `MoveTo` before the 8 s `MoveToFinished` timeout; `path.Blocked` ahead of the current waypoint replans.
-- Stuck detection: < 1 stud in 1.5 s -> jump + replan; 3 times -> Return home.
+## Connect the visual and behavioral contracts
+Use named root, joints, attachment/grip points, navigation size, collision and hit/interaction targets. Separate cosmetic motion from server decisions about perception, damage, rewards and dialogue choices. Character animation markers may drive local effects; they do not authorize damage from a client.
 
-## States
-| State | Leave |
-|---|---|
-| Idle | 2-4 s -> Patrol; target seen (40 studs, 120 degree cone, clear Raycast) -> Chase |
-| Patrol | `Waypoints` parts in order; seen -> Chase |
-| Chase | in 5 studs -> Attack; lost 3 s -> Return; Health < 30% -> Flee |
-| Attack | 1.2 s cooldown, server `TakeDamage` after its own reach check |
-| Flee | 30 studs away, then Return -> Idle |
-The server decides perception, damage, rewards and dialogue outcomes. Clients only display them.
+Build only the needed states, with explicit entry/exit and interruption: idle, travel, investigate, chase, attack, flee, return, talk or follow. Tune reach, cooldown, perception and home/leash distance for the actual role. Use path success, blocked-path replanning and bounded stuck recovery rather than assuming every MoveTo arrives. Reset targets and tracks on death, despawn and replacement.
 
-## Dialogue and pets
-- Server `ProximityPrompt` (Talk, 10 studs, HoldDuration 0); panel via `scene_build` (`arcane-interface`); the server tracks each player's node and validates choice index and distance (`arcane-gameplay-systems`).
-- Pets save only `{ kind }` under server uids in the session-locked profile (`arcane-datastore-safety`), capped; bonuses come from saved data.
+Load verified clips on the actual Animator, reuse tracks, select priorities and blend locomotion by measured speed. Discover existing default animations from the actual rig rather than copying remembered asset numbers. Check grounded feet, turn behavior, attack anticipation and recovery. Custom creature and grip work belongs with arcane-rig-animation.
 
-## Performance and ownership
-- `SetNetworkOwner(nil)` on NPC parts (pcall); a cosmetic pet may be player-owned.
-- One Heartbeat manager: 0.1 s ticks near players, 0.75 s far, sleep beyond 250 studs; at most 4 path computes per frame; ~20-30 moving Humanoids per server.
-- StreamingEnabled: `ModelStreamingMode` Atomic; client code handles NPCs streaming in/out (CollectionService), never waits forever.
-- Perception design `arcane-npc`; Blender creatures `arcane-rig-animation`.
+## Dialogue, companions and load
+Dialogue needs a server-owned node/choice contract, distance/eligibility validation, a real GUI state and cancel/close behavior. Companions need follow spacing, obstacle recovery, spawn/despawn and only authorized saved state; cosmetic network ownership must not control bonuses or rewards.
 
-## Verify
-Enable with `script_set_enabled` after review. Test NPC 12 studs ahead; `playtest_request` (`hold-key` W, `hold-key` E) and `assert-player-attribute` TalkedTo or ChasedBy. Then the `arcane-playtest-qa` script check loop (at most 3 fixes). Report flee, respawn, pet rejoin and load as untested unless checked.
+Choose explicit server ownership for gameplay-critical NPC physics where supported; cosmetic ownership must not decide hits. Throttle AI/perception/path queries according to distance and measured population; use a manager and clean up tracks, connections and tasks. Handle streamed-out/replaced actors without indefinite waits. Load the existing declared [npc-rig](references/npc-rig.md), [npc-ai](references/npc-ai.md), [dialogue](references/dialogue.md) or [pets](references/pets.md) reference only for that mode; validate its assumptions against current capabilities and project state.
+
+## Acceptance
+With the supported human-approved playtest flow, observe the real actor moving through its route, encountering an obstacle, entering/exiting interaction and recovering after interruption. Check contact/hit timing, denied dialogue choice, loss of target, respawn and observer view where relevant. Measure a representative population, path failures and runtime errors. State exactly which states, rejoin/pet persistence or custom clips were not checked. A posed mesh, enabled script or decorative NPC is not functional character acceptance.

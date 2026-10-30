@@ -1,5 +1,15 @@
 # Arena code patterns (--!strict, server-authoritative)
 
+## Integration boundary: a complete match needs real dependencies
+
+These retained fragments assume actual map, stats, ammo, weapon and network services. raycastAgainstHistory, Ammo, sameTeamAllowed and other names are placeholders, not an implemented lag-compensation/security system. Supply and review the real dependencies before enabling; do not claim a working shooter from their names. The Studio minimum-player exception illustrates a test configuration and must not silently change the public game's roster rules.
+
+Unify match/round epochs, roster, votes, map loading, equipment, scoring and once-only results. Handle empty/invalid map options, failed loads, no survivor, ties and late join/disconnect. Old callbacks cannot award or respawn into the next map. Unload/reset owned resources and return players coherently instead of assuming every participant still has a live character.
+
+Weapon admission needs finite plausible inputs, exact equipped state, live phase, rate/ammo and bounded replay identity. The excerpt does not by itself implement every one of those checks. Historical hitbox queries need real bounded history and guaranteed proxy restoration; never move actual characters. Reconcile cosmetic prediction with denied shots and authoritative hit confirmation. Requested persistent stats/awards need the genuine profile/claim lifecycle.
+
+Connect the requested distinct maps/modes to selection and actual full matches, with fair sightlines/spawns and useful weapon roles. Add readable objective/ammo/score/results/spectator UI, real animation/audio and restrained effects, all cleaned by phase. Test impossible fire, duplicates, simultaneous final hits, vote ties, leavers, failed map load and repeated rounds. A single-player vote/countdown test does not establish multiplayer fairness, latency compensation or the promised content roster.
+
 Scripts start disabled (`scene_create` + `script_update`), then `script_read` + `script_set_enabled`. Edge cases (disconnect during results, simultaneous final hits): `arcane-rounds`.
 
 ## RoundService (epoch state machine)
@@ -119,3 +129,10 @@ On a validated `Swing` intent (cooldown, alive, equipped), the server runs `work
 
 ## Data record
 `{ version = 1, lock = { jobId, time }, data = { wins, kills, deaths, matches, xp, unlocked } }` through session-locked `UpdateAsync` with budget-checked retries; save at Results (staggered) and on leave/BindToClose.
+
+## Conditional tuning examples from the original kit
+
+These inherited figures describe one starting configuration, not universal limits, verified performance or required mechanics. Choose relevant values for the actual brief, bind total resources to the intended audience/device and measure them in real play. Vehicle/platform motion, threat readability and commerce/persistence still require the integration checks above. Do not weaken supported-tool or production bounds to fit an example.
+
+### Performance budgets
+<= 3,000 parts per map, maps unloaded after Results; server raycasts <= 15 per player per second; position history 1 s at 20 Hz; kill feed and tracers client-only; one RoundService loop at 1 Hz.

@@ -1,62 +1,31 @@
 ---
 name: arcane-interface
-description: "Build modern, responsive Roblox ScreenGui interfaces from a design system: tokens, UICorner/UIStroke/UIGradient components, scale layouts, typography, hover/press tweens, accessible contrast and clean LocalScript modules."
+description: "Build a coherent responsive Roblox GUI that exposes the real game loop, binds to authoritative state and works across loading, interaction, error, touch and controller states."
 license: MIT
 ---
 
-# Game UI design system
+# GUI that lets players complete the loop
 
-## Rules first
-- Build the GUI tree directly with `scene_build` (plugin capability `scene.gui`). Never write a script that constructs static UI.
-  - Screen: `container: "ScreenGui"`, parent = the StarterGui root ref from `scene_children`, `screen` props. Items: a GUI className + `ui`, `in` = parent item key. One screen = one atomic build (one undo step, one receipt).
-  - Repeated components (button, card, slot) are `prototypes` `{ui: [root, UICorner, UIStroke, ...]}` stamped by items with `use` + `ui` overrides (Text, LayoutOrder).
-  - World UI: BillboardGui (part/Attachment) and SurfaceGui (part) items in a Model build.
-  - Values: UDim2 `[xScale,xOffset,yScale,yOffset]`, UDim `[scale,offset]` or px, FontFace a built-in family. One-line Text; wrap with TextWrapped. Image only a user-given or found `rbxassetid://`; no icon id: use a glyph label or a UICorner shape.
-- Behaviour only in code: LocalScript `StarterPlayer.StarterPlayerScripts.UIController` + ModuleScripts in `ReplicatedStorage.UI` (`scene_create`, `script_update`, then `script_read` + `script_set_enabled`). It finds the tree (`PlayerGui:WaitForChild("<Screen>")`), wires events, tweens, data. Runtime lists clone a hidden built template (Visible false).
-- Verify: `studio_viewport_capture` cannot show a ScreenGui in Edit mode. Use `playtest_request` `click-gui`, `assert-gui` (Visible), `assert-text`, `assert-gui-layout`; for a look, stamp a component on a temporary SurfaceGui part facing the camera, capture, `receipt_restore`. Paths: `PlayerGui.<Screen>.Root.<Name>`.
-- UI never owns state: buttons request via remotes, the server validates (`arcane-remote-security`); show pending, accepted, denied.
-- Keep an existing UI's style; these tokens are the default. Screen recipes and shop card: `skills_get` ids ["arcane-interface"], references ["arcane-interface:recipes"], allowExperimental true ([recipes](references/recipes.md)); tween Motion module, UIController and a HUD build: `arcane-interface:controller` ([controller](references/controller.md)).
+## Define information and actions
+Read the existing GUI and art direction. For a full game, inventory the screens the actual loop needs: entry/onboarding, readable HUD/objective, interaction/menu, feedback/results and relevant settings. Add inventory, shop or progression only when the design uses them. A focused button or layout fix stays focused.
 
-## Layout: phone to 4K
-- ScreenGui: ResetOnSpawn false, ZIndexBehavior Sibling, ScreenInsets CoreUISafeInsets (default: clear of notch and Roblox top bar). Full-bleed art goes in its own ScreenGui with IgnoreGuiInset true + ScreenInsets None; buttons never.
-- DisplayOrder: HUD 0, menus 10, modals 20, toasts 30, loading 100.
-- Size and Position in Scale, AnchorPoint matching the edge (centre 0.5,0.5; bottom-left 0,1). Offset only for padding, stroke, radius, gaps.
-- Every panel: UIAspectRatioConstraint for its shape + UISizeConstraint (e.g. Min 320x240, Max 760x560). Edge margins 2-3% of the screen.
-- Touch: keep HUD out of the top-left (Roblox menu) and bottom-right (jump button); thumb actions bottom-centre or right-middle.
-- Stacks: UIListLayout (Padding 8-12 px, SortOrder LayoutOrder). Toolbars: FillDirection Horizontal, HorizontalFlex SpaceBetween, UIFlexItem FlexMode Fill on the item that stretches. Chip rows: Wraps true.
-- Grids: UIGridLayout, CellSize recomputed from AbsoluteSize `cell = floor((width - pad * (cols - 1)) / cols)`; 4 columns under 600 px wide.
-- ScrollingFrame: AutomaticCanvasSize Y, CanvasSize 0, ScrollBarThickness 6, ScrollingDirection Y.
-- UIScale is for motion and a "UI size" setting (0.85 / 1 / 1.15), not layout.
+For every view define its data owner, primary action, open/close route and states: loading, ready, empty, pending, accepted, denied and failure/recovery as applicable. A polished static panel with unwired buttons is not a complete interface. UI requests actions; the server validates eligibility and returns authoritative state. Do not optimistically grant rewards, currency or purchases.
 
-## Tokens (dark default)
-| Token | Value | Use |
-|---|---|---|
-| overlay | Black, BackgroundTransparency 0.45 | modal dim |
-| surface / surface2 | 1a1f2b / 242b3a | panels / cards |
-| stroke | 2f3747 | UIStroke 1.5 px, Transparency 0.2 |
-| text / muted / disabled | f2f4f8 / a9b1c2 / 8b93a5 | 15:1 / 7.6:1 / 5.3:1 on surface |
-| primary | 2563eb, white text (5.2:1) | main action |
-| accent | ffc845, text 1b1300 (11.9:1) | currency, rewards |
-| danger / success | d93a40 white text / 3ccf7a text 0b1a10 | health, errors / confirm |
-Spacing 4/8/12/16/24 px only. Radius: panel 12, button 10, pill UDim 0.5,0. UIPadding: panel 16, card 10. BorderSizePixel 0. One UIGradient per panel (Rotation 90, ffffff to c8c8c8: it multiplies). Shadow: a Black Frame behind, offset 0,4 px, Transparency 0.6, same corner.
+## Build the tree and a style system
+Use the actual scene.gui capability. Build static ScreenGui structure directly with scene_build under the granted StarterGui ref, or scene_create for a small addition; do not hide the static design in a construction script. Repeated buttons/cards/slots can use declared prototypes; runtime collections clone a built template. Use ui values in the current schema, not invented HTML/CSS or unsupported properties.
 
-## Typography
-- Body: BuilderSans Medium (`FontFace: {family: "BuilderSans", weight: "Medium"}`); numbers, timers, buttons Bold.
-- Display (titles only), one per game: Montserrat Bold (default), FredokaOne or LuckiestGuy (playful), Michroma or Oswald (sci-fi, military), Merriweather or GrenzeGotisch (fantasy), Creepster or SpecialElite (horror), PressStart2P (retro). Max two families; no legacy SourceSans.
-- Sizes at 1080p: title 48-64, heading 32, body 20-24, caption 16; never below 14 px on a phone.
-- TextScaled only in fixed-proportion labels, always with UITextSizeConstraint (title Max 64 Min 24, body Max 24 Min 14). Body: TextWrapped; names: TextTruncate AtEnd.
-- Text over the 3D world: UIStroke ApplyStrokeMode Contextual, Thickness 1.5-2, Black, Transparency 0.4.
+Choose project-specific palette roles, typography, spacing, corner/stroke treatment and motion. Preserve a coherent existing theme; a horror terminal, playful party game and historical RPG need not share a default dark dashboard. A practical starting spacing scale is 4/8/12/16/24, at most two font families, one clear primary action and restrained transitions. User/project-owned images or expressly authorized resources only; an unprovided icon can use a legible text label or constructed shape instead of an invented asset ID.
 
-## Components and motion
-- Button: TextButton, AutoButtonColor false, at least 44 px tall (UISizeConstraint MinSize 44,44), UICorner 10, child UIScale. Wire `Activated` (mouse, touch, gamepad).
-  - Hover: background 8% lighter, UIScale 1.04, 0.12 s Quad Out. Press: 0.96 in 0.08 s; release 0.12 s Back Out.
-  - Disabled: BackgroundTransparency 0.5, disabled text, Active false. Gamepad focus: UIStroke 2 px accent; `GuiService.SelectedObject` = first button on open.
-- Panel open: UIScale 0.92 to 1 + fade 0.18 s Quart Out; close 0.12 s Quad In; never over 0.3 s. Fade via CanvasGroup GroupTransparency (at most 4 open). Reduced Motion skips scale tweens.
-- Progress bar: pill track (surface2) + fill with Size X Scale = ratio, tweened 0.2 s; a lighter chip bar follows after 0.4 s.
-- State never by colour alone: add icon or text. Contrast 4.5:1 for text, 3:1 for bars and icons (`arcane-accessibility`).
+Use the tool's UDim2 [xScale,xOffset,yScale,yOffset] and UDim [scale,offset] forms. Use scale/anchors for placement and deliberate offsets for padding/minimum dimensions. Apply min/max and aspect constraints only where they preserve function; locking every text panel to one ratio can break translation. Use list/grid layouts and scrolling/virtualized or bounded lists as appropriate, not manually positioned hundreds of entries. Respect safe areas, core controls and phone orientation. Keep primary touch targets at least 44px in the target layout with separation, then check actual device scaling.
 
-## Code structure
-- Static look lives in the build. `Theme` returns frozen tables (`table.freeze`) of state colours and TweenInfos. Each screen module exports `bind(screenGui) -> { open, close, destroy }`, looks elements up by name, owns a cleanup list (`arcane-luau-architecture`), re-renders from server state and ignores stale responses after close.
+The declared [recipes](references/recipes.md) and [controller](references/controller.md) references provide concrete screen builds and controller patterns. Request only the needed reference through skills_get; preserve current capabilities and review boundaries when adapting it.
 
-## First-try check
-No default grey Frames or borders; every text has FontFace; nothing touches a screen edge; buttons 44 px+; one primary action per screen; one radius and spacing scale; `assert-gui-layout` on every primary control (inside the safe area, at least 44x44); suggest a phone check in the Studio Device Emulator.
+## Bind behavior and lifecycle
+Keep behavior in a LocalScript/controller and shared presentation modules, using the supported create/update/read/enable review flow. A screen module should own its bindings and expose open/close/destroy or equivalent. Use bounded waits and handle respawn/replacement; ignore responses belonging to a closed or replaced view. Cancel tweens and disconnect handlers so repeated opens do not multiply activations.
+
+Use one input-neutral activation path, deliberate controller focus and a clear back/cancel route. Represent disabled/pending states in both visuals and behavior. Add short hover/press/transition feedback where appropriate, and make reduced-motion settings effective. Colour alone cannot convey state; preserve meaningful labels, error reasons and readable numeric/progress feedback.
+
+## Acceptance
+Use actual supported human-approved playtest_request scenarios and playtest_status observations for click/GUI/text/layout assertions where available. An Edit viewport does not show a ScreenGui; a SurfaceGui mock-up can preview a component but cannot prove the PlayerGui works. Captures illustrate appearance and do not replace attested action/state checks; report unsupported capture evidence honestly.
+
+Exercise the complete intended action, rejection, empty/loading/error state, back/close, repeated open and respawn. Inspect long names/translations, text scale, phone/controller navigation, safe-area overlap and focus restoration. Confirm one activation causes one accepted request and real state updates the HUD/results. Measure relevant layout bounds, target sizes, contrast and list cost. State what was played versus inspected or still a placeholder.

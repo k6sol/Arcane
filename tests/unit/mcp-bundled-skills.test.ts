@@ -319,3 +319,57 @@ test('MCP schemas expose no fixture, module, path or root selectors', async t =>
   }
   await notExecuted(project);
 });
+
+test('actual bundled whole-game composition progressively loads intact presentation bodies without approval or network effects', async t => {
+  const project = await directory(t), network = t.mock.method(globalThis, 'fetch', async () => { throw Error('Skill composition must stay offline.'); });
+  const client = await linked(t, project), registry = await registryAt(), original = await readFile(join(ROOT, 'skills/registry.json'));
+  const reply = await call(client, 'skills_recommend', { request: 'Create a complete puzzle game with a coherent player journey.' });
+  assert.notEqual(reply.result.isError, true); assert.equal(reply.data.available, true);
+  assert.deepEqual(reply.data.ids, ['arcane-project-director', 'arcane-genre-adaptation']);
+  assert.equal(reply.data.composition.intent, 'whole-game'); assert.equal(reply.data.composition.primaryGenre, 'puzzle');
+  assert.equal(reply.data.composition.initialCoverage, 'director-and-genre'); assert.equal(reply.data.composition.guidanceOnly, true);
+  assert.equal(reply.data.byteBudget, 10_240); assert.ok(reply.data.bytes <= 10_240);
+  assert.equal(reply.data.bytes, Buffer.byteLength(reply.data.context)); assert.equal(reply.data.approvalChanged, false);
+  for (const id of reply.data.ids) {
+    const entry = registry.skills.find(entry => entry.id === id); assert.ok(entry);
+    const source = await readFile(join(ROOT, entry.path), 'utf8'); assert.equal(hash(source), entry.sha256);
+    assert.ok(reply.data.context.includes(`## Loaded skill: ${id}\n${source}`));
+  }
+  const presentation = reply.data.composition.phases.find((phase: { phase: string; ids: string[] }) => phase.phase === 'presentation');
+  assert.ok(presentation); assert.ok(presentation.ids.length <= 8);
+  assert.deepEqual(presentation.ids, ['arcane-interface', 'arcane-rig-animation', 'arcane-vfx', 'arcane-audio', 'arcane-accessibility', 'arcane-onboarding', 'arcane-gameplay-feel']);
+  // A phase is not a silently oversized pack: the real reader refuses it whole.
+  const oversized = await call(client, 'skills_get', { ids: presentation.ids, allowExperimental: true, byteBudget: 10_240 });
+  assert.equal(oversized.result.isError, true); assert.equal(oversized.data.error.code, 'BUDGET_EXCEEDED');
+  for (const id of presentation.ids) {
+    assert.ok(!reply.data.ids.includes(id)); assert.ok(!reply.data.context.includes(`## Loaded skill: ${id}\n`));
+    const refused = await call(client, 'skills_get', { ids: [id], byteBudget: 10_240 });
+    assert.equal(refused.result.isError, true); assert.equal(refused.data.error.code, 'UNAPPROVED');
+    const loaded = await call(client, 'skills_get', { ids: [id], allowExperimental: true, byteBudget: 10_240 });
+    const entry = registry.skills.find(entry => entry.id === id); assert.ok(entry);
+    const source = await readFile(join(ROOT, entry.path), 'utf8'); assert.equal(hash(source), entry.sha256);
+    assert.notEqual(loaded.result.isError, true); assert.deepEqual(loaded.data.ids, [id]); assert.deepEqual(loaded.data.references, []);
+    assert.ok(loaded.data.context.includes(`## Loaded skill: ${id}\n${source}`));
+    assert.equal(loaded.data.bytes, Buffer.byteLength(loaded.data.context)); assert.ok(loaded.data.bytes <= 10_240);
+    assert.equal(loaded.data.approvalChanged, false);
+  }
+  assert.deepEqual((await call(client, 'skills_list')).data.items, []);
+  assert.deepEqual(await readFile(join(ROOT, 'skills/registry.json')), original);
+  assert.equal(network.mock.callCount(), 0); assert.deepEqual(await readdir(project), []);
+});
+
+test('staged eligibility does not bypass actual deferred content integrity or direct-reader policy', async t => {
+  const fixture = await dataFixture(t), project = await directory(t), skills = new SkillRegistry({ fixtureRoot: fixture.root });
+  const client = await linked(t, project, skills), sourceRegistry = await readFile(join(fixture.root, 'skills/registry.json'));
+  const audio = fixture.registry.skills.find(entry => entry.id === 'arcane-audio'); assert.ok(audio);
+  const source = await readFile(join(fixture.root, audio.path), 'utf8');
+  await writeFile(join(fixture.root, audio.path), source + '\nTampered deferred presentation fixture.\n');
+  const routed = await call(client, 'skills_recommend', { request: 'Build a complete racing game.' });
+  assert.notEqual(routed.result.isError, true); assert.ok(!routed.data.ids.includes(audio.id));
+  assert.ok(routed.data.composition.phases.some((phase: { ids: string[] }) => phase.ids.includes(audio.id)));
+  const refused = await call(client, 'skills_get', { ids: [audio.id] });
+  assert.equal(refused.result.isError, true); assert.equal(refused.data.error.code, 'UNAPPROVED');
+  const checked = await call(client, 'skills_get', { ids: [audio.id], allowExperimental: true });
+  assert.equal(checked.result.isError, true); assert.equal(checked.data.error.code, 'INTEGRITY');
+  assert.deepEqual(await readFile(join(fixture.root, 'skills/registry.json')), sourceRegistry);
+});

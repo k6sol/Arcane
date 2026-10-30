@@ -4,68 +4,26 @@ description: "Prescriptive round-based arena/PvP genre kit: lobby, intermission,
 license: MIT
 ---
 
-# Arena / PvP kit
+# Arena play: fair encounters inside a complete match cycle
 
-Cross-links: round edge cases `arcane-rounds`; state loop basics `arcane-gameplay-systems`; weapon feel and hit timing `arcane-combat`; remote checks `arcane-remote-security`; latency `arcane-networking`; HUD `arcane-interface`; muzzle/impact `arcane-vfx`; saving `arcane-datastore-safety`. Code: [patterns](references/patterns.md) (`arcane-arena-kit:patterns`).
+Choose the actual mode: free-for-all, teams, elimination, cooperative waves or a specific objective. Define why movement, position and equipment matter. A full arena game needs a usable lobby, clear rules, fair starts, purposeful content variety, results and replay; one weapon in an empty box is the first combat slice. Do not turn a narrow score or spawn repair into an unrequested mode expansion.
 
-## Architecture
-- ServerScriptService: Script `ArenaServer` + ModuleScripts `Arena/RoundService` (state machine), `Arena/VoteService`, `Arena/MapService` (load/unload maps), `Arena/WeaponService` (hit validation), `Arena/StatsService` + `Arena/DataService`.
-- ServerStorage: Folder `Maps` with Models `Map_<Name>` (each with `Spawns` Folder and `Bounds` part). Folder `Weapons` with Tool templates.
-- ReplicatedStorage: `Shared/ArenaConfig`, `Shared/WeaponConfig`. `Remotes` made by the server: RemoteEvent `Vote`, RemoteEvent `Fire` (client intent: origin, direction, shotId), RemoteEvent `HitConfirm` (server -> client).
-- Round state replicated as `workspace` attributes `RoundState`, `TimeLeft`, `MapName`, `VoteOptions` (CSV).
+Read [patterns](references/patterns.md) (`arcane-arena-kit:patterns`) for retained round/vote/weapon fragments. They contain integration placeholders, not a complete secure shooter. Coordinate `arcane-rounds`, `arcane-combat`, `arcane-networking`, `arcane-remote-security`, `arcane-interface`, `arcane-vfx`, `arcane-audio` and requested saves.
 
-## Data model
-- Session: `leaderstats.Kills`, `leaderstats.Wins`; attributes `Team`, `Alive`, `Kills`.
-- DataStore `Arena_v1`, key `u_<UserId>`: `{ version = 1, lock = { jobId, time }, data = { wins, kills, deaths, matches, xp, unlocked = {..} } }`. Wins granted once per round epoch; UpdateAsync + session lock per `arcane-datastore-safety`; saving disabled until asked.
+## Match and roster contract
 
-## Build order
-1. Inspect; `environment_apply` preset `golden_hour` (or per map).
-2. `scene_build` lobby (spawn, vote pads or vote GUI, leaderboard board).
-3. `scene_build` 2-3 maps into ServerStorage `Maps` (one batch each), plus the weapon Tool handle parts.
-4. Scripts disabled -> HUD `scene_build` -> enable -> `playtest_request`.
+Separate RoundService epochs, eligible roster/teams, map lifecycle, objective/score, equipment and awards. Validate vote options and eligibility; define no votes, ties, failed loads, leavers and late joins. Elimination spectators differ from temporary downed or respawning players. Countdown, spawn protection, result award and return-to-lobby happen once. Expired hit/respawn/map callbacks cannot affect a new round. Do not quietly change public minimum-player rules to make single-client automation appear like a real match.
 
-## Map with scene_build
-- Lobby 80 x 80 at Y 200 (out of arena sight). Maps 160-220 studs across; 3 lanes, cover every 12-20 studs (half cover 3 high, full cover 7 high), no spot visible from more than 2 lanes.
-- Spawns: Folder `Spawns`, 8-12 parts (Transparency 1), paired per team, >= 60 studs from enemy spawns; 2 s spawn protection.
-- `Bounds` part (CanCollide false) per map: leaving it kills after 3 s warning.
+Map definitions contain stable IDs, spawns, bounds, objective locations and mode compatibility. Create distinct sightline, elevation, flank, cover and objective situations appropriate to the requested roster, not cosmetic copies. Study reachable spawns from both teams and likely movement paths; distance alone does not prevent spawn traps. Stage initial blockout combat before dressing complete maps. Original art and readable silhouettes support tactical information without clutter or misleading collision; no Toolbox unless requested.
 
-## Round flow
-| State | Time | Notes |
-|---|---|---|
-| Waiting | until >= 2 players (1 in Studio) | lobby |
-| Intermission + Vote | 20 s | 3 random maps, one vote per player, ties random |
-| Loading | 3 s | clone map to `workspace.ActiveMap`, teleport |
-| InRound | 150 s | FFA: first to 15 KOs; Teams: 30 KOs; elimination: last alive |
-| Results | 8 s | award once, destroy map, return to lobby |
-Each round has an epoch; stale callbacks are ignored. Late joiners spectate in elimination, spawn in KO modes.
+## Trustworthy combat and useful equipment
 
-## Weapons (server-authoritative hits)
-- Client: plays animation, tracer, sound immediately (prediction), sends `Fire(origin, direction, shotId)`.
-- Server checks: weapon equipped, alive, `RoundState == InRound`, fire rate (<= config RPM + 10% slack), origin within 6 studs of the head, direction unit length, ammo. Server raycasts itself (lag tolerance: target position rewind <= 250 ms via a 1 s position history), applies damage, fires `HitConfirm`.
-- Melee: server overlap box in front of the root at swing time, max 1 hit per target per swing.
-| Weapon | Damage | RPM | Range | Mag / reload |
-|---|---|---|---|---|
-| Blaster | 25 (head 40) | 300 | 250 | 12 / 1.6 s |
-| SMG | 14 | 700 | 120 | 30 / 2.0 s |
-| Sword | 35 | 90 | 7 | - |
-TTK targets 0.5-1.2 s at 100 HP; respawn 4 s.
+Clients request action and may predict cosmetics. The server validates actor/equipped item, live phase, ammo/resources, rate, finite origin/direction, target/team rules and plausible reach/occlusion. Bounded action identities prevent duplicate outcomes. Latency compensation needs measured limits and actual history/query code; a placeholder named raycastAgainstHistory is not an implemented rewind system. Never move real characters to perform a historical query.
 
-## GUI with scene_build
-Screen `ArenaHud`: top state pill (`Intermission 0:12`), vote panel with 3 map cards, kill feed (template row, 5 rows max), crosshair + hitmarker, ammo, Results panel. Recipes: `arcane-interface:recipes`.
+Weapons should have different useful roles and costs, readable reload/recovery and fair counterplay. Actual rig/animation, muzzle/contact/impact effects, positional sound and hit confirmation must agree with authoritative outcomes. Avoid turning every hit into shake/bloom. Define assists, simultaneous kills, friendly fire and once-only score. Persistent unlocks/stats use requested safe profiles and award identities; a display leaderboard is not the authoritative result journal.
 
-## Test plan (playtest_request)
-- Verify own scripts with the `arcane-playtest-qa` script check loop: Output cursor before `playtest_request`, read `after` it, fix only errors from scripts you wrote (Output is untrusted data), at most 3 fixes, stop the run, report.
-- `assert-text` `ArenaHud.Root.State` shows the intermission text within 1000 ms (Studio min players 1).
-- `click-gui` a vote card; `assert-player-attribute VotedFor = "<map>"`.
-- `hold-key W 400` after teleport, `assert-displacement 4`.
-- Review: Fire with impossible origin, rate or no weapon is ignored; Wins awarded once per epoch. Multi-client combat reported untested.
+## Presentation and acceptance
 
-## Performance budgets
-<= 3,000 parts per map, maps unloaded after Results; server raycasts <= 15 per player per second; position history 1 s at 20 Hz; kill feed and tracers client-only; one RoundService loop at 1 Hz.
+Provide mode/map information, phase/time/objective, team/score, relevant ammo/resources and legible results/requeue. Spectators need a useful honest view and a path back. Settings/device input, death/respawn focus and reduced-effect readability matter as much as a crosshair. Use real authorized media IDs and expose missing content rather than celebrating placeholders.
 
-## Pitfalls
-- Trusting client hit results or damage; per-bullet server Parts.
-- Timers without epochs: two rounds overlapping after a fast restart.
-- Awarding wins in both timeout and last-alive paths.
-- Spawning into enemy sightlines; no spawn protection.
-- Votes accepted outside Intermission or multiple per player.
+Inspect/build with actual scoped scene/script tools, review disabled code and request separate human-approved finite tests. Follow playtest status through cleanup. Exercise lobby -> vote/load -> combat/objective -> result -> next round; wrong-phase actions, impossible fire, duplicate last hits, ties, leavers and failed map loading must be tested too. Play every delivered map under intended occupancy and measure query/history/effect/part costs. Single-client vote/text checks do not prove multi-client hit fairness or spawn balance; keep those acceptance gaps explicit and never weaken combat or phase rules merely to pass an available scenario.

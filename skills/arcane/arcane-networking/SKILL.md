@@ -1,20 +1,25 @@
 ---
 name: arcane-networking
-description: "Design client-server requests, state replication and prediction for Roblox multiplayer without trusting client-owned outcomes."
+description: "Design and implement Roblox multiplayer protocols, replication and responsive prediction with authoritative state, bounded traffic and reconnect behavior."
 license: MIT
 ---
 
-# Replication and network contracts
+# Treat multiplayer as an explicit protocol
 
-## Define the protocol
-Identify who owns each state field, which changes need replication and which are purely cosmetic. Specify request IDs, payload schemas, bounded values, response/error semantics and lifecycle. Use current engine APIs only after verifying the selected project's supported version.
+## Define the contract at the feature boundary
+For each action, record direction, payload shape, stable content IDs, ownership, permitted states, sequence/request identity, expected response and timeout behavior. Identify what must be authoritative, what each player may see, and what is disposable presentation. Extend the existing protocol instead of adding a second inventory, match or combat truth.
 
-Clients request intent; the server checks permission and state before applying rewards, damage or shared transitions. Replicate compact state changes, not every rendered frame or entire inventory on each click. A reliable request needs a bounded response path; avoid recursive or indefinitely yielding remote calls.
+Clients submit intent; servers derive consequential values and validate them through `arcane-remote-security`. Model the UI path too: ready, pending, accepted, denied and disconnected must be distinguishable. A disabled button is not a server lock, and a slow response is not a denial. Choose RemoteEvents with correlated replies for asynchronous actions. A RemoteFunction is appropriate only for a bounded query whose yielding and failure behavior is understood; do not make server progress depend on an untrusted client's reply.
 
-Use prediction for responsive presentation only where correction is defined. Distinguish delayed acknowledgement from denial. Include sequence/revision handling for stale updates and clear rejoin/late-join reconstruction.
+## Replicate enough to reconstruct state
+Use a versioned snapshot for initial/late join and compact deltas for changes. Define how a client detects a missed revision, replaces stale state and requests a fresh view. Apply updates in their intended entity/session scope so an old round or respawn packet cannot overwrite the new one. Bound pending requests and retain idempotence for the actual value-granting operation, not an arbitrary client-generated success flag.
 
-## Failure behavior
-A lost client, duplicate action or out-of-order presentation update must not corrupt authoritative state. Preserve cleanup for per-player handlers. Avoid synchronized broadcast bursts and accidental per-frame fanout.
+Send private results to their owner and relevant public state to interested observers. Avoid whole inventories on every click or per-frame global broadcasts. Derive rates and sizes from player count, active entities and tested bandwidth; batch compatible state without delaying critical feedback. Reliable traffic carries required state transitions. Loss-tolerant cosmetic samples may use a supported unreliable channel only if omission/reordering is harmless.
 
-## Verification
-Test simultaneous input, duplicate requests, delayed results, late join and disconnect. Record real client/server observations; bots or injected state alone do not establish network correctness. Route economic/damage payload review to the security checklist when those outcomes are involved.
+## Make responsiveness compatible with truth
+Predict local presentation when it has a correction policy: input sequence, authoritative acknowledgement, reconciliation and bounded visual smoothing. Keep rewards, collisions that decide scoring, and scarce ownership server-controlled. Separate immediate animation/audio feedback from a confirmed result so a rejected action does not leave a false reward or equipped item. Do not synchronize entire animation/VFX instances when a small validated state/event suffices.
+
+Handle late dependencies, streaming disappearance, disconnect and reconnect explicitly. Remove per-player queues/listeners and expire obsolete request scopes; do not replay an ambiguous purchase or teleport as an ordinary network retry.
+
+## Verify the multiplayer path
+Exercise simultaneous conflicting actions, duplicate requests, delayed acknowledgement, stale revisions, late join, respawn and disconnect during a pending action. Check both authoritative state and what each client actually sees, including denial feedback and correction. A single-client injected fixture can validate a reducer or schema, but not real latency, ownership or replication. State the available client/server observations and remaining native tests.

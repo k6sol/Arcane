@@ -1,29 +1,29 @@
 ---
 name: arcane-world-building
-description: "Build coherent Roblox terrain, biomes and modular environments with landmarks, traversal and measured runtime budgets."
+description: "Create coherent playable Roblox worlds with terrain and modular content, meaningful destinations, traversal, environmental storytelling and measured streaming/performance."
 license: MIT
 ---
 
-# Terrain and modular world building
+# World building organized around play
 
-## Establish scale and composition
-Define traversable area, movement/camera, focal landmarks, boundary treatment and art direction. Use a blockout and representative scene before large procedural scatter. Tie terrain and architecture to intended play rather than decorating an empty square.
+## Define a connected world
+Read the existing place and intended core loop. Map spawn/onboarding, destinations, challenges, rewards, recovery and return routes at the scale the request needs. For a full game, these spaces must support the real gameplay states; for one room or biome, complete that area without inventing an unrelated campaign.
 
-Create reusable modules with compatible grids, pivots and material scale. Vary form and silhouette purposefully; random rotations of the same asset do not create identity. Foliage/debris density follows sightlines, paths and target-device measurements.
+Choose movement envelope, player camera, landmark hierarchy, world boundary and target-device budget before mass placement. Block and traverse the main route early. Give each district/room/biome an identity through function, large forms, palette and recurring details, while sharing a coherent art direction. Alternate constrained/open spaces, reveal landmarks deliberately and provide orientation at decision points.
 
-Keep interactive collision separate from visual detail. Streaming and distant representation need actual engine behavior tests; a file named LOD does not make automatic switching happen. Preserve editable source and placement seeds/manifests.
+## Build a reusable content system
+Define module dimensions, grid/connection rules, floor and doorway heights, pivots, material scale, collision and gameplay sockets. Test a corner, transition, elevation change and repeated run before producing a kit. Keep a placement seed/manifest and original editable sources. A random rotation of one prop is not a diverse content family.
 
-## Build fast in Studio
-- Ground: `terrain_generate` (seeded landforms, a flattened clearing under landmarks, paths, rivers, lakes); `environment_apply` only for simple fills, lighting and atmosphere.
-- Original assets by default: authored Blender/procedural geometry, previewed before adoption. Only if the user explicitly requests Toolbox models may `studio_asset_search`/`studio_asset_insert` supply them. Reuse original templates with `scene_build` + scatter. Primitive prototypes suit architecture or explicit stylized/blockout work; they are not a silent substitute for a requested realistic finish.
-- Repeated objects: `scene_build` prototypes and scatter, a few calls rather than one per part. Natural placement only: Poisson-disk spacing with clusters and clearing falloff, scale jitter around ±25% and random yaw. Never place foliage in rings, grids or rows.
-- Check the result with `studio_viewport_capture`. Concrete recipes: `arcane-natural-scenes` and `arcane-architectural-features`; lighting moods, materials and real-world scale: `arcane-photoreal`.
+Author finished models, UVs, textures and PBR in Blender using a faithful supported recipe or permitted native route. Inspect previews and exact-model human review before the advertised import flow. Toolbox/free assets require an express request. Primitive architecture/blockouts can serve their requested purpose but cannot silently replace a requested realistic finish.
 
-## Verification
-Traverse critical routes at avatar scale, inspect landmark readability and performance under representative density. Test terrain transitions, collision, stuck points and streaming boundaries.
+Use terrain_generate for requested landforms, routes, water and clearing transitions; environment_apply serves supported lighting/atmosphere and simple fills. Batch repeated placement with scene_build templates/prototypes and appropriate scatter. Wild growth benefits from clustering and variable spacing; farms, avenues or formal gardens can intentionally use rows. Keep ordered structures aligned instead of randomizing load-bearing parts.
 
-## Complete the requested build
-Keep a short internal acceptance list for each clause. A raised circular spawn needs a functional spawn, a circular visual treatment and supporting platform, a usable approach, and surrounding forest composition. Preserve the existing baseplate and project style unless terrain changes are requested. Reserve continuous routes with `scatter.avoidPaths` (`points: [[x,z], ...]`, full `width` in studs). Set `footprintRadius` from a conservative object/canopy extent at scale 1; clearance scales with each copy around the clearing, keep-out circles and paths. Check returned requested/placed counts; do not report a full forest from an underfilled scatter. Inspect at player approach height and in a wider composition view; repair floating props, clipping and blocked access before adding detail.
+## Connect art to functionality
+Reserve interaction, combat, vehicle, camera and NPC navigation clearance before small dressing. Route and objective markers must agree with actual gameplay locations. Avoid visually promising doors, climbable ledges, collectibles or safe areas that have no corresponding behavior unless intentionally decorative and legible as such.
 
-## Blender authoring boundary
-- Models, UVs, textures and PBR are authored in local Blender. Do not use Studio AI generation. Check the actual exported materials and preview before import; on a failure give its stage and reason. A local export, flat color or reconstructed mesh alone does not prove a finished textured Studio asset.
+Copy continuous routes into every scatter layer's avoidPaths with full widths. Derive footprintRadius from conservative template extents and check placed/requested counts. Separate gameplay collision from render detail and preserve existing content outside the authorized area. Use the current receipt/Undo mechanism correctly; an ambiguous mutation is inspected, never replayed automatically.
+
+## Acceptance
+Traverse the complete critical loop from the actual spawn to objective and return/recovery path, including elevation changes, doors, water edges and boundaries. Inspect landmark readability at player height, clipping, floating props, material repetition, dark choke points and blocked camera views. Check a representative dense state rather than an empty overview.
+
+Test advertised streaming and distant representations in engine: naming an object LOD does not implement switching. Measure frame cost, visible instances/materials/transparency and loading behavior on representative devices; record conditions and unresolved bottlenecks. Placed session-only mesh/image resources do not prove Play/reopen persistence. Distinguish a composed world, a traversed world and a fully functioning game, and state which is demonstrated.

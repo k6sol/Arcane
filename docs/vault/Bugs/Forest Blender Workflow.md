@@ -26,3 +26,9 @@ The user has authorized prompt testing in the open app and designated baseplate 
 - [ ] Repeat the regression on the actual updated installed build and retain revision, tool/asset provenance, checks and remaining limits.
 
 Related: [[Skills/Production Upgrade]], [[Bugs/Original Asset Authoring]], [[Delivery/G05 Blender Quality]], [[Delivery/G06 Connected Import]], [[Delivery/G08 Diagnostics]].
+
+## Connection diagnostic and source correction
+
+One new read-only diagnostic was attempted in the actual running app with Sol 6.1 low. It remained in the composer after connection entered unknown native acknowledgement with `FRAME_LIMIT`; no tool dispatch was confirmed. It was not resent and no scene changes were requested. This is a distinct connection failure, not evidence of why the earlier skill recommender failed.
+
+Source review identified the forest resolver's implicit built-in fallback. The correction requires declared intended prototypes/templates or numbered variants and returns `FOREST_SOURCES_REQUIRED` before daemon scene dispatch if any required layer is unresolved. Explicitly requested blockouts can supply explicit primitive prototypes. Declared templates alone do not prove Blender provenance: actual authoring/review/import must still be verified. Progress groups with unmatched failures or unfinished calls now say Incomplete; successful recovered retries retain their existing summary.

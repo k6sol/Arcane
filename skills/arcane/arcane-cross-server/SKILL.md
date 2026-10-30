@@ -1,17 +1,25 @@
 ---
 name: arcane-cross-server
-description: "Design Roblox matchmaking, queues, teleport handoff and transient cross-server coordination with expiry, retries and recovery."
+description: "Implement recoverable Roblox matchmaking, parties, teleport handoff and transient coordination with authoritative reservations, leases, expiry and duplicate protection."
 license: MIT
 ---
 
-# Cross-server systems
+# Design a recoverable distributed play flow
 
-## Separate durable and transient state
-Define authoritative membership, queue expiry, match assignment, creator/server identity and duplicate protection. Choose supported transient coordination and durable storage according to the actual lifecycle; do not use a transient cache as permanent player inventory.
+## Assign one truth to each fact
+Specify party membership/leader, queue entry, eligibility, match assignment, server reservation and durable rewards. Use stable IDs and revisions. Separate ephemeral coordination from durable player value: MemoryStore-style queues/leases are not permanent inventory, and messages are notifications rather than the only truth.
 
-Design a claim/lease or reservation flow for a match before dispatching players. Retries must not allocate a player to two matches. Include expired hosts, partial parties, cancellation and server shutdown. Treat messages as signals that may be delayed or missed; re-read authoritative state instead of using a notification as the only truth.
+Choose a small protocol proportional to the game. A lobby that needs a single recoverable queue should not gain a general distributed framework. Integrate the actual menu/HUD states: idle, queued, reserved, transferring, partial failure and returned. Players need an exit/cancel path, clear party restrictions and a way to recover from a failed transfer.
 
-Teleport handoff carries only validated session identifiers and necessary metadata. Receiving servers recheck player eligibility and assignment. Keep sensitive state server-side. Test-mode limitations must be explicit; a Studio mock cannot prove live teleport success.
+## Reserve before dispatching
+Define atomic claim/lease semantics, expiry and ownership token for queue/match records. Revalidate ownership before advancing after a yield. A stale host must not allocate the same player after a newer host has claimed them. Specify how duplicates, expired queue items, leader changes, absent players, capacity and partial parties are reconciled.
 
-## Verification
-Use deterministic queue fixtures for expiry/replay and, when authorized, a published test universe for real handoff. Simulate a lost host, duplicate signal, failed transfer and reconnect. Show which checks were fixture-only versus cross-server. Prefer a small recoverable protocol over a complex distributed service for a tiny lobby.
+Persist or recover match assignment according to its consequence; don't rely on one message arriving. Treat duplicate/delayed notifications idempotently and read authoritative state. Bound retries, scanning, queue size and per-server work according to supported APIs and observed load. Do not assume exactly-once message delivery.
+
+## Make teleport a handoff, not a success badge
+Carry only necessary validated identifiers/metadata. Destination servers recheck the authoritative assignment, player eligibility, allowed source/destination and current match state; teleport data is not a secret or sufficient reward proof. Keep credentials and reservation authority server-side. Distinguish reserved, dispatched, arrived and abandoned members.
+
+Handle teleport failure, disconnect during dispatch, destination timeout and server shutdown without double rewards or indefinite queue ownership. Compensation should return/requeue only members whose actual state permits it. Reconnect must reconcile an old assignment before admitting a second one. Results/awards need their own durable idempotence, especially when the match host disappears.
+
+## Verify the failure schedules
+Use deterministic coordination fixtures for competing claims, stale lease, expiry, duplicate message, partial party and host loss. Then, when authorized, use a published test universe for actual teleport/destination arrival and reconnect. Studio mocks cannot prove live teleport, reserved-server behavior or cross-server delivery. Capture both server observations and player-visible recovery; report which stages remain unverified.

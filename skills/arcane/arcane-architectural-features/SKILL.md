@@ -1,33 +1,27 @@
 ---
 name: arcane-architectural-features
-description: "Build detailed Roblox architecture such as classical columns, stepped plinths, stairs and spawn pedestals with correct SpawnLocation placement, in one batch call."
+description: "Author original architectural kits and landmarks with coherent construction, measured scale, continuous access, usable interiors and verified gameplay integration."
 license: MIT
 ---
 
-# Architectural features and spawn landmarks
+# Architecture people can use
 
-## Design from the brief
-- Define a distinct silhouette, proportions, palette and player approach. A pillar request does not request a spiral stair, classical column, flutes or floating labels. Do not repeat an earlier landmark as a new design.
-- Author finished visual geometry in Blender with UVs, textures and PBR; keep Studio for placement, gameplay, terrain and simple collision. A primitive blockout is not a finished realistic model.
-- Use assets_start/custom assembly for bespoke architecture, or assets_procedural only when its supported shape fits. Inspect assets_preview before adoption; preserve editable source and measured exports. Only if the user explicitly requests Toolbox models may studio_asset_search/studio_asset_insert supply them.
-- Follow assets_jobs, then prepare, stage, reconstruct and assets_place_studio_import. A render or local GLB is not Studio placement. Do not use studio_asset_generate: models, UVs and materials belong in Blender. Report the exact failing stage; do not silently substitute engine primitives or free models.
+## Resolve the design
+Identify function, period/style, footprint, structural rhythm, player approach and required interiors or moving pieces. A pillar request does not imply flutes, spiral stairs, a spawn or floating labels. For a building or game environment, plan the rooms, circulation, entry/exit and associated interaction points; for a single feature, keep that scope.
 
-## Spatial and traversal rules
-- Use meters in Blender and the import's explicit studs-per-meter conversion once. Establish a floor pivot and measure final rotated bounds; avoid a second ad-hoc scale conversion.
-- A piece of thickness t on surface y has center y+t/2. Derive rails from adjacent support endpoints, with midpoint at their average and length equal to their distance plus a small overlap.
-- Choose access from gameplay: path, ramp, bridge or conventional steps. Add a spiral stair only when requested or deliberately justified by the design, never by default.
-- For appropriate radial stairs derive count/rise from endpoint heights. With width w, radius R and angle a, tread depth is at least 2*(R+w/2)*tan(a/2) plus overlap. Include support, risers and a continuous landing.
-- Keep collision separate from visual mesh detail. No claimed walkability from an overhead image alone.
+Block primary load-bearing forms and openings before trim. Use consistent wall/floor thickness, column spacing, beams, supports and roof logic. Build reusable straight, corner, junction, end and height-transition modules with aligned seams, pivots and material scale. Test a representative assembled bay before multiplying it.
 
-## Spawn and surroundings
-- Moving a spawn: scene_inspect then scene_update on the existing SpawnLocation with exact baselines. Keep it upright, anchored and collidable, with its bottom on the platform top and clear of rails.
-- Round spawn plinth: scene_build kits plinth (fields: `arcane-natural-scenes:scene-build`); fluted only if classical. Verify kits spawn.top.
-- Avoid duplicate spawns; use scene_delete when removal is requested. Deletion uses Studio Undo, not receipt_restore.
-- Size the clearing and foliage exclusion from the final footprint. Blend the ground around it instead of making a huge flat disc. Keep the approach and cave route unobstructed.
-- Make the safe-zone boundary visible at ground/platform level. A decorative ring is not functioning protection; implement and verify server-side behavior if requested.
+Author finished geometry, UVs, textures and PBR in Blender. Use assets_start/custom assembly or assets_procedural only when its representation fits the design; preserve editable source and measured exports. Review assets_preview and exact-model human approval, then the advertised prepare/stage/reconstruct/place or revision flow. Models from Toolbox/free libraries require an express request. Report unsupported stages instead of replacing a bespoke facade with primitives or claiming Studio AI authoring.
 
-## Review and delivery
-- Check silhouette, bevels, texture scale, UV seams, topology and collision separately. Export success does not establish visual quality or photorealism.
-- Inspect studio_viewport_capture from the player approach and at eye height; fix gaps, intersections, unsupported structure and repeated shapes. Verify actual spawn height and a continuous route.
-- Reuse original scene_build templates only when intended by the brief. Session-only meshes and image resources require supported persistence; state the actual import boundary rather than implying an upload occurred.
-- Related guidance: arcane-photoreal for materials/scale; arcane-vfx for lighting/effects.
+## Derive the geometry and access
+Use Blender metres and the import manifest's explicit studs-per-metre conversion once. Measure final rotated bounds instead of applying a second guessed scale. A slab of thickness t on a surface at y has centre y+t/2. Derive rails from support endpoints: midpoint at their average, length from their distance with intentional joint overlap.
+
+Select path, ramp, bridge or stairs for actual movement/camera needs. Choose riser/tread and landings from tested player capability. A radial stair requires explicit design justification; at radius R, width w and angular step a, outer tread depth must cover at least 2*(R+w/2)*tan(a/2) plus joint overlap. Include risers/support and continuous top/bottom landings; a good overhead silhouette proves no walkability.
+
+Keep collision simpler than ornament and preserve doorway, headroom, turning and handrail clearance. Moving doors/lifts need separate pivots, authoritative activation and fail/recovery behavior from gameplay code.
+
+## Landmarks and spawns when requested
+Inspect the existing SpawnLocation before an exact-baseline update; keep it upright, anchored and correctly seated, with player headroom. Avoid duplicate spawns. scene_delete is only for authorized removals and uses Studio Undo, not receipt_restore. Derive vegetation exclusion and grading from the final footprint, and keep approaches open. A visible safe-zone boundary must correspond to actual server-side protection if that function is requested.
+
+## Acceptance
+Review neutral front/side/three-quarter form, actual dimensions, bevels/normals, UV seams, texture scale and material joins. In the engine inspect eye-height approaches and interiors, then traverse every advertised entrance, landing and connection. Exercise moving mechanisms and spawn/respawn where included; detect snagging, unsupported spans, floor gaps and camera clipping. Check repeated modules for cumulative drift. Record actual import/persistence limits and unresolved functionality; neither export success nor a beauty render proves a usable building.

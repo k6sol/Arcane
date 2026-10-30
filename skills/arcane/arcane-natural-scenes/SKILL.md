@@ -1,40 +1,29 @@
 ---
 name: arcane-natural-scenes
-description: "Build coherent original forests, caves and spawn landmarks with grounded foliage, continuous paths, natural scatter and visual review."
+description: "Build original natural environments with believable plant and rock structure, ecological content layers, usable routes and inspected in-engine composition."
 license: MIT
 ---
 
-# Natural scenes: forests, caves and spawn landmarks
+# Natural environments with structure and usable space
 
-## Plan and source
-Keep every clause of the brief. For a forest with caves and a detailed spawn pillar, plan the landmark, accessible cave entrances/interiors, approach, visible safe zone, foliage layers and lighting together. Use existing project style and sensible scale; 800-2500 parts is a planning example, not a target to fill with debris.
-Original assets by default. For trees, rocks, foliage, fallen logs, stumps and columns use assets_procedural (local Blender), assets_jobs, assets_preview, then assets_prepare_studio_import -> assets_stage_studio_import -> assets_reconstruct_studio_import -> assets_place_studio_import. Do not stop after rendering/exporting: place the actual meshes. Session-only meshes disappear in Play unless uploaded; report it. Only if the user explicitly requests Toolbox models and enables Settings may studio_asset_search/studio_asset_insert supply them; realism grants neither.
+## Compose the requested habitat
+Identify terrain, focal landmarks, routes, activity areas, sightlines and biome conditions from the brief. Preserve every requested feature without making every natural scene a forest, cave or spawn plinth. A full-game environment needs useful destinations and coherent transitions around its actual objectives; a local vegetation edit stays local.
 
-## Ground and caves
-Preserve usable ground in local edits; for landforms run terrain_generate first (seeded, gentle amplitude on player routes). Never use a flat Part disc as a substitute for requested natural terrain; a circular architectural platform is valid.
-Use terrain features to `flatten` the clearing; `path` bends gently with useful width; `river` follows low ground and avoids the spawn. Match material transitions to slope, dampness and shoreline.
-A cave needs an entrance, roof, continuous floor and traversable interior. Use terrain_generate `caves` {at: outcrop centre outside the clearing, entrances, chambers}: it raises a rock outcrop and carves winding tunnels with hillside mouths and Slate-floored chambers, never under pads or keep-outs. scene_build result.caves.fixtures (stalactites, dim lights); keep mouths open with forest `paths`. A rock arch or unenterable dark opening is not a completed cave. Inspect each mouth and chamber route.
+Block traversable ground and silhouette first. Use terrain_generate for requested landforms, flatten only intended activity areas, and reserve continuous path/river polylines before scatter. Preserve existing ground in local edits. A flat Part disc does not stand in for natural terrain, while an intentional architectural platform is valid.
 
-## Original foliage
-For realism use authored meshes with branch structure, irregular crowns and coherent bark/leaf materials. Prepare several mature/young silhouettes and a few dead snags. Visible cylinder tiers, overlapping Balls or moss-capped Blocks are not a realistic finish.
-Stylized/blockout only: multi-part prototypes for Pine (tapered trunk, layered crown), Oak (branching trunk, broad crown), Birch (slender pale trunk, dark marks).
-Keep trunks collidable and decorative foliage non-colliding; small leaves CastShadow false. Use original fern, grass, log and rock variants for realistic undergrowth, concentrated by ecology and routes rather than uniform debris.
+For caves, inspect an entrance, roof, continuous floor, interior route and exit/dead-end design at player scale. Supported terrain_generate caves raise/carve an outcrop; read [scene-build](references/scene-build.md) for actual fields and fixtures. A dark hole or rock arch is not an explored cave. Do not carve beneath protected structures or fill entrances with scatter.
 
-## Tree anatomy review
-Review the leafless model alone (no people or scale figures) in front, side and three-quarter views plus root/fork closeups: a tapered, crooked trunk, staggered boughs, intermediate branches, fine twigs, continuous thickness through forks and grounded root flares. Fix junction lips, cone bases, repeated tiers and hair-thin branches at their source before leaves or bark. Then review the textured canopy and exported mesh at viewing distance; validation and nice lighting do not prove reference fidelity.
+## Author convincing natural families
+Use original Blender geometry, UVs, textures and PBR. Choose assets_procedural only for faithfully supported forms; use the permitted native authoring route for other forms. Review assets_jobs and assets_preview, obtain the exact model's human approval, then follow the supported import flow. Toolbox/free models require an express request and the human-controlled setting. Unsupported authoring/import is a stated limitation, never permission to substitute.
 
-## Placement
-Use scene_build prototypes/templates + scatter (Poisson-disk) per layer and a fixed seed; fields: `arcane-natural-scenes:scene-build`. Group Trees, Undergrowth and Rocks separately; budget includes every clone's contents.
-Landmark forest: scene_build kits plinth (SpawnLocation on top) + forest (species/cover use, share, spacing; paths); terrain_generate plateau base = plinth radius, plus a matching `path`. Originals: an assets_procedural variant family per species, `<use>-<n>` = `variant` [n, count], family seed = kit seed x 100 + 1 (oak-1..4; a blockout kit's `recipe` lists all). The user approves each preview; agents never approve. Place ONE approved copy each in a hidden template Folder; templates {"oak-1": ref} make use "oak" clone its `<use>-<n>` variants. Else the kit reports `blockouts`; say so and never call that forest realistic.
-Never use rings, grids, rows, evenly stepped angles or one shared radius.
-Tree variation: scale [0.75,1.25], random yaw, subtle tint. Match minSpacing to real crown sizes and clusters to grove scale; preserve foreground/midground/background depth.
-Set clearing inner to the protected landmark radius and outer to a gentle density transition; avoid reserves circular obstacles. Copy continuous approach/river polylines into every layer as avoidPaths: [{points: [[x,z], ...], width: 8}] using the intended full width. footprintRadius (scale-1 canopy/prop radius) scales clearance around paths, circles and clearings. ground:true lands copies on the surface.
-Compare placed/requested counts; if crowded reduce density or widen the open area, never fill a protected route.
+For trees, inspect a leafless front/side/three-quarter view and root/fork closeups: taper, crooked growth, unequal bough spacing, connected intermediate branches, fine twigs, sensible fork thickness and grounded root flare. Then inspect the textured canopy. Check actual visible petiole/card roots meet branches, not merely card bounds or a virtual guide; UV/alpha numbers alone do not prove visible attachment. Use mature/young/dead variants when the habitat benefits, not tiers of identical cylinders or balls for a requested realistic finish.
 
-## Finish
-Light, ClockTime, atmosphere: environment_apply preset forest-morning (or another forest-*); kit `life`: motes, sound hooks. Inspect the landmark/forest composition, player approach and cave access with studio_viewport_capture. Repair floating props, stair/rail gaps, repetitive silhouettes and clipped foliage. Safe zone: plinth `safeZone` {radius >= plinth radius + 2.5, style glow|stone} grounds a ring; install report safeZone.script via scene_create Script in the plinth, script_read, script_update, script_set_enabled. Floating labels are no substitute. Verify spawn and damage protection in a playtest. State actual results and limits; do not claim photographic indistinguishability.
+For rocks, establish geological mass, bedding/fracture direction, stable contact and a few large broken planes before fine roughness. Avoid inflated cubes, melted blobs, uniform noise, razor spikes, repeated silhouettes and paint-only moss caps. Review untextured form and a neutral textured view separately.
 
-Read arcane-photoreal for materials/light and arcane-architectural-features for connected landmark geometry.
+## Place layers with purpose
+Reuse approved originals as hidden templates and scene_build clones/scatter; declared scene-build guidance covers variant families, footprints and counts. Human review cannot be supplied by an agent. Wild habitats use clustered spacing, varied age/scale and foreground/midground/background layers; planted rows are appropriate when the brief calls for cultivation.
 
-## Blender authoring boundary
-- Models, UVs, textures and PBR are authored in local Blender. Do not use Studio AI generation. Check the actual exported materials and preview before import; on a failure give its stage and reason. A local export, flat color or reconstructed mesh alone does not prove a finished textured Studio asset.
+Separate canopy, shrubs, ground cover, rocks and deadwood. Density follows moisture, slope, light and gameplay access rather than a uniform debris field. Copy full route widths into every layer's avoidPaths; choose footprintRadius from conservative scale-1 crown/prop bounds so clearance scales with clones. Check placed versus requested counts and reduce crowding instead of blocking routes. Keep decorative foliage non-colliding and collision purposeful.
+
+## Acceptance
+Inspect the player approach, focal composition, ground contacts, leaf/branch joins and cave mouths/interiors in actual engine views. Traverse critical paths, entrances and interaction areas; measure relevant stuck points, sightline loss and dense-area cost on target devices. Add appropriate light, ambient life or audio only when within the requested experience and available rights/capabilities. Verify any requested spawn/safe-zone gameplay server-side; decoration is not protection. Report blockouts, missing persistence and untested features honestly: session meshes and their editable image maps do not become durable published assets through placement or a pretty preview.

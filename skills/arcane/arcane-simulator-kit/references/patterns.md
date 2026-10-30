@@ -1,5 +1,15 @@
 # Simulator code patterns (--!strict, server-authoritative)
 
+## Integration boundary: collection must connect to useful play
+
+These snippets assume Config, remotes, profiles and helpers supplied by the actual game. They do not implement a complete progression economy, durable purchase or safe paid random-item system. Keep pets/eggs/rebirth out unless they serve the brief. A physical simulation is not automatically a collect-sell simulator.
+
+Compose authoritative collection, capacity, selling and upgrades before adding the full requested activity/location roster. Validate alive/equipped actor, current node/zone ownership, range, rate and eligibility; UI and a hidden gate are not authority. Depletion/respawn callbacks require the original zone/node epoch, cleanup of removed nodes and a single reward claim. Full inventory, simultaneous depletion and duplicate sell touches need intentional outcomes.
+
+The egg roll is a server-side weighted sampling fragment, not a complete persistent receipt/grant path or platform-policy approval. Validate bounded definitions and current eligibility before indexing, serialize related profile effects and recover uncertain persistence through the original transaction. Never activate a real purchase with fabricated IDs, client rolls or merely a successful reveal animation. Requested saves preserve failed-load protection and consistent equipment/bonus state.
+
+Build actual tool contact/recovery animation, bag/currency/benefit UI, useful location affordances and restrained collection sound/VFX. Pets are bounded presentation over real owned equipment, not source of trusted bonuses. Test full-bag/locked-zone denials, later upgrade effects, expired respawn after unload, repeated sale, failed load and reset. Compare actual travel/action time with the example price curve; a clickable hub and rising number are not proof of varied content, satisfying activity or retention.
+
 Scripts start disabled (`scene_create` + `script_update`), then `script_read` + `script_set_enabled`. Saving stays disabled until the user asks (`arcane-datastore-safety`).
 
 ## SimConfig (ReplicatedStorage.Shared)
@@ -96,3 +106,21 @@ Validate `zoneId == player.Zone + 1`, price from config, coins >= price; deduct,
 
 ## Data record
 `{ version = 1, lock = { jobId, time }, data = { coins, rebirths, tool, bag, zones, pets, equipped, eggsOpened } }` through session-locked `UpdateAsync` with budget-checked retries; never save after a failed load; BindToClose saves all.
+
+## Conditional tuning examples from the original kit
+
+These inherited figures describe one starting configuration, not universal limits, verified performance or required mechanics. Choose relevant values for the actual brief, bind total resources to the intended audience/device and measure them in real play. Vehicle/platform motion, threat readability and commerce/persistence still require the integration checks above. Do not weaken supported-tool or production bounds to fit an example.
+
+### Balancing (starting numbers)
+| Zone | Unlock | Node value | Node HP | Respawn |
+|---|---|---|---|---|
+| 1 | free | 1 | 3 | 5 s |
+| 2 | 1,000 | 6 | 10 | 8 s |
+| 3 | 12,000 | 40 | 30 | 10 s |
+| 4 | 150,000 | 250 | 90 | 12 s |
+- Swing 0.35 s cooldown; damage = tool power x pet bonus. Bag 25 -> 80 -> 250 -> 800 (price x8 per tier, ~3 min of farming each). Sell 1 coin per bag unit x zone multiplier.
+- Eggs: 250 / 3,000 / 40,000 coins. Odds per egg: Common 60%, Uncommon 28%, Rare 10%, Epic 2% (shown in the UI). Pet bonus +10% / +25% / +60% / +150%; equip 3 (5 after 1st rebirth).
+- Rebirth at 1M lifetime coins, then x3 each; +50% coins per rebirth; resets coins, bag, zones; keeps pets.
+
+### Performance budgets
+<= 60 nodes per zone, nodes anchored with one shared respawn loop; pets: client-side follow (server stores only equipped ids), <= 5 pets per player rendered, <= 30 parts per pet; collect remote rate-limit 6/s per player; HUD updates on attribute change, no per-frame polling.

@@ -24,7 +24,7 @@ export function sceneUpdateDescription(): string {
 }
 export function sceneBuildDescription(): string {
   // Field meanings: the arcane-natural-scenes:scene-build skill reference (kept out of the per-turn tool list).
-  return `Write: one atomic hierarchy (one undo step/receipt) under a returned parent ref; container ${BUILD_GROUP_CLASSES.join("/")}, or ScreenGui (parent StarterGui; GUI items; screen = its props). prototypes: reusable parts local to a ground-level origin, or ui trees. items: groups, parts, placements (use/at/yaw/scale/tint/ground), effects (className + fx in a part/Attachment) or GUI (scene.gui; className + ui; use stamps a ui prototype), fx/ui as on scene_create (refs = item keys); key = local id, in = earlier key. scatter: seeded Poisson spacing, clusters, clearings, keep-out routes; Never use rings or grids for foliage. Fields: skills_get arcane-natural-scenes:scene-build. Anchored defaults true. Limits: ${SCENE_BUILD_LIMITS.items} items, ${SCENE_BUILD_LIMITS.prototypes} prototypes x ${SCENE_BUILD_LIMITS.prototypeParts} parts, ${SCENE_BUILD_LIMITS.instances} instances, 250 KiB. Verified before parenting. Returns counts/root/keyed refs; receipt_restore removes an unchanged build. Plugin 0.2.0+, write grant, edit mode. Never auto-retry; receipt_status on ambiguity.`;
+  return `Write: one atomic hierarchy (one undo step/receipt) under a returned parent ref; container ${BUILD_GROUP_CLASSES.join("/")}, or ScreenGui (parent StarterGui; GUI items; screen = its props). prototypes: reusable parts local to a ground-level origin, or ui trees. items: groups, parts, placements (use/at/yaw/scale/tint/ground), effects (className + fx in a part/Attachment) or GUI (scene.gui; className + ui; use stamps a ui prototype), fx/ui as on scene_create (refs = item keys); key = local id, in = earlier key. scatter: seeded Poisson spacing, clusters, clearings, keep-out routes; Never use rings or grids for foliage. Forest layers require declared intended prototypes/templates (numbered variants supported); unresolved sources refuse with FOREST_SOURCES_REQUIRED before writes, never implicit substitutes. Generate/review/import original models first when required; declaring a template alone does not prove Blender provenance. Explicit primitive blockouts use explicit prototypes. Fields: skills_get arcane-natural-scenes:scene-build. Anchored defaults true. Limits: ${SCENE_BUILD_LIMITS.items} items, ${SCENE_BUILD_LIMITS.prototypes} prototypes x ${SCENE_BUILD_LIMITS.prototypeParts} parts, ${SCENE_BUILD_LIMITS.instances} instances, 250 KiB. Verified before parenting. Returns counts/root/keyed refs; receipt_restore removes an unchanged build. Plugin 0.2.0+, write grant, edit mode. Never auto-retry; receipt_status on ambiguity.`;
 }
 export function environmentDescription(): string {
   return `Write: in one undo step, fill Workspace.Terrain with ordered ${TERRAIN_SHAPES.join('/')} shapes (Air carves; later shapes overwrite earlier) and/or set Lighting plus Atmosphere, Bloom, ColorCorrection, SunRays, DepthOfField and the built-in Sky (reused or created under Lighting; Sky textures are never set). Colors are [r,g,b] or "#rrggbb". Terrain needs the Workspace grant; lighting/effects need the Lighting grant. Max ${ENVIRONMENT_LIMITS.terrainShapes} shapes, ${ENVIRONMENT_LIMITS.extent}-stud extent. Lighting is verified and rolled back on failure before terrain is written. Revert with Studio Undo (receipt_restore is refused; the receipt lists prior lighting values). For natural landforms, clearings and rivers use terrain_generate. Needs plugin 0.2.0+. Never auto-retry.`;
@@ -106,6 +106,86 @@ function rank(skill: Metadata, terms: Set<string>): number {
   for (const term of terms) score += hints.has(term) ? 12 : identity.has(term) ? 8 : title.has(term) ? 4 : description.has(term) ? 1 : 0;
   return score;
 }
+
+type GameGenre = 'obby' | 'tycoon' | 'simulator' | 'horror' | 'shooter' | 'melee-rpg' | 'racing' | 'cozy-social' | 'strategy' | 'party' | 'puzzle' | 'roleplay' | 'adventure';
+type Phase = 'design' | 'systems' | 'content' | 'presentation' | 'verification';
+interface Composition {
+  intent: 'whole-game' | 'focused'; primaryGenre: GameGenre | null;
+  initialCoverage: 'director-and-genre' | 'partial' | 'unavailable' | null;
+  /** Bounded metadata for later skills_get calls, not loaded bodies or authority. */
+  phases: { phase: Phase; ids: string[] }[];
+  guidanceOnly: true;
+}
+const GAME_GENRES: readonly { name: GameGenre; match: RegExp; kit?: string }[] = [
+  { name: 'obby', match: /\b(?:obby|platformer|parkour|obstacle course)\b/, kit: 'arcane-obby-kit' },
+  { name: 'tycoon', match: /\btycoon\b/, kit: 'arcane-tycoon-kit' },
+  { name: 'simulator', match: /\b(?:simulator|clicker)\b/, kit: 'arcane-simulator-kit' },
+  { name: 'horror', match: /\b(?:horror|scary|spooky|haunted)\b/, kit: 'arcane-horror-kit' },
+  { name: 'shooter', match: /\b(?:shooter|pvp|arena|deathmatch|fps)\b/, kit: 'arcane-arena-kit' },
+  { name: 'melee-rpg', match: /\b(?:rpg|role-playing|roleplaying|melee)\b/, kit: 'arcane-rpg-kit' },
+  { name: 'racing', match: /\b(?:racing|race|racer|karting)\b/, kit: 'arcane-racing-kit' },
+  { name: 'cozy-social', match: /\b(?:cozy|social)\b/ },
+  { name: 'strategy', match: /\b(?:strategy|rts|tower defense)\b/ },
+  { name: 'party', match: /\b(?:party|minigame)\b/ },
+  { name: 'puzzle', match: /\b(?:puzzle|educational)\b/ },
+  { name: 'roleplay', match: /\broleplay\b/ },
+  { name: 'adventure', match: /\b(?:adventure|exploration)\b/ },
+];
+function gameIntent(request: string): { brief: string; genre: typeof GAME_GENRES[number] | undefined } | null {
+  const text = request.normalize('NFKC').toLowerCase().trim();
+  let action = text;
+  for (let n = 0; n < 4; n++) {
+    const next = action.replace(/^(?:please|can you|could you|help me|i want you to|i want to|i need you to|i would like you to)\s+/, '');
+    if (next === action) break; action = next;
+  }
+  const creation = /^(?:build|create|make|develop|design|deliver)\s+(.+)/s.exec(action)
+    ?? /^(?:i want|i need|give me)\s+(.+)/s.exec(action);
+  if (!creation) return null;
+  const target = creation[1]!.split(/[,;.!?\n]|\b(?:with|featuring|including|for|inside|within|using|of|in|to)\b/, 1)[0]!
+    .replace(/\b(?:don['’]t|do not|never|not|without|except|rather than|instead of)\b.*$/, '').trim();
+  // The object being requested matters: a HUD/track/asset for a full game is a focused task.
+  const gameNoun = /\b(?:games?|experiences?)\b/.exec(target);
+  const focusedObject = /\b(?:scenes?|assets?|meshes?|models?|props?|tracks?|circuits?|courses?|vehicles?|cars?|karts?|characters?|npcs?|rigs?|animations?|vfx|sfx|sounds?|audio|music|ui|gui|huds?|menus?|screens?|scripts?|modules?|systems?|mechanics?|features?|lighting|forests?|terrain|rooms?|worlds?|levels?|maps?|dungeons?)\b/;
+  if (focusedObject.test(gameNoun ? target.slice(gameNoun.index + gameNoun[0].length) : target)) return null;
+  if (/\b(?:prototype|demo|blockout|vertical slice|starter)\b/.test(target)) return null;
+  if (!/\b(?:games?|experiences?|obby|tycoon|simulator|rpg|platformer|shooter|roleplay)\b/.test(target)
+      && !/\b(?:pvp arena|round-based arena|arena battle)\b/.test(target)) return null;
+  // Examples and negated alternatives must not silently select the genre.
+  const brief = text.replace(/\be\.g\./g, 'for example').replace(/\b(?:for example|such as)\b[^;.!?\n]*/g, '').split(/[,;.!?\n]+/)
+    .map(clause => /\bexample\b/.test(clause) ? ''
+      : clause.replace(/\b(?:don['’]t|do not|never|not|without|except|rather than|instead of)\b.*$/, ''))
+    .join(' ');
+  const genre = GAME_GENRES.map(value => ({ value, at: brief.search(value.match) })).filter(row => row.at >= 0)
+    .sort((a, b) => a.at - b.at)[0]?.value;
+  return { brief, genre };
+}
+const SYSTEM_PHASES: Record<GameGenre, readonly string[]> = {
+  racing: ['arcane-physics', 'arcane-rounds', 'arcane-input-camera', 'arcane-gameplay-systems', 'arcane-networking', 'arcane-remote-security', 'arcane-luau-architecture'],
+  obby: ['arcane-gameplay-systems', 'arcane-physics', 'arcane-input-camera', 'arcane-luau-architecture', 'arcane-datastore-safety'],
+  tycoon: ['arcane-economy', 'arcane-gameplay-systems', 'arcane-datastore-safety', 'arcane-remote-security', 'arcane-luau-architecture'],
+  simulator: ['arcane-gameplay-systems', 'arcane-inventory', 'arcane-economy', 'arcane-datastore-safety', 'arcane-remote-security', 'arcane-luau-architecture'],
+  horror: ['arcane-npc', 'arcane-gameplay-systems', 'arcane-input-camera', 'arcane-rounds', 'arcane-luau-architecture'],
+  shooter: ['arcane-combat', 'arcane-rounds', 'arcane-networking', 'arcane-remote-security', 'arcane-input-camera', 'arcane-luau-architecture'],
+  'melee-rpg': ['arcane-gameplay-systems', 'arcane-npc', 'arcane-inventory', 'arcane-combat', 'arcane-economy', 'arcane-datastore-safety', 'arcane-luau-architecture'],
+  'cozy-social': ['arcane-social-moderation', 'arcane-gameplay-systems', 'arcane-inventory', 'arcane-persistence', 'arcane-input-camera'],
+  strategy: ['arcane-gameplay-systems', 'arcane-rounds', 'arcane-npc', 'arcane-economy', 'arcane-networking', 'arcane-luau-architecture'],
+  party: ['arcane-rounds', 'arcane-gameplay-systems', 'arcane-networking', 'arcane-social-moderation', 'arcane-input-camera'],
+  puzzle: ['arcane-gameplay-systems', 'arcane-input-camera', 'arcane-luau-architecture', 'arcane-onboarding'],
+  roleplay: ['arcane-social-moderation', 'arcane-gameplay-systems', 'arcane-inventory', 'arcane-networking', 'arcane-persistence'],
+  adventure: ['arcane-gameplay-systems', 'arcane-npc', 'arcane-inventory', 'arcane-input-camera', 'arcane-persistence'],
+};
+function gamePhases(catalogue: readonly Metadata[], genre: GameGenre | null): Composition['phases'] {
+  const eligible = new Set(catalogue.map(skill => skill.id));
+  const groups: { phase: Phase; ids: readonly string[] }[] = [
+    { phase: 'design', ids: ['arcane-project-director', 'arcane-game-design', 'arcane-genre-adaptation'] },
+    { phase: 'systems', ids: genre ? SYSTEM_PHASES[genre] : ['arcane-gameplay-systems', 'arcane-luau-architecture', 'arcane-rounds', 'arcane-inventory', 'arcane-economy', 'arcane-npc', 'arcane-physics', 'arcane-remote-security'] },
+    { phase: 'content', ids: ['arcane-level-design', 'arcane-world-building', 'arcane-art-direction', 'arcane-blender-props', 'arcane-characters', 'arcane-materials', 'arcane-asset-integration', 'arcane-asset-optimization'] },
+    { phase: 'presentation', ids: ['arcane-interface', 'arcane-rig-animation', 'arcane-vfx', 'arcane-audio', 'arcane-accessibility', 'arcane-onboarding', 'arcane-gameplay-feel'] },
+    { phase: 'verification', ids: ['arcane-playtest-qa', 'arcane-quality-review', 'arcane-debugging', 'arcane-performance', 'arcane-release'] },
+  ];
+  return groups.map(group => ({ phase: group.phase, ids: [...new Set(group.ids)].filter(id => eligible.has(id)).slice(0, SKILL_ROUTER_LIMITS.skills) }))
+    .filter(group => group.ids.length > 0);
+}
 function fail(code: string, message: string): never { throw Object.assign(new Error(message), { code }); }
 
 /** Pure local retrieval: no daemon call, model invocation, project scan or registry write. */
@@ -117,7 +197,7 @@ export async function recommendSkills(registry: SkillRegistry, input: SkillRecom
   }
   const catalogue = await registry.list({ limit: SKILL_ROUTER_LIMITS.catalogue, allowExperimental: input.allowExperimental });
   if (catalogue.truncated) fail('SKILL_CATALOGUE_LIMIT', 'Bundled skill catalogue exceeds the bounded router inventory.');
-  const terms = tokens(input.request);
+  const game = gameIntent(input.request), terms = tokens(game?.brief ?? input.request);
   const ranked = catalogue.items.filter(skill => !CORE.includes(skill.id as typeof CORE[number]))
     .map(skill => { const score = rank(skill, terms), boost = input.boosts?.[skill.id]; return { skill, score: score > 0 && typeof boost === 'number' && boost > 0 ? score + Math.min(4, boost) : score }; })
     .filter(row => row.score > 0)
@@ -128,11 +208,18 @@ export async function recommendSkills(registry: SkillRegistry, input: SkillRecom
   const core = CORE.map(id => catalogue.items.find(skill => skill.id === id)).filter((skill): skill is Metadata => !!skill).slice(0, coreSlots);
   // Most relevant first: domain skills lead and core process (also in the instructions) trails,
   // so a tight budget defers core bodies before task-specific guidance; skills_get loads them on demand.
-  const selected = [...ranked.slice(0, input.limit - core.length).map(row => row.skill), ...core];
+  const partnerId = game?.genre?.kit ?? 'arcane-genre-adaptation';
+  const initial = game ? ['arcane-project-director', partnerId].map(id => catalogue.items.find(skill => skill.id === id))
+    .filter((skill): skill is Metadata => !!skill) : [];
+  const selected = game ? initial.slice(0, input.limit) : [...ranked.slice(0, input.limit - core.length).map(row => row.skill), ...core];
   const ids = selected.map(skill => skill.id);
   const references: string[] = [];
   const genre = selected.find(skill => skill.id === 'arcane-genre-adaptation');
-  if (genre) for (const term of terms) {
+  if (game && genre) {
+    const name = game.genre?.name ?? 'genres';
+    if (genre.references.includes(name)) references.push(`${genre.id}:${name}`);
+  }
+  else if (genre) for (const term of terms) {
     const name = GENRES[term] ?? term;
     const reference = `${genre.id}:${name}`;
     if (genre.references.includes(name) && !references.includes(reference) && references.length < SKILL_ROUTER_LIMITS.references) references.push(reference);
@@ -141,7 +228,7 @@ export async function recommendSkills(registry: SkillRegistry, input: SkillRecom
     const name = CODE_REFERENCES[skill.id];
     if (name && skill.references.includes(name) && references.length < SKILL_ROUTER_LIMITS.references) references.push(`${skill.id}:${name}`);
   }
-  const deferredIds: string[] = [], deferredReferences: string[] = [];
+  const deferredIds: string[] = initial.slice(input.limit).map(skill => skill.id), deferredReferences: string[] = [];
   let pack: Awaited<ReturnType<SkillRegistry['get']>> | undefined;
   while (ids.length) {
     try { pack = await registry.get({ ids: [...ids], references: [...references], byteBudget: input.byteBudget, allowExperimental: input.allowExperimental }); break; }
@@ -149,12 +236,19 @@ export async function recommendSkills(registry: SkillRegistry, input: SkillRecom
       // Budget is the sole recoverable case. Integrity/status/path failures are
       // never converted into successful partial guidance or "approved" fallback.
       if ((error as { code?: unknown }).code !== 'BUDGET_EXCEEDED') throw error;
-      if (ids.length > 1 && CORE.includes(ids.at(-1) as typeof CORE[number])) deferredIds.unshift(ids.pop()!);
+      if (game && references.length) deferredReferences.unshift(references.pop()!);
+      else if (game && ids.length > 1) deferredIds.unshift(ids.pop()!);
+      else if (!game && ids.length > 1 && CORE.includes(ids.at(-1) as typeof CORE[number])) deferredIds.unshift(ids.pop()!);
       else if (references.length) deferredReferences.unshift(references.pop()!);
       else if (ids.length > 1) deferredIds.unshift(ids.pop()!);
       else throw error;
     }
   }
+  const coverage = !pack ? 'unavailable' : ids.includes('arcane-project-director') && ids.includes(partnerId) ? 'director-and-genre' : 'partial';
+  const composition: Composition = { intent: game ? 'whole-game' : 'focused', primaryGenre: game?.genre?.name ?? null,
+    initialCoverage: game ? coverage : null, phases: game ? gamePhases(catalogue.items, game.genre?.name ?? null) : [], guidanceOnly: true };
+  const limitation = !pack ? 'No eligible bundled skills under the requested policy; core product instructions still apply.'
+    : game && coverage === 'partial' ? 'Only partial initial whole-game guidance is available under this count, byte budget or policy. Use eligible deferred/phase guidance with skills_get; no complete game or authority is implied.' : null;
   return {
     tool: SKILLS_RECOMMEND_TOOL, selection: 'deterministic-task-relevance',
     allowExperimental: input.allowExperimental, defaultLoadPolicy: catalogue.defaultLoadPolicy, approvalChanged: false,
@@ -162,7 +256,7 @@ export async function recommendSkills(registry: SkillRegistry, input: SkillRecom
     selected: selected.filter(skill => ids.includes(skill.id)).map(skill => ({ id: skill.id, status: skill.status, approved: skill.approved,
       reason: CORE.includes(skill.id as typeof CORE[number]) ? 'Core inspect/plan/build/verify process' : 'Task relevance in bundled metadata and domain hints' })),
     ids, references, deferredIds, deferredReferences, bytes: pack?.bytes ?? 0, byteBudget: input.byteBudget,
-    context: pack?.context ?? '', available: !!pack,
-    ...(!pack ? { limitation: 'No eligible bundled skills under the requested policy; core product instructions still apply.' } : {}),
+    context: pack?.context ?? '', available: !!pack, composition,
+    ...(limitation ? { limitation } : {}),
   };
 }

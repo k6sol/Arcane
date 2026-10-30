@@ -98,3 +98,9 @@ Check an item only after its revised source is reviewed, validated and published
 - [ ] arcane-gameplay-feel
 
 [[Operations/Requirements Ledger]] · [[Delivery/G05 Blender Quality]] · [[Skills/Skills Hub]]
+
+## Reviewed source candidate
+
+All 62 entrypoints now have domain-specific production, integration and acceptance instructions; 22 supporting references are reconciled. Complete-game direction covers meaningful content breadth, real gameplay, original art, interface, animation and relevant audio/VFX while focused edits stay scoped. The unchanged experimental approval policy is explicit. Registry metadata and all content/reference hashes match; the official skill format checker passed all 62. Source forward review exposed two contradictions, corrected in the forest field guide and genre discovery description. These are source checks, not actual game/output acceptance or model training.
+
+The actual recommendation path adds bounded director/genre initialization and staged eligible discipline metadata for whole-game requests. Each later skill body still uses the existing checked reader and context budget. Focused prompts retain domain routing. Verify hosted MCP, integrity, policy and budget cases on the published revision before checking the source-completion list.

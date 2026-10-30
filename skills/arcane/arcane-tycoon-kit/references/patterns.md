@@ -1,5 +1,15 @@
 # Tycoon code patterns (--!strict, server-authoritative)
 
+## Integration boundary: compose one owned business
+
+The retained fragments assume shared Config, profiles, remotes and helper functions; they are not ready-to-run complete services. Connect plot ownership, purchase prerequisites, production, collector credit and requested saves under one lifecycle before enabling. Build the first chain, then the useful alternative branches and visible build-out promised by the brief. Reference prices are tuning hypotheses, not a tested economy.
+
+Bind every drop/spout/upgrader to the original plot epoch and owner so leaving/reclaiming cannot credit another business. Collector processing needs one authoritative claim before credit, not repeated touch awards. Hide/reveal is presentation; server validation still checks current owner, prerequisite and affordability. Purchase/reset mutation must not strand cash and ownership if a helper throws. A busy flag and in-memory Owned attribute do not settle durable commerce or rebirth after a crash.
+
+The save fragment shows a session claim, not every lock-renewal/deadline/recovery condition. Use the actual datastore-safety contract, retain failed-load protection and join original leaving cleanup before resetting/reassigning a plot. Cap drops and remove scheduler entries as original objects disappear; no script per drop. Measure the intended fully developed business, not only the free machine.
+
+GUI/signage should show actual price, benefit, dependencies, balance and reset consequences. Machinery motion, throughput audio and purchase effects must agree with confirmed state and use real authorized media. Test simultaneous claims, another owner's button, insufficient cash, duplicate collection, old drops after release, rapid reset and requested save/rejoin. Full plot/content operation and multiplayer claims remain separate from a passing purchase fragment.
+
 Scripts are created disabled (`scene_create` + `script_update`) and enabled after `script_read` + `script_set_enabled`. Saving code stays disabled unless the user asked for saving (`arcane-datastore-safety`).
 
 ## TycoonConfig (ReplicatedStorage.Shared)
@@ -121,3 +131,22 @@ end)
 local claimed = ok and record and record.lock and record.lock.jobId == game.JobId
 ```
 Retry this pcall with `GetRequestBudgetForRequestType` checks and 1/2/4/8 s backoff. If the claim fails, do not create a plot or save anything for that player. Saves write `data` only when `old.lock.jobId == game.JobId`; the leaving save sets `lock = nil`. BindToClose saves all loaded players in parallel and waits (<= 25 s).
+
+## Conditional tuning examples from the original kit
+
+These inherited figures describe one starting configuration, not universal limits, verified performance or required mechanics. Choose relevant values for the actual brief, bind total resources to the intended audience/device and measure them in real play. Vehicle/platform motion, threat readability and commerce/persistence still require the integration checks above. Do not weaken supported-tool or production bounds to fit an example.
+
+### Balancing (starting numbers)
+| Item | Price | Effect |
+|---|---|---|
+| Dropper 1 | 0 (free) | drop $1 every 2 s |
+| Dropper 2 | 50 | $3 / 2 s |
+| Upgrader | 150 | x1.5 on pass |
+| Dropper 3 | 400 | $10 / 2 s |
+| Walls / decor | 100-600 | cosmetic, unlock pacing |
+| Dropper 4 | 1,500 | $35 / 2 s |
+| Dropper 5 | 6,000 | $120 / 2 s |
+Next item price ~ 2.2-2.8x previous; each purchase pays back in 40-120 s. First purchase within 30 s, full plot in 25-40 min. Rebirth cost `25,000 * 2.5 ^ rebirths`; reward multiplier `1 + 0.5 * rebirths`; resets cash and owned, keeps rebirths.
+
+### Performance budgets
+<= 60 live drops per plot (oldest destroyed; Debris 20 s lifetime), drops CanTouch only on collector, 1 server loop ticking all droppers, <= 800 parts per plot, <= 4 plots per server; drops `CanCollide` with belt only via CollisionGroup `Drops`.

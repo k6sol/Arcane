@@ -1,17 +1,25 @@
 ---
 name: arcane-subscription-workflow
-description: "Choose a supported AI client or authorized plan connection for Arcane work while respecting subscription limits and separate API billing."
+description: "Use the user-selected supported AI access mode for Arcane work, preserving model choice, honest usage reporting and resumable game-development progress when limits interrupt work."
 license: MIT
 ---
 
-# Subscription-aware agent workflow
+# Preserve the access route and the work
 
-## Preserve the user's access choice
-Inspect the configured mode: external MCP client, supported direct plan connection, personal API or managed inference. Do not treat a consumer subscription as a generic API key. Use [subscription architecture](../../../docs/SUBSCRIPTION_WORKFLOW.md) for current verified routes and eligibility checks.
+## Identify the actual configured mode
+Distinguish external MCP client, supported direct plan connection, personal API and managed inference. Read [subscription architecture](../../../docs/SUBSCRIPTION_WORKFLOW.md) as project context, then revalidate current implementation and eligibility rather than treating a design note as a live entitlement. A consumer subscription is not a generic API key.
 
-External clients retain their own authentication, model selection and subscription usage. Arcane supplies scoped tools, relevant skills and artifacts; it does not claim control over the client's internal reasoning or unreported quota. Supported plan integration uses the app's own authorized connection, never credentials scraped from another app.
+External clients retain login, model/effort and their own usage accounting. Arcane provides scoped tools, skills and artifacts; it cannot report hidden quota or control unobserved internal reasoning. Direct integration uses the app's authorized connection and supported provider flow, never credentials scraped from another app. Preserve an explicitly chosen model and effort. A fallback that changes billing or data routing needs the user's choice, not silent activation.
 
-Keep personal-API fallback opt-in because it can change the bill. Preserve an explicitly requested model/effort; recommend a different one only with clear trade-offs. Limits are account/provider constraints, not an obstacle to bypass with credential rotation or parallel accounts.
+## Spend context on useful game outcomes
+For a broad game brief, track the connected feature/content plan and acceptance evidence across turns. Use the relevant specialist skills and task-sized source reads; do not reduce a requested complete game to a starter script because a turn is short. For a narrow task, avoid loading an entire game-production manual.
 
-## Verification
-A mode label must match the actual authenticated path and reported usage. Pause on limits; preserve task checkpoints and explain continuation options without repeated chargeable retries. Token/byte savings are measured separately from completed-task quality.
+Checkpoint exact changed artifacts, target/revision, remaining dependencies, known failures and the next meaningful acceptance step. Separate implemented systems from placeholders and untested content. Preserve player-facing integration work such as UI, models, animation and sound dependencies rather than leaving them as undocumented TODOs at handoff.
+
+## Handle interruption honestly
+On a limit or revoked connection, stop new inference through that route, reconcile already-started operations and retain their original IDs/outcomes. Unknown acknowledgements must not be replayed as a fresh chargeable job. Offer supported continuation later or another explicitly selected mode. Do not rotate identities, accounts or credentials to evade limits, and do not claim parallel agents multiply allowance.
+
+Model-switch/cancel/resume paths must preserve the chosen access semantics and actual tool grants; a provider conversation continuing does not resurrect a retired native operation. Use fresh host authority for later work and leave historical evidence read-only.
+
+## Acceptance and reporting
+Verify the mode label matches the actual authenticated request path and reported usage. Keep provider-reported tokens/cost, byte measurements and unavailable quota separate. Judge efficiency by completed acceptance, regressions, corrections and elapsed work as well as context size. No savings percentage, plan eligibility or universal quality promise follows from installing this skill.

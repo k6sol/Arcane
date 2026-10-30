@@ -1,17 +1,25 @@
 ---
 name: arcane-debugging
-description: "Diagnose Roblox errors and behavioral failures with scoped hypotheses, minimal patches and repeatable evidence."
+description: "Find and fix Roblox script, state, replication and lifecycle failures using exact source, discriminating observations and repeatable player-visible regressions."
 license: MIT
 ---
 
-# Repro-driven debugging
+# Diagnose the cause before changing the system
 
-## Establish the failure
-Read the actual Output trace, source revision, execution context and reproduction steps. Reduce the failing interaction without changing its essential condition. When reproduction is unavailable, identify the evidence gap and keep a proposed fix unverified.
+## Establish an exact reproducer
+Capture expected versus observed behavior, the first relevant error/trace, current source and asset revision, execution side and the player actions that trigger it. Identify whether the failure is deterministic, timing-dependent or currently unobservable. Preserve essential conditions such as multiple players, respawn or a delayed response when reducing the case.
 
-Choose a small set of plausible causes proportional to the issue; an obvious syntax mistake does not need an elaborate theory document. Use targeted logs/assertions or measured state to distinguish causes. Instrumentation must be bounded and removed or disabled after diagnosis.
+Trace the action across input, client request, server validation/state, replication and presentation. A missing HUD update may be a subscription or ownership bug rather than a reward failure. A stopped animation is not proof that the server cancelled its action. Inspect the actual owner and callers before rewriting a module.
 
-Patch the cause within scope rather than rewriting the system to hide it. Inspect callers and adjacent states affected by the change. Preserve the first failure evidence and do not change the test's success condition to obtain a green result.
+## Choose observations that distinguish causes
+Use a few testable hypotheses and the smallest observation that separates them: a state transition with generation/revision, handler count, authoritative balance, queue depth, current owner or elapsed boundary. Bound diagnostic volume, avoid player text/secrets and do not log entire profiles. Correlate callbacks without turning arbitrary log text into authority.
 
-## Verification
-Script errors: run the `arcane-playtest-qa` script check loop (Output cursor, playtest, read `after`, fix only your scripts, at most 3 iterations, stop the run). Rerun the original reproducer and relevant regression cases at the changed revision. Include cleanup, respawn or repeated use when the failure involves lifecycle. Stop a repair loop when the same attempt repeats without new evidence; return what was inspected, changed and still unknown.
+For races, write the schedule explicitly: operation starts, yields, owner changes, old callback resumes. Check whether registration happened before the first await/yield and whether cleanup waits for actual owned work. For replication, compare server truth and each client's view. For geometry/input/UI, inspect real hierarchy, transforms, focus and asset availability before adjusting unrelated constants.
+
+## Patch narrowly and preserve the failure
+Fix the earliest incorrect transition or ownership decision. Keep compatibility with existing callers/content and preserve the original error when later cleanup also fails. Cleanup should attempt all owned releases; a caught exception is not proof of successful teardown. Do not suppress errors, widen deadlines or alter the success condition just to make a test pass.
+
+Use `arcane-safe-edits` for exact baselines and activation. Run the original reproducer and a regression that would fail under the old behavior, within `arcane-playtest-qa` and the host's actual repair allowance. Fix only the task's affected scripts; report unrelated Output errors without expanding scope. Stop a repair loop when the same attempt produces no new evidence.
+
+## Deliver the result at its actual confidence
+State the cause, changed behavior, regression exercised and remaining evidence gap. Include repeated use/respawn/cancellation when the defect involved lifecycle. Distinguish an inspected source fix, a controlled fixture and a real gameplay pass. Leave useful bounded diagnostics only when they support future operation; remove temporary probes that would become noise or expose data.

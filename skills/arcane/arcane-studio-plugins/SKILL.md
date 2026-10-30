@@ -1,17 +1,25 @@
 ---
 name: arcane-studio-plugins
-description: "Build Roblox Studio tools with dock widgets, editor-aware operations, scoped connections and safe unload/update behavior."
+description: "Build Roblox Studio plugins with coherent editor workflows, safe source/history operations, authenticated bridges and complete unload/reconnect ownership."
 license: MIT
 ---
 
-# Roblox Studio plugin authoring
+# Build editor tools that respect the open project
 
-## Separate editor tooling from game runtime
-Define the plugin's permitted operations, installation route, UI and data scope. Use supported toolbar/widgets and current Studio privilege APIs. Do not write arbitrary evaluation into game scripts to work around missing plugin capabilities.
+## Define the tool's editor contract
+Identify users, target operations, permitted hierarchy/source scope, installation/update route and the exact output. Separate plugin code from runtime game code. A dock widget or toolbar button needs loading, ready, working, conflict, denied and disconnected states; do not expose a control that silently does nothing.
 
-For external bridges, use authenticated loopback transport, explicit sessions, bounded messages and capability negotiation. Pairing tokens and task grants are not provider credentials. Keep status, target and disconnect visible.
+Inspect available Studio APIs and privileges before choosing an implementation. Script editing must account for open editor buffers and the supported source-edit path. A plugin cannot safely bypass a refused source update by evaluating arbitrary code or placing an executor into the game. Do not infer permission from a selection/name alone.
 
-Source edits honor open buffers and concurrent work. Group changes through supported history recording while recording actual partial outcomes. Own toolbar handlers, polling and widgets and clean them on unload. Persistent settings should not leak long-lived cloud/provider secrets.
+## Make edits reviewable and recoverable
+Read the real baseline and apply only the intended changes. Group a logical edit through the supported history recording mechanism, with cancel/partial-failure behavior. Keep transaction boundaries truthful: an external HTTP request and several engine writes do not automatically share an atomic undo. Do not overwrite manual work that changed after preview.
 
-## Verification
-Build/install in a disposable Studio environment; test narrow panel, theme, reload, reconnect, denied HTTP permission and stale target. A generated plugin source file is not proof of a working installed plugin. Do not silently overwrite other plugins or user configuration.
+For tools that generate game systems/content, validate definitions and dependencies before committing consumers. Preserve model pivots, stable identifiers and source relationships rather than flattening a hierarchy for convenience. Surface unsupported classes/properties before allocation when possible, and clean up partially created owned instances on failure.
+
+## Own the plugin lifetime
+Assign toolbar handlers, widgets, selection listeners, scheduled work and temporary instances to the plugin instance. Unload/update must disconnect and settle or cancel owned operations without continuing into a new plugin lifetime. Persist only appropriate settings; do not store cloud/provider secrets in ordinary plugin settings or replicated game objects.
+
+An external bridge needs authenticated transport, explicit session/target identity, bounded parsing, capability negotiation and correlation for commands/results. Reconnect must create fresh context; serialized packets or old refs are not replay authority. A lost acknowledgement requires reconciliation, not automatic re-execution. Keep target, connection state and refusal visible without leaking tokens.
+
+## Verify the actual editor workflow
+Use a disposable authorized Studio environment for install, first run, narrow dock layout, theme, selection changes, dirty-buffer conflict, Undo, permission denial, reload and reconnect. Exercise unload during a held operation and confirm cleanup/no stale write. Check version compatibility and the actual installed artifact. Generated Luau or a mock UI test proves neither installation nor engine privilege behavior. Leave unrelated plugins and user configuration intact.

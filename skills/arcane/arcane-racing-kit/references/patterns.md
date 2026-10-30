@@ -1,5 +1,15 @@
 # Racing code patterns (--!strict, server-authoritative timing)
 
+## Integration boundary: fragments are not a finished racer
+
+The retained code below illustrates individual responsibilities; Config, RaceService, vehicle ownership and lifecycle wiring are not supplied as a complete module. Keep original project baselines and make only granted edits. Build a small driving proof before the requested full course/event roster, then validate every selectable track through countdown, ordered traversal, finish, results and replay.
+
+The driverOf fallback deliberately recognizes a walking character, which can exercise gate plumbing in a single-client scenario. A production vehicle race must instead bind progress to its actual eligible entrant/vehicle and intended traversal, with direction, reset and shortcut rules. Do not claim that the foot test proves valid driving. The sample gate count assumes a clean ordered inventory; validate names/order and stale round/vehicle callbacks. Timing initialization and finish awards belong to the same current race epoch.
+
+Constraint values are hypotheses for a particular assembly. Verify attachment axes, collisions, steering, mass, traction, network-owner transitions and reset velocities in actual play; the hinge helper is not a tested universal chassis. Restore input/camera on exit and remove only the original owned vehicle. Requested best-time persistence needs track/rules identity and the genuine profile/duplicate-award path, not only board writes.
+
+Compose course selection, useful vehicle choices, race HUD and readable results/retry around actual server events. Engine/skid audio, wheel animation and boost effects use real authorized assets and bounded cleanup. Test reverse/skip gates, reset abuse, countdown, DNF/leaving, repeated races and every delivered course's seams/corners. Multi-car physics and device handling remain untested until exercised; source snippets cannot replace that acceptance.
+
 Scripts start disabled (`scene_create` + `script_update`), then `script_read` + `script_set_enabled`. Constraint tuning and network ownership: `arcane-physics`.
 
 ## RaceConfig
@@ -80,3 +90,20 @@ Sort racers by `(Lap desc, progressIndex desc, distanceToNext asc)` where progre
 
 ## Data record and board
 `{ version = 1, lock = { jobId, time }, data = { bestLap = { [trackId] = seconds }, wins, races, coins } }` via session-locked UpdateAsync with budget-checked retries. Best-lap board: OrderedDataStore `BestLap_<trackId>`, UpdateAsync keeping the lower integer milliseconds; refresh the board every 60 s with `GetSortedAsync(true, 10)`.
+
+## Conditional tuning examples from the original kit
+
+These inherited figures describe one starting configuration, not universal limits, verified performance or required mechanics. Choose relevant values for the actual brief, bind total resources to the intended audience/device and measure them in real play. Vehicle/platform motion, threat readability and commerce/persistence still require the integration checks above. Do not weaken supported-tool or production bounds to fit an example.
+
+### Vehicle setup basics
+| Kart | Top speed | Motor torque | Steer | Grip F/R |
+|---|---|---|---|---|
+| Starter | 70 | 10,000 | 32 deg | 1.6 / 1.5 |
+| Sport | 90 | 12,000 | 28 deg | 1.6 / 1.4 |
+| Pro | 110 | 15,000 | 24 deg | 1.7 / 1.4 |
+- Chassis 6 x 1.5 x 10, wheels 3.2 diameter Cylinder parts (friction = grip via CustomPhysicalProperties). A lap of a starter track takes 45-75 s.
+- VehicleService adds Attachments + HingeConstraints (Motor, AngularVelocity from Throttle) and front steering HingeConstraint (Servo, +/- the Steer value) at spawn; scene_build has no constraint classes.
+- `SetNetworkOwner(driver)` while seated, `nil` when empty; despawn empty karts after 20 s.
+
+### Performance budgets
+<= 8 karts per server, <= 25 parts per kart, track <= 6,000 parts with StreamingEnabled, checkpoint checks server-side via Touched on gates (no per-frame scans), position update 4 Hz.

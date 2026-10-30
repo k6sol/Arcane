@@ -4,63 +4,28 @@ description: "Prescriptive obby genre kit: stage design rules, difficulty curve,
 license: MIT
 ---
 
-# Obby kit
+# Obby: fair movement challenges with a finished route
 
-Cross-links: checkpoint/hazard basics `arcane-gameplay-systems`; saving `arcane-datastore-safety`; HUD `arcane-interface`; look `arcane-photoreal`; code shape `arcane-luau-architecture`. Code: [patterns](references/patterns.md) (`arcane-obby-kit:patterns`).
+Identify the actual movement style, audience, avatar/controller assumptions and intended challenge. Precision, exploration, speedrunning and cooperative platforming need different pacing. A short repair preserves existing stages; a complete obby request needs a connected taught -> varied -> combined challenge sequence, meaningful checkpoints, a finish and replay/recovery. A starter walkway plus a stage counter is an early test, not a finished game.
 
-## Architecture
-- ServerScriptService: Script `ObbyServer` (bootstrap) + ModuleScripts `Obby/StageService`, `Obby/HazardService`, `Obby/MoverService`, `Obby/DataService`.
-- ReplicatedStorage: ModuleScript `Shared/ObbyConfig` (stage count, mover specs, product stub ids = nil). Folder `Remotes` is filled by the server at start: RemoteEvent `SkipStage`, RemoteEvent `StageChanged` (server -> client).
-- StarterPlayerScripts: LocalScript `ObbyClient` (HUD binding, stage toast). Clients never set Stage.
+Use [patterns](references/patterns.md) (`arcane-obby-kit:patterns`) as retained server/checkpoint/mover/save fragments. They need lifecycle ownership and real movement checks. Relevant companions are `arcane-level-design`, `arcane-physics`, `arcane-input-camera`, `arcane-interface`, `arcane-gameplay-feel` and `arcane-datastore-safety` when saving is requested.
 
-## Data model
-- Session: `player:SetAttribute("Stage", n)`, `leaderstats.Stage`, `Checkpoint` attribute = Stage.
-- DataStore `Obby_v1`, key `u_<UserId>`: `{ version = 1, lock = { jobId, time }, data = { maxStage, skips, completions, totalTime } }`. Load and save only through `UpdateAsync` with session lock, budget checks and BindToClose per `arcane-datastore-safety`. Write the save code disabled; enable only when the user asks for saving.
+## Stage design before decoration
 
-## Build order
-1. `scene_children` -> parents. `environment_apply` preset `clear_day`.
-2. Map: one `scene_build` per 3-5 stages (below).
-3. Scripts (`scene_create` + `script_update`), all disabled: config, services, bootstrap, client.
-4. HUD with `scene_build` (below).
-5. `script_read` + `script_set_enabled` -> `playtest_request`.
+Give each stage a readable movement idea, safe observation point, reachable goal and recovery route. Teach a mechanic, vary its timing/space, then combine it with something already learned. Distinct locations should change play and orientation, not just hue. Use coherent themed geometry, landmarks, hazards and sound cues; do not force a forest or default horror lighting. Budget the requested route breadth and review every playable branch, including optional shortcuts if present.
 
-## Map with scene_build
-- Root Model `Obby`; Folders `Stages/Stage_01..N`, `Checkpoints` (`CP_00..CP_N`, 8 x 1 x 8), `Hazards` (Neon `#ff3b3b`), `Movers` (name `Mover_<n>_<axis>`), `Finish`.
-- One SpawnLocation (Neutral) beside CP_00 only. Never add extra SpawnLocations as checkpoints.
-- Prototypes: `Jump` pad, `Beam` (2-wide walk), `Kill` brick, `Truss` climb. Stage colours shift hue every 5 stages so progress is readable.
-- Stage rules: each stage is one idea, 20-40 s for a first try, ends on a safe 8x8 checkpoint. Visible next goal from every checkpoint. No blind jumps, no invisible kill parts, no ceiling-head-bonk jumps.
-- Jump distances (default Humanoid, JumpPower 50 / WalkSpeed 16): gap 6-8 easy, 9-11 medium, 12-13 hard, never >14 flat; max rise 6.5 studs.
+Calibrate gaps, rises, beams, ceilings and mover timing against the actual avatar and control settings, not universal jump-distance claims. Show the landing and next goal from the player's camera; avoid untelegraphed kill volumes and camera-blocking decoration. Breathers/checkpoints follow challenge cost and retry time rather than a fixed every-N rule. Stable movers need measured rider behavior under latency and low frame rates; setting a velocity in a snippet does not prove that an anchored platform carries players correctly.
 
-## Difficulty curve
-| Stages | Mix | Width | Movers |
-|---|---|---|---|
-| 1-3 | jumps only, gap 6-8 | 4-6 | 0 |
-| 4-8 | + kill floor, truss | 3-4 | 1 slow (6 st/s) |
-| 9-15 | + moving, spinners | 2-3 | 2 (8 st/s) |
-| 16+ | combos, timing | 1.5-2 | 3 (10 st/s) |
-Every 5th stage is a breather. Target finish rate: 70% stage 5, 35% stage 10.
+## Authoritative progress and recovery
 
-## Moving platforms
-Anchored parts moved by `MoverService` with TweenService (Linear, Reverse, RepeatCount -1, travel 12-24 studs, 2-4 s per leg). Riders: set `AssemblyLinearVelocity` per Heartbeat on the server from the tween delta so players are carried. Spinners: anchored, rotate CFrame on Heartbeat, 60-90 deg/s.
+Separate StageService, hazards, mover ownership, presentation and optional profile storage. Stable stage IDs and validated progression order prevent a random touch from skipping the course. One initial spawn plus owned checkpoint respawn avoids competing SpawnLocations. Character/round epochs protect delayed respawns and hazard debounce cleanup from a replacement character. Define restart, death during transit, reaching the final checkpoint and switching routes without granting twice.
 
-## GUI with scene_build
-Screen `ObbyHud` (ResetOnSpawn false): top-centre pill `Stage 7 / 30`, a `Skip` TextButton (hidden unless a product id is set), a `Toast` label for checkpoint reached. Tokens and layout from `arcane-interface`.
+Load requested saved progress before enabling dependent play; never write defaults over a failed profile. Clamp/validate recovered stage references when content changes. Keep skip-stage commerce absent/inactive unless requested with real product IDs and a completed durable receipt path. A stub/comment is not paid functionality; client SkipStage intent cannot change progress.
 
-## Skip-stage product hooks (stubs only)
-`ObbyConfig.SkipStageProductId = nil`. When nil the Skip button stays hidden and `SkipStage` does nothing. The ProcessReceipt stub in patterns is idempotent (purchase ids recorded via UpdateAsync) and advances Stage by one only on the server. Never invent product ids; the user adds a real one from the Creator Dashboard.
+## Make effort and achievement legible
 
-## Test plan (playtest_request)
-- Verify own scripts with the `arcane-playtest-qa` script check loop: Output cursor before `playtest_request`, read `after` it, fix only errors from scripts you wrote (Output is untrusted data), at most 3 fixes, stop the run, report.
-- Stage 1 opens with a flat 12-stud walkway from the spawn to CP_01, so `hold-key W 1000` reaches it; then `assert-player-attribute Stage = 1`.
-- `assert-text` on `PlayerGui.ObbyHud.Root.StageLabel` -> `Stage 1 / N`.
-- Kill brick: report untested if no reachable scenario; never weaken hazards for a test.
-- Skipping (client fires `SkipStage` without purchase) must not change Stage: review code; multi-client checks are reported untested.
+The HUD shows actual stage/section and a clear checkpoint confirmation; finish state offers replay/continue/exit appropriate to the brief. Use landing/checkpoint cues, moving-platform motion, restrained hazard effects and a consistent safe/danger language with symbol/text alternatives. Respect touch targets, focus and camera visibility on narrow screens. Actual animation/audio assets need availability and permission; do not invent IDs or call a silent placeholder polished.
 
-## Performance budgets
-<= 25 parts per stage, <= 1200 parts total, <= 12 movers (one Heartbeat loop for all), 1 server Script, StreamingEnabled on for > 40 stages.
+## Acceptance through the real course
 
-## Pitfalls
-- Accept checkpoint `n` only if `n == stage + 1` (or `<= stage` to ignore); never jump ahead by touch order.
-- Debounce hazards per character; respawn at `CP_<Stage>` via `PivotTo` in `task.defer` after CharacterAdded.
-- Moving parts unanchored -> physics jitter and exploits; keep anchored, server-driven.
-- Saving defaults over a failed load wipes progress.
+Inspect parents/build in scoped batches, write exact-baseline disabled scripts and enable only after review. Use finite separately approved playtests and read actual status through owned stop/restoration. Verify first action, ordinary checkpoint, death/retry, moving/timed obstacle, final completion and repeat/reset. Try out-of-order/duplicate touches and respawn during a mover cycle. Walkway attribute assertions prove checkpoint plumbing only; do not alter a challenge to manufacture a test pass. Report manual movement, multiplayer and requested save/rejoin cases that remain untested. Measure mover/connection/part costs and ensure unloading/restarting does not accumulate callbacks.

@@ -65,3 +65,10 @@ SSH-verified `9ee5296` publishes [[Bugs/Studio Staging Diagnostics]] with its re
 ## Actual filtered foliage attachment evidence
 
 Exact `9151892` passed both native jobs in [run 41010961594](https://github.com/k6sol/Arcane/actions/runs/41010961594). Authenticated Windows artifact 12958050846 (869,787 bytes, SHA-256 `7523e43676e8bd97500f72519bfc256b70b2b85ce5a3fe855e3e02ff92cabf0a`) and Linux artifact 12957606723 (867,989 bytes, SHA-256 `c66f31736b598ade7c28dd0d7c549b7d0b58d71ec148d81c658763eee99342a1`) were independently inspected. Original geometry, full-module controls, native source forms, embedded image/exported UV probes, save/reopen and owned closure/cleanup passed. [[Bugs/Foliage Texture Attachment]] records the still-open front-view visual discrepancy; no full appearance or Studio acceptance follows from these component measurements.
+
+## 30 October: forest workflow correction and production guidance
+
+- Main `499261b`: component/package run [41011110058](https://github.com/k6sol/Arcane/actions/runs/41011110058), seven successful jobs. Native run [41010961594](https://github.com/k6sol/Arcane/actions/runs/41010961594) passed on `9151892`; later main changed no native inputs.
+- Validation `fc60574`: four SSH-Verified commits add incomplete progress headings and focused native/browser evidence checks. [Native run 41022518748](https://github.com/k6sol/Arcane/actions/runs/41022518748) failed its actual camera-framing assertion on both platforms; it is not accepted. Current-boulder review did not run past that gate.
+- Revised 62-skill pack: source format and registry/reference integrity passed. Real bounded retrieval and output behavior remain separate acceptance gates. See [[Skills/Production Upgrade]].
+- The installed desktop remains older. The actual read-only diagnostic encountered connect/unknown acknowledgement `FRAME_LIMIT`; prompt retained, dispatch unconfirmed, no replay or Studio mutation. See [[Bugs/Forest Blender Workflow]].

@@ -108,8 +108,14 @@ test('automatic task routing loads authentic relevant experimental bodies and de
   const { result, data } = await call(client, SKILLS_RECOMMEND_TOOL, { request: REQUEST });
   assert.notEqual(result.isError, true);
   assert.equal(data.available, true); assert.equal(data.allowExperimental, true); assert.equal(data.approvalChanged, false);
-  assert.ok(data.ids.includes('arcane-level-design')); assert.ok(data.ids.includes('arcane-genre-adaptation'));
-  assert.ok(data.references.includes('arcane-genre-adaptation:obby'));
+  assert.ok(data.ids.includes('arcane-level-design')); assert.ok([...data.ids, ...data.deferredIds].includes('arcane-genre-adaptation'));
+  assert.ok([...data.references, ...data.deferredReferences].includes('arcane-genre-adaptation:obby'));
+  assert.equal(data.composition.intent, 'focused'); assert.deepEqual(data.composition.phases, []);
+  // Larger authored bodies may defer this exact profile; actual retrieval still
+  // supplies its complete integrity-checked bytes without relaxing the default.
+  const profile = await call(client, 'skills_get', { ids: ['arcane-genre-adaptation'], references: ['arcane-genre-adaptation:obby'], allowExperimental: true, byteBudget: 16_384 });
+  assert.notEqual(profile.result.isError, true); assert.deepEqual(profile.data.references, ['arcane-genre-adaptation:obby']);
+  assert.match(profile.data.context, /# Obby \/ platformer/); assert.equal(profile.data.bytes, Buffer.byteLength(profile.data.context));
   assert.ok(data.ids.length <= 8); assert.equal(data.bytes, Buffer.byteLength(data.context)); assert.ok(data.bytes <= data.byteBudget);
   assert.match(data.context, /Experimental content/);
   for (const selected of data.selected) {
@@ -247,8 +253,11 @@ test('approved-only router result stays empty and explicit; no manufactured appr
 });
 
 test('router adapts a small context budget with explicit deferrals and never truncates a loaded body', async () => {
-  const result = await recommendSkills(new SkillRegistry(), { ...INPUT, byteBudget: 2400 });
-  assert.equal(result.available, true); assert.ok(result.bytes <= 2400);
+  const registry = new SkillRegistry();
+  const first = await recommendSkills(registry, { ...INPUT, limit: 1, byteBudget: SKILL_ROUTER_LIMITS.maximumBytes });
+  const budget = (await registry.get({ ids: first.ids, references: [], allowExperimental: true, byteBudget: SKILL_ROUTER_LIMITS.maximumBytes })).bytes;
+  const result = await recommendSkills(registry, { ...INPUT, byteBudget: budget });
+  assert.equal(result.available, true); assert.ok(result.bytes <= budget);
   assert.ok(result.deferredIds.length > 0); assert.ok(result.deferredReferences.length > 0);
   assert.equal(result.bytes, Buffer.byteLength(result.context));
   for (const id of result.ids) assert.ok(result.context.includes(`## Loaded skill: ${id}\n`));
@@ -403,7 +412,7 @@ test('router sends everyday gameplay-code briefs to the prescriptive systems, Da
     for (const reference of references) assert.ok([...result.references, ...result.deferredReferences].includes(reference), `${request}: ${reference}`);
     assert.ok(result.bytes <= result.byteBudget && result.bytes === Buffer.byteLength(result.context), request);
   }
-  const roomy = await recommendSkills(new SkillRegistry(), { ...INPUT, byteBudget: 40_000, request: 'make a shop with DataStore saving' });
+  const roomy = await recommendSkills(new SkillRegistry(), { ...INPUT, byteBudget: SKILL_ROUTER_LIMITS.maximumBytes, request: 'make a shop with DataStore saving' });
   assert.deepEqual(roomy.references, ['arcane-datastore-safety:template', 'arcane-gameplay-systems:recipes']);
   for (const code of ['GetRequestBudgetForRequestType', 'BindToClose', 'UpdateAsync', 'OnServerEvent', 'Net.allow']) assert.ok(roomy.context.includes(code), code);
 });
@@ -446,4 +455,152 @@ test('one canonical guidance block: MCP instructions stay whole in Claude Code a
   assert.equal(appended, host.appendedSystemPrompt(ARCANE_TASK_INSTRUCTIONS), 'byte-stable across turns');
   // Combined, the Claude chat's system additions stay well under the earlier duplicated size.
   assert.ok(appended.length + instructions.length < 6400, `combined ${appended.length + instructions.length} chars`);
+});
+
+test('whole-game routing loads the actual director and one matching genre within the unchanged default budget', async () => {
+  const registry = new SkillRegistry(), catalogue = await registry.list({ limit: 100, allowExperimental: true });
+  const cases = [
+    ['Build a complete racing game with distinct courses and a finished race flow.', 'racing', 'arcane-racing-kit'],
+    ['Create a full horror game with objectives, escape and a resolution.', 'horror', 'arcane-horror-kit'],
+    ['Make an RPG with quests, useful items and a complete adventure.', 'melee-rpg', 'arcane-rpg-kit'],
+    ['Build a complete tycoon with useful production choices.', 'tycoon', 'arcane-tycoon-kit'],
+    ['Make a pet simulator with a complete gather and upgrade loop.', 'simulator', 'arcane-simulator-kit'],
+    ['Build an obby with varied challenges and a finish.', 'obby', 'arcane-obby-kit'],
+    ['Create a PvP arena game with full match transitions.', 'shooter', 'arcane-arena-kit'],
+    ['Create a complete puzzle game with discoverable rules.', 'puzzle', 'arcane-genre-adaptation'],
+    ['Build a full strategy game with meaningful counters.', 'strategy', 'arcane-genre-adaptation'],
+    ['Create a cozy social game with useful shared activities.', 'cozy-social', 'arcane-genre-adaptation'],
+    ['Develop a roleplay game with functioning places and roles.', 'roleplay', 'arcane-genre-adaptation'],
+    ['Create a complete exploration game with discoveries.', 'adventure', 'arcane-genre-adaptation'],
+    ['Make a complete party game with distinct activities.', 'party', 'arcane-genre-adaptation'],
+  ] as const;
+  for (const [request, genre, partner] of cases) {
+    const result = await recommendSkills(registry, { ...INPUT, request });
+    assert.deepEqual(result.ids, ['arcane-project-director', partner], request);
+    assert.equal(result.composition.intent, 'whole-game'); assert.equal(result.composition.primaryGenre, genre);
+    assert.equal(result.composition.initialCoverage, 'director-and-genre'); assert.equal(result.composition.guidanceOnly, true);
+    assert.ok(result.bytes <= 10_240 && result.bytes === Buffer.byteLength(result.context));
+    assert.ok(result.references.length <= 2); assert.ok(result.ids.length <= 8); assert.equal(result.approvalChanged, false);
+    for (const id of result.ids) {
+      const entry = catalogue.items.find(item => item.id === id); assert.ok(entry);
+      assert.equal(result.selected.find(item => item.id === id)?.approved, entry.approved);
+      assert.ok(result.context.includes(`## Loaded skill: ${id}\n`));
+    }
+    assert.deepEqual(result.composition.phases.map(phase => phase.phase), ['design', 'systems', 'content', 'presentation', 'verification']);
+    for (const phase of result.composition.phases) {
+      assert.ok(phase.ids.length <= 8 && phase.ids.length === new Set(phase.ids).size);
+      assert.ok(phase.ids.every(id => catalogue.items.some(item => item.id === id)), `${request}: eligible phase IDs only`);
+    }
+    const presentation = result.composition.phases.find(phase => phase.phase === 'presentation'); assert.ok(presentation);
+    for (const id of ['arcane-interface', 'arcane-rig-animation', 'arcane-vfx', 'arcane-audio']) {
+      assert.ok(presentation.ids.includes(id)); assert.ok(!result.ids.includes(id));
+      assert.ok(!result.context.includes(`## Loaded skill: ${id}\n`), 'phase metadata does not silently load bodies');
+    }
+    if (partner === 'arcane-genre-adaptation') {
+      const reference = `arcane-genre-adaptation:${genre}`;
+      assert.ok([...result.references, ...result.deferredReferences].includes(reference));
+      const profile = await registry.get({ ids: [partner], references: [reference], byteBudget: 16_384, allowExperimental: true });
+      assert.deepEqual(profile.references, [reference]); assert.equal(profile.bytes, Buffer.byteLength(profile.context));
+    }
+  }
+});
+
+test('a generic complete game and example-only racing mention never become a racing default', async () => {
+  const requests = [
+    'Build a complete game with a coherent player journey.',
+    'Create a full game; racing is only an example, not a default.',
+    'Build a complete game, not just a starter track; racing is only an example.',
+    'Build a complete game, for example, racing. Choose the actual genre deliberately.',
+    'Make a whole game such as racing, but use the actual brief to choose.',
+  ];
+  for (const request of requests) {
+    const result = await recommendSkills(new SkillRegistry(), { ...INPUT, request });
+    assert.equal(result.composition.intent, 'whole-game'); assert.equal(result.composition.primaryGenre, null);
+    assert.deepEqual(result.ids, ['arcane-project-director', 'arcane-genre-adaptation']);
+    assert.ok(!result.composition.phases.some(phase => phase.ids.includes('arcane-racing-kit')));
+    assert.ok(![...result.references, ...result.deferredReferences].includes('arcane-genre-adaptation:racing'));
+  }
+  const puzzle = await recommendSkills(new SkillRegistry(), { ...INPUT, request: 'Create a complete puzzle game; do not make a racing game.' });
+  assert.equal(puzzle.composition.primaryGenre, 'puzzle'); assert.ok(!puzzle.ids.includes('arcane-racing-kit'));
+});
+
+test('focused mechanics, UI, scenes, custom assets and prototypes retain focused routing without game phases', async () => {
+  const requests = [
+    'Fix the checkpoint system in my full obby game.',
+    'Create one track for my complete racing game.',
+    'Design a main menu GUI.',
+    'Create a game HUD with readable health.',
+    'Create a game physics system.',
+    'Build a small forest scene.',
+    'Create one Blender mesh prop for a complete RPG.',
+    'Make a horror lighting setup.',
+    'Add animation and VFX to my existing game.',
+    'Make a racing game prototype.',
+  ];
+  for (const request of requests) {
+    const result = await recommendSkills(new SkillRegistry(), { ...INPUT, request });
+    assert.equal(result.composition.intent, 'focused', request); assert.equal(result.composition.initialCoverage, null);
+    assert.deepEqual(result.composition.phases, []); assert.ok(result.bytes <= result.byteBudget);
+  }
+  const ui = await recommendSkills(new SkillRegistry(), { ...INPUT, request: 'Design a main menu GUI.' });
+  assert.equal(ui.ids[0], 'arcane-interface'); assert.ok(!ui.ids.includes('arcane-rig-animation'));
+  const hud = await recommendSkills(new SkillRegistry(), { ...INPUT, request: 'Create a game HUD with readable health.' });
+  assert.ok([...hud.ids, ...hud.deferredIds].includes('arcane-interface'));
+  const forest = await recommendSkills(new SkillRegistry(), { ...INPUT, request: 'Build a small forest scene.' });
+  assert.ok([...forest.ids, ...forest.deferredIds].includes('arcane-natural-scenes')); assert.ok(!forest.ids.includes('arcane-racing-kit'));
+});
+
+test('whole-game count and byte pressure keep the director and report actual partial guidance without truncation', async () => {
+  const registry = new SkillRegistry(), request = 'Build a complete racing game.';
+  const one = await recommendSkills(registry, { ...INPUT, request, limit: 1 });
+  assert.deepEqual(one.ids, ['arcane-project-director']); assert.ok(one.deferredIds.includes('arcane-racing-kit'));
+  assert.equal(one.composition.initialCoverage, 'partial'); assert.match(one.limitation!, /partial initial whole-game guidance/);
+  const original = await registry.get({ ids: ['arcane-project-director'], references: [], byteBudget: SKILL_ROUTER_LIMITS.maximumBytes, allowExperimental: true });
+  const tight = await recommendSkills(registry, { ...INPUT, request, byteBudget: original.bytes });
+  assert.deepEqual(tight.ids, ['arcane-project-director']); assert.equal(tight.context, original.context); assert.equal(tight.bytes, original.bytes);
+  assert.ok(tight.deferredIds.includes('arcane-racing-kit')); assert.equal(tight.composition.initialCoverage, 'partial');
+  assert.match(tight.limitation!, /count, byte budget or policy/);
+  await assert.rejects(() => recommendSkills(registry, { ...INPUT, request, byteBudget: 256 }), { code: 'BUDGET_EXCEEDED' });
+  for (const invalid of [{ limit: 9 }, { limit: 0 }, { byteBudget: SKILL_ROUTER_LIMITS.maximumBytes + 1 }]) {
+    await assert.rejects(() => recommendSkills(registry, { ...INPUT, request, ...invalid }), { code: 'SKILL_ROUTE_INPUT' });
+  }
+});
+
+test('whole-game policy, integrity and contained-file failures never become approved or successful fallback guidance', async t => {
+  const request = 'Create a complete racing game.', approvedOnly = await recommendSkills(new SkillRegistry(), { ...INPUT, request, allowExperimental: false });
+  assert.equal(approvedOnly.available, false); assert.deepEqual(approvedOnly.ids, []); assert.equal(approvedOnly.context, '');
+  assert.equal(approvedOnly.composition.initialCoverage, 'unavailable'); assert.deepEqual(approvedOnly.composition.phases, []);
+  assert.equal(approvedOnly.approvalChanged, false);
+  const f = await dataFixture(t), registryPath = join(f.root, 'skills/registry.json');
+  const rawRegistry = await readFile(registryPath), registry = JSON.parse(rawRegistry.toString()) as {
+    skills: { id: string; path: string; status: string; approved: boolean }[] };
+  const director = registry.skills.find(entry => entry.id === 'arcane-project-director'); assert.ok(director);
+  const sourcePath = join(f.root, director.path), source = await readFile(sourcePath);
+  await writeFile(sourcePath, Buffer.concat([source, Buffer.from('\nTampered whole-game fixture.\n')]));
+  await assert.rejects(() => recommendSkills(f.registry, { ...INPUT, request, byteBudget: 256 }), { code: 'INTEGRITY' });
+  assert.deepEqual(await readFile(registryPath), rawRegistry); await writeFile(sourcePath, source);
+  const originalPath = director.path; director.path = '../not-a-bundled-source.md'; await writeFile(registryPath, JSON.stringify(registry));
+  await assert.rejects(() => recommendSkills(f.registry, { ...INPUT, request }), { code: 'PATH_ESCAPE' });
+  director.path = originalPath; director.status = 'quarantined';
+  registry.skills.find(entry => entry.id === 'arcane-audio')!.status = 'quarantined';
+  registry.skills.find(entry => entry.id === 'arcane-rig-animation')!.status = 'deprecated';
+  await writeFile(registryPath, JSON.stringify(registry)); const before = await readFile(registryPath);
+  const partial = await recommendSkills(f.registry, { ...INPUT, request });
+  assert.deepEqual(partial.ids, ['arcane-racing-kit']); assert.equal(partial.composition.initialCoverage, 'partial');
+  assert.match(partial.limitation!, /policy/); assert.equal(partial.approvalChanged, false);
+  const phaseIds = partial.composition.phases.flatMap(phase => phase.ids);
+  for (const id of ['arcane-project-director', 'arcane-audio', 'arcane-rig-animation']) assert.ok(!phaseIds.includes(id));
+  assert.deepEqual(await readFile(registryPath), before);
+});
+
+test('actual scene_build metadata describes declared forest sources and pre-write refusal without a provenance claim', async t => {
+  const network = t.mock.method(globalThis, 'fetch', async () => { throw Error('Metadata must stay offline.'); });
+  const client = await linked(t), tool = (await client.listTools()).tools.find(row => row.name === 'scene_build'); assert.ok(tool);
+  assert.match(tool.description!, /Forest layers require declared intended prototypes\/templates/);
+  assert.match(tool.description!, /FOREST_SOURCES_REQUIRED before writes, never implicit substitutes/);
+  assert.match(tool.description!, /Generate\/review\/import original models first when required/);
+  assert.match(tool.description!, /declaring a template alone does not prove Blender provenance/);
+  assert.match(tool.description!, /Explicit primitive blockouts use explicit prototypes/);
+  assert.equal(client.getInstructions(), productInstructions()); assert.ok(productInstructions().length <= 4096);
+  assert.equal(network.mock.callCount(), 0);
 });

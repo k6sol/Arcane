@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "packVersion": "0.1.0",
+  "packVersion": "0.2.0",
   "authoredOn": "2026-10-11",
   "provenance": "Original Arcane instructions; no community repository skill text vendored",
   "licence": "MIT",
@@ -10,7 +10,7 @@
     {
       "id": "arcane-studio-context",
       "title": "Live Studio context",
-      "description": "Inspect the intended Roblox place, selection and source before live Studio work; resolve ambiguous targets without changing the game.",
+      "description": "Resolve the actual Roblox place, source, grants and game-system context before scoped Studio work; use for inspection and target selection, not mutation.",
       "category": "engineering",
       "keywords": [
         "studio",
@@ -20,9 +20,9 @@
         "inspect",
         "context"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-studio-context/SKILL.md",
-      "sha256": "32851b61d102926520115c2bc7a835466f5558ba88f5aafec0cfb98e9f27a991",
+      "sha256": "bc3cde30838b57ea1521c4b752fdc0c373cbe97a5122379a82db2ee5eb8f46b4",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -34,7 +34,7 @@
     {
       "id": "arcane-safe-edits",
       "title": "Conflict-safe Studio edits",
-      "description": "Apply and restore bounded Luau or scene changes while preserving concurrent manual work; use for live mutations and reimports.",
+      "description": "Plan, apply and recover scoped Roblox source and scene changes with exact baselines, dependency-aware activation and preservation of concurrent manual work.",
       "category": "engineering",
       "keywords": [
         "patch",
@@ -44,9 +44,9 @@
         "restore",
         "source"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-safe-edits/SKILL.md",
-      "sha256": "156ba21dc6a11984a8362d5b6dfeac3d250a13924133aea9eb59ed16c20339c4",
+      "sha256": "6c6a5da00350f8bb3deae3e45256a6808f9b2f0760d8dcf2af24adc6225886c6",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -58,7 +58,7 @@
     {
       "id": "arcane-luau-architecture",
       "title": "Luau architecture and scripting",
-      "description": "Write production-quality typed Luau for Roblox: server/client split, ModuleScripts, server-validated remotes, cleanup ownership, CollectionService, TweenService, RunService and performance, using Arcane's disabled-until-activated script flow.",
+      "description": "Implement integrated typed Luau systems with explicit authority, lifecycle, content definitions and client presentation; extend the existing architecture rather than installing a second framework.",
       "category": "engineering",
       "keywords": [
         "luau",
@@ -75,7 +75,7 @@
       ],
       "version": "0.2.0",
       "path": "skills/arcane/arcane-luau-architecture/SKILL.md",
-      "sha256": "d2da9c1699c9a7f7643387ba33ef3db8b709640b6a5c74d4f0850784c031986d",
+      "sha256": "38c4dd50bcd46cf236e9c536606580040d4b9090b08976b4fa9bd6fde6a98aec",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -94,7 +94,7 @@
     {
       "id": "arcane-networking",
       "title": "Replication and network contracts",
-      "description": "Design client-server requests, state replication and prediction for Roblox multiplayer without trusting client-owned outcomes.",
+      "description": "Design and implement Roblox multiplayer protocols, replication and responsive prediction with authoritative state, bounded traffic and reconnect behavior.",
       "category": "engineering",
       "keywords": [
         "network",
@@ -104,9 +104,9 @@
         "latency",
         "multiplayer"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-networking/SKILL.md",
-      "sha256": "afd7f8f58ffe6d722601e459b2bd11f313211048521ef0e9af6b17fabf12a84d",
+      "sha256": "7f4c40208f79f23dd6df0e8b3a293c45a908c70fe2dc123cf5835eba205caa53",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -118,7 +118,7 @@
     {
       "id": "arcane-remote-security",
       "title": "Networking security checklist",
-      "description": "Networking security checklist: design and validate Roblox remotes, prompts, purchases, damage and rewards with server authority, type checks and rate limits; not a promise of exploit-free games.",
+      "description": "Validate Roblox remotes, prompts, touch interactions and value grants with server-owned rules, bounded work, replay protection and legitimate-player regression tests.",
       "category": "engineering",
       "keywords": [
         "security",
@@ -133,9 +133,9 @@
         "rate-limit",
         "networking-security"
       ],
-      "version": "0.3.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-remote-security/SKILL.md",
-      "sha256": "a6afcad710c7fe808a3eb98c663e2b1db5b7672e4879d64eeaca3059a1799cfd",
+      "sha256": "00d104c01811637111b2ffda0edb5fce5503fd366585f8b25eb86c73e72d10ce",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -147,7 +147,7 @@
     {
       "id": "arcane-persistence",
       "title": "Player data and migrations",
-      "description": "Implement or diagnose Roblox save/load, session ownership and schema migration with explicit failure handling and protected test data.",
+      "description": "Design game progress, inventory and economy persistence across rejoin, migrations and interrupted transactions; integrate durable state with honest player-facing save behavior.",
       "category": "engineering",
       "keywords": [
         "save",
@@ -157,9 +157,9 @@
         "migration",
         "persistence"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-persistence/SKILL.md",
-      "sha256": "86acb734b84f721bbfe3398b77ad89e4ba6254a0a7f653d67ed18fa10d42a740",
+      "sha256": "3dac279c01c89e38033d939fdb9e04f8037a67090c048fe874d8e26be227b5b2",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -171,7 +171,7 @@
     {
       "id": "arcane-datastore-safety",
       "title": "DataStore safety",
-      "description": "Write or review Roblox DataStore code that never loses or overwrites player data: pcall with budgeted retries, UpdateAsync, session locking, BindToClose and Studio API-access awareness.",
+      "description": "Protect existing Roblox player data while implementing loads, ownership, budgeted writes, migrations and shutdown; use for storage safety, not promises of loss-free persistence.",
       "category": "engineering",
       "keywords": [
         "datastore",
@@ -185,7 +185,7 @@
       ],
       "version": "0.2.0",
       "path": "skills/arcane/arcane-datastore-safety/SKILL.md",
-      "sha256": "78c599c721543b8e9609cb51eab8777b464ed4ad051a991fe20d4557edc14b50",
+      "sha256": "a145e4fc19b3d816adf20ff36fe33b397d82573abc74de2e943929542da6fbbf",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -203,7 +203,7 @@
     {
       "id": "arcane-cross-server",
       "title": "Cross-server systems",
-      "description": "Design Roblox matchmaking, queues, teleport handoff and transient cross-server coordination with expiry, retries and recovery.",
+      "description": "Implement recoverable Roblox matchmaking, parties, teleport handoff and transient coordination with authoritative reservations, leases, expiry and duplicate protection.",
       "category": "engineering",
       "keywords": [
         "matchmaking",
@@ -213,9 +213,9 @@
         "messaging",
         "cross-server"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-cross-server/SKILL.md",
-      "sha256": "c13ccce193ce119b17c6359450b5c7690b8fcc2e1d3eed3e0d0eed4c52b880f1",
+      "sha256": "b0a950eea15da7a8d6367a1b5141db8d14b01e78bdfdbf4b678812bbe7027ce3",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -237,9 +237,9 @@
         "lives",
         "teams"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-rounds/SKILL.md",
-      "sha256": "7bfc7591cccb04958d46e7120e12847cf73ed8b8b61c851cc013b89948effb40",
+      "sha256": "ca76d4678c7a083e352fe534984c0cc13b7ecc1564ba27111cd98f5e37b07a54",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -251,7 +251,7 @@
     {
       "id": "arcane-gameplay-systems",
       "title": "Gameplay system recipes",
-      "description": "Server-authoritative recipes for common Roblox systems: rounds, checkpoints, leaderstats, shop and currency, inventory, sprint and stamina, health and damage, teams, doors and keys, NPC dialogue and pathfinding NPCs.",
+      "description": "Compose server-authoritative Roblox mechanics into working player journeys with explicit state, rewards, UI, animation, feedback and recovery contracts.",
       "category": "engineering",
       "keywords": [
         "checkpoint",
@@ -273,7 +273,7 @@
       ],
       "version": "0.2.0",
       "path": "skills/arcane/arcane-gameplay-systems/SKILL.md",
-      "sha256": "1f7a91cf23fe760a8d53a216292ce164fd4178bc44773453923778757e54910e",
+      "sha256": "2e8ce5f37f85992b475be1e93f4d01a159865d1df0f7a0ed590c447a552c4ae2",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -302,9 +302,9 @@
         "consumable",
         "loot"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-inventory/SKILL.md",
-      "sha256": "85942d02238749aeaa6c50de340154adf666a099faaacf88f516eecad8c07e91",
+      "sha256": "e50ceaef213dde09385b6d8fd544accdd7b8c3c8c767eebd6228b1307d6bf029",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -326,9 +326,9 @@
         "balance",
         "upgrade"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-economy/SKILL.md",
-      "sha256": "a882a5c271a81148ba1cbacc7d0c9b3b6006c8260420e82cd5e847a682e3aede",
+      "sha256": "294a80608b126a794206752f990c2d17f4132276feaae2a5cd606e952a3b2365",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -350,9 +350,9 @@
         "product",
         "robux"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-monetization/SKILL.md",
-      "sha256": "e41b50c3ffccc3afb69054891abc0e02e2fb291ea55359413731b3f603ff4759",
+      "sha256": "f520933090aecef2f8b9f4f5f3803a8a443a9c3fe3a10ff9a5553585f0d08047",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -364,7 +364,7 @@
     {
       "id": "arcane-input-camera",
       "title": "Controls and camera",
-      "description": "Build responsive Roblox keyboard, controller and touch input, camera and viewmodels with explicit focus and lifecycle behavior.",
+      "description": "Build coherent Roblox action input, camera and viewmodel systems across keyboard, controller and touch, with focus, accessibility and lifecycle-safe ownership.",
       "category": "engineering",
       "keywords": [
         "input",
@@ -374,9 +374,9 @@
         "viewmodel",
         "arms"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-input-camera/SKILL.md",
-      "sha256": "aad4fbf29b78f11891d7dfff4492590d441e0a168c95f4863f9d7102690c156c",
+      "sha256": "f5cdc5d6497436e55370aed532d379f68f22c75821b9fb6a6670c1bb17c14e43",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -389,7 +389,7 @@
     {
       "id": "arcane-physics",
       "title": "Physics, vehicles and mechanisms",
-      "description": "Create stable Roblox physical interactions, mechanisms and vehicles with deliberate authority, constraints and recoverable states.",
+      "description": "Implement stable Roblox vehicles, moving mechanisms and physical interactions with assembly-aware constraints, deliberate authority, responsive feedback and recoverable failure states.",
       "category": "engineering",
       "keywords": [
         "physics",
@@ -399,9 +399,9 @@
         "mechanism",
         "collision"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-physics/SKILL.md",
-      "sha256": "30ebfbb3c9c511b170fbbb09a24d14110d2c4b1243ba24266e43695de5d6585e",
+      "sha256": "1156a92268ff0762050fa9033a507023278fdc09cdbad96e525ef272f061a482",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -423,9 +423,9 @@
         "damage",
         "parry"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-combat/SKILL.md",
-      "sha256": "937cd9ea43e0567bcaf91a08c16ce8d445740c579db7e7233d2ef5a8dfbc75b9",
+      "sha256": "a3e5f387f8e24fbebc0a9db5aea5ca6f3b40f6c279f04a738abe757fd31e286e",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -447,9 +447,9 @@
         "bot",
         "perception"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-npc/SKILL.md",
-      "sha256": "a9e338b47aed0e4b6b07af2c61b8675ed29a0af276e733c87faae28a7fa5717c",
+      "sha256": "26d71ccf4e696c6ea4a6a1b0bd4986ffe50ecdf1baca0e986171bd090f269728",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -461,7 +461,7 @@
     {
       "id": "arcane-interface",
       "title": "Game UI design system",
-      "description": "Build modern, responsive Roblox ScreenGui interfaces from a design system: tokens, UICorner/UIStroke/UIGradient components, scale layouts, typography, hover/press tweens, accessible contrast and clean LocalScript modules.",
+      "description": "Build a coherent responsive Roblox GUI that exposes the real game loop, binds to authoritative state and works across loading, interaction, error, touch and controller states.",
       "category": "craft",
       "keywords": [
         "ui",
@@ -477,7 +477,7 @@
       ],
       "version": "0.2.0",
       "path": "skills/arcane/arcane-interface/SKILL.md",
-      "sha256": "d47220464da9140d3a0118c47ff08014250106b0cb211ef63b7de4c7218303a1",
+      "sha256": "a23e1ffdb0ecb9add65972b73390a48825acc83e23ef2e5bd928f0999666be6d",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -501,7 +501,7 @@
     {
       "id": "arcane-accessibility",
       "title": "Accessibility and inclusive controls",
-      "description": "Review Roblox readability, motion, audio cues and device interaction; improve access without changing the intended challenge.",
+      "description": "Identify and remove Roblox barriers in essential information, controls, motion, audio and GUI while preserving intended challenge and testing the actual accommodated play path.",
       "category": "craft",
       "keywords": [
         "accessibility",
@@ -510,9 +510,9 @@
         "readability",
         "captions"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-accessibility/SKILL.md",
-      "sha256": "3304592bf70aaa615c7fe7ac22747761d41513cd3e3fbcb837b40b013d1e16e1",
+      "sha256": "81f03e01c99eda40903121cb1e04c2d798920f8171b7861d05a3fa8bba6903e1",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -524,7 +524,7 @@
     {
       "id": "arcane-performance",
       "title": "Performance, streaming and resource budgets",
-      "description": "Measure and improve Roblox client/server performance, streaming and resource lifecycle on representative workloads.",
+      "description": "Diagnose and optimize Roblox client, server, rendering, memory and replication costs on representative game workloads while preserving behavior and presentation.",
       "category": "engineering",
       "keywords": [
         "performance",
@@ -534,9 +534,9 @@
         "lag",
         "optimization"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-performance/SKILL.md",
-      "sha256": "0289a481107c9edad6da579a9cbce45194239b5c82d7e693b22ce789b1b069bb",
+      "sha256": "45e1bb919a611a007db0136db2ae4768f3afb4490748315350f8874237b1374f",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -549,7 +549,7 @@
     {
       "id": "arcane-debugging",
       "title": "Repro-driven debugging",
-      "description": "Diagnose Roblox errors and behavioral failures with scoped hypotheses, minimal patches and repeatable evidence.",
+      "description": "Find and fix Roblox script, state, replication and lifecycle failures using exact source, discriminating observations and repeatable player-visible regressions.",
       "category": "engineering",
       "keywords": [
         "debug",
@@ -559,9 +559,9 @@
         "repro",
         "fix"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-debugging/SKILL.md",
-      "sha256": "8f4cda1a39f00032d4fbcfc3554e34ce1c198aa4f13d61a93db38b6ce99795ca",
+      "sha256": "5d1a8f968ce3bf09d15847178028a5520a8d05324ec117e2ccff8a3e56480660",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -573,7 +573,7 @@
     {
       "id": "arcane-playtest-qa",
       "title": "Assertion-based gameplay QA",
-      "description": "Define and run Roblox feature/playflow tests and check your scripts work: real inputs, state assertions, Output errors since a cursor, at most 3 fixes and guaranteed teardown.",
+      "description": "Plan and run capability-supported Roblox feature and playflow acceptance with real input evidence, bounded repair, Output correlation and verified owned teardown.",
       "category": "engineering",
       "keywords": [
         "qa",
@@ -583,9 +583,9 @@
         "regression",
         "verify"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-playtest-qa/SKILL.md",
-      "sha256": "b325a73ce3fb0c4d62d795a079b4a96eecfcaeb1966df58a0a50f90a27f5686c",
+      "sha256": "d86880d9debfb545ef50e7c0eb50deba09fb71a6b473cb087b57b5da5b0beb26",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -598,7 +598,7 @@
     {
       "id": "arcane-game-design",
       "title": "Distinctive game design and vertical slices",
-      "description": "Design Roblox core loops and scoped prototypes with meaningful player decisions and measurable play hypotheses across genres.",
+      "description": "Design coherent Roblox games with meaningful decisions, complete player journeys, appropriate content breadth and testable gameplay hypotheses.",
       "category": "product",
       "keywords": [
         "game-design",
@@ -608,9 +608,9 @@
         "mechanic",
         "concept"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-game-design/SKILL.md",
-      "sha256": "417c86323e2b4a1d5bb526782442d557fca76a6356fc74f2268dd09dec89c9a2",
+      "sha256": "139dfee5ae44d0ded5b04dc954deae46d78f3aeea3423554b6df0af8c1a5c5ec",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -632,9 +632,9 @@
         "pacing",
         "juice"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-gameplay-feel/SKILL.md",
-      "sha256": "de7858db509b40df9325291d5d821d536ffb760e63649d1c7f45b8432fe1b7c5",
+      "sha256": "01ff032af69074bec96bceaf7a8f7df4f19eb69b609ef156da3f4d193429eeb4",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -647,7 +647,7 @@
     {
       "id": "arcane-level-design",
       "title": "Level layout and player decisions",
-      "description": "Design Roblox spaces around traversal, sightlines, interaction reach and encounter choices, using readable blockouts before set dressing.",
+      "description": "Design and finish Roblox play spaces with measured traversal, readable objectives, distinct challenges, integrated scenery and tested player routes.",
       "category": "craft",
       "keywords": [
         "level",
@@ -657,9 +657,9 @@
         "sightline",
         "arena"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-level-design/SKILL.md",
-      "sha256": "9db226a060bad226d1ef2c96ff8a6b6ab944964d8ad75afa8e9e15a3753834d8",
+      "sha256": "2ed7fcdb034df48e6ec01f159a1428c1e7db304286d0838f4f40efd7a5e38754",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -672,7 +672,7 @@
     {
       "id": "arcane-art-direction",
       "title": "Coherent visual direction",
-      "description": "Establish and maintain a project-specific Roblox visual language, reference set and review criteria instead of generic generated aesthetics.",
+      "description": "Define and review a coherent Roblox art direction across environments, characters, props, interface and effects while preserving the requested style and gameplay readability.",
       "category": "craft",
       "keywords": [
         "art",
@@ -682,9 +682,9 @@
         "palette",
         "coherence"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-art-direction/SKILL.md",
-      "sha256": "579956d5a7243fc463e052cfd00aedad589d1113bb5b5eee9c83bd3db0ae4c62",
+      "sha256": "adb821b62c125dfd37097641c5056b3804c0629e3904123fbae2dbabfb01e2a7",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -696,7 +696,7 @@
     {
       "id": "arcane-blender-props",
       "title": "Reference-driven Blender props",
-      "description": "Author game-ready Blender props and mechanical models from references with controlled silhouette, scale, moving parts and engine validation.",
+      "description": "Author original Blender props and mechanical models with purposeful form, UV/PBR detail, moving-part contracts and verified game-scale interaction.",
       "category": "craft",
       "keywords": [
         "blender",
@@ -706,9 +706,9 @@
         "machine",
         "mesh"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-blender-props/SKILL.md",
-      "sha256": "b39c621748573af3985a84adf50a5dac8eb9dab612ca16438a918f0c0b1cc59d",
+      "sha256": "6186775c07e93c9db9b6ef48e7ffecd562d0893e5eaa3d7602e60de7821d11d2",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -727,7 +727,7 @@
     {
       "id": "arcane-characters",
       "title": "NPCs and characters",
-      "description": "NPCs and characters that look and behave well: R15 rigs from HumanoidDescription, default animations, AnimationController creatures, pathfinding, idle/patrol/chase/attack/flee state machines, ProximityPrompt dialogue, a pet or follower that follows the player, network ownership and server authority.",
+      "description": "Build original characters and NPC presentation that fit their gameplay roles, with a genuine rig, readable animation, server-owned behavior and tested dialogue/follower integration.",
       "category": "engineering",
       "keywords": [
         "npc",
@@ -747,7 +747,7 @@
       ],
       "version": "0.2.0",
       "path": "skills/arcane/arcane-characters/SKILL.md",
-      "sha256": "c2bbe483cb6e445ac895afbbde24c28f0d3829fc4dcfb0be2502406be40c1d3a",
+      "sha256": "b08d8ed62d0e32e868a21672f0bd161fb1688f70a9b4f2c6efb582af0a3111a1",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -781,7 +781,7 @@
     {
       "id": "arcane-materials",
       "title": "UVs, textures and engine look development",
-      "description": "Create and verify Blender-to-Roblox UVs, textures and materials at the asset's actual scale and supported engine settings.",
+      "description": "Author and validate original Blender UV layouts, texture sets and PBR materials with correct channel semantics, useful detail scale and actual Roblox import checks.",
       "category": "craft",
       "keywords": [
         "uv",
@@ -791,9 +791,9 @@
         "bake",
         "atlas"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-materials/SKILL.md",
-      "sha256": "f29d04d885735cb0ecf442e810631f9b9df24aef333adb6b63dd2d60ab885b9c",
+      "sha256": "0b51cf876cbf2cc1fa506d0f942d835e2fcce0d79b24ae892660cabf95d8a7e5",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -806,7 +806,7 @@
     {
       "id": "arcane-rig-animation",
       "title": "Rigs, clips and motion integration",
-      "description": "Author and validate Roblox rig conversions, animation clips, grips and transitions in Blender and on the actual runtime rig.",
+      "description": "Author and integrate Blender rigs and purposeful animation clips with verified joint frames, deformation, timing, grips, transitions and interruption-safe runtime behavior.",
       "category": "craft",
       "keywords": [
         "animation",
@@ -816,9 +816,9 @@
         "grip",
         "motion"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-rig-animation/SKILL.md",
-      "sha256": "903fc49180ca7249c503bab27663efed46a09754eef36cc61146bfbdc521e60f",
+      "sha256": "caddbccee29d50a7d692bb3df2ef421cff4a86287fa5a2253aa6d74777e0462a",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -831,7 +831,7 @@
     {
       "id": "arcane-vfx",
       "title": "VFX: particles, beams, trails and lights",
-      "description": "Build Roblox VFX with exact presets: ParticleEmitter fire, smoke, sparks, magic, waterfall, dust, fireflies and leaves, plus Beams, Trails, lights and Highlight, with pooling and performance budgets.",
+      "description": "Design readable Roblox effects for actual gameplay cues or atmosphere, with controlled particle/beam/trail construction, event timing, cleanup and measured overlap cost.",
       "category": "craft",
       "keywords": [
         "vfx",
@@ -849,7 +849,7 @@
       ],
       "version": "0.2.0",
       "path": "skills/arcane/arcane-vfx/SKILL.md",
-      "sha256": "40d5b61d1429073f08643ddfed8315ef10976ae6f6e141225f20aba4bfd715da",
+      "sha256": "568c8f4856c281a0bb55304ab7d6b17cff1f5b9a98be668b67502cf2825c3a24",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -868,7 +868,7 @@
     {
       "id": "arcane-audio",
       "title": "Audio: ambience, mixing, reverb and music",
-      "description": "Build realistic Roblox audio: layered positional ambience (wind, birds, water), roll-off, SoundGroups for mixing, per-area reverb, footstep/interaction scripts, music with ducking and performance budgets, using only real sound ids.",
+      "description": "Integrate authorized Roblox sound and music into meaningful gameplay cues and spatial ambience, with listener-tested mixing, accessibility, lifecycle and truthful missing-resource handling.",
       "category": "craft",
       "keywords": [
         "audio",
@@ -884,7 +884,7 @@
       ],
       "version": "0.2.0",
       "path": "skills/arcane/arcane-audio/SKILL.md",
-      "sha256": "cb22e54b3a7321950e97d767f82c08156892184aad5d08ebc44e26d0e6456498",
+      "sha256": "f4ae1b990e7531ae2069fb2b63bed8634e618fa9baf93eade621b3e8ad731c4a",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -897,7 +897,7 @@
     {
       "id": "arcane-asset-integration",
       "title": "Ownership-aware assets and reimport",
-      "description": "Validate and import Roblox models, textures, audio and animations while preserving ownership, stable mappings and gameplay children.",
+      "description": "Integrate and revise original assets through the actual supported Arcane import route while preserving provenance, ownership, mappings, authored gameplay children and honest persistence state.",
       "category": "engineering",
       "keywords": [
         "asset",
@@ -907,9 +907,9 @@
         "reimport",
         "format"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-asset-integration/SKILL.md",
-      "sha256": "1e4b742b09d5274710fdd3618bb0a63caa3634be6d11048576e154e7e0236041",
+      "sha256": "9c65e62f98a6115465da4363c4fb783190bdfaf10559702343df704b873ce981",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -922,7 +922,7 @@
     {
       "id": "arcane-release",
       "title": "Safe release and deployment",
-      "description": "Prepare Roblox releases with tested migrations, permissions, rollback boundaries and explicit publication authorization.",
+      "description": "Prepare and deliver a specific Roblox game revision with feature/content readiness, asset permissions, compatible data, staged verification and truthful rollback/publication boundaries.",
       "category": "engineering",
       "keywords": [
         "release",
@@ -932,9 +932,9 @@
         "version",
         "staging"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-release/SKILL.md",
-      "sha256": "d867d9a6c11eec517c713ad4b0d1fe25112a2c5735503741be29b93b145a2666",
+      "sha256": "3852012e690b844689b2088a6a9c0a54a864f113ff46ee65ce0ac06c99dc53dc",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -946,7 +946,7 @@
     {
       "id": "arcane-analytics",
       "title": "Analytics and play hypotheses",
-      "description": "Design privacy-conscious Roblox funnels and event measurements that distinguish gameplay problems from unsupported retention claims.",
+      "description": "Instrument and interpret Roblox gameplay funnels, progression and reliability with versioned event contracts, valid denominators, privacy limits and actual play observations.",
       "category": "product",
       "keywords": [
         "analytics",
@@ -955,9 +955,9 @@
         "metric",
         "telemetry"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-analytics/SKILL.md",
-      "sha256": "8c0992ee3cbda71106894c493ccfda7a741bc45ecf7478a968f71c1308cab8db",
+      "sha256": "d2e8b61d0b619a798b6c3b88acef36ebd903699d15cc6971b8c499a2c40ea6a8",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -969,7 +969,7 @@
     {
       "id": "arcane-live-ops",
       "title": "Live operations and events",
-      "description": "Plan and implement Roblox seasonal events, feature flags and balance changes with compatibility, expiry and recovery.",
+      "description": "Design and operate Roblox events, balance updates and feature flags as versioned content with safe rewards, lifecycle transitions and measurable player-facing outcomes.",
       "category": "product",
       "keywords": [
         "live-ops",
@@ -978,9 +978,9 @@
         "flag",
         "balance-update"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-live-ops/SKILL.md",
-      "sha256": "06272ec41c19d91d17e47208cdbb11ea12bbef6eb19b52bd2fb585736893c606",
+      "sha256": "cac6a8b7ea4edd638c571b1cd5dc0dd3b7d8b109f1b6e168b4d2195e5da7069e",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -992,7 +992,7 @@
     {
       "id": "arcane-genre-adaptation",
       "title": "Genre-specific prototypes",
-      "description": "Adapt a Roblox vertical slice to its requested genre using selective design references; do not copy another game's assets or default to horror.",
+      "description": "Adapt complete Roblox games or scoped genre features into coherent mechanics, content, presentation and verified player journeys.",
       "category": "product",
       "keywords": [
         "genre",
@@ -1005,9 +1005,9 @@
         "social",
         "party"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-genre-adaptation/SKILL.md",
-      "sha256": "ae6527516e7547a107c77c5ba2b07edf8d838d2dc6ed84d6cefe8af290da8aa4",
+      "sha256": "41092d58d0b6f24599e0ef520098a63f1dc1919e0c99cabc2c5ffc2f9ac6b699",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -1018,72 +1018,72 @@
         {
           "name": "horror",
           "path": "skills/arcane/arcane-genre-adaptation/references/horror.md",
-          "sha256": "fa4b4120fa54ce75c45eedcefe355cea5615cb3589dcfc7fc46709d9e01554f2"
+          "sha256": "cd63759459c8d1153b4b6d5e07eb7d3c9c4795e4a0c7adccb16028b5703d69ee"
         },
         {
           "name": "obby",
           "path": "skills/arcane/arcane-genre-adaptation/references/obby.md",
-          "sha256": "c281d9505702579b5863329275a7c8dbf29109e7d817c75a0e067cef69e42538"
+          "sha256": "2096804af1010796e3cdee0ec182503ad8a1383239ae50dbbb7fcaa8ba695796"
         },
         {
           "name": "tycoon",
           "path": "skills/arcane/arcane-genre-adaptation/references/tycoon.md",
-          "sha256": "edd2e943e9b41e5de6e7a30b2a15885b3764f394b68db5db7cc2d88eff63959e"
+          "sha256": "5cca6976a04b2f027138b94ef74d130d8ce944606f673d8b11f38adfc5c3799b"
         },
         {
           "name": "simulator",
           "path": "skills/arcane/arcane-genre-adaptation/references/simulator.md",
-          "sha256": "e043be9c397c3989eb8647fce6c4084298143874ce3c4218e4234a34a1c457bd"
+          "sha256": "e89c974dbf99af8fdaed82af69be7531c5d958b57eb7bb36bb5f14b4d5956b63"
         },
         {
           "name": "shooter",
           "path": "skills/arcane/arcane-genre-adaptation/references/shooter.md",
-          "sha256": "59f7f8b51e2ea95de3e1a549484365819066e99c6129a9f9ac66b89f09bfe2a7"
+          "sha256": "019d5f29234dabe435070145fa5a201c1a273ec9ecf8cc651355da5ce1fef2a9"
         },
         {
           "name": "melee-rpg",
           "path": "skills/arcane/arcane-genre-adaptation/references/melee-rpg.md",
-          "sha256": "ce4f641338a97196206cb25011b10d2dc9287fb1bddb95327e5b758b32ee3228"
+          "sha256": "b0afcf55389642bc87e2808dc2de1ceea71bdfe9feebbf2735dd70221924f3e5"
         },
         {
           "name": "cozy-social",
           "path": "skills/arcane/arcane-genre-adaptation/references/cozy-social.md",
-          "sha256": "dafd75a7d6efd0ee308fed92ce85f44e7f2d8bfc18776ee96ed0f2c71101a25f"
+          "sha256": "d591c602ac6cb175bbd5ff18dbe823f3101a928b7be993419f04813f5a56490e"
         },
         {
           "name": "racing",
           "path": "skills/arcane/arcane-genre-adaptation/references/racing.md",
-          "sha256": "594c105c883bee7d995293425ab26ac797a8e834a8613b9c028d780a5d9a3de6"
+          "sha256": "7ded6ca3fbce22617a7d3bfd93c7602fd7a32519f3e2ee655e77719ce1dba82d"
         },
         {
           "name": "strategy",
           "path": "skills/arcane/arcane-genre-adaptation/references/strategy.md",
-          "sha256": "76363b7d3b5fe64cb5c46a98fae9cac520bfb2636223a75e426bd7394b4e26e1"
+          "sha256": "11b808019b8d4f15a5cf7da270d1161068f9754c7a4dba6292f179feb05ff05d"
         },
         {
           "name": "party",
           "path": "skills/arcane/arcane-genre-adaptation/references/party.md",
-          "sha256": "deef04b72b07ac3cec012afbdb1934eab0d81c17da8ac2201b016920c76733e1"
+          "sha256": "0f772e312a9cefb1b460879dffcda3d63d460e3a1d19277c0263b8709e5b71c8"
         },
         {
           "name": "puzzle",
           "path": "skills/arcane/arcane-genre-adaptation/references/puzzle.md",
-          "sha256": "17457be136694f0ceb3dcf0013d213fd85007f820ccbd38f13b4c8bf579ec3b1"
+          "sha256": "febee0374a64dae0d485b2a2c822dadb4c557771d89278344d4b39b513f965a0"
         },
         {
           "name": "roleplay",
           "path": "skills/arcane/arcane-genre-adaptation/references/roleplay.md",
-          "sha256": "bc0ad0ba2864052531f75909ba4b8b92f6fcaed78c8aedbbb21eab4de715f80f"
+          "sha256": "94ebd6dd199d88fcec56d57a647ee96ad6f2242fda654accdc44c3fcc7b767c5"
         },
         {
           "name": "adventure",
           "path": "skills/arcane/arcane-genre-adaptation/references/adventure.md",
-          "sha256": "5bd3c152f754c5cc19666b9dba64f6a6431348f25d6781bf8571dd5e3c3ac425"
+          "sha256": "6429f5a1b4bda6178f0d334f0aed2631455d56ad3df3506341ea2ff670fcd4f7"
         },
         {
           "name": "genres",
           "path": "skills/arcane/arcane-genre-adaptation/references/genres.md",
-          "sha256": "70a089e8750de823849f9cf874e9a69d9f788a19947e240ba61cab9b63d1fd15"
+          "sha256": "7016c2572761bc0c590f30082555a0b1cfcf2f01336f80b5f6f6861f150894e7"
         }
       ]
     },
@@ -1100,9 +1100,9 @@
         "ugc",
         "safety"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-social-moderation/SKILL.md",
-      "sha256": "b9f08ada33c820015540fee31389eaef5e5fbf162f501e31875cca86748becda",
+      "sha256": "982657177d6440999699a69b817897bb44fb675d369ab2a99ad9b0b8caa2f1ce",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -1114,7 +1114,7 @@
     {
       "id": "arcane-subscription-workflow",
       "title": "Subscription-aware agent workflow",
-      "description": "Choose a supported AI client or authorized plan connection for Arcane work while respecting subscription limits and separate API billing.",
+      "description": "Use the user-selected supported AI access mode for Arcane work, preserving model choice, honest usage reporting and resumable game-development progress when limits interrupt work.",
       "category": "platform",
       "keywords": [
         "subscription",
@@ -1124,9 +1124,9 @@
         "quota",
         "plan-access"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-subscription-workflow/SKILL.md",
-      "sha256": "71da90a05403a1b4531bead6374730227b9ad5c1369d8af21529396a5a227f00",
+      "sha256": "ae017fd42acb7f071e34b97ab9ead355c55f6d9e3439e4ae6245afa6842e8776",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -1144,7 +1144,7 @@
     {
       "id": "arcane-context-budget",
       "title": "Efficient evidence and context budgets",
-      "description": "Reduce redundant Arcane context and tool output without losing current source, acceptance evidence or the user's requested quality.",
+      "description": "Keep Arcane retrieval and handoffs compact while preserving complete requested functionality, exact edit baselines, cross-system contracts and acceptance evidence.",
       "category": "platform",
       "keywords": [
         "context-budget",
@@ -1153,9 +1153,9 @@
         "compact",
         "efficiency"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-context-budget/SKILL.md",
-      "sha256": "75f8f40cbfa38d301b97e55bcb77a8df34a20f32b5373f0908ec0a063a6cbc50",
+      "sha256": "71f3fbff7e8c3749e509762ef6a3529903a6228c41cef351ff06413f15fdfd2e",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -1167,7 +1167,7 @@
     {
       "id": "arcane-project-director",
       "title": "End-to-end project direction",
-      "description": "Coordinate a scoped Roblox feature or game slice across design, code, assets and tests with dependencies and concrete acceptance.",
+      "description": "Direct complete Roblox games or scoped changes across gameplay, content, original assets, interface, animation, audio, effects and verified integration.",
       "category": "platform",
       "keywords": [
         "project",
@@ -1176,9 +1176,9 @@
         "vertical-slice",
         "scope"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-project-director/SKILL.md",
-      "sha256": "a34c42a8d27bd21f0792d55a75289a4b8d6956c239ef5b7218887f6ddf92164b",
+      "sha256": "5c3516b66cca4551e83558a8f2e8a67f348ee730c488577b90e9d9d1abe64187",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -1190,7 +1190,7 @@
     {
       "id": "arcane-quality-review",
       "title": "Independent quality gates",
-      "description": "Review a Roblox slice against brief, function, feel, visual coherence and device budgets using evidence rather than self-awarded scores.",
+      "description": "Review actual Roblox deliverables against scope, complete gameplay, original asset provenance, presentation, usability and device budgets with attributable evidence.",
       "category": "platform",
       "keywords": [
         "quality",
@@ -1199,9 +1199,9 @@
         "polish",
         "audit"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-quality-review/SKILL.md",
-      "sha256": "cd6f08e035bdb5673c31f4a451b702367e35692acc8905be5db89d7b501287be",
+      "sha256": "6ba3c5b2982c1460f562ba33b31b356d4865a182ee73ccc559b41e99215c4043",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -1214,7 +1214,7 @@
     {
       "id": "arcane-avatars",
       "title": "Avatars and wearable integration",
-      "description": "Create or integrate Roblox avatar items and cosmetics using the intended rig, fit and publication requirements; distinguish them from ordinary NPC props.",
+      "description": "Author and integrate avatar cosmetics or wearable items for the intended body and product type, with verified fit, attachment, lifecycle and publication boundaries.",
       "category": "craft",
       "keywords": [
         "avatar",
@@ -1223,9 +1223,9 @@
         "clothing",
         "cosmetic"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-avatars/SKILL.md",
-      "sha256": "efc21ba8db634d3245f731c4505d07dfd8a30f84e4c646039abf54a28a7668a7",
+      "sha256": "38e1e5210d4e94d45229dfc0e37dc6abcbbbdcd87a80978e3cda90af209e68c3",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -1238,7 +1238,7 @@
     {
       "id": "arcane-studio-plugins",
       "title": "Roblox Studio plugin authoring",
-      "description": "Build Roblox Studio tools with dock widgets, editor-aware operations, scoped connections and safe unload/update behavior.",
+      "description": "Build Roblox Studio plugins with coherent editor workflows, safe source/history operations, authenticated bridges and complete unload/reconnect ownership.",
       "category": "engineering",
       "keywords": [
         "plugin",
@@ -1247,9 +1247,9 @@
         "editor",
         "widget"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-studio-plugins/SKILL.md",
-      "sha256": "373dfaebbf4fe5e810f0f326ea09c562292c81d921d2535aa6407879c852b9dd",
+      "sha256": "b7890b2a5d2aef2660353e7b3a5fc4535809f3da5bdee4fba4cccffd76396a69",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -1261,7 +1261,7 @@
     {
       "id": "arcane-open-cloud",
       "title": "Open Cloud services and authorization",
-      "description": "Integrate Roblox cloud operations with current endpoint capabilities, minimum scopes, ownership checks and async reconciliation.",
+      "description": "Design and integrate Roblox Open Cloud operations with verified endpoint/auth contracts, resource ownership, durable unknown-outcome handling and scoped credentials.",
       "category": "engineering",
       "keywords": [
         "open-cloud",
@@ -1270,9 +1270,9 @@
         "cloud",
         "endpoint"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-open-cloud/SKILL.md",
-      "sha256": "a902eb9fff61139cda4abdb2b7abecbf83d4d2ccc5f2d5eaf8bd06a9450276e2",
+      "sha256": "a13be25791bf62f7f37251680d775a3a01e5c8b57d7893db0934b138357ba4bf",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -1284,7 +1284,7 @@
     {
       "id": "arcane-localization",
       "title": "Localization and text presentation",
-      "description": "Prepare Roblox interfaces and permitted player-facing text for multiple languages with real layout, filtering and fallback checks.",
+      "description": "Localize the actual Roblox game text and presentation with contextual keys, safe user-text boundaries, robust fallback and measured layout, subtitle and locale behavior.",
       "category": "craft",
       "keywords": [
         "localization",
@@ -1293,9 +1293,9 @@
         "text",
         "locale"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-localization/SKILL.md",
-      "sha256": "f211207648f498cc417ff0b989cb74e6665f5b7e0d09b6a1213a92715e471224",
+      "sha256": "180b6a5e0cb9a9cfe5beff71785cb571edf1cd9230895ee627b000e201261521",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -1307,7 +1307,7 @@
     {
       "id": "arcane-world-building",
       "title": "Terrain and modular world building",
-      "description": "Build coherent Roblox terrain, biomes and modular environments with landmarks, traversal and measured runtime budgets.",
+      "description": "Create coherent playable Roblox worlds with terrain and modular content, meaningful destinations, traversal, environmental storytelling and measured streaming/performance.",
       "category": "craft",
       "keywords": [
         "terrain",
@@ -1317,9 +1317,9 @@
         "modular",
         "foliage"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-world-building/SKILL.md",
-      "sha256": "11a3d5c527334e47c5227dfe84171b79efb73285eb31b2cb6af2c4e000654dea",
+      "sha256": "a966b0ba106a65ff48e1d43d32e5a1fdde4bf619ebe98b34a5ede03577ca1c05",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -1332,7 +1332,7 @@
     {
       "id": "arcane-architectural-features",
       "title": "Architectural features and spawn pedestals",
-      "description": "Build detailed Roblox architecture such as classical columns, stepped plinths, stairs and spawn pedestals with correct SpawnLocation placement, in one batch call.",
+      "description": "Author original architectural kits and landmarks with coherent construction, measured scale, continuous access, usable interiors and verified gameplay integration.",
       "category": "craft",
       "keywords": [
         "pillar",
@@ -1342,9 +1342,9 @@
         "stairs",
         "architecture"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-architectural-features/SKILL.md",
-      "sha256": "7884fc04df82f5fa2beb7ef1828019704df6dc2a037725f412ad5f62a6d45646",
+      "sha256": "098359f346fead6b61aaca65af302a488aea69642396c96cdc19ad9d506249d1",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -1356,7 +1356,7 @@
     {
       "id": "arcane-natural-scenes",
       "title": "Natural scenes and forests",
-      "description": "Build coherent original forests, caves and spawn landmarks with grounded foliage, continuous paths, natural scatter and visual review.",
+      "description": "Build original natural environments with believable plant and rock structure, ecological content layers, usable routes and inspected in-engine composition.",
       "category": "craft",
       "keywords": [
         "forest",
@@ -1366,9 +1366,9 @@
         "scatter",
         "lighting"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-natural-scenes/SKILL.md",
-      "sha256": "45b7e7349114235306d10105537c4b9f8e2447d063a1d1edb3b575a8a6b9c78f",
+      "sha256": "5e8482408656c2f8e5015acb4398ddf8a67aee59603625cfca5b0b811e63fa8b",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -1379,14 +1379,14 @@
         {
           "name": "scene-build",
           "path": "skills/arcane/arcane-natural-scenes/references/scene-build.md",
-          "sha256": "e2a42c2b7647fbd47204654c67a7c0a65cbe18cd2a0cfaa2485b2af0d3f7da76"
+          "sha256": "e0555d727ea6ab7036ada9ba6fa3788421abf4690484123a97ffc7ddd4642f18"
         }
       ]
     },
     {
       "id": "arcane-photoreal",
       "title": "Photoreal lighting, materials and scale",
-      "description": "Make Roblox scenes look photoreal: Future lighting, mood presets (golden hour, foggy forest, night, horror, sci-fi) with Atmosphere and post-processing, terrain grass, MaterialVariants, SurfaceAppearance, real-world scale and imperfection rules.",
+      "description": "Develop a requested realistic Roblox look through original form, scale, UV/PBR surfaces and controlled lighting, then assess the actual engine result without promising photographic equivalence.",
       "category": "craft",
       "keywords": [
         "photoreal",
@@ -1400,9 +1400,9 @@
         "materialvariant",
         "surfaceappearance"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-photoreal/SKILL.md",
-      "sha256": "bba84c0f2b82add9a8bdbdf444e3e3f2c49d5552a7cdb490416a538f4b1f8fc0",
+      "sha256": "2c624d96b574a0969a34007705233ad293ab63252e77d42ed66ed84fdfc7570c",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -1421,7 +1421,7 @@
     {
       "id": "arcane-procedural-generation",
       "title": "Seeded procedural content",
-      "description": "Build Roblox procedural layouts or encounters with reproducible seeds, validity constraints and meaningful controlled variation.",
+      "description": "Author reproducible Roblox layouts, assets and encounters with meaningful variation, bounded generation, validated topology and traceable source-to-engine integration.",
       "category": "engineering",
       "keywords": [
         "procedural",
@@ -1431,9 +1431,9 @@
         "dungeon",
         "variation"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-procedural-generation/SKILL.md",
-      "sha256": "c515859019186e35662b119485078332d12946c255f5432c0268f91e1967cd65",
+      "sha256": "0e40388c69765dd29826852a83cc244b346c230e9e41fefadd6d3bb6984711e8",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -1454,9 +1454,9 @@
         "exchange",
         "dupe"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-trading/SKILL.md",
-      "sha256": "ec053ef6c8c07cfbb34b2a3783a90527ae9b7a632f5706639931dfe75525631f",
+      "sha256": "f83c05ba43d33ca042534e6cfefca778108fdec77b4542c356c37cdfe45cf803",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -1476,9 +1476,9 @@
         "first-session",
         "new-player"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-onboarding/SKILL.md",
-      "sha256": "363c52d1a05baf9ea31252d40053da011a43f7a451a19cbcdb5b4667f7706777",
+      "sha256": "c803acfd243a387e66de4b728fb3bb08c76579e40ce795187c8b04d7788de9c8",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -1490,7 +1490,7 @@
     {
       "id": "arcane-cinematics",
       "title": "Playable cinematics and broadcast sequences",
-      "description": "Build Roblox cutscenes, introductions and timed media with camera ownership, synchronized playback and interruption-safe gameplay transitions.",
+      "description": "Create purposeful Roblox cutscenes and timed presentation with actual camera/animation/audio contracts, readable staging and reliable skip, interruption and return-to-play behavior.",
       "category": "craft",
       "keywords": [
         "cutscene",
@@ -1499,9 +1499,9 @@
         "timeline",
         "intro"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-cinematics/SKILL.md",
-      "sha256": "c916392a59041e201f5b81ae90f23cdb8f7787a548a6b8e622b870184b346258",
+      "sha256": "fb24157f6b47b07cf8972663d5e82fd313aa61d6c2d46a704febc466a45067eb",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -1514,7 +1514,7 @@
     {
       "id": "arcane-asset-optimization",
       "title": "Asset QA, collision and LODs",
-      "description": "Validate and optimize Roblox-bound Blender assets for measured budgets, collision, material cost and verified LOD consumption.",
+      "description": "Optimize Roblox-bound original assets against measured scene bottlenecks while preserving silhouette, UV/PBR quality, collision, deformation and actual LOD behavior.",
       "category": "craft",
       "keywords": [
         "asset-optimization",
@@ -1523,9 +1523,9 @@
         "polycount",
         "budget"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-asset-optimization/SKILL.md",
-      "sha256": "35ab8c555c2964b497578e6bf4c376ec8b5cbf6d23430862f0b0c40bc2b0ae55",
+      "sha256": "5bf2e3370b86943e1bdea7ad49c918c93744d5fdd9b656244ac4ee1e4eb2b9d8",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -1551,9 +1551,9 @@
         "genre",
         "kit"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-tycoon-kit/SKILL.md",
-      "sha256": "fc5b6cf720a29e67536756e6e27ac70bda241e21ded2b2bc7d02db39bc6c8e8e",
+      "sha256": "5cbc0d2e499db1691af9719e4eb92c0d3a3510dc1a039cd8d44a891c49c5b434",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -1565,7 +1565,7 @@
         {
           "name": "patterns",
           "path": "skills/arcane/arcane-tycoon-kit/references/patterns.md",
-          "sha256": "c75f4b35aa1a190f7e8df3f0e74ddb848ffffb2ad65350611dd6f7edb461ecba"
+          "sha256": "a0b823f8c039f6d8dd1ae255dd0dbe95067c906665ecb43713a03c6ec72419ac"
         }
       ]
     },
@@ -1586,9 +1586,9 @@
         "genre",
         "kit"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-obby-kit/SKILL.md",
-      "sha256": "1345266ae056c02e3ce1b65a9dda70abc4129688a69a916fa015e3b1138e39d5",
+      "sha256": "fe4b6af44edab739f67658bd6e707958cb2f88fd8792f963c18d1fb9acde1ad9",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -1600,7 +1600,7 @@
         {
           "name": "patterns",
           "path": "skills/arcane/arcane-obby-kit/references/patterns.md",
-          "sha256": "95ee0ab05297604463bb54bec8968b264931888fad844907914df59c2a6ea3e4"
+          "sha256": "a867e0cab6c12ec86825fcd8706aac8c20dd4d8c6a003388113ccb46732c905b"
         }
       ]
     },
@@ -1623,9 +1623,9 @@
         "genre",
         "kit"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-simulator-kit/SKILL.md",
-      "sha256": "dba3915f3f3e052e74a7a917fa7ff4bce32c55b31c4d14efcaa4d9d3f218b889",
+      "sha256": "f0b6e8d6659403abb24b5eb3c50bb9d0171ce4670cb2eaf8937099af92cd423d",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -1637,7 +1637,7 @@
         {
           "name": "patterns",
           "path": "skills/arcane/arcane-simulator-kit/references/patterns.md",
-          "sha256": "84fc7578ef711e0f3c94ed554c7697a8cbaf2d3fcce9dc43d0aab1f158422348"
+          "sha256": "bc51326a9b881e6433fa236624a0f420835f1ea12ac29e4a8b653582a2657a0f"
         }
       ]
     },
@@ -1659,9 +1659,9 @@
         "genre",
         "kit"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-horror-kit/SKILL.md",
-      "sha256": "b960edad19f1c2dcc318e14f876a74a018a096bf2b00bfec2606c4c174cdc93b",
+      "sha256": "b8fc0bd737d108d423eff2a548dfb44ce5a40f8973ff12dd1ca989c73a1b1e8f",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -1673,7 +1673,7 @@
         {
           "name": "patterns",
           "path": "skills/arcane/arcane-horror-kit/references/patterns.md",
-          "sha256": "fb49a3b83b6398d09e53e30423a8c3ec39d3527f8f7c2741020aa4c67ffe69b4"
+          "sha256": "9a6175ddbfc16ae3d0f29d47c14220eb88d72718931d720236d2befe57b39c57"
         }
       ]
     },
@@ -1695,9 +1695,9 @@
         "genre",
         "kit"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-arena-kit/SKILL.md",
-      "sha256": "5fabb66e058af01ce4fb08902bcef2336e53fe0f7a0065d07b90257475a12f6a",
+      "sha256": "7cfb71a3512228663bd53f0bbeecab8973d4cbf0619a7d9141502aaab8f655ba",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -1709,7 +1709,7 @@
         {
           "name": "patterns",
           "path": "skills/arcane/arcane-arena-kit/references/patterns.md",
-          "sha256": "5470ecf55fc4b2507fd5d06a2f9139042d1464a40a7df8c05e4f4eeb3e022f63"
+          "sha256": "545a6b951d9547f9641c65a74eaea7983bc7c15d8ec4ced913cd7b38b244cc78"
         }
       ]
     },
@@ -1731,9 +1731,9 @@
         "genre",
         "kit"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-racing-kit/SKILL.md",
-      "sha256": "39ee68ab3ac79c57be66bc3f617959da4a3cf6c3d626dcb163644016355a37c6",
+      "sha256": "d3e8b06cca9721557a29cc26984d6e95de2b31f7cd75a2be835e011f799d1abc",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -1745,7 +1745,7 @@
         {
           "name": "patterns",
           "path": "skills/arcane/arcane-racing-kit/references/patterns.md",
-          "sha256": "43ed46b379fa21ee48b2b5e5020c712fcfd9053ce38e7547ea64d758f953555e"
+          "sha256": "3b884b24496125b1c0036a3c19bb562544728428b5a76ef199c12aadc5b430b8"
         }
       ]
     },
@@ -1767,9 +1767,9 @@
         "genre",
         "kit"
       ],
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "skills/arcane/arcane-rpg-kit/SKILL.md",
-      "sha256": "48e50a386eaa1ac18fc08f6fdffc872286fc83453d955dee19a3034d07c642b0",
+      "sha256": "9c61ff613ea456c03eec6f5fdfd374cf9e55442f50cf7c6293e0cc0f3e4bbd0c",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -1781,7 +1781,7 @@
         {
           "name": "patterns",
           "path": "skills/arcane/arcane-rpg-kit/references/patterns.md",
-          "sha256": "1de70b5e6c797eb5017d46bf15df686e2009280b437fbf967fdc08a39e430853"
+          "sha256": "da4cd405a0f4e70af318011c8c69633c2808093e38e4247645f65e8dd4265771"
         }
       ]
     }
