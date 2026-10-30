@@ -66,7 +66,7 @@ const PEER = basePeer
   .replace("daemonUrl: process.env.ARCANE_DAEMON_URL || null", "audience: process.env.ARCANE_ASSET_AUDIENCE || null, daemonUrl: process.env.ARCANE_DAEMON_URL || null")
   .replace("  if (method === 'initialized') return;", TURN_PEER + "\n  if (method === 'initialized') return;")
   .replace("  if (method === 'account/read') return result", "  if (method === 'account/read' && ++accountReads > 1 && mode === 'account-read') return result(id, { account: { type: 'apiKey' }, requiresOpenaiAuth: false });\n  if (method === 'account/read') return result")
-  .replace("    return result(id, { data, nextCursor: null });", "    if (params.threadId && ++checks > 1 && mode === 'preflight') data[1].runtimeStatus = 'connected';\n    return result(id, { data, nextCursor: null });");
+  .replace("    const offset = Number(params.cursor || 0);", "    if (params.threadId && params.cursor == null) checks++;\n    if (params.threadId && checks > 1 && mode === 'preflight') data[1].runtimeStatus = 'connected';\n    const offset = Number(params.cursor || 0);");
 
 const HARNESS = String.raw`
 import assert from 'node:assert/strict';

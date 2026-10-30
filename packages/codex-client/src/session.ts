@@ -310,16 +310,16 @@ export class CodexSession {
     const cursors = new Set<string>(), names = new Set<string>();
     let cursor: string | null = null, totalTools = 0;
     try {
-      for (let page = 0; page < 8; page++) {
+      for (let page = 0; page < 32; page++) {
         check();
-        const response = await this.#transport.request('mcpServerStatus/list', { cursor, limit: 4, detail: 'toolsAndAuthOnly', ...(threadId === undefined ? {} : { threadId }) });
+        const response = await this.#transport.request('mcpServerStatus/list', { cursor, limit: 1, detail: 'toolsAndAuthOnly', ...(threadId === undefined ? {} : { threadId }) });
         check();
         const result = object(response);
         if (this.mcpPolicy !== 'native-config' && !Object.hasOwn(result, 'nextCursor')) fail('MCP_INVENTORY', 'Native MCP inventory lacks pagination metadata.');
-        if (!Array.isArray(result.data) || result.data.length > 4) fail('MCP_INVENTORY', 'Native MCP inventory exceeds its page bound.');
+        if (!Array.isArray(result.data) || result.data.length > 1) fail('MCP_INVENTORY', 'Native MCP inventory exceeds its page bound.');
         for (const value of result.data) {
           const raw = object(value), name = str(raw.name, 256);
-          if (names.has(name) || rows.length >= 64) fail('MCP_INVENTORY', 'Duplicate or excessive native MCP servers.');
+          if (names.has(name) || rows.length >= 32) fail('MCP_INVENTORY', 'Duplicate or excessive native MCP servers.');
           names.add(name);
           if (this.mcpPolicy !== 'native-config' &&
               (!['runtimeStatus','pluginId','toolsError'].every(key => Object.hasOwn(raw, key)) || raw.toolsError !== null && typeof raw.toolsError !== 'string')) {

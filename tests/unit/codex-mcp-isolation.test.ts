@@ -56,7 +56,7 @@ const inventory = params => {
     if (mode === 'bad-data') data = {};
     if (mode === 'bad-row') data = [null];
     if (mode === 'page-bound') data = Array.from({ length: 5 }, (_, n) => row('server-' + n));
-    if (mode === 'server-bound') { const page = Number(params.cursor || 0); data = Array.from({ length: 32 }, (_, n) => row('server-' + (page * 32 + n))); nextCursor = String(page + 1); }
+    if (mode === 'server-bound') { const page = Number(params.cursor || 0); data = [row('server-' + page)]; nextCursor = String(page + 1); }
     if (mode === 'tool-bound') arcane.tools = Object.fromEntries(Array.from({ length: 2049 }, (_, n) => ['tool-' + n, {}]));
     if (mode === 'tool-name-bound') arcane.tools = { ['x'.repeat(257)]: {} };
     if (mode === 'cursor-loop') { data = []; nextCursor = 'same'; }
@@ -64,6 +64,11 @@ const inventory = params => {
     if (mode === 'duplicate-page') { data = [arcane]; nextCursor = params.cursor ? null : 'next'; }
     if (mode === 'paged') { data = params.cursor ? [row('inherited')] : [arcane]; nextCursor = params.cursor ? null : 'next'; }
     if (mode === 'missing-cursor') return { data };
+    if (['page-bound', 'server-bound', 'cursor-loop', 'pagination-bound', 'duplicate-page', 'paged'].includes(mode)) return { data, nextCursor };
+  }
+  if (Array.isArray(data)) {
+    const offset = Number(params.cursor || 0), count = data.length;
+    data = data.slice(offset, offset + 1); nextCursor = offset + 1 < count ? String(offset + 1) : null;
   }
   return { data, nextCursor };
 };
@@ -139,6 +144,7 @@ async function fixture(t: test.TestContext, scenario: Scenario = {}, policy: 'ar
 }
 async function open(t: test.TestContext, scenario: Scenario = {}) { const context = await fixture(t, scenario); await context.session.startThread(HUMAN); return context; }
 const calls = (wire: Wire[], method: string) => wire.filter(row => row.method === method);
+const inventoryScans = (wire: Wire[]) => calls(wire, 'mcpServerStatus/list').filter(row => row.params?.cursor === null);
 function answer(approval: Approval) { return { ...HUMAN, handle: approval.handle, connectionId: approval.connectionId, threadId: approval.threadId, turnId: approval.turnId, decision: 'accept' as const }; }
 function assertFenced(session: CodexSession, before: ReturnType<CodexSession['snapshot']>) {
   const after = session.snapshot();
@@ -153,13 +159,14 @@ function assertFenced(session: CodexSession, before: ReturnType<CodexSession['sn
 test('initial thread inventory plus every turn uses the exact native thread and fresh bounded inventory', async t => {
   const { session, receipts } = await open(t, { inventory: 'paged' });
   assert.equal(session.snapshot().mcpIsolation, 'arcane-only-verified');
-  assert.equal(calls(await receipts(), 'mcpServerStatus/list').length, 1);
+  assert.equal(inventoryScans(await receipts()).length, 1);
+  assert.equal(calls(await receipts(), 'mcpServerStatus/list').length, 2);
   session.grantThreadWrites({ ...HUMAN, threadId: THREAD });
   await session.startTurn(INPUT); session.selectModel({ ...HUMAN, ...OTHER }); await session.startTurn(INPUT);
   const wire = await receipts(), inventory = calls(wire, 'mcpServerStatus/list'), turns = calls(wire, 'turn/start');
-  assert.equal(inventory.length, 5); assert.equal(turns.length, 2);
+  assert.equal(inventory.length, 6); assert.equal(turns.length, 2);
   for (const row of inventory) assert.deepEqual(Object.keys(row.params!).sort(), ['cursor', 'detail', 'limit', 'threadId']);
-  for (const row of inventory) { assert.equal(row.params!.threadId, THREAD); assert.equal(row.params!.limit, 4); assert.equal(row.params!.detail, 'toolsAndAuthOnly'); }
+  for (const row of inventory) { assert.equal(row.params!.threadId, THREAD); assert.equal(row.params!.limit, 1); assert.equal(row.params!.detail, 'toolsAndAuthOnly'); }
   assert.equal(turns[0]!.params!.model, PAIR.model); assert.equal(turns[0]!.params!.effort, PAIR.effort);
   assert.deepEqual(turns[0]!.params!.sandboxPolicy, { type: 'workspaceWrite', writableRoots: [ROOT], networkAccess: false, excludeTmpdirEnvVar: true, excludeSlashTmp: true });
   assert.deepEqual(turns[1]!.params!.sandboxPolicy, { type: 'readOnly', networkAccess: false });
@@ -206,7 +213,7 @@ test('changed inherited server after a completed turn preserves exact previous t
 test('the entire held preflight is oneflight and blocks selection, grants, interrupt and thread/history starts', async t => {
   const { session, receipts, release } = await open(t, { holdCheck: 2, wrongThread: true });
   const before = session.snapshot(), start = session.startTurn(INPUT); start.catch(() => undefined);
-  await until(async () => calls(await receipts(), 'mcpServerStatus/list').length === 2);
+  await until(async () => inventoryScans(await receipts()).length === 2);
   assert.deepEqual(session.snapshot().operations, before.operations);
   assert.equal(session.snapshot().thread!.turnId, null); assert.equal(session.snapshot().thread!.turnStatus, 'idle');
   assert.equal(session.snapshot().mcpIsolation, 'arcane-only-pending');
@@ -228,7 +235,7 @@ for (const granted of [false, true]) test('revocation while inventory is held ca
   const { session, receipts, release } = await open(t, { holdCheck: 2 });
   if (granted) session.grantThreadWrites({ ...HUMAN, threadId: THREAD });
   const before = session.snapshot(), start = session.startTurn(INPUT), rejected = assert.rejects(start, code('GRANT_REVOKED', false));
-  await until(async () => calls(await receipts(), 'mcpServerStatus/list').length === 2);
+  await until(async () => inventoryScans(await receipts()).length === 2);
   session.revokeThreadWrites({ ...HUMAN, threadId: THREAD });
   assert.equal(session.snapshot().thread!.writeGranted, false);
   assert.throws(() => session.grantThreadWrites({ ...HUMAN, threadId: THREAD }), code('STATE'));
@@ -240,7 +247,7 @@ test('closing a connection during inventory cannot resurrect configured isolatio
   const { session, receipts } = await open(t, { holdCheck: 2 });
   session.grantThreadWrites({ ...HUMAN, threadId: THREAD }); const before = session.snapshot();
   const start = session.startTurn(INPUT), rejected = assert.rejects(start, code('DISCONNECTED', false));
-  await until(async () => calls(await receipts(), 'mcpServerStatus/list').length === 2);
+  await until(async () => inventoryScans(await receipts()).length === 2);
   await session.close(); await rejected; assertFenced(session, before);
   assert.equal(calls(await receipts(), 'turn/start').length, 0);
 });
@@ -252,10 +259,10 @@ for (const phase of ['during', 'before', 'changed-and-restored']) test('account 
     const read = session.readAccount(); read.catch(() => undefined);
     await assert.rejects(() => session.startTurn(INPUT), code('STATE', false));
     await assert.rejects(read, code('STATE')); assertFenced(session, before);
-    assert.equal(calls(await receipts(), 'mcpServerStatus/list').length, 1); return;
+    assert.equal(inventoryScans(await receipts()).length, 1); return;
   }
   const start = session.startTurn(INPUT), rejected = assert.rejects(start, code('STATE', false));
-  await until(async () => calls(await receipts(), 'mcpServerStatus/list').length === 2);
+  await until(async () => inventoryScans(await receipts()).length === 2);
   if (phase === 'changed-and-restored') await until(() => session.snapshot().account === null);
   const read = session.readAccount(); read.catch(() => undefined);
   if (phase === 'during') await releaseAccount();
@@ -267,7 +274,7 @@ for (const phase of ['during', 'before', 'changed-and-restored']) test('account 
 test('initial setup rechecks readiness after inventory awaits and never restores a disconnected thread', async t => {
   const { session, receipts } = await fixture(t, { holdCheck: 1 });
   const start = session.startThread(HUMAN), rejected = assert.rejects(start, code('DISCONNECTED'));
-  await until(async () => calls(await receipts(), 'mcpServerStatus/list').length === 1);
+  await until(async () => inventoryScans(await receipts()).length === 1);
   await session.close(); await rejected;
   const snapshot = session.snapshot(); assert.equal(snapshot.thread!.configured, false); assert.equal(snapshot.mcpIsolation, 'arcane-only-pending');
   assert.equal(snapshot.thread!.threadId, THREAD); assert.equal(snapshot.operations[0]!.state, 'unknown');
@@ -289,7 +296,7 @@ test('resumed native thread is checked on setup and again before a turn using it
   const { session, receipts } = await fixture(t);
   await session.resumeThread({ ...HUMAN, threadId: THREAD }); await session.startTurn(INPUT);
   assert.equal(calls(await receipts(), 'thread/start').length, 0); assert.equal(calls(await receipts(), 'thread/resume').length, 1);
-  assert.equal(calls(await receipts(), 'mcpServerStatus/list').length, 2);
+  assert.equal(inventoryScans(await receipts()).length, 2);
   for (const call of calls(await receipts(), 'mcpServerStatus/list')) assert.equal(call.params!.threadId, THREAD);
 });
 
@@ -318,7 +325,7 @@ test('exact thread validation precedes metadata dispatch; inventory cannot fall 
   const { session, receipts } = await open(t);
   await assert.rejects(() => session.startTurn({ ...INPUT, threadId: 'another-thread' }), code('THREAD'));
   await assert.rejects(() => session.inspectMcpServers({ ...HUMAN, threadId: 'another-thread' }), code('STATE'));
-  assert.equal(calls(await receipts(), 'mcpServerStatus/list').length, 1);
+  assert.equal(inventoryScans(await receipts()).length, 1);
   await session.startTurn(INPUT); for (const call of calls(await receipts(), 'mcpServerStatus/list')) assert.equal(call.params!.threadId, THREAD);
 });
 
@@ -328,7 +335,7 @@ test('actual lost turn acknowledgement still retains a dispatched unknown operat
   const snapshot = session.snapshot(); assert.equal(snapshot.operations.at(-1)!.method, 'turn/start'); assert.equal(snapshot.operations.at(-1)!.state, 'unknown');
   assert.notEqual(snapshot.operations.at(-1)!.requestId, null); assert.equal(snapshot.thread!.turnId, null); assert.equal(snapshot.thread!.turnStatus, 'unknown');
   await assert.rejects(() => session.startTurn(INPUT), code('DISCONNECTED'));
-  assert.equal(calls(await receipts(), 'turn/start').length, 1); assert.equal(calls(await receipts(), 'mcpServerStatus/list').length, 2);
+  assert.equal(calls(await receipts(), 'turn/start').length, 1); assert.equal(inventoryScans(await receipts()).length, 2);
 });
 
 test('approvals from a previous interrupted turn cannot be accepted or grant writes during a new preflight', async t => {
@@ -337,7 +344,7 @@ test('approvals from a previous interrupted turn cannot be accepted or grant wri
   await until(() => session.snapshot().approvals.length === 1); const stale = session.snapshot().approvals[0]!;
   await session.interruptTurn({ ...HUMAN, threadId: THREAD, turnId: stale.turnId });
   const before = session.snapshot(), start = session.startTurn(INPUT); start.catch(() => undefined);
-  await until(async () => calls(await receipts(), 'mcpServerStatus/list').length === 3);
+  await until(async () => inventoryScans(await receipts()).length === 3);
   assert.equal(session.snapshot().thread!.turnId, stale.turnId); assert.deepEqual(session.snapshot().operations, before.operations);
   assert.throws(() => session.respondApproval(answer(stale)), code('STALE_APPROVAL'));
   assert.throws(() => session.grantThreadWrites({ ...HUMAN, threadId: THREAD }), code('STATE'));

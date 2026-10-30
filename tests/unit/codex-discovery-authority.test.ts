@@ -85,7 +85,7 @@ createInterface({ input: process.stdin }).on('line', line => {
   if (method === 'model/list') return result(id, { data: [{ id: 'picker-fixture', model: 'fixture-model', displayName: 'Fixture',
     supportedReasoningEfforts: [{ reasoningEffort: 'low' }] }], nextCursor: null });
   if (method === 'mcpServerStatus/list') {
-    inventoryReads++;
+    if (params.cursor == null) inventoryReads++;
     if (launch === 1 && mode === 'inventory-failure') return reject(id);
     const discovery = launch === 1;
     let data = [row('arcane', discovery ? 'disabled' : 'connected'),
@@ -105,7 +105,8 @@ createInterface({ input: process.stdin }).on('line', line => {
       if(mode==='proposal-tools')data[0].tools={read:{}};
       if(mode==='proposal-late-inherited'&&inventoryReads>1)data[1].runtimeStatus='connected';
     }
-    return result(id, { data, nextCursor: null });
+    const offset = Number(params.cursor || 0);
+    return result(id, { data: data.slice(offset, offset + 1), nextCursor: offset + 1 < data.length ? String(offset + 1) : null });
   }
   if (method === 'thread/start') return result(id, {
     thread: { id: 'fixture-thread', sessionId: 'fixture-session', turns: [], status: { type: mode==='proposal-active'?'active':'idle' } },
@@ -298,7 +299,7 @@ async function fixture(t: test.TestContext, options: FixtureOptions = {}) {
     '  const child = realSpawn(process.execPath, ["-e", peer, JSON.stringify({ ...scenario, launch: id }), audit, ...args], options);',
     '  if (scenario.repeatHistory && id >= 3) { args.push("SYNTHETIC_BOUNDARY_MUTATION"); options.env.ARCANE_LOCAL_TOKEN = "b5".repeat(32); options.env.ARCANE_DAEMON_URL = "http://127.0.0.1:49999"; }',
     '  let frame="", inventoryReads=0;const requests=new Map();const write=child.stdin.write.bind(child.stdin);',
-    '  child.stdin.write=(data,...rest)=>{const message=JSON.parse(String(data));if(message.method==="mcpServerStatus/list")inventoryReads++;if(message.id)requests.set(message.id,{method:message.method,inventoryReads});return write(data,...rest);};',
+    '  child.stdin.write=(data,...rest)=>{const message=JSON.parse(String(data));if(message.method==="mcpServerStatus/list"&&message.params?.cursor==null)inventoryReads++;if(message.id)requests.set(message.id,{method:message.method,inventoryReads});return write(data,...rest);};',
     '  child.stdout.on("data",chunk=>{frame+=chunk.toString();let end;while((end=frame.indexOf("\\n"))>=0){const line=frame.slice(0,end);frame=frame.slice(end+1);if(!line.trim())continue;const message=JSON.parse(line),request=requests.get(message.id),stage=scenario.parentRetirement;',
     '    if(scenario.mode==="proposal-deadline"&&id===2&&request?.method==="turn/start"){const now=Date.now();Date.now=()=>now+120000;}',
     '    if(request&&(stage==="discovery-init"&&id===1&&request.method==="initialize"||stage==="discovery-inventory"&&id===1&&request.method==="mcpServerStatus/list"||stage==="final-init"&&id===2&&request.method==="initialize"||stage==="thread-inventory"&&id===2&&request.method==="mcpServerStatus/list"&&request.inventoryReads===1||stage==="turn-inventory"&&id===2&&request.method==="mcpServerStatus/list"&&request.inventoryReads===2||stage==="active"&&id===2&&request.method==="turn/start"))globalThis.arcaneFixtureRetire();',
@@ -393,8 +394,12 @@ test('discovery gets no inherited authority; final retains fixed authority, exac
   assert.deepEqual(events(records, 'history-after')[0]?.snapshot, events(records, 'history-before')[0]?.snapshot);
   assert.equal(calls(records, 'thread/resume').length, 0);
   assert.deepEqual(calls(records, 'mcpServerStatus/list').map(row => row.params), [
-    { cursor: null, limit: 4, detail: 'toolsAndAuthOnly' },
-    { cursor: null, limit: 4, detail: 'toolsAndAuthOnly', threadId: 'fixture-thread' },
+    { cursor: null, limit: 1, detail: 'toolsAndAuthOnly' },
+    { cursor: '1', limit: 1, detail: 'toolsAndAuthOnly' },
+    { cursor: '2', limit: 1, detail: 'toolsAndAuthOnly' },
+    { cursor: null, limit: 1, detail: 'toolsAndAuthOnly', threadId: 'fixture-thread' },
+    { cursor: '1', limit: 1, detail: 'toolsAndAuthOnly', threadId: 'fixture-thread' },
+    { cursor: '2', limit: 1, detail: 'toolsAndAuthOnly', threadId: 'fixture-thread' },
   ]);
   assert.equal(calls(records, 'turn/start').length, 0);
 });
@@ -553,7 +558,8 @@ test('proposal worker launches two secret-free children and dispatches exactly o
   const turn=calls(records,'turn/start');assert.equal(turn.length,1);
   assert.deepEqual(turn[0]!.params!.sandboxPolicy,{type:'readOnly',networkAccess:false});
   assert.equal(turn[0]!.params!.approvalPolicy,'never');assert.equal(turn[0]!.params!.model,'fixture-model');assert.equal(turn[0]!.params!.effort,'low');
-  assert.equal(calls(records,'mcpServerStatus/list').length,3);
+  assert.equal(calls(records,'mcpServerStatus/list').length,9);
+  assert.equal(calls(records,'mcpServerStatus/list').filter(row=>row.params?.cursor===null).length,3);
   assert.equal(events(records,'rpc').find(row=>row.resultValue)?.resultValue?.decision,'cancel');
   assert.equal(events(records,'repeat-error')[0]?.code,'PROPOSAL_READ_ONLY');
   assert.deepEqual(events(records,'proposal-result')[0]?.proposalResult,{threadId:'fixture-thread',sessionId:'fixture-session',turnId:'proposal-turn',text:'Synthetic code proposal',status:'proposed'});
