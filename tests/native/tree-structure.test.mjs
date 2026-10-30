@@ -14,11 +14,17 @@ import { captureFailureAudit } from './tree-structure-evidence.mjs';
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
-const input = { template: 'procedural', name: 'tree-structure-proof', seed: 31, triangleBudget: 16000,
+const originalInput = { template: 'procedural', name: 'tree-structure-proof', seed: 31, triangleBudget: 16000,
   renderResolution: 512, renderSamples: 16,
   procedural: { kind: 'tree', species: 'oak', height: 9, trunkTaper: .55, branchLevels: 3, leafDensity: .7, finish: 'natural' } };
 
-test('original Blender tree retains its exact-source structure sheet through export and reopen', { timeout: 210000 }, async t => {
+const tallInput = { ...originalInput, name: 'tree-height-proof', procedural: { ...originalInput.procedural, height: 18 } };
+let originalMaps;
+for (const [name, input, retainedName] of [
+  ['original Blender tree retains its exact-source structure sheet through export and reopen', originalInput, 'ci-tree-structure-artifacts'],
+  ['tall oak retains height-aware leaf maps through original authoring and exact-source reopen', tallInput, 'ci-tall-tree-structure-artifacts'],
+]) {
+test(name, { timeout: 210000 }, async t => {
   const executable = process.env.ARCANE_TEST_BLENDER_EXECUTABLE, receiptPath = process.env.ARCANE_TEST_BLENDER_RUNTIME_RECEIPT;
   assert.ok(typeof executable === 'string' && isAbsolute(executable));
   assert.ok(typeof receiptPath === 'string' && isAbsolute(receiptPath));
@@ -33,12 +39,15 @@ test('original Blender tree retains its exact-source structure sheet through exp
   const executableBytes = await readRegularFile(executable, 512 * 1024 * 1024);
   assert.equal(executableBytes.length, receipt.executableBytes); assert.equal(sha(executableBytes), receipt.executableSha256);
   const root = await realpath(await mkdtemp(join(await realpath(tmpdir()), 'arcane-native-tree-structure-')));
-  const retained = join(repository, 'runtime/ci-tree-structure-artifacts'); await mkdir(retained, { recursive: true });
+  const retained = join(repository, 'runtime', retainedName); await mkdir(retained, { recursive: true });
   const evidence = { schemaVersion: 1, kind: 'arcane-original-tree-structure', runtimeReceiptSha256: sha(receiptBytes),
     request: normalizeRequest(input), stages: [], result: null, workers: [], artifacts: [], sources: {},
     failureAudit: { schemaVersion: 1, state: 'not-read', reason: 'closure-unconfirmed' },
     modelArtQualityAccepted: false, studioImported: false, uploaded: false };
   try {
+    // Never launch another job after the original case has failed or lost its
+    // closure proof. A tall case is a distinct request, not an implicit retry.
+    if (input === tallInput) assert.ok(originalMaps, 'The original 9 m case must finish with observed closures first.');
     const workerRoot = join(repository, 'workers/blender');
     for (const name of workerScripts(evidence.request)) evidence.sources[name] = sha(await readRegularFile(join(workerRoot, ...workerSourcePath(name)), 512 * 1024));
     const pipeline = new AssetPipeline({ workspaceRoot: root, outputRoot: join(root, 'assets'), workerRoot, blenderExecutable: executable });
@@ -68,6 +77,24 @@ test('original Blender tree retains its exact-source structure sheet through exp
     const reopenedWorkers = parseWorkerRecords(reopenedJournal.workers); assert.ok(reopenedWorkers && reopenedWorkers.length <= 6);
     assert.ok(reopenedWorkers.every(worker => worker.state === 'closed' && worker.closure === 'exit-observed'));
     evidence.workers = reopenedWorkers.map(worker => ({ role: worker.role, state: worker.state, closure: worker.closure ?? null }));
+    const materialMaps = {};
+    for (const key of ['bark', 'leaves']) {
+      const rows = manifest.validation.meshes.filter(row => row.role === 'render' && row.name === 'SM_' + input.name + '_' + key);
+      assert.equal(rows.length, 1); assert.equal(rows[0].materialProperties.length, 1);
+      const surface = rows[0].materialProperties[0].surface;
+      assert.equal(surface.pattern, 'oak-' + key); assert.equal(surface.resolution, 512);
+      assert.equal(surface.images.length, 3);
+      materialMaps[key] = Object.fromEntries(surface.images.map(image => {
+        assert.match(image.sha256, /^[a-f0-9]{64}$/); return [image.role, image.sha256];
+      }));
+      assert.deepEqual(Object.keys(materialMaps[key]).sort(), ['baseColor', 'metallicRoughness', 'normal']);
+    }
+    evidence.materialMapSha256 = materialMaps;
+    if (input === tallInput) {
+      assert.deepEqual(materialMaps.bark, originalMaps.bark, 'Height-aware leaf density must not alter the bark tile.');
+      for (const role of ['baseColor', 'metallicRoughness', 'normal'])
+        assert.notEqual(materialMaps.leaves[role], originalMaps.leaves[role], 'The actual tall-tree leaf maps must use height-aware authoring.');
+    }
     const structure = manifest.validation.treeStructure; assert.ok(structure);
     assert.deepEqual(structure.views, ['front', 'side', 'oblique', 'roots']);
     assert.equal(structure.requestSha256, manifest.artifacts.find(row => row.path === 'request.json').sha256);
@@ -96,9 +123,11 @@ test('original Blender tree retains its exact-source structure sheet through exp
       const artifact = manifest.artifacts.find(row => row.path === name && row.role === 'worker'); assert.ok(artifact);
       assert.equal(artifact.sha256, digest);
     }
+    if (input === originalInput) originalMaps = materialMaps;
   } finally {
     // Retain original job data when ownership/publication is unproved. No implicit
     // retry, fabricated closure, process kill or recursive cleanup is performed.
     await writeFile(join(retained, 'tree-structure.json'), JSON.stringify(evidence, null, 2) + '\n', { flag: 'wx' });
   }
 });
+}

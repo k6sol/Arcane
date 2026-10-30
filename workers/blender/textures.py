@@ -53,6 +53,7 @@ def author_surfaces(request, directory, objects, *, normal_relief=.035):
             raise ValueError("Textured parts require exactly one generated UV layer")
         obj.data.uv_layers[0].name = "UVMap"
     for data in request["recipe"]["materials"]:
+        leaf_scale = _checked_leaf_scale(data.get("pattern"), data.get("leaf_scale", 1.0))
         if data.get("library"):
             # New requests only: a named library material (materials/mat_library) as a tile.
             library_surface(request, directory, data)
@@ -74,7 +75,8 @@ def author_surfaces(request, directory, objects, *, normal_relief=.035):
         pixels = {role: [] for role, _, _ in ROLES}
         step = 1 / (size - 1)
         if pattern is not None:
-            pixels = tree_pixels(pattern, data["color"], data["metallic"], seed, size, data.get("repeats", 1), data.get("moss", False), data.get("extent", 1.0), data.get("bake"))
+            extra = {"leaf_scale": leaf_scale} if leaf_scale < 1.0 else {}
+            pixels = tree_pixels(pattern, data["color"], data["metallic"], seed, size, data.get("repeats", 1), data.get("moss", False), data.get("extent", 1.0), data.get("bake"), **extra)
         for y in range(size if pattern is None else 0):
             v = (y % (size - 1)) * step
             for x in range(size):
@@ -495,29 +497,43 @@ def _shoot(start, heading, length, steps, curve):
     return points
 
 
-def _spray(np, rng, species, color, width, height, shade):
+def _spray(np, rng, species, color, width, height, shade, *, leaf_scale=1.0):
     """One original leaf spray: a branching shoot with species leaves, kept inside the tile."""
     canvas = _Canvas(np, width, height)
     leaf_color = np.array(color) * (np.array([.6, .66, .8]) if shade else 1.0)
     bark = np.array([.09, .065, .045]) if species == "oak" else np.array([.14, .06, .04])
     oak = species == "oak"
+    leaf_scale = _checked_leaf_scale(species + "-leaves", leaf_scale)
+    dense = leaf_scale < 1.0
+    # Nearest integer, with halves rounded up. More shoots and cohorts partly
+    # replace the area of smaller glyphs; coverage is not guaranteed. At s>=.45:
+    # <=7 side shoots, <=30 main + 7*18 side leaves =156 calls/tile (1248/atlas).
+    def count(value):
+        return math.floor(value / leaf_scale + .5) if dense else value
+    sides = count(3) if oak else 4
     main = _shoot((width * rng.uniform(.44, .56), 2.0), math.pi / 2 + rng.uniform(-.07, .07), height * (.66 if oak else .82), 14, rng.uniform(-.22, .22))
-    shoots = [(main, 2.6 if oak else 1.7)]
-    for k in range(3 if oak else 4):
-        f = rng.uniform(.12, .5) if oak else rng.uniform(.15, .65)
+    shoots = [(main, 2.6 * leaf_scale if dense else 2.6 if oak else 1.7)]
+    for k in range(sides):
+        f = .12 + .38 * (k + rng.uniform(.1, .9)) / sides if dense else rng.uniform(.12, .5) if oak else rng.uniform(.15, .65)
         index = int(f * (len(main) - 1))
         side = 1 if k % 2 == 0 else -1
         if rng.random() < .5:
             side = -side
         heading = math.pi / 2 + side * rng.uniform(.45, .8)
-        shoots.append((_shoot(main[index], heading, height * rng.uniform(.25, .36) * (1 if oak else 1.1), 8, -side * rng.uniform(.1, .4)), 1.6 if oak else 1.1))
+        shoots.append((_shoot(main[index], heading, height * rng.uniform(.25, .36) * (1 if oak else 1.1), 8, -side * rng.uniform(.1, .4)), 1.6 * leaf_scale if dense else 1.6 if oak else 1.1))
     for number, (points, w) in enumerate(shoots):
         # Only the painted basal endpoint follows the card's fixed UV root.
         # Keep generated shoots and their random consumers unchanged.
         painted = [np.array(p) for p in points]
         if number == 0:
             painted[0] = np.array((width * .5, 2.0))
-        canvas.twig(painted, [w * (1 - .55 * k / (len(points) - 1)) for k in range(len(points))], bark)
+        widths = [w * (1 - .55 * k / (len(points) - 1)) for k in range(len(points))]
+        if dense and number == 0:
+            # Only the basal raster footprint needs this small floor: bilinear
+            # sampling at the declared UV root must remain opaque. All later
+            # stations retain the scaled twig radius (no broad painted stems).
+            widths[0] = max(widths[0], 1.25)
+        canvas.twig(painted, widths, bark)
     leaves = []
     for number, (points, _) in enumerate(shoots):
         n = len(points) - 1
@@ -525,21 +541,23 @@ def _spray(np, rng, species, color, width, height, shade):
         if oak:
             # Keep a small terminal rosette, with the remaining tip cohort
             # stratified along the outer shoot instead of sharing one base.
-            for k in range(rng.integers(3, 5) if number else rng.integers(4, 7)):
+            for k in range(count(rng.integers(3, 5) if number else rng.integers(4, 7))):
                 f = rng.uniform(.15, .85)
                 leaves.append((points, f, (1 if k % 2 else -1) * rng.uniform(.6, 1.2), scale * rng.uniform(.14, .19)))
-            count = rng.integers(5, 8) if number == 0 else 4
+            cohort = count(rng.integers(5, 8) if number == 0 else 4)
             terminal = 2 if number == 0 else 1
-            spread = count - terminal
-            for k in range(count):
+            spread = cohort - terminal
+            for k in range(cohort):
                 f = .68 + .28 * (k + .5) / spread if k < spread else 1.0
                 leaves.append((points, f, rng.uniform(-1.2, 1.2), scale * rng.uniform(.16, .21)))
         else:
             # Birch: alternate leaves along thin, slightly drooping shoots.
-            count = rng.integers(11, 15) if number == 0 else rng.integers(5, 8)
-            for k in range(count):
-                f = .12 + .88 * k / max(1, count - 1)
+            cohort = rng.integers(11, 15) if number == 0 else rng.integers(5, 8)
+            for k in range(cohort):
+                f = .12 + .88 * k / max(1, cohort - 1)
                 leaves.append((points, f, (1 if k % 2 else -1) * rng.uniform(.5, 1.2), scale * rng.uniform(.11, .14)))
+    if dense and len(leaves) > 156:
+        raise ValueError("Oak leaf atlas density exceeds its trusted bound")
     for i in sorted(range(len(leaves)), key=lambda i: rng.random()):
         points, f, swing, size = leaves[i]
         if oak:
@@ -554,7 +572,7 @@ def _spray(np, rng, species, color, width, height, shade):
             base = np.array(points[index])
             ahead = np.array(points[min(len(points) - 1, index + 1)]) - np.array(points[max(0, index - 1)])
         heading = math.atan2(ahead[1], ahead[0]) + swing
-        length = size * height
+        length = size * height * leaf_scale if dense else size * height
         # Keep every leaf inside its tile: swing it towards its shoot, then shorten it.
         for _ in range(12):
             tip = base + length * np.array([math.cos(heading), math.sin(heading)])
@@ -752,7 +770,8 @@ def _needle_spray(np, rng, color, width, height, shade):
     return canvas
 
 
-def _leaf_atlas(np, rng, species, color, size):
+def _leaf_atlas(np, rng, species, color, size, *, leaf_scale=1.0):
+    leaf_scale = _checked_leaf_scale(species + "-leaves", leaf_scale)
     if size != 512:
         raise ValueError("Leaf atlas tiles are laid out for 512 px")
     cols, rows = ATLAS
@@ -761,7 +780,8 @@ def _leaf_atlas(np, rng, species, color, size):
     height, rough = np.zeros((size, size)), np.full((size, size), .7)
     for row in range(rows):
         for col in range(cols):
-            tile = _needle_spray(np, rng, color, tw, th, row == 1) if species == "pine" else _spray(np, rng, species, color, tw, th, row == 1)
+            extra = {"leaf_scale": leaf_scale} if leaf_scale < 1.0 else {}
+            tile = _needle_spray(np, rng, color, tw, th, row == 1) if species == "pine" else _spray(np, rng, species, color, tw, th, row == 1, **extra)
             covered = tile.alpha > .5
             # Transparent texels carry the tile's mean leaf colour so filtering never darkens edges.
             if not covered.all():
@@ -1193,8 +1213,15 @@ def _rock_surface(np, rng, color, size, form, extent, moss, bake):
             np.clip(grid_rough.reshape(size, size), .4, 1.0))
 
 
-def tree_surface(pattern, color, seed, size, repeats=1, moss=False, extent=1.0, bake=None):
+def _checked_leaf_scale(pattern, value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not .45 <= value <= 1.0 or not math.isfinite(value) or (value != 1.0 and pattern != "oak-leaves"):
+        raise ValueError("Invalid trusted oak leaf scale")
+    return value
+
+
+def tree_surface(pattern, color, seed, size, repeats=1, moss=False, extent=1.0, bake=None, *, leaf_scale=1.0):
     """(linear rgb HxWx3, alpha HxW, normal HxWx3, roughness HxW) for a natural tree pattern."""
+    leaf_scale = _checked_leaf_scale(pattern, leaf_scale)
     np = _np()
     if pattern not in TREE_PATTERNS:
         raise ValueError("Unsupported natural tree pattern")
@@ -1208,14 +1235,17 @@ def tree_surface(pattern, color, seed, size, repeats=1, moss=False, extent=1.0, 
         return _log_surface(np, rng, species, color, size, repeats, bool(moss))
     if kind == "bark":
         return {"oak": _oak_bark, "birch": _birch_bark, "pine": _pine_bark}[species](np, rng, color, size)
-    return _leaf_atlas(np, rng, species, color, size)
+    extra = {"leaf_scale": leaf_scale} if leaf_scale < 1.0 else {}
+    return _leaf_atlas(np, rng, species, color, size, **extra)
 
 
-def tree_pixels(pattern, color, metallic, seed, size, repeats=1, moss=False, extent=1.0, bake=None):
+def tree_pixels(pattern, color, metallic, seed, size, repeats=1, moss=False, extent=1.0, bake=None, *, leaf_scale=1.0):
     """Flat float32 RGBA arrays (bpy pixel order) for the baseColor/normal/metallicRoughness roles.
     Base colour alpha is leaf coverage for the atlases and exactly 1 for bark."""
+    leaf_scale = _checked_leaf_scale(pattern, leaf_scale)
     np = _np()
-    rgb, alpha, normal, rough = tree_surface(pattern, color, seed, size, repeats, moss, extent, bake)
+    extra = {"leaf_scale": leaf_scale} if leaf_scale < 1.0 else {}
+    rgb, alpha, normal, rough = tree_surface(pattern, color, seed, size, repeats, moss, extent, bake, **extra)
     rgb = np.clip(rgb, 0, 1)
     encoded = np.where(rgb <= .0031308, 12.92 * rgb, 1.055 * np.power(rgb, 1 / 2.4) - .055)
     ones = np.ones(alpha.shape)

@@ -3507,10 +3507,20 @@ def surface_materials(request):
         keys = ["bark"]
     # Natural rock forms: one 512 px texture baked in world space over the rock's unique UV charts.
     stone = kind == "rock" and request["procedural"].get("form") in ROCK_FORMS
+    leaf_scale = 1.0
+    if tree and species == "oak" and request["procedural"]["leafDensity"] > 0:
+        effective = request["procedural"]
+        if effective.get("variant"):
+            import variation
+            effective, _, _ = variation.resolve(effective, request["seed"], SPECIES[species]["radius"])
+        # Private atlas compensation, not a public surface option or a geometry
+        # deformation. Keep the established <=9m output; resolved height is <=20m.
+        leaf_scale = min(1.0, 9.0 / effective["height"])
     return [{"id": key.capitalize(), "color": request["procedural"]["secondaryColor"] if key == "leaves" else request["color"],
              "metallic": MATERIALS[key][0], "roughness": .8 if key in ("leaves", "foliage", "stone") else MATERIALS[key][1],
              "surface": {"profile": profiles[key], "resolution": BARK_RESOLUTION if tree or deadwood or stone else 256},
              **({"pattern": species + "-" + key} if tree else {}),
+             **({"leaf_scale": leaf_scale} if key == "leaves" and leaf_scale < 1.0 else {}),
              **({"pattern": species + "-log", "repeats": log_repeats(request["procedural"]), "moss": bool(request["procedural"].get("moss"))} if deadwood else {}),
              **({"pattern": rock_pattern(request["procedural"]), "extent": rock_extent(request["procedural"]), "moss": bool(request["procedural"].get("moss"))} if stone else {})}
             for key in keys]

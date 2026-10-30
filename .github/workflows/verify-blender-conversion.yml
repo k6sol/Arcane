@@ -116,6 +116,8 @@ jobs:
         run: node --test --test-concurrency=1 tests/native/blender-conversion.test.mjs
       - name: Verify generated mesh material slots in actual Blender
         run: node --test tests/native/procedural-material-slots.test.mjs
+      - name: Verify height-aware oak atlas contracts in actual Blender
+        run: node --test tests/native/oak-height-atlas.test.mjs
       - name: Verify actual foliage card attachment and native save/reopen
         id: native-foliage
         run: node --test --test-concurrency=1 tests/native/foliage-attachment.test.mjs
@@ -135,6 +137,18 @@ jobs:
             runtime/ci-tree-structure-artifacts/preview-hero.png
             runtime/ci-tree-structure-artifacts/preview-side.png
             runtime/ci-tree-structure-artifacts/preview-structure.png
+          if-no-files-found: error
+          retention-days: 7
+      - name: Retain tall oak structure evidence
+        if: ${{ always() && steps.native-tree.outcome != 'skipped' && steps.native-tree.outcome != '' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: arcane-tall-tree-structure-${{ matrix.os }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            runtime/ci-tall-tree-structure-artifacts/tree-structure.json
+            runtime/ci-tall-tree-structure-artifacts/preview-hero.png
+            runtime/ci-tall-tree-structure-artifacts/preview-side.png
+            runtime/ci-tall-tree-structure-artifacts/preview-structure.png
           if-no-files-found: error
           retention-days: 7
       - name: Retain bounded native conversion evidence

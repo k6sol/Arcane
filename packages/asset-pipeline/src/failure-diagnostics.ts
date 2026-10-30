@@ -143,6 +143,7 @@ const REASONS: Record<string, string> = {
   MESH_MATERIAL_PBR: 'A generated mesh material is missing its PBR shader or has an invalid metallic or roughness value.',
   RENDER_CONTENT: 'Review render was empty, uniform or contained nonfinite pixels.',
   FOLIAGE_ATTACHMENT: 'Foliage could not remain attached to the final emitted branch surface.',
+  FOLIAGE_SCALE: 'Oak foliage texture scale or density failed its bounded authoring checks.',
   SCENE_REOPEN: 'Reopened scene geometry differs from the validated generated scene.',
   EXPORT_ROUNDTRIP: 'Reimported export geometry failed triangle-count or finite-position validation.',
   IMPORT_IDENTITY: 'Exported object or anchor identities failed verification.',
