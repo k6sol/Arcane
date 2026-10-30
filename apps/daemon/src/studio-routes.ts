@@ -92,7 +92,7 @@ function pairingDiscovery(store: StudioStore, fixedPort: number) {
 }
 
 export function studioRoutes(store: StudioStore, cwd: string, work?: WorkStore, projectPath = cwd, agentToken: string | ((request: IncomingMessage) => string) = '', sourceVerifier: ScriptSourceVerifier | null = null,
-  authorizeBoundWork?: (actorId:string,binding:WorkTaskBinding)=>void, pairing: { discoveryPort?: number } = {}) {
+  authorizeBoundWork?: (actorId:string,binding:WorkTaskBinding)=>void, pairing: { discoveryPort?: number } = {},captureModelSource?:(request:IncomingMessage)=>object|null) {
   // Canonical host identity, never supplied by a browser/model or inferred from UI text.
   const project = workflowProjectIdentity(projectPath);
   const discovery = pairingDiscovery(store, pairing.discoveryPort ?? STUDIO_PAIRING_DISCOVERY_PORT);
@@ -108,6 +108,10 @@ export function studioRoutes(store: StudioStore, cwd: string, work?: WorkStore, 
       const expectedAgent = () => typeof agentToken === 'function' ? agentToken(request) : agentToken;
       const human = matches(controlToken); const agent = matches(expectedAgent());
       if (!plugin && !human && !agent) throw new ArcaneError('AUTH', 'Open the local launcher session, or supply its scoped local MCP bearer.');
+      // A non-human caller MUST pass a private admission argument even when no
+      // original task can be captured. Undefined is reserved for human manual
+      // policy; neither a held body nor later repair may supply fresh authority.
+      const modelSourceAdmission=!plugin&&!human&&url.pathname==='/v1/studio/commands'?(captureModelSource?.(request)??Object.freeze({})):undefined;
       const actorId='agent-'+createHash('sha256').update(bearer).digest('hex');
       const authorizeBinding=(binding:WorkTaskBinding):void=>{
         if(human)return;if(!authorizeBoundWork)throw new ArcaneError('SCOPE','Original task work authority is unavailable.');
@@ -228,7 +232,7 @@ export function studioRoutes(store: StudioStore, cwd: string, work?: WorkStore, 
       else if (url.pathname === '/v1/studio/pairing-offer/cancel') { if (Object.keys(a).length) throw new ArcaneError('INPUT', 'Cancelling a pairing offer requires an empty object.'); const cancelled = store.cancelPairingOffer(); discovery.sync(); send(200, { cancelled }); }
       else if (url.pathname === '/v1/studio/diagnostics/clear') { send(200, { cleared: store.clearDiagnostics(a.sessionId === undefined ? undefined : textField(a.sessionId, 'session ID')) }); }
       else if (url.pathname === '/v1/studio/revoke') { store.revoke(textField(a.sessionId, 'session ID')); send(200, { revoked: true }); }
-      else if (url.pathname === '/v1/studio/commands') send(200, { command: await store.enqueueVerified(a, sourceVerifier, activationGuard) });
+      else if (url.pathname === '/v1/studio/commands') send(200, { command: await store.enqueueVerified(a, sourceVerifier, activationGuard,false,modelSourceAdmission) });
       else if (url.pathname === '/v1/studio/restore') send(200, { command: await store.restoreVerified(a, sourceVerifier, activationGuard) });
       else send(404, { error: 'NOT_FOUND', message: 'Unknown bridge endpoint.' });
     } catch (error) {

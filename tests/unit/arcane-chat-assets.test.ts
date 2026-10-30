@@ -12,7 +12,7 @@ import {createArcaneGateway} from '../../apps/daemon/src/arcane-gateway.js';
 const require=createRequire(join(process.cwd(),'package.json'));
 const {createArcaneChat}=require(join(process.cwd(),'apps/desktop/electron/arcane-chat.cjs')) as {createArcaneChat(options:Record<string,unknown>):any};
 const CORE='C'.repeat(43),ASSET='a'.repeat(64);
-type Stage='issue'|'bind'|'grantNextIntent'|'dispatched'|'ended'|'retire'|'transportClosed';
+type Stage='issue'|'bind'|'grantModelSource'|'grantNextIntent'|'dispatched'|'ended'|'retire'|'transportClosed';
 function deferred<T>(){let resolve!:(value:T|PromiseLike<T>)=>void,reject!:(error?:unknown)=>void;const promise=new Promise<T>((yes,no)=>{resolve=yes;reject=no;});return {promise,resolve,reject};}
 type Gate=ReturnType<typeof deferred<void>>;
 const input=(text='build',conversationId:string|null=null)=>({text,conversationId,model:'fixture',effort:'standard'});
@@ -58,6 +58,7 @@ async function fixture(t:TestContext,options:FixtureOptions={}){
     return Object.freeze({
       launchEnvironment(){return overlay;},
       async bind(value:unknown){bindings.push(value);await stage('bind');},
+      async grantModelSource(sessionId:string){assert.equal(sessionId,'studio-original');await stage('grantModelSource');},
       async grantNextIntent(){await stage('grantNextIntent');},
       async dispatched(id:string){calls.push({dispatch:id});await stage('dispatched');},
       async ended(id:string){calls.push({ended:id});await stage('ended');},
@@ -109,6 +110,22 @@ test('Arcane assets: durable human message and every authority ACK precede the f
   assert.equal(f.bindings[0].kind,'arcane-gateway-loop');assert.equal(f.calls.find(c=>c.dispatch).dispatch,sent.turnId);
   await f.wait('transportClosed');assert.equal(f.trace.filter(x=>x==='transportClosed').length,1);
   assert.ok(f.trace.indexOf('done:'+sent.turnId)<f.trace.indexOf('transportClosed'),'delivery completion precedes closure');
+});
+
+test('Arcane human model consent is awaited once and stays outside provider input and stored history',{timeout:5000},async t=>{
+ const grant=deferred<void>(),f=await fixture(t,{gates:{grantModelSource:grant}});
+ const sent=await f.chat.send({...input(),modelSource:{sessionId:'studio-original'}});await f.wait('grantModelSource');assert.ok(!f.trace.includes('gateway'));
+ grant.resolve();assert.equal((await f.finished(sent.turnId)).ok,true);assert.equal(f.trace.filter(value=>value==='grantModelSource').length,1);
+ assert.ok(f.calls.filter(row=>row.gateway).every(row=>!JSON.stringify(row.gateway).includes('modelSource')&&!JSON.stringify(row.gateway).includes('studio-original')));
+ assert.ok(!JSON.stringify(await f.chat.history(sent.conversationId)).includes('modelSource'));
+ const next=await f.chat.send(input('Unrelated follow-up',sent.conversationId));assert.equal((await f.finished(next.turnId)).ok,true);
+ assert.equal(f.trace.filter(value=>value==='grantModelSource').length,1,'later human task has no inherited message metadata');
+});
+
+test('Arcane unknown original model grant never retries or starts provider input',{timeout:5000},async t=>{
+ const f=await fixture(t,{reject:'grantModelSource'}),sent=await f.chat.send({...input(),modelSource:{sessionId:'studio-original'}});
+ assert.equal((await f.finished(sent.turnId)).ok,false);assert.equal(f.trace.filter(value=>value==='grantModelSource').length,1);assert.ok(!f.trace.includes('gateway'));
+ await f.wait('transportClosed');
 });
 
 test('Arcane assets: failed durable write issues no context and starts no provider or child',{timeout:5000},async t=>{

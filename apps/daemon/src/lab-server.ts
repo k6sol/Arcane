@@ -1,4 +1,5 @@
 import { createNativeAssetRegistry } from './native-asset-authority.js';
+import {captureModelSourceBinding} from './model-source-binding.js';
 import {createAppAssetControl} from './app-asset-control.js';
 import {createAppAssetHumanSelection} from './app-asset-human-selection.js';
 import { createNativeHandoffRoutes } from './native-handoff-routes.js';
@@ -144,7 +145,8 @@ export async function createConnectionLab(options: Options) {
   const handoffs=options.studioStore&&options.workStore
     ?createNativeHandoffRoutes({projectPath:options.projectPath??options.cwd}):null;
   const nativeAssetRegistry = options.assetService && options.workStore
-    ? createNativeAssetRegistry({projectPath:workflowProjectIdentity(options.projectPath ?? options.cwd).projectPath}) : null;
+    ? createNativeAssetRegistry({projectPath:workflowProjectIdentity(options.projectPath ?? options.cwd).projectPath,
+      ...(options.studioStore?{modelSourceBinding:(sessionId:string)=>captureModelSourceBinding(options.studioStore!,sessionId)}:{})}) : null;
   // Parent-only authority port. It is deliberately absent from HTTP/state.
   const humanAssetSelection=createAppAssetHumanSelection({codexConversation:()=>{
     const state=codex?.state(),thread=state?.snapshot?.thread;
@@ -157,6 +159,12 @@ export async function createConnectionLab(options: Options) {
     const value = request.headers.authorization;
     const bearer = typeof value==='string' && /^Bearer [a-f0-9]{64}(?![\s\S])/.test(value) ? value.slice(7) : '';
     return nativeAssetRegistry?.recognizes(bearer) ? bearer : agentToken;
+  };
+  const captureModelSource=(request:IncomingMessage)=>{
+    const bearer=request.headers.authorization?.startsWith('Bearer ')?request.headers.authorization.slice(7):'';
+    // Classification is not execution authority. Audio and ordinary reads stay
+    // independent; model effects require this exact captured mutation epoch.
+    try{return nativeAssetRegistry?.capture(bearer,'mutate')??null;}catch{return null;}
   };
   let bridge: ReturnType<typeof studioRoutes> | null = null;
   let ownedSourceVerifier: ScriptSourceVerifier | null = null;
@@ -231,7 +239,7 @@ export async function createConnectionLab(options: Options) {
       catch { /* Failed trusted preflight leaves activation unavailable, never a fallback. */ }
     }
     bridge = options.studioStore ? studioRoutes(options.studioStore, options.cwd, options.workStore, options.projectPath, coreAgentToken, options.scriptSourceVerifier ?? ownedSourceVerifier,
-      (actorId,binding)=>{if(!codex?.authorizeBoundWork)throw new ArcaneError('SCOPE','Original native task work authority is unavailable.');codex.authorizeBoundWork(actorId,binding);}) : null;
+      (actorId,binding)=>{if(!codex?.authorizeBoundWork)throw new ArcaneError('SCOPE','Original native task work authority is unavailable.');codex.authorizeBoundWork(actorId,binding);},{},captureModelSource) : null;
     if(options.studioStore){
       const resolveTestActor: StudioTestActorResolver = request => {
         const bearer=request.headers.authorization?.startsWith('Bearer ')?request.headers.authorization.slice(7):'';
@@ -285,7 +293,7 @@ export async function createConnectionLab(options: Options) {
         archiveStatus,
       });
       const attach=(tests:StudioTestService)=>{
-        testApi=studioTestRoutes(tests,resolveTestActor);
+        testApi=studioTestRoutes(tests,resolveTestActor,captureModelSource);
         if(codex?.playtestTasks&&tests.cancelExact&&tests.revalidateExact)codex.attachPlaytestCancellation?.(Object.freeze({cancelExact:tests.cancelExact,revalidateExact:tests.revalidateExact}));
       };
       openOwnedTests=async()=>{
@@ -304,6 +312,7 @@ export async function createConnectionLab(options: Options) {
           // everything else waits for the human "Repair playtest records" action.
           unavailableCode='FENCED';
           ownedTests=await createStudioTestService({directory:join(options.stateDirectory,'playtests'),store:studioStore,pluginArtifactHash,custody,assertProject:testProject.assertCurrent,
+            ...(nativeAssetRegistry?{revokeModelSource:(sessionId:string)=>nativeAssetRegistry.revokeModelSource(sessionId)}:{}),
             exclusiveWriter:exclusiveTestWriter!,
             ...(testReports?{reports:testReports}:{}),
             ...(options.studioTestConnect?{connect:options.studioTestConnect}:{}),

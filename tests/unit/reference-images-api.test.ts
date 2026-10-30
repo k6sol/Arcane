@@ -58,3 +58,15 @@ test('cancellation while the actual image digest awaits never reaches HTTP',asyn
   await assert.rejects(pending,error=>error instanceof CodexHttpError&&!error.unknown&&/No message was sent/.test(error.message));
   assert.equal(sent,0);
 });
+
+test('Models owner is rechecked after held WebCrypto and a revoked original message sends no HTTP',async t=>{
+  let release!:()=>void,entered!:()=>void,current=true;
+  const gate=new Promise<void>(resolve=>{release=resolve;}),started=new Promise<void>(resolve=>{entered=resolve;});
+  const digest=crypto.subtle.digest.bind(crypto.subtle);
+  t.mock.method(crypto.subtle,'digest',async(...args:Parameters<typeof digest>)=>{entered();await gate;return digest(...args);});
+  const original={...input(),modelSource:{sessionId:'studio-original'}};let sent=0,checks=0;
+  const api=new CodexChatApi('a'.repeat(64),(async()=>{sent++;throw Error('No HTTP permitted');})as typeof fetch);
+  const pending=api.action(original,undefined,()=>{checks++;return current;});await started;current=false;release();
+  await assert.rejects(pending,error=>error instanceof CodexHttpError&&!error.unknown&&/No message was sent/.test(error.message));
+  assert.equal(checks,1);assert.equal(sent,0);
+});

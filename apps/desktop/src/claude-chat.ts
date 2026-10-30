@@ -11,6 +11,7 @@ import {
 } from './codex-chat.js';
 import type { BeforeMessageSubmit,RecordedChatTranscript, ChoiceBlockOptions, ComposerModelGroup, ComposerProvider, CrossProviderModels, ProviderUsageLimit, ToolChange,ChatQueueRow,ChatQueueAction } from './codex-chat.js';
 import type {ChatQueueBridge,StoredChatQueueRow} from '../../../packages/protocol/src/chat-queue.js';
+import type {ModelSourceConsentPort,ModelSourceContext,ModelSourceTicket} from './toolbox-policy.js';
 import type { ChatAttachmentsController, ChatAttachmentsOwner } from './chat-attachments.js';
 import { ClaudePreferenceStore, claudePreferenceBridge, type ClaudePreferenceBridge, type ClaudePreferenceSnapshot } from './claude-preferences.js';
 import { chatSwitchFocus, chatSwitchOpenSection, chatSwitchSummary, draftCloseConfirm, draftCloseStep, restoreChatSwitchFocus } from './chat-tabs.js';
@@ -71,7 +72,7 @@ export interface ClaudeChatBridge {
   history(conversationId: string): Promise<unknown>;
   /** images: optional PNG references (data URLs from the composer); the engine keeps only an '[image: name]' marker. */
   /** `playtest` mirrors the composer's Playtest switch (#playtest-toggle) when it is mounted; the engine turns it into a short system note. */
-  send(request: { conversationId: string | null; text: string; model: string; effort: string; displayText?:string; images?: readonly ClaudeChatImage[]; playtest?: boolean }): Promise<unknown>;
+  send(request: { conversationId: string | null; text: string; model: string; effort: string; displayText?:string; images?: readonly ClaudeChatImage[]; playtest?: boolean;modelSource?:Readonly<{sessionId:string}> }): Promise<unknown>;
   /** Removes a saved user message and everything after it (edit and rewind). Older bridges lack it; Edit is then hidden. */
   rewind?(request: { conversationId: string; messageId: string }): Promise<unknown>;
   /**
@@ -434,6 +435,9 @@ export class ClaudeChat {
   private shownKey:string|null=null;
   private readonly messageElements=new WeakMap<HTMLElement,ClaudeChatMessage>();
   private beforeMessageSubmit:BeforeMessageSubmit|null=null;
+  private modelSourceConsent:ModelSourceConsentPort|null=null;
+  private modelSourceProject:(()=>string|null)|null=null;
+  private modelSourceRevision=0;
   private preparingSend=false;
   /** New chat pressed while a message is still being handed to the bridge: it opens as soon as that hand-off settles. */
   private newChatAfterSend=false;
@@ -488,6 +492,17 @@ export class ClaudeChat {
   isActive(): boolean { return this.active; }
   activeConversation(): string | null { return this.activeTab()?.conversationId ?? null; }
   setBeforeMessageSubmit(callback:BeforeMessageSubmit|null):void{this.beforeMessageSubmit=callback;}
+  setModelSourceConsent(port:ModelSourceConsentPort|null,project?:()=>string|null):void{this.modelSourceConsent=port;this.modelSourceProject=project??null;}
+  private modelSourceOwner():string|null{
+    const tab=this.activeTab(),projectPath=this.preferenceStore?.projectPath??this.modelSourceProject?.();
+    return !this.active||this.nativeDisposed||this.nativeHydrating||!tab||!projectPath?null:
+      JSON.stringify([this.profile.provider,projectPath,tab.key,this.viewEpoch,this.modelSourceRevision,tab.model,tab.effort,this.state]);
+  }
+  modelSourceContext():ModelSourceContext|null{
+    const tab=this.activeTab(),projectPath=this.preferenceStore?.projectPath??this.modelSourceProject?.(),owner=this.modelSourceOwner(),draft=this.input()?.value??'';
+    return tab&&projectPath&&owner&&draft.trim()?{provider:this.profile.provider,projectPath,localId:tab.key,
+      fingerprint:JSON.stringify([owner,this.preferenceEdits,draft,this.attachments.controller()?.selectionRevision()])}:null;
+  }
   setQueuePersistence(port:ChatQueueBridge|null):Promise<void>{
     if(this.profile.provider!=='claude')return Promise.resolve();
     const preserveLocal=this.queue.length>0||this.queueEmptyCheckpoint!==null;
@@ -658,6 +673,7 @@ export class ClaudeChat {
   /** Returns the shared surface to Codex, keeping Claude tabs, drafts and any running turn. */
   deactivate(): void {
     if (!this.active) return;
+    this.modelSourceRevision++;
     this.pauseQueue('Paused while another provider is shown. Choose Send next to resume.');
     const tab = this.activeTab(), input = this.input();
     if (tab && input) tab.draft = input.value;
@@ -715,7 +731,7 @@ export class ClaudeChat {
     if (this.refreshing) return this.refreshing;
     const bridge = this.bridge;
     this.refreshing = (async () => {
-      try { this.state = this.profile.readStatus(await bridge.status()); this.statusError = null; }
+      try { const next=this.profile.readStatus(await bridge.status());if(JSON.stringify(next)!==JSON.stringify(this.state))this.modelSourceRevision++;this.state=next; this.statusError = null; }
       catch { this.state = null; this.statusError = this.profile.engine + ' status is unavailable. Reopen the chat to try again.'; }
       this.applyDefaults();
       this.applyPendingChoice();
@@ -792,6 +808,7 @@ export class ClaudeChat {
    * is selected with the carried effort when Claude Code reports it (otherwise its default). Nothing is sent.
    */
   receiveHandoff(handoff: { draft: string; model: string | null; effort: string | null }): void {
+    this.modelSourceRevision++;
     if (!this.active) this.activate();
     const tab = this.activeTab(), input = this.input();
     if (handoff.draft && tab) { tab.draft = handoff.draft; if (input) input.value = handoff.draft;this.preferenceEdits++;this.queueNativePreferences(); }
@@ -995,6 +1012,7 @@ export class ClaudeChat {
   /** Queues the composer text to send after the running reply finishes successfully. */
   enqueue(): boolean {
     if(this.queueEnqueue)return false;
+    if(this.modelSourceConsent?.pending()){this.notice='Models applies to this typed Send only. Wait for the reply to finish, then send from the composer; your draft is retained.';this.render();return false;}
     const input = this.input(), tab = this.activeTab();
     if (!this.active || !input || !tab || !this.turn || !this.turnOwnsActiveTab()||!this.ready()) return false;
     if(this.profile.provider==='claude'&&!this.queueJournal.available(this.queueProject())){this.notice=this.queueJournal.notice()??'Wait for queued message recovery before adding another prompt.';this.render();return false;}
@@ -1095,6 +1113,9 @@ export class ClaudeChat {
     const message = (queued ?? input.value).trim();
     if (!message) return;
     if (message.length > MAX_INPUT) { this.notice = 'This message is too long for ' + this.profile.name + '. Shorten it to 100,000 characters.'; this.render(); return; }
+    let modelSourceTicket:ModelSourceTicket|null=null;
+    try{if(queued===undefined)modelSourceTicket=this.modelSourceConsent?.capture()??null;}
+    catch(error){this.notice=error instanceof Error?error.message:'Review Models before sending.';this.render();return;}
     // A typed message carries the composer's attachments: text files are quoted into the text, PNG references travel as images.
     let attached: { text: string; images: ClaudeChatImage[] } | null = null;
     if (queued === undefined) {
@@ -1123,6 +1144,9 @@ export class ClaudeChat {
       }
       queuedEntry.dispatched=true;
     }
+    const modelSource=modelSourceTicket?.consume()??null;
+    if(modelSourceTicket&&!modelSource){this.notice='The Models message context changed. Review your draft, then enable Models again.';this.render();return;}
+    const modelSourceOwner=this.modelSourceOwner();
     const { model, effort } = tab, epoch = this.viewEpoch, conversationId = tab.conversationId;
     const delivery:ClaudeMessageDelivery={model,effort,turnId:null,startedAt:new Date().toISOString(),finishedAt:null,state:'sending',error:null,contextIncluded:sent!==visibleSent,transmittedBytes:new TextEncoder().encode(sent).length};
     const turn: Turn = this.turn = { turnId: null, conversationId, tabKey: tab.key, stopping: false, bubble: null, text: '', echo: message, prompt: message, retry: images.length ? null : visibleSent,delivery };
@@ -1134,7 +1158,9 @@ export class ClaudeChat {
     this.render();
     let reply: Record<string, unknown> | null, failure = this.profile.name + ' could not start this message. Try again.';
     const playtestSwitch = this.doc.getElementById?.('playtest-toggle'), playtest = playtestSwitch ? { playtest: playtestSwitch.getAttribute('aria-checked') === 'true' } : {};
-    try { reply = record(await bridge.send({ conversationId, text: sent, model, effort, ...(sent!==visibleSent?{displayText:visibleSent}:{}),...(images.length ? { images } : {}), ...playtest })); }
+    try {
+      if(modelSource&&(!modelSource.current()||!modelSourceOwner||modelSourceOwner!==this.modelSourceOwner()))throw new Error('Models context changed before this message was sent. Review the draft and Models setting.');
+      reply = record(await bridge.send({ conversationId, text: sent, model, effort, ...(sent!==visibleSent?{displayText:visibleSent}:{}),...(images.length ? { images } : {}), ...playtest,...(modelSource?{modelSource:modelSource.scope}:{}) })); }
     catch (error) { reply = null; failure = bridgeError(error, failure, this.profile.knownErrors); }
     const turnId = text(reply?.turnId, 256), nextConversation = text(reply?.conversationId, 256);
     // A New chat pressed during the hand-off opens once this send has settled (after the code below has run).
@@ -1174,6 +1200,7 @@ export class ClaudeChat {
   }
 
   async stopTurn(): Promise<void> {
+    this.modelSourceConsent?.invalidate();
     const turn = this.turn;
     if (!this.bridge || !turn?.turnId || turn.stopping) return;
     turn.stopping = true; this.render();
@@ -1814,6 +1841,7 @@ export class ClaudeChat {
     } catch { return { model: '', effort: '' }; }
   }
   private saveChoice(tab: Tab): void {
+    this.modelSourceRevision++;
     this.lastChoice={model:tab.model,effort:tab.effort};
     this.preferenceEdits++;this.queueNativePreferences();
     try { this.storage?.setItem(this.profile.keys.choice, JSON.stringify({ model: tab.model, effort: tab.effort })); } catch { /* Only the remembered choice is lost. */ }

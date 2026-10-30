@@ -18,6 +18,7 @@ type Command=
  | {action:'issue';provider:Provider;conversationId:string;connectionId:string}
  | (IssueReference&{action:'bind';binding:AppAssetConversationBinding})
  | (IssueReference&{action:'grant-next'|'retire'|'transport-closed'|'retire-issue'})
+ | (IssueReference&{action:'model-source';sessionId:string})
  | (IssueReference&{action:'dispatched'|'ended';operationId:string})
  | (IssueReference&{action:'cancel';scope:'active-operation'|'incarnation'});
 export interface AppAssetRequest {
@@ -65,6 +66,7 @@ function command(value:unknown):Command{
  }
  if(action==='issue'){const a=fields(value,['action','provider','conversationId','connectionId']);return{action,provider:provider(a.provider),conversationId:uuid(a.conversationId),connectionId:uuid(a.connectionId)};}
  if(action==='bind'){const a=fields(value,['action','issueSequence','issueRequestId','binding']);return{action,...issueReference(a),binding:binding(a.binding)};}
+ if(action==='model-source'){const a=fields(value,['action','issueSequence','issueRequestId','sessionId']);if(typeof a.sessionId!=='string'||!/^[A-Za-z0-9_-]{1,128}(?![\s\S])/.test(a.sessionId))fail();return{action,...issueReference(a),sessionId:a.sessionId};}
  if(action==='grant-next'||action==='retire'||action==='transport-closed'||action==='retire-issue'){const a=fields(value,['action','issueSequence','issueRequestId']);return{action,...issueReference(a)};}
  if(action==='dispatched'||action==='ended'){const a=fields(value,['action','issueSequence','issueRequestId','operationId']);return{action,...issueReference(a),operationId:uuid(a.operationId)};}
  if(action==='cancel'){const a=fields(value,['action','issueSequence','issueRequestId','scope']);if(a.scope!=='active-operation'&&a.scope!=='incarnation')fail();return{action,...issueReference(a),scope:a.scope};}
@@ -139,6 +141,7 @@ export function createAppAssetControl(options:{projectPath:string;registry:Nativ
     if(scope.projectId!==project.projectId||scope.projectPath!==project.projectPath||scope.conversation.provider!==entry.provider||scope.conversation.threadId!=='app:'+entry.conversationId||scope.conversation.sessionId!==null)fail('SCOPE');
     entry.bound=encoded;break;
    }
+   case'model-source':if(entry.bound===null)fail('SCOPE');entry.handle.grantModelSource(c.sessionId);break;
    case'grant-next':if(entry.bound===null)fail('SCOPE');entry.handle.grantNextIntent({connectionId:entry.connectionId,threadId:'app:'+entry.conversationId,sessionId:null});break;
    case'dispatched':if(entry.bound===null||entry.activeOperation!==null)fail('SCOPE');entry.handle.dispatched({connectionId:entry.connectionId,threadId:'app:'+entry.conversationId,operationId:c.operationId});entry.activeOperation=c.operationId;break;
    case'ended':if(entry.activeOperation!==null&&entry.activeOperation!==c.operationId)fail('SCOPE');entry.handle.ended(c.operationId);entry.activeOperation=null;break;
@@ -169,7 +172,7 @@ export function createAppAssetControl(options:{projectPath:string;registry:Nativ
    highWater=r.sequence;
    let reply:AppAssetReply;
    try{reply=perform(r);}catch(error){
-    if(['bind','grant-next','dispatched'].includes(r.command.action)&&'issueSequence'in r.command){const entry=entries.get(r.command.issueSequence);if(entry&&entry.issueRequestId===r.command.issueRequestId)retire(entry);}
+    if(['bind','model-source','grant-next','dispatched'].includes(r.command.action)&&'issueSequence'in r.command){const entry=entries.get(r.command.issueSequence);if(entry&&entry.issueRequestId===r.command.issueRequestId)retire(entry);}
     reply=rejected(r,error instanceof Refusal?error.code:'REJECTED');
    }
    let owner=r.command.action==='issue'?entries.get(r.sequence):'issueSequence'in r.command?entries.get(r.command.issueSequence):undefined;

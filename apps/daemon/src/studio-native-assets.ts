@@ -7,6 +7,7 @@ import {nativeAssetSearchSchema,nativeAssetInsertSchema,nativeAssetGenerateSchem
   NATIVE_REFUSAL_CODES,NativeAssetRefusal,type NativeAssetContext,type JobState,type NativeRefusal} from '../../../packages/studio-test-controller/src/native-assets.js';
 import {decodeTestInventory,decodeTestMode} from './studio-test-decoders.js';
 import type {NativeTestConnection} from './studio-test-service.js';
+import {assertNativeModelSource,type NativeAssetActor} from './native-asset-authority.js';
 
 /** Rolling ten-minute budgets per daemon (one native asset operation at a time). */
 export const NATIVE_ASSET_RATE=Object.freeze({windowMs:600_000,search:40,insert:24,generate:8,searchedTtlMs:30*60_000,searchedIds:512,jobs:16,jobTtlMs:30*60_000});
@@ -27,22 +28,32 @@ export interface NativeAssetDependencies{
   eligible(sessionId:string):Session;identity(session:Session):string;
   /** True while a playtest, preparation or viewport capture owns the native connection. */
   busy():boolean;
+  revokeModelSource?:(sessionId:string)=>void;
 }
 /** Internal HTTP lifecycle only. No field is accepted in tool/request JSON. */
-export interface NativeAssetRequestScope { guard():void; signal:AbortSignal; dispatched():void }
+export interface NativeAssetRequestScope { guard():void; signal:AbortSignal; dispatched():void; readonly modelSource?:NativeAssetActor }
 
 /** Native asset search/insert/generation for the exact paired Edit session. The built-in tools
  * run only after a fresh mapping witness and Edit-mode check, which are repeated afterwards. */
 export function createNativeAssetRequests(deps:NativeAssetDependencies){
-  let active=false;
+  let active=false,closed=false;
   // Only the authenticated human-control surface may change this session choice.
   // A fresh daemon, pairing, proof epoch or expired choice restores original assets.
   const modelChoices=new Map<string,{binding:string;expires:number}>();
   const modelPolicyInput=z.strictObject({sessionId:z.string().min(1).max(128),allowModels:z.boolean().optional()});
   const binding=(session:Session)=>digest({scope:deps.identity(session),proof:session.proof&&{lifetime:session.proof.clientLifetimeId,epoch:session.proof.playEpoch,marker:session.proof.markerName,artifact:session.proof.pluginArtifactHash}});
   const modelsAllowed=(sessionId:string)=>{const s=deps.eligible(sessionId),choice=modelChoices.get(sessionId);return !!choice&&choice.expires>Date.now()&&choice.binding===binding(s)&&s.proof?.connected===true&&Date.parse(s.proof.expiresAt)>Date.now();};
-  const releasePolicy=deps.store.bindModelSourcePolicy(modelsAllowed);
-  const requireModels=(sessionId:string)=>{if(!modelsAllowed(sessionId))throw new NativeAssetHostRefusal('TOOLBOX_MODELS_DISABLED');};
+  const releasePolicy=deps.store.bindModelSourcePolicy((sessionId,admission)=>{
+    if(closed)return false;
+    if(admission===undefined)return modelsAllowed(sessionId); // Explicit human/manual route only.
+    try{assertNativeModelSource(admission as NativeAssetActor,sessionId);return true;}catch{return false;}
+  });
+  const requireModels=(sessionId:string,actor:string,request?:NativeAssetRequestScope)=>{
+    if(closed)throw new NativeAssetHostRefusal('TOOLBOX_MODELS_DISABLED');
+    if(actor==='human'){if(modelsAllowed(sessionId))return;}
+    else if(request?.modelSource){try{assertNativeModelSource(request.modelSource,sessionId);return;}catch{/* Fixed denial; never expose private scope. */}}
+    throw new NativeAssetHostRefusal('TOOLBOX_MODELS_DISABLED');
+  };
   const times={search:[] as number[],insert:[] as number[],generate:[] as number[]};
   const searched=new Map<string,number>(),jobs=new Map<string,Job>();
   const admit=(kind:keyof typeof times)=>{
@@ -92,18 +103,18 @@ export function createNativeAssetRequests(deps:NativeAssetDependencies){
   const prune=()=>{const now=Date.now();for(const [id,job] of jobs)if(now-job.createdAt>NATIVE_ASSET_RATE.jobTtlMs)jobs.delete(id);for(const [key,expires] of searched)if(expires<=now)searched.delete(key);};
   return Object.freeze({
     active:()=>active,
-    close(){releasePolicy();modelChoices.clear();},
+    close(){closed=true;releasePolicy();modelChoices.clear();},
     toolboxPolicy(input:unknown,guard:()=>void){
       guard();const a=modelPolicyInput.parse(input),s=deps.eligible(a.sessionId);
       if(a.allowModels!==undefined){
         if(a.allowModels){if(!s.proof?.connected||s.proof.mode!=='Edit'||Date.parse(s.proof.expiresAt)<=Date.now())rejected('STALE_PROOF');guard();if(!modelChoices.has(s.id)&&modelChoices.size>=128)modelChoices.delete(modelChoices.keys().next().value!);modelChoices.set(s.id,{binding:binding(s),expires:Date.now()+NATIVE_ASSET_RATE.searchedTtlMs});}
-        else {guard();modelChoices.delete(s.id);for(const key of searched.keys())if(key.startsWith(s.id+':'))searched.delete(key);}
+        else {guard();modelChoices.delete(s.id);deps.revokeModelSource?.(s.id);for(const key of searched.keys())if(key.startsWith(s.id+':'))searched.delete(key);}
       }
       return {sessionId:s.id,allowModels:modelsAllowed(s.id)};
     },
     /** Read-only Creator Store/inventory search: free results only, bounded pages. */
     async search(input:unknown,actor:string,request?:NativeAssetRequestScope){
-      actorOk(actor);current(request);const a=nativeAssetSearchSchema.parse(input);if(a.category!=='Audio')requireModels(a.sessionId);prune();idle();admit('search');
+      actorOk(actor);current(request);const a=nativeAssetSearchSchema.parse(input);if(a.category!=='Audio')requireModels(a.sessionId,actor,request);prune();idle();admit('search');
       return withNative('asset-search',a.sessionId,a.nativeStudioId,DEADLINE.search,async(context,session,nativeStudioId,signal)=>{
         const found=await searchNativeAssets(context,a,signal);
         // Audio ids are Sound.SoundId values only; they never become insertable.
@@ -112,18 +123,18 @@ export function createNativeAssetRequests(deps:NativeAssetDependencies){
           while(searched.size>NATIVE_ASSET_RATE.searchedIds)searched.delete(searched.keys().next().value!);
         }
         return {search:{sessionId:session.id,nativeStudioId,query:a.query,category:a.category,page:a.page,pageSize:a.pageSize,results:found.results,hasMore:found.hasMore}};
-      },()=>{if(a.category!=='Audio')requireModels(a.sessionId);},request);
+      },()=>{if(a.category!=='Audio')requireModels(a.sessionId,actor,request);},request);
     },
     /** Insert one previously searched free asset; the plugin adopts it under the armed watch. */
     async insert(input:unknown,actor:string,request?:NativeAssetRequestScope){
-      actorOk(actor);current(request);const a=nativeAssetInsertSchema.parse(input);requireModels(a.sessionId);prune();
+      actorOk(actor);current(request);const a=nativeAssetInsertSchema.parse(input);requireModels(a.sessionId,actor,request);prune();
       if((searched.get(a.sessionId+':'+actor+':'+a.assetId)??0)<=Date.now())throw new NativeAssetHostRefusal('ASSET_NOT_SEARCHED');
       if(!watched(deps.eligible(a.sessionId),a.watch))throw new NativeAssetHostRefusal('ASSET_WATCH_REQUIRED');
       idle();admit('insert');
       return withNative('asset-insert',a.sessionId,a.nativeStudioId,DEADLINE.insert,async(context,session,nativeStudioId,signal)=>{
         const inserted=await insertNativeAsset(context,a,signal);
         return {insert:{sessionId:session.id,nativeStudioId,assetId:a.assetId,assetName:inserted.assetName,acknowledgement:inserted.outcome}};
-      },()=>requireModels(a.sessionId),request);
+      },()=>requireModels(a.sessionId,actor,request),request);
     },
     async generate(input:unknown,actor:string,request?:NativeAssetRequestScope):Promise<never>{
       actorOk(actor);current(request);nativeAssetGenerateSchema.parse(input);

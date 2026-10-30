@@ -8,7 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { CallToolRequestSchema, CallToolResultSchema, ListToolsRequestSchema, type CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import { CallToolRequestSchema, CallToolResultSchema, ListToolsRequestSchema, type CallToolResult, type Tool } from '@modelcontextprotocol/sdk/types.js';
 import { createConnectionLab } from '../../apps/daemon/src/lab-server.js';
 import { refuseNativeCodex, noProviderProbe } from './native-fixture-refusal.js';
 import { createAssetService } from '../../apps/daemon/src/asset-service.js';
@@ -59,6 +59,7 @@ async function fixture(t: TestContext, holdClose = false) {
   let creatingAssets:Promise<Awaited<ReturnType<typeof createAssetService>>>|undefined;
   let lab:Awaited<ReturnType<typeof createConnectionLab>>|undefined,creatingLab:Promise<Awaited<ReturnType<typeof createConnectionLab>>>|undefined;
   let timer:ReturnType<typeof setInterval>|undefined,heartbeatFailure:unknown,closing:Promise<void>|undefined;
+  let expectedCloseFailure:{value:unknown}|null=null;
   let releaseClose!: () => void; const closeGate = new Promise<void>(resolve => { releaseClose = resolve; });
   const tokens: string[] = [], providers: CodexSession[] = [], connections: NativeTestConnection[] = [],requests=new AbortController();
   const agent = new Client({ name: 'joint-agent-fixture', version: 'fixture' });
@@ -78,7 +79,10 @@ async function fixture(t: TestContext, holdClose = false) {
         try{await dispose();}catch(error){errors.push(error);}
       }
       t.signal.removeEventListener('abort',cancel);
-      if(errors.length){t.diagnostic('Retained joint fixture after uncertain cleanup: '+root);throw new AggregateError(errors,'Joint fixture cleanup failed.');}
+      if(errors.length){
+        if(expectedCloseFailure&&errors.length===1&&errors[0]===expectedCloseFailure.value){/* Exact cached public refusal was asserted by this negative case. */}
+        else {t.diagnostic('Retained joint fixture after uncertain cleanup: '+root);throw new AggregateError(errors,'Joint fixture cleanup failed.');}
+      }else assert.equal(expectedCloseFailure,null,'An explicitly captured cached cleanup refusal must remain observable.');
       const part=relative(fixtureTempDirectory(),root);assert.ok(part.startsWith('arcane-chat-studio-')&&!isAbsolute(part)&&!part.includes(sep));
       await rm(root,{recursive:true,force:true});assert.equal(heartbeatFailure,undefined);
     })();void closing.catch(()=>{});return closing;
@@ -90,7 +94,7 @@ async function fixture(t: TestContext, holdClose = false) {
   const artifact = await studioImportPluginArtifactHash(process.cwd());t.signal.throwIfAborted();
   const grant = studio.createGrant({ allowedRoots: ['Workspace', 'ServerStorage'], allowWrites: true });
   const pair = store.pair({ code: grant.code, protocolVersion: 1, identity: { clientSessionId: 'joint-plugin-lifetime', placeId: 0, universeId: 0, name: NAME, pluginVersion: 'fixture' }, capabilities: [...READ_METHODS, ...WRITE_METHODS] });
-  const state = { mode: 'Edit' as 'Edit' | 'Play', epoch: 10, immobile: true, source: 'print("original fixture")', inputCalls: 0, starts: 0, stops: 0, closes: 0, closeEntered: false };
+  const state = { mode: 'Edit' as 'Edit' | 'Play', epoch: 10, immobile: true, source: 'print("original fixture")', inputCalls: 0, searches: 0, starts: 0, stops: 0, closes: 0, closeEntered: false };
   const vm: { entered: number; returned: number; elapsedMs: number | null; code: string | null } = { entered: 0, returned: 0, elapsedMs: null, code: null };
   const finite = (value: unknown, allowed: readonly string[]) => typeof value === 'string' && allowed.includes(value) ? value : 'other';
   const count = (value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : 'other';
@@ -123,11 +127,14 @@ async function fixture(t: TestContext, holdClose = false) {
     placeId: 0, universeId: 0, placeName: NAME, mode: state.mode, playEpoch: state.epoch, continuitySupported: true, connected: true,
   }); };
   publish();
+  const recorded=JSON.parse(await readFile(join(process.cwd(),'docs/research/native-studio-checks.json'),'utf8')) as {runtime:{capabilityInventory:{tools:(Tool&{allowed?:unknown;blockedReason?:unknown})[]}}};
+  const searches=recorded.runtime.capabilityInventory.tools.filter(tool=>tool.name==='search_asset');assert.equal(searches.length,1);
+  const {allowed:_allowed,blockedReason:_blocked,...searchTool}=searches[0]!;
   timer = setInterval(() => { try { assert.deepEqual(publish(), []); } catch (error) { heartbeatFailure = error; } }, 20);
   const connectStudio = async (): Promise<NativeTestConnection> => {
     const client = new Client({ name: 'joint-studio-fixture', version: 'fixture' }), server = new Server({ name: 'synthetic-native-peer', version: 'fixture' }, { capabilities: { tools: {} } });
     const [left, right] = InMemoryTransport.createLinkedPair();
-    server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: [...structuredClone(reviewedTestTools), {
+    server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: [...structuredClone(reviewedTestTools), structuredClone(searchTool), {
       name: 'execute_luau', inputSchema: { type: 'object', properties: { studio_id: { type: 'string' }, datamodel_type: { type: 'string', enum: ['Edit', 'Client', 'Server'] }, code: { type: 'string' } }, required: ['studio_id', 'datamodel_type', 'code'] } },
     ] }));
     server.setRequestHandler(CallToolRequestSchema, async request => {
@@ -141,6 +148,10 @@ async function fixture(t: TestContext, holdClose = false) {
       if (name === 'start_stop_play') {
         state.mode = args.is_start ? 'Play' : 'Edit'; state.epoch++; if (args.is_start) state.starts++; else state.stops++;
         assert.deepEqual(publish(), []); return text('Synthetic owned ACK');
+      }
+      if(name==='search_asset'){
+        assert.equal(state.mode,'Edit');assert.equal(args.assetType,'Model');assert.equal(args.priceFilter,'free');assert.equal(args.maxResults,1);
+        state.searches++;return text({results:[{assetId:1001,name:'Synthetic model fixture',assetType:'Model',price:0}]});
       }
       assert.equal(name, 'execute_luau');
       if (args.datamodel_type === 'Edit') {
@@ -192,11 +203,11 @@ async function fixture(t: TestContext, holdClose = false) {
   };
   const task = async () => {
     const response = await fetch(ownedLab.origin + '/v1/codex/state', { headers: { Authorization: 'Bearer ' + ownedLab.token }, signal: AbortSignal.any([t.signal,requests.signal,AbortSignal.timeout(5000)]) });
-    assert.equal(response.status, 200); return ((await response.json()) as { state: { chatTasks: { taskId: string; state: string; round: number; reportDigest: string | null }[] } }).state.chatTasks.at(-1)!;
+    assert.equal(response.status, 200); return ((await response.json()) as { state: { chatTasks: { taskId: string; state: string; reason: string | null; round: number; reportDigest: string | null }[] } }).state.chatTasks.at(-1)!;
   };
-  const ready = async () => {
+  const ready = async (models=false) => {
     for (const [name, fields] of [['connect', {}], ['select', { model: 'fixture', effort: 'low' }], ['thread-start', {}]] as const) assert.equal((await action(name, fields)).record!.state, 'acknowledged');
-    assert.equal((await action('turn-start', { threadId: THREAD, text: 'Build and verify this synthetic local task.', allowWorkspaceWrites: true, allowAssets: true })).record!.state, 'acknowledged');
+    assert.equal((await action('turn-start', { threadId: THREAD, text: 'Build and verify this synthetic local task.', allowWorkspaceWrites: true, allowAssets: true,...(models?{modelSource:{sessionId:pair.sessionId}}:{}) })).record!.state, 'acknowledged');
     mcp = createMcpServer({ client: new DaemonClient({ url: ownedLab.origin, token: tokens[0]!, assetAudience: 'native-session' }), projectRoot: project });
     const [left, right] = InMemoryTransport.createLinkedPair(); await mcp.connect(right); await agent.connect(left);
   };
@@ -204,22 +215,37 @@ async function fixture(t: TestContext, holdClose = false) {
     const result = CallToolResultSchema.parse(await agent.callTool({ name: 'playtest_request', arguments: { sessionId: pair.sessionId, nativeStudioId: STUDIO, durationMs: 5000, observationIntervalMs: 250, failOnRuntimeError: true, scenario: plan } }));
     assert.notEqual(result.isError, true, JSON.stringify(result.structuredContent)); return playtestJob.parse((result.structuredContent as { job: unknown }).job);
   };
-  return { lab:ownedLab, state, providers, ready, prepare, status, task, action, releaseClose, diagnostic, approve: (job: Pick<StudioTestView,'id'|'displayDigest'>) => post('/v1/playtests/approve', { id: job.id, displayDigest: job.displayDigest }),
+  const modelSearch=async()=>CallToolResultSchema.parse(await agent.callTool({name:'studio_asset_search',
+    arguments:{sessionId:pair.sessionId,nativeStudioId:STUDIO,query:'Synthetic model fixture',category:'Model',page:1,pageSize:1}}));
+  const allowedSearch=async()=>{
+    const result=await modelSearch();assert.notEqual(result.isError,true,JSON.stringify(result.structuredContent));
+    assert.equal((result.structuredContent as {search:{results:{id:string}[]}}).search.results[0]?.id,'1001');
+  };
+  const refusedSearch=async(code:string)=>{
+    const result=await modelSearch();assert.equal(result.isError,true);
+    assert.equal((result.structuredContent as {error:{code:string}}).error.code,code);
+  };
+  return { lab:ownedLab, state, providers, ready, prepare, status, task, action, releaseClose, diagnostic, allowedSearch, refusedSearch,
+    disturbEpoch(){assert.equal(state.mode,'Edit');state.epoch++;assert.deepEqual(publish(),[]);},
+    expectCachedCleanupFailure(value:unknown){assert.equal(expectedCloseFailure,null);expectedCloseFailure={value};}, approve: (job: Pick<StudioTestView,'id'|'displayDigest'>) => post('/v1/playtests/approve', { id: job.id, displayDigest: job.displayDigest }),
     finish: (turn: number) => writeFile(join(root, 'finished-' + turn), 'Synthetic terminal', { flag: 'wx' }),
     wire: async () => (await readFile(audit, 'utf8')).trim().split('\n').map(line => JSON.parse(line) as { method: string; params: Record<string, unknown> }) };
 }
 
 test('production lab routes measured scenario failure into one original-client repair and bounded reverify', { timeout: 30000 }, async t => {
-  const f = await fixture(t); await f.ready(); const first = await f.prepare(); await f.approve(first);
+  const f = await fixture(t); await f.ready(true);await f.allowedSearch();assert.equal(f.state.searches,1);
+  const first = await f.prepare(); await f.approve(first);
   await until(async () => (await f.status(first.id)).review.phase === 'done'); const failed = await f.status(first.id);
   const failedDetails = f.diagnostic(failed);
   assert.equal(failed.review.outcome, 'failed', failedDetails); assert.equal(failed.review.code, 'ASSERTION_FAILED', failedDetails); assert.equal(failed.review.cleanup, 'complete', failedDetails);
   assert.equal(failed.review.scenario!.inputRelease, 'observed_released', failedDetails); assert.equal((await f.task()).round, 0, failedDetails);
   await until(async () => (await f.task()).reportDigest!==null);
   const failedDigest=(await f.task()).reportDigest; assert.ok(failedDigest);
+  assert.equal(f.state.epoch,12);await f.refusedSearch('TOOLBOX_MODELS_DISABLED');assert.equal(f.state.searches,1,'The stopped Play epoch cannot refresh the original still-held operation.');
   assert.equal((await f.wire()).filter(row => row.method === 'turn/start').length, 1);
   await f.finish(1); await until(async () => (await f.task()).round === 1 && f.providers[0]!.snapshot().operations.filter(op => op.method === 'turn/start' && op.state === 'acknowledged').length === 2);
-  assert.equal(f.providers.length, 1); f.state.immobile = false; f.state.source = 'print("repaired fixture")';
+  assert.equal(f.providers.length, 1);await f.allowedSearch();assert.equal(f.state.searches,2,'Only the original owner repair advanced the allowance for this new operation.');
+  f.state.immobile = false; f.state.source = 'print("repaired fixture")';
   const second = await f.prepare(); assert.notEqual(first.display.proposal.subjectDigest, second.display.proposal.subjectDigest);
   assert.deepEqual(first.display.proposal.scenario, second.display.proposal.scenario); await f.approve(second);
   await until(async () => (await f.status(second.id)).review.phase === 'done'); const passed = await f.status(second.id);
@@ -228,7 +254,8 @@ test('production lab routes measured scenario failure into one original-client r
   await f.finish(2); await until(async () => (await f.task()).state === 'verified');
   assert.equal(f.state.inputCalls, 2); assert.equal(f.state.starts, 2); assert.equal(f.state.stops, 2); assert.equal(f.state.mode, 'Edit');
   const turns = (await f.wire()).filter(row => row.method === 'turn/start'); assert.equal(turns.length, 2);
-  for (const row of turns) { assert.equal(row.params.threadId, THREAD); assert.equal(row.params.model, 'fixture'); assert.equal(row.params.effort, 'low'); assert.equal(row.params.initiatedBy, undefined); }
+  for (const row of turns) { assert.equal(row.params.threadId, THREAD); assert.equal(row.params.model, 'fixture'); assert.equal(row.params.effort, 'low'); assert.equal(row.params.initiatedBy, undefined);
+    assert.equal(Object.hasOwn(row.params,'modelSource'),false);assert.equal(JSON.stringify(row.params.input).includes('modelSource'),false); }
   const repairInput=turns[1]!.params.input as {type:string;text:string}[];
   assert.equal(repairInput.length,1); assert.equal(repairInput[0]!.type,'text');
   assert.ok(repairInput[0]!.text.includes(first.id)); assert.ok(repairInput[0]!.text.includes(failedDigest));
@@ -236,12 +263,13 @@ test('production lab routes measured scenario failure into one original-client r
 });
 
 test('a changed source after measured failure pauses the task before any automatic repair', { timeout: 30000 }, async t => {
-  const f = await fixture(t); await f.ready(); const job = await f.prepare(); await f.approve(job);
+  const f = await fixture(t); await f.ready(true);await f.allowedSearch(); const job = await f.prepare(); await f.approve(job);
   await until(async () => (await f.status(job.id)).review.phase === 'done');
   const failed = await f.status(job.id); assert.equal(failed.review.code, 'ASSERTION_FAILED'); assert.equal(failed.review.cleanup, 'complete');
   f.state.source = 'print("separate human edit after test")'; await f.finish(1);
   await until(async () => (await f.task()).state === 'paused');
   assert.equal((await f.task()).round, 0); assert.equal((await f.wire()).filter(row => row.method === 'turn/start').length, 1);
+  await f.refusedSearch('TOOLBOX_MODELS_DISABLED');assert.equal(f.state.searches,1,'Changed source cannot refresh the completed operation or dispatch another model search.');
   assert.equal(f.state.starts, 1); assert.equal(f.state.stops, 1); assert.equal(f.state.inputCalls, 1); assert.equal(f.state.mode, 'Edit');
 });
 
@@ -260,11 +288,35 @@ test('a Studio metadata lab initializes its owned services without a managed ass
 });
 
 test('lab shutdown fences task admission before owned playtest teardown can request a repair', { timeout: 20000 }, async t => {
-  const f = await fixture(t, true); await f.ready(); const pending = await f.prepare(); await f.finish(1);
+  const f = await fixture(t, true); await f.ready();await f.refusedSearch('TOOLBOX_MODELS_DISABLED');assert.equal(f.state.searches,0);
+  const pending = await f.prepare(); await f.finish(1);
   await until(() => f.providers[0]!.snapshot().thread!.turnStatus === 'completed');
   await f.approve(pending); await until(() => f.state.closeEntered);
   const measured = await f.status(pending.id); assert.equal(measured.review.outcome, 'failed'); assert.equal(measured.review.cleanup, 'complete');
   const before = await f.wire(), closing = f.lab.close(); await delay(20); f.releaseClose(); await closing;
   assert.equal(f.providers[0]!.snapshot().connected, false); assert.equal(f.state.starts, 1); assert.equal(f.state.stops, 1); assert.equal(f.state.inputCalls, 1);
   assert.deepEqual(await f.wire(), before, 'No provider preflight or repair may start during daemon teardown.');
+});
+
+test('an extra unowned epoch after real Play and Stop cannot refresh original Models consent or replay repair', { timeout: 30000 }, async t => {
+  const f=await fixture(t);await f.ready(true);await f.allowedSearch();
+  const job=await f.prepare();await f.approve(job);
+  await until(async()=>(await f.status(job.id)).review.phase==='done'&&(await f.task()).reportDigest!==null);
+  const failed=await f.status(job.id);assert.equal(failed.review.code,'ASSERTION_FAILED');assert.equal(failed.review.cleanup,'complete');
+  assert.equal(failed.evidence,'fixture');assert.equal(failed.nativeAcceptance,false);assert.equal(f.state.epoch,12);
+  f.disturbEpoch();assert.equal(f.state.epoch,13);await f.finish(1);
+  await until(async()=>(await f.task()).state==='paused'&&f.providers[0]!.snapshot().connected===false);
+  assert.equal((await f.task()).reason,'repair_dispatch_not_replayed');
+  assert.equal((await f.wire()).filter(row=>row.method==='turn/start').length,1);
+  assert.equal(f.state.searches,1);assert.equal(f.state.starts,1);assert.equal(f.state.stops,1);assert.equal(f.state.inputCalls,1);assert.equal(f.state.mode,'Edit');
+  await f.refusedSearch('AUTH');assert.equal(f.state.searches,1);
+  // LAB deliberately exposes its fixed cleanup wrapper, not the original
+  // private policy error or a claim of uncertain physical custody.
+  let original:unknown;
+  await assert.rejects(f.lab.close(),error=>{
+    assert.ok(error instanceof Error&&'code'in error&&error.code==='CLEANUP');original=error;return true;
+  });
+  f.expectCachedCleanupFailure(original);
+  await assert.rejects(f.lab.close(),error=>error===original);
+  assert.equal(f.providers[0]!.snapshot().connected,false);
 });

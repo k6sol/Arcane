@@ -9,6 +9,16 @@ import { pathToFileURL } from 'node:url';
 const browserModule = process.env.ARCANE_UI_BROWSER_MODULE;
 const source = (file: string) => readFile(resolve(file), 'utf8');
 
+test('Model sources explains one typed message and keeps manual browsing distinct without adding an approval dialog',async()=>{
+  const html=await source('apps/desktop/public/studio.html'),section=html.slice(html.indexOf('aria-labelledby="asset-source-heading"'),html.indexOf('<details class="settings-group" id="code-verification-settings"'));
+  assert.match(section,/write your message, enable Models, then send that typed message/);
+  assert.match(section,/Later messages need fresh consent; queued messages must be reviewed in the composer/);
+  assert.match(section,/Manual Toolbox browsing is a separate session choice that expires after 30 minutes/);
+  assert.match(section,/id="toolbox-models-allow" type="checkbox" disabled> Models: allow Toolbox models and external templates for this typed message/);
+  assert.equal(section.split('id="toolbox-models-allow"').length-1,1);assert.doesNotMatch(section,/<dialog|for this Studio session/);
+  assert.match(section,/id="toolbox-models-revoke" class="quiet" hidden disabled>Turn off Toolbox access/);
+});
+
 test('General keeps one key action and initial guards without permission or history selectors', async () => {
   const html = await source('apps/desktop/public/studio.html');
   const general = html.slice(html.indexOf('<section id="workspace-settings"'), html.indexOf('<section id="settings-connections"'));

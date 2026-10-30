@@ -41,7 +41,7 @@ export const codexActionInput = z.discriminatedUnion('action', [
   z.strictObject({ ...common, action: z.literal('revoke-assets'), threadId: identifier }),
   z.strictObject({ ...common, action: z.literal('grant-writes'), threadId: identifier }),
   z.strictObject({ ...common, action: z.literal('revoke-writes'), threadId: identifier }),
-  z.strictObject({ ...common, action: z.literal('turn-start'), threadId: identifier, text: z.string().min(1).refine(value => Buffer.byteLength(value) <= 131072), displayText:z.string().min(1).refine(value=>Buffer.byteLength(value)<=131072).optional(), allowAssets: z.boolean().optional(), allowWorkspaceWrites: z.boolean().optional(),references:imageReferences.optional() }),
+  z.strictObject({ ...common, action: z.literal('turn-start'), threadId: identifier, text: z.string().min(1).refine(value => Buffer.byteLength(value) <= 131072), displayText:z.string().min(1).refine(value=>Buffer.byteLength(value)<=131072).optional(), allowAssets: z.boolean().optional(), allowWorkspaceWrites: z.boolean().optional(),references:imageReferences.optional(),modelSource:z.strictObject({sessionId:z.string().regex(/^[A-Za-z0-9_-]{1,128}(?![\s\S])/)}).optional() }),
   z.strictObject({ ...common, action:z.literal('turn-steer'),threadId:identifier,expectedTurnId:identifier,
     text:z.string().min(1).refine(value=>!value.includes('\0')&&Buffer.byteLength(value)<=131072) }),
   z.strictObject({ ...common, action: z.literal('turn-interrupt'), threadId: identifier, turnId: identifier }),
@@ -616,6 +616,9 @@ export function createCodexService(options: CodexServiceOptions) {
                 }
               }
               const context=currentAssets,authority=context?.handle;
+              if(value.modelSource){
+                if(!managed||!context||!authority||!allowAssets)throw new CodexClientError('ASSET_AUTHORITY','This message has no original managed model-source admission.');
+              }
               let permission:HumanAssetIntent|null=null,accepted=false;
               // Only this existing human-control action can arm the next actual
               // dispatch. Never forward allowAssets to the provider/model API.
@@ -649,6 +652,7 @@ export function createCodexService(options: CodexServiceOptions) {
                       if(!continuation)throw new CodexClientError('TASK_SCOPE','Original task continuation is unavailable.');
                       const snapshot=owned.snapshot(),thread=snapshot.thread!;
                       if(!allowAssets&&ownedContext.manualAssets)throw new CodexClientError('TASK_SCOPE','Task asset scope cannot expand after the original Send.');
+                      if(value.modelSource)ownedContext.handle!.advanceModelSourceAfterOwnedPlay(report);
                       if(allowAssets)ownedContext.nextIntent={connectionId:snapshot.connectionId,threadId:thread.threadId,sessionId:thread.sessionId,operationId:null};
                       try {await owned.continueTask!({continuation,text:repairPrompt(report)});}
                       finally {ownedContext.nextIntent=null;}
@@ -660,7 +664,8 @@ export function createCodexService(options: CodexServiceOptions) {
                 if(options.automaticTaskPlanning===true&&options.workStore&&proposalFactory&&owned.openIncorporationChain&&owned.issueIncorporationPermit&&owned.continueIncorporation&&Buffer.byteLength(value.text)<=CHAT_TASK_PLAN_INPUT_BYTES)
                   planInputs.set(taskId,{objective:value.text,inputSha256:createHash('sha256').update(JSON.stringify({text:value.text,
                     references:value.references?referenceImageMetadata(value.references):[],allowWorkspaceWrites:allowWrites,allowAssets})).digest('hex')});
-                try {const started=await owned.startManagedTask!({initiatedBy:'human',threadId:value.threadId,text:value.text,allowWorkspaceWrites:allowWrites,...(value.references?{references:value.references}:{})});continuation=started.continuation;accepted=true;}
+                try {if(value.modelSource)authority!.grantModelSource(value.modelSource.sessionId);
+                  const started=await owned.startManagedTask!({initiatedBy:'human',threadId:value.threadId,text:value.text,allowWorkspaceWrites:allowWrites,...(value.references?{references:value.references}:{})});continuation=started.continuation;accepted=true;}
                 catch(error){const uncertain=error instanceof CodexClientError&&error.dispatched&&error.code!=='REMOTE_REJECTED'||owned.snapshot().operations.some(op=>op.method==='turn/start'&&op.state==='unknown');
                   tasks!.uncertain(taskId,'initial_turn_not_replayed',uncertain);throw error;}
               } else {await selected.startTurn({initiatedBy:'human',threadId:value.threadId,text:value.text,

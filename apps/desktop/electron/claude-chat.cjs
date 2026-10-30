@@ -278,13 +278,20 @@ function imagesInput(value) {
 }
 /** Lightweight transcript marker for each reference; the bytes are never persisted. */
 const imageMarkers = images => images.map(image => '[image: ' + image.name + ']').join(' ');
+/** Human-control metadata only. Never appended to provider input or saved messages. */
+function modelSourceInput(value) {
+  const v=plain(value,['sessionId']);
+  if(typeof v.sessionId!=='string'||!/^[A-Za-z0-9_-]{1,128}(?![\s\S])/.test(v.sessionId))fail('unavailable');
+  return Object.freeze({sessionId:v.sessionId});
+}
 /** Exact `send` envelope (shared by the IPC boundary and the host); `images` is optional. */
 function sendInput(value) {
   const keys = ['conversationId', 'text', 'model', 'effort'];
   const hasImages = !!value && typeof value === 'object' && !types.isProxy(value) && Object.hasOwn(value, 'images');
   const hasPlaytest = !!value && typeof value === 'object' && !types.isProxy(value) && Object.hasOwn(value, 'playtest');
   const hasDisplay = !!value && typeof value === 'object' && !types.isProxy(value) && Object.hasOwn(value, 'displayText');
-  const v = plain(value, [...keys, ...(hasImages ? ['images'] : []), ...(hasPlaytest ? ['playtest'] : []),...(hasDisplay?['displayText']:[])]);
+  const hasModelSource=!!value&&typeof value==='object'&&!types.isProxy(value)&&Object.hasOwn(value,'modelSource');
+  const v = plain(value, [...keys, ...(hasImages ? ['images'] : []), ...(hasPlaytest ? ['playtest'] : []),...(hasDisplay?['displayText']:[]),...(hasModelSource?['modelSource']:[])]);
   if (hasPlaytest && typeof v.playtest !== 'boolean') fail('unavailable');
   if (!(v.conversationId === null || isId(v.conversationId)) || typeof v.model !== 'string' || !CHOICE.test(v.model) ||
       typeof v.effort !== 'string' || !CHOICE.test(v.effort)) fail('unavailable');
@@ -294,6 +301,7 @@ function sendInput(value) {
   if(hasDisplay)out.displayText=v.displayText;
   if (hasImages) out.images = imagesInput(v.images);
   if (hasPlaytest) out.playtest = v.playtest;
+  if(hasModelSource)out.modelSource=modelSourceInput(v.modelSource);
   return Object.freeze(out);
 }
 /** One stream-json user message (the shape Claude Code reads with --input-format stream-json): references in order, then the text. */
@@ -629,6 +637,8 @@ function createClaudeChat(options) {
       if (!d || !Object.hasOwn(d, 'value') || typeof d.value !== 'function') fail('unavailable');
       captured[name] = (...args) => d.value.apply(value, args);
     }
+    const modelSource=Object.getOwnPropertyDescriptor(value,'grantModelSource');
+    if(modelSource&&Object.hasOwn(modelSource,'value')&&typeof modelSource.value==='function')captured.grantModelSource=sessionId=>modelSource.value.call(value,sessionId);
     return Object.freeze(captured);
   }
   // Cleanup remains independent of logical finish and never blocks or retries
@@ -926,6 +936,7 @@ function createClaudeChat(options) {
   async function send(input) {
     if (disposed) fail('unavailable');
     const v = sendInput(input);
+    if(v.modelSource&&!appAssets)fail('unavailable');
     if (turns.size >= limits.turns) fail('full');
     let entry = null;
     if (v.conversationId !== null) { entry = await store.get(v.conversationId); if (!entry) fail('missing'); }
@@ -934,7 +945,7 @@ function createClaudeChat(options) {
     if (byConversation.has(conversationId)) fail('busy');
     if (turns.size >= limits.turns) fail('full');
     const turn = { turnId: randomUUID(), conversationId, model: v.model, effort: v.effort, child: null, stopped: false, finished: false, timer: null,
-      sessionId: entry?.sessionId ?? null, credential: null, redactions: [], deltaCarry: '', assets: null, result: null, tools: new Map(), arcaneCalls: new Set(), toolImages: 0, overflow: false, limit: null, seed: '', images: v.images ?? [], playtest: v.playtest };
+      sessionId: entry?.sessionId ?? null, credential: null, redactions: [], deltaCarry: '', assets: null, result: null, tools: new Map(), arcaneCalls: new Set(), toolImages: 0, overflow: false, limit: null, seed: '', images: v.images ?? [], playtest: v.playtest,modelSource:v.modelSource };
     turns.set(turn.turnId, turn); byConversation.set(conversationId, turn);
     let user = null;
     try {
@@ -1091,6 +1102,7 @@ function createClaudeChat(options) {
         await spawned; assertAssetLive(turn);
         await turn.assets.context.bind({ kind: 'claude-code-process', incarnationId: randomUUID(), nativeSessionId: null });
         assertAssetLive(turn);
+        if(turn.modelSource){if(typeof turn.assets.context.grantModelSource!=='function')fail('unavailable');await turn.assets.context.grantModelSource(turn.modelSource.sessionId);assertAssetLive(turn);}
         await turn.assets.context.grantNextIntent(); assertAssetLive(turn);
         turn.assets.dispatchAttempted = true;
         await turn.assets.context.dispatched(turn.turnId); assertAssetLive(turn);

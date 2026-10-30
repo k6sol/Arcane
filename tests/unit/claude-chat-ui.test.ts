@@ -1,5 +1,6 @@
 import type {ChatQueueBridge,ChatQueueSnapshot,StoredChatQueueRow} from '../../packages/protocol/src/chat-queue.js';
 import type {ClaudePreferenceBridge} from '../../apps/desktop/src/claude-preferences.js';
+import {createModelSourceConsent} from '../../apps/desktop/src/toolbox-policy.js';
 /// <reference lib="dom" />
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -2688,6 +2689,26 @@ test('durability: context preparation keeps edited drafts and sends original vis
   b.emit({type:'done',ok:false,error:'Mesh export failed: invalid material assignment.',usage:null});
   assert.match(f.messages.textContent,/Mesh export failed: invalid material assignment/);
   assert.match(f.messages.querySelector('.message-details')!.textContent,/Status: failed/);
+});
+
+test('actual Claude initial Send consumes Models consent once and the next unrelated brief cannot inherit it',async t=>{
+  const b=fakeBridge(),f=mount(b.bridge);t.after(()=>f.chat.stop());await f.chat.refresh();f.type('Use a reviewed external model in this synthetic brief');
+  const consent=createModelSourceConsent({context:()=>f.chat.modelSourceContext(),session:()=>'studio-original'});f.chat.setModelSourceConsent(consent.port,()=>'C:\\Project');
+  assert.equal(consent.arm(true),true);consent.confirm(true);await f.chat.send();
+  assert.deepEqual((sends(b)[0] as Record<string,unknown>).modelSource,{sessionId:'studio-original'});assert.equal(consent.pending(),false);
+  b.emit({type:'done',ok:true,usage:null});await tick();f.type('Another unrelated brief');await f.chat.send();
+  assert.equal(sends(b).length,2);assert.equal(Object.hasOwn(sends(b)[1] as object,'modelSource'),false);
+});
+
+test('actual Claude held Models preparation refuses draft ABA and never consumes consent for a queued message',async t=>{
+  const b=fakeBridge(),f=mount(b.bridge);t.after(()=>f.chat.stop());await f.chat.refresh();f.type('Original Models brief');
+  const consent=createModelSourceConsent({context:()=>f.chat.modelSourceContext(),session:()=>'studio-original'});f.chat.setModelSourceConsent(consent.port,()=>'C:\\Project');
+  assert.equal(consent.arm(true),true);consent.confirm(true);let release!:(value:string)=>void;
+  f.chat.setBeforeMessageSubmit(()=>new Promise(resolve=>{release=resolve;}));const preparing=f.chat.send();await tick();f.type('Replacement');f.type('Original Models brief');release('Original Models brief');await preparing;
+  assert.equal(sends(b).length,0);assert.equal(f.input.value,'Original Models brief');assert.match(f.notice.textContent,/Models message context changed/);
+  f.chat.setBeforeMessageSubmit(null);await f.chat.send();b.emit({type:'done',ok:true,usage:null});await tick();
+  f.type('Typed message with explicit Models');assert.equal(consent.arm(true),true);consent.confirm(true);
+  await f.chat.send('A different queued message');assert.equal(Object.hasOwn(sends(b).at(-1) as object,'modelSource'),false);
 });
 
 test('durability: provider preparation gates overlapping switches and retains the source when refused',async t=>{

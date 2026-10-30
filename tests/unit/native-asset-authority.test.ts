@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {mkdtempSync,lstatSync,realpathSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join,resolve,relative,isAbsolute,sep} from 'node:path';
-import {createNativeAssetRegistry,assertNativeAssetActor,nativeAssetActorScope,nativeAssetOperationSignal,assertNativeAssetStageOperationAvailable,claimNativeAssetStageOperation,assertNativeAssetRevisionOperationAvailable,claimNativeAssetRevisionOperation,acquireNativeAssetWork,type NativeAssetActor} from '../../apps/daemon/src/native-asset-authority.js';
+import {createNativeAssetRegistry,assertNativeAssetActor,assertNativeModelSource,nativeAssetActorScope,nativeAssetOperationSignal,assertNativeAssetStageOperationAvailable,claimNativeAssetStageOperation,assertNativeAssetRevisionOperationAvailable,claimNativeAssetRevisionOperation,acquireNativeAssetWork,type NativeAssetActor} from '../../apps/daemon/src/native-asset-authority.js';
 import type {AppAssetConversationBinding} from '../../packages/protocol/src/asset-conversation.js';
 const refused={code:'NATIVE_ASSET_AUTHORITY'};
 function fixture(t:test.TestContext) {
@@ -15,6 +15,35 @@ function fixture(t:test.TestContext) {
   const ready=()=>{incarnation.seal(seal);incarnation.grant(bound);incarnation.dispatched({...bound,operationId:'intent-a'});};
   return {directory,registry,incarnation,token,seal,bound,ready};
 }
+
+test('one human model-source admission stays on its original entry and needs a fresh operation capture for repair',t=>{
+  const f=fixture(t);let proof=true,captures=0;
+  const registry=createNativeAssetRegistry({projectPath:f.directory,modelSourceBinding:sessionId=>{assert.equal(sessionId,'studio-original');captures++;return()=>{if(!proof)throw Error('changed proof');};}});
+  t.after(()=>registry.close());const first=registry.issue(),second=registry.issue();
+  for(const entry of [first,second]){entry.seal(f.seal);entry.grant(f.bound);}
+  first.grantModelSource('studio-original');assert.equal(captures,1);
+  assert.throws(()=>registry.capture(first.credential(),'mutate'),refused,'consent is not dispatch');
+  first.dispatched({...f.bound,operationId:'initial'});second.dispatched({...f.bound,operationId:'unrelated'});
+  const actor=registry.capture(first.credential(),'mutate'),other=registry.capture(second.credential(),'mutate');
+  assertNativeModelSource(actor,'studio-original');assert.throws(()=>assertNativeModelSource(actor,'other-studio'),refused);
+  for(const fake of [{...actor},structuredClone(actor),other,registry.capture(first.credential(),'read')])assert.throws(()=>assertNativeModelSource(fake,'studio-original'),refused);
+  assert.throws(()=>second.grantModelSource('studio-original'),refused,'cannot expand an already dispatched task');
+  first.ended('initial');assert.throws(()=>assertNativeModelSource(actor,'studio-original'),refused);
+  first.dispatched({...f.bound,operationId:'original-repair'});const repair=registry.capture(first.credential(),'mutate');
+  assertNativeModelSource(repair,'studio-original');assert.throws(()=>assertNativeModelSource(actor,'studio-original'),refused);
+  proof=false;assert.throws(()=>assertNativeModelSource(repair,'studio-original'),/changed proof/);proof=true;
+  registry.revokeModelSource('studio-original');assert.throws(()=>assertNativeModelSource(repair,'studio-original'),refused);
+  assertNativeAssetActor(repair,'mutate');assert.equal(nativeAssetOperationSignal(repair).aborted,false,'source revocation does not fabricate a native Stop or receipt');
+  assert.throws(()=>first.grantModelSource('studio-original'),refused);assert.equal(captures,1);
+});
+
+for(const fence of ['cancel','revoke','retire','close'] as const)test('model-source admission cannot outlive '+fence,t=>{
+  const f=fixture(t),registry=createNativeAssetRegistry({projectPath:f.directory,modelSourceBinding:()=>()=>{}});t.after(()=>registry.close());
+  const owner=registry.issue();owner.seal(f.seal);owner.grant(f.bound);owner.grantModelSource('studio');owner.dispatched({...f.bound,operationId:'owned'});
+  const actor=registry.capture(owner.credential(),'mutate');assertNativeModelSource(actor,'studio');
+  if(fence==='cancel')owner.cancelWork('incarnation');else if(fence==='revoke')owner.revokeGrant();else if(fence==='retire')owner.retire();else registry.close();
+  assert.throws(()=>assertNativeModelSource(actor,'studio'),refused);
+});
 
 function appBinding(provider:'claude-code'|'arcane'):AppAssetConversationBinding {
   const anchor={kind:'app-conversation' as const,connectionId:'connection-app',conversationId:'11111111-1111-4111-8111-111111111111'};

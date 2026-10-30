@@ -27,6 +27,7 @@ const witnessSchema=z.strictObject({placeId:z.number().int().nonnegative(),unive
 type Witness=z.infer<typeof witnessSchema>;
 export interface NativeTestConnection {client:Client;evidence:'native'|'fixture';witness(studioId:string,markerName:string,mode:'Edit'|'Play',signal:AbortSignal):Promise<Witness>;close():Promise<void>}
 interface Options {directory:string;store:StudioStore;pluginArtifactHash:string;connect?:()=>Promise<NativeTestConnection>;taskPort?:StudioTestTaskPort;
+  revokeModelSource?:(sessionId:string)=>void;
   /** Original fixed-project StudioStore custody port. Absence never permits native dispatch. */
   custody?:StudioNativeCustodyPort;
   /** Actual original LAB project identity guard; never supplied by HTTP. */
@@ -308,7 +309,7 @@ export async function createStudioTestService(options:Options){
   };
   /** Native asset search/insert/generation: same exact-session Edit binding as the viewport. */
   const nativeAssets=createNativeAssetRequests({store:options.store,pluginArtifactHash:options.pluginArtifactHash,connect:operation=>connectOwned(operation),assertCurrent:connection=>custody.assertConnection(connection),assertReady:()=>custody.assertReady(),
-    ...(options.fixtureScheduler?{fixtureScheduler:options.fixtureScheduler}:{}),eligible,identity,busy:()=>closed||preparing||viewing||current?.view.state==='running'||!!current?.reserved});
+    ...(options.fixtureScheduler?{fixtureScheduler:options.fixtureScheduler}:{}),...(options.revokeModelSource?{revokeModelSource:options.revokeModelSource}:{}),eligible,identity,busy:()=>closed||preparing||viewing||current?.view.state==='running'||!!current?.reserved});
   let serviceClosing:Promise<void>|null=null;
   return Object.freeze({
     reportArchiveStatus:()=>reportFault,

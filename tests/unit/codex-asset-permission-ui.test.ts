@@ -2,6 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { assertTextOnlyChatSource } from './chat-source-contract.js';
+import {createModelSourceConsent} from '../../apps/desktop/src/toolbox-policy.js';
 import { randomUUID } from 'node:crypto';
 import { mkdtemp, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -224,6 +225,65 @@ test('composer Send omits automatic assets when the host has no managed capabili
   const initial=state();delete initial.nativeAssets;const f=await fixture(t,initial);f.el('codex-composer').value='Ordinary human message';
   f.handler(async input=>{assert.ok(input.action==='turn-start');assert.equal(Object.hasOwn(input,'allowAssets'),false);assert.equal(input.allowWorkspaceWrites,true);return response(input,f.observed());});
   f.el('codex-compose').emit('submit');await flush();assert.equal(f.posts.length,1);
+});
+
+test('actual Codex composer binds Models consent to one typed Send and later Sends remain original-only',async t=>{
+  const initial=state(),threadId='models.thread:original';initial.snapshot!.thread!.threadId=threadId;
+  initial.nativeThreads=[{provider:'codex',projectPath:initial.projectPath,threadId,sessionId:null,selection:{model:'fixture',effort:'low'}}];assert.doesNotThrow(()=>readCodexState(initial));
+  const f=await fixture(t,initial),storage=new Map<string,string>();f.doc.getElementById('workspace-chat-tabs').setAttribute('role','tablist');
+  await f.chat.enableChatTabs({storage:{getItem:key=>storage.get(key)??null,setItem:(key,value)=>{storage.set(key,value);}}});
+  f.el('codex-composer').value='Use a reviewed external model for this synthetic brief';f.el('codex-composer').emit('input');
+  const consent=createModelSourceConsent({context:()=>f.chat.modelSourceContext(),session:()=>'studio-original'});f.chat.setModelSourceConsent(consent.port);
+  assert.equal(consent.arm(true),true);consent.confirm(true);
+  f.handler(async input=>{assert.equal(input.action,'turn-start');return response(input,f.observed());});
+  f.el('codex-compose').emit('submit');await flush();assert.equal(f.posts.length,1);
+  assert.ok(f.posts[0]!.action==='turn-start');assert.deepEqual(f.posts[0]!.modelSource,{sessionId:'studio-original'});assert.equal(consent.pending(),false);
+  f.el('codex-composer').value='A separate unrelated brief';f.el('codex-composer').emit('input');f.el('codex-compose').emit('submit');await flush();
+  assert.equal(f.posts.length,2);assert.equal(Object.hasOwn(f.posts[1]!,'modelSource'),false);
+});
+
+test('actual Codex held context preparation refuses Models draft ABA without HTTP or losing the original text',async t=>{
+  const initial=state(),threadId='models.thread:original';initial.snapshot!.thread!.threadId=threadId;
+  initial.nativeThreads=[{provider:'codex',projectPath:initial.projectPath,threadId,sessionId:null,selection:{model:'fixture',effort:'low'}}];assert.doesNotThrow(()=>readCodexState(initial));
+  const f=await fixture(t,initial),storage=new Map<string,string>();f.doc.getElementById('workspace-chat-tabs').setAttribute('role','tablist');
+  await f.chat.enableChatTabs({storage:{getItem:key=>storage.get(key)??null,setItem:(key,value)=>{storage.set(key,value);}}});
+  const draft='Original Models brief';f.el('codex-composer').value=draft;f.el('codex-composer').emit('input');
+  const consent=createModelSourceConsent({context:()=>f.chat.modelSourceContext(),session:()=>'studio-original'});f.chat.setModelSourceConsent(consent.port);
+  assert.equal(consent.arm(true),true);consent.confirm(true);const gate=deferred<string>();f.chat.setBeforeMessageSubmit(()=>gate.promise);
+  f.el('codex-compose').emit('submit');await flush();f.el('codex-composer').value='Replacement brief';f.el('codex-composer').emit('input');
+  f.el('codex-composer').value=draft;f.el('codex-composer').emit('input');gate.release(draft);await flush();
+  assert.equal(f.posts.length,0);assert.equal(f.el('codex-composer').value,draft);assert.match(f.el('codex-notice').textContent,/Models message context changed/);
+  assert.equal(consent.port.capture(),null);
+});
+
+test('actual Codex first-Send draft setup retains exact Models ownership through acknowledged native binding',async t=>{
+  const initial=state(),threadId='models.first-send:original';initial.snapshot!.thread=null;initial.nativeThreads=[];initial.nativeAssets=assets({sealed:false});assert.doesNotThrow(()=>readCodexState(initial));
+  const f=await fixture(t,initial),storage=new Map<string,string>();f.doc.getElementById('workspace-chat-tabs').setAttribute('role','tablist');
+  await f.chat.enableChatTabs({storage:{getItem:key=>storage.get(key)??null,setItem:(key,value)=>{storage.set(key,value);}}});
+  f.el('codex-model').value='fixture';f.el('codex-effort').value='low';f.el('codex-composer').value='First typed Models brief';f.el('codex-composer').emit('input');
+  const original=f.chat.conversationSource()!;const consent=createModelSourceConsent({context:()=>f.chat.modelSourceContext(),session:()=>'studio-original'});f.chat.setModelSourceConsent(consent.port);
+  assert.equal(consent.arm(true),true);consent.confirm(true);
+  f.handler(async input=>{
+    const next=f.observed();
+    if(input.action==='select'){assert.equal(Object.hasOwn(input,'modelSource'),false);return response(input,next);}
+    if(input.action==='thread-start'){
+      assert.equal(Object.hasOwn(input,'modelSource'),false);next.snapshot!.thread={...state().snapshot!.thread!,threadId};next.nativeAssets=assets();
+      next.nativeThreads=[{provider:'codex',projectPath:next.projectPath,threadId,sessionId:null,selection:{model:'fixture',effort:'low'}}];assert.doesNotThrow(()=>readCodexState(next));f.set(next);return response(input,next,{threadId});
+    }
+    assert.ok(input.action==='turn-start');assert.deepEqual(input.modelSource,{sessionId:'studio-original'});return response(input,next);
+  });
+  f.el('codex-compose').emit('submit');await flush();
+  assert.deepEqual(f.posts.map(input=>input.action),['select','thread-start','turn-start'],f.el('codex-notice').textContent);
+  assert.deepEqual(f.chat.conversationSource(),original);assert.equal(f.chat.currentStateView().nativeBoundToActiveChat,true);
+});
+
+test('Models is a closed initial-Send field and its final pre-dispatch check cannot send after cancellation',async()=>{
+  const st=state(),fields={threadId:THREAD,text:'Synthetic Models message',modelSource:{sessionId:'studio-original'}};
+  const input=prepareCodexAction(st,'turn-start',fields);assert.ok(input.action==='turn-start');assert.deepEqual(input.modelSource,fields.modelSource);
+  for(const value of [true,null,{}, {sessionId:'studio-original',actor:'human'}, {sessionId:'studio-original\n'}])assert.throws(()=>prepareCodexAction(st,'turn-start',{...fields,modelSource:value}));
+  for(const action of ['select','turn-steer','thread-start','grant-assets'])assert.throws(()=>prepareCodexAction(st,action,fields));
+  let posts=0;const api=new CodexChatApi(TOKEN,async()=>{posts++;throw Error('No HTTP expected');});
+  await assert.rejects(api.action(input,undefined,()=>false),error=>error instanceof CodexHttpError&&!error.unknown);assert.equal(posts,0);
 });
 
 test('Human Send opens its exact new chat before requesting one-shot assets on that Send only',async t=>{

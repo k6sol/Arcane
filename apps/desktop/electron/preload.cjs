@@ -485,6 +485,12 @@ const claudeChatReply = (action, value) => {
   if (value.messageId !== undefined && !claudeChatId(value.messageId)) claudeChatUnavailable();
   return { turnId: value.turnId, conversationId: value.conversationId, ...(value.messageId === undefined ? {} : { messageId: value.messageId }) };
 };
+const chatModelSource = value => {
+  if(!value||Object.getPrototypeOf(value)!==Object.prototype||Reflect.ownKeys(value).length!==1)claudeChatUnavailable();
+  const d=Object.getOwnPropertyDescriptor(value,'sessionId');
+  if(!d?.enumerable||!Object.hasOwn(d,'value')||typeof d.value!=='string'||!/^[A-Za-z0-9_-]{1,128}(?![\s\S])/.test(d.value))claudeChatUnavailable();
+  return {sessionId:d.value};
+};
 const claudeChatInvoke = async (action, args) => {
   let input;
   if (action === 'status' || action === 'list') { if (args.length) claudeChatUnavailable(); }
@@ -493,6 +499,7 @@ const claudeChatInvoke = async (action, args) => {
     const keys = ['conversationId', 'text', 'model', 'effort'];
     if (value && typeof value === 'object' && Object.hasOwn(value, 'images')) keys.push('images');
     if (value && typeof value === 'object' && Object.hasOwn(value, 'displayText')) keys.push('displayText');
+    if (value && typeof value === 'object' && Object.hasOwn(value, 'modelSource')) keys.push('modelSource');
     // The composer's Playtest switch, when mounted: a plain boolean the engine turns into a short system note.
     if (value && typeof value === 'object' && Object.hasOwn(value, 'playtest')) keys.push('playtest');
     if (args.length !== 1 || !value || Object.getPrototypeOf(value) !== Object.prototype || Reflect.ownKeys(value).length !== keys.length) claudeChatUnavailable();
@@ -502,7 +509,7 @@ const claudeChatInvoke = async (action, args) => {
     if(keys.includes('displayText')&&(typeof value.displayText!=='string'||!value.displayText.trim()||!value.displayText.isWellFormed()||value.displayText.length>100000))claudeChatUnavailable();
     if (keys.includes('playtest') && typeof value.playtest !== 'boolean') claudeChatUnavailable();
     input = { conversationId: value.conversationId, text: value.text, model: value.model, effort: value.effort, ...(keys.includes('images') ? { images: claudeChatImages(value.images) } : {}),
-      ...(keys.includes('playtest') ? { playtest: value.playtest } : {}),...(keys.includes('displayText')?{displayText:value.displayText}:{}) };
+      ...(keys.includes('playtest') ? { playtest: value.playtest } : {}),...(keys.includes('displayText')?{displayText:value.displayText}:{}),...(keys.includes('modelSource')?{modelSource:chatModelSource(value.modelSource)}:{}) };
   } else if (action === 'rewind') {
     const value = args[0];
     if (args.length !== 1 || !value || Object.getPrototypeOf(value) !== Object.prototype || Reflect.ownKeys(value).length !== 2) claudeChatUnavailable();
@@ -615,6 +622,7 @@ const arcaneChatInvoke = async (action, args) => {
     if (value && typeof value === 'object' && Object.hasOwn(value, 'images')) throw new Error(ARCANE_CHAT_ERRORS[6]);
     const keys = ['conversationId', 'text', 'model', 'effort'];
     if (value && typeof value === 'object' && Object.hasOwn(value, 'displayText')) keys.push('displayText');
+    if (value && typeof value === 'object' && Object.hasOwn(value, 'modelSource')) keys.push('modelSource');
     if (value && typeof value === 'object' && Object.hasOwn(value, 'playtest')) keys.push('playtest');
     if (args.length !== 1 || !value || Object.getPrototypeOf(value) !== Object.prototype || Reflect.ownKeys(value).length !== keys.length) arcaneChatUnavailable();
     for (const key of keys) { const d = Object.getOwnPropertyDescriptor(value, key); if (!d?.enumerable || !Object.hasOwn(d, 'value')) arcaneChatUnavailable(); }
@@ -622,7 +630,7 @@ const arcaneChatInvoke = async (action, args) => {
     if (typeof value.text !== 'string' || !value.text.trim() || value.text.length > 100000) throw new Error(ARCANE_CHAT_ERRORS[4]);
     if(keys.includes('displayText')&&(typeof value.displayText!=='string'||!value.displayText.trim()||!value.displayText.isWellFormed()||value.displayText.length>100000))arcaneChatUnavailable();
     if (keys.includes('playtest') && typeof value.playtest !== 'boolean') arcaneChatUnavailable();
-    input = { conversationId: value.conversationId, text: value.text, model: value.model, effort: value.effort, ...(keys.includes('playtest') ? { playtest: value.playtest } : {}),...(keys.includes('displayText')?{displayText:value.displayText}:{}) };
+    input = { conversationId: value.conversationId, text: value.text, model: value.model, effort: value.effort, ...(keys.includes('playtest') ? { playtest: value.playtest } : {}),...(keys.includes('displayText')?{displayText:value.displayText}:{}),...(keys.includes('modelSource')?{modelSource:chatModelSource(value.modelSource)}:{}) };
   } else if (action === 'rewind') {
     const value = args[0];
     if (args.length !== 1 || !value || Object.getPrototypeOf(value) !== Object.prototype || Reflect.ownKeys(value).length !== 2) arcaneChatUnavailable();

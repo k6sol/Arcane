@@ -95,12 +95,15 @@ function sendInput(value) {
   if (own(value, 'images')) fail('images');
   const hasPlaytest = own(value, 'playtest');
   const hasDisplay=own(value,'displayText');
-  const v = plain(value, ['conversationId', 'text', 'model', 'effort', ...(hasPlaytest ? ['playtest'] : []),...(hasDisplay?['displayText']:[])]);
+  const hasModelSource=own(value,'modelSource');
+  const v = plain(value, ['conversationId', 'text', 'model', 'effort', ...(hasPlaytest ? ['playtest'] : []),...(hasDisplay?['displayText']:[]),...(hasModelSource?['modelSource']:[])]);
   if (hasPlaytest && typeof v.playtest !== 'boolean') fail('unavailable');
   if (!(v.conversationId === null || isId(v.conversationId)) || typeof v.model !== 'string' || !MODEL_ID.test(v.model) || v.effort !== EFFORT) fail('unavailable');
   if (typeof v.text !== 'string' || !v.text.trim() || v.text.length > LIMITS.textChars || !v.text.isWellFormed()) fail('text');
   if(hasDisplay&&(typeof v.displayText!=='string'||!v.displayText.trim()||v.displayText.length>LIMITS.textChars||!v.displayText.isWellFormed()))fail('text');
-  return Object.freeze({ conversationId: v.conversationId, text: v.text, model: v.model, effort: v.effort,...(hasDisplay?{displayText:v.displayText}:{}), ...(hasPlaytest ? { playtest: v.playtest } : {}) });
+  let modelSource;
+  if(hasModelSource){const a=plain(v.modelSource,['sessionId']);if(typeof a.sessionId!=='string'||!/^[A-Za-z0-9_-]{1,128}(?![\s\S])/.test(a.sessionId))fail('unavailable');modelSource=Object.freeze({sessionId:a.sessionId});}
+  return Object.freeze({ conversationId: v.conversationId, text: v.text, model: v.model, effort: v.effort,...(hasDisplay?{displayText:v.displayText}:{}), ...(hasPlaytest ? { playtest: v.playtest } : {}),...(modelSource?{modelSource}:{}) });
 }
 function rewindInput(value) {
   const v = plain(value, ['conversationId', 'messageId']);
@@ -501,6 +504,7 @@ function createArcaneChat(options) {
   async function send(input) {
     if (disposed) fail('unavailable');
     const v = sendInput(input);
+    if(v.modelSource&&!appAssets)fail('unavailable');
     if (turns.size >= limits.turns || appAssets && assetTurns.size >= limits.turns) fail('full');
     let entry = null;
     if (v.conversationId !== null) { entry = await store.get(v.conversationId); if (!entry) fail('missing'); }
@@ -509,7 +513,7 @@ function createArcaneChat(options) {
     if (byConversation.has(conversationId)) fail('busy');
     if (turns.size >= limits.turns || appAssets && assetTurns.size >= limits.turns) fail('full');
     const turn = { turnId: randomUUID(), conversationId, model: v.model, stopped: false, finished: false, timedOut: false, timer: null, credential: null, mcp: null,
-      controller: new AbortController(), playtest: v.playtest, history: [],
+      controller: new AbortController(), playtest: v.playtest,modelSource:v.modelSource, history: [],
       asset: appAssets ? {loopId: randomUUID(), context: null, secret: null, client: null, childClosed: true, gateway: new Set(),
         loopSettled: false, deliverySettled: false, cleanupStarted: false, cleanupSettled: false, dispatched: false, cancel: null, closeSent: false, unknown: false} : null };
     turns.set(turn.turnId, turn); byConversation.set(conversationId, turn); if (turn.asset) assetTurns.add(turn);
@@ -596,6 +600,7 @@ function createArcaneChat(options) {
       const own = clean(await loadInstructions()), server = clean(tools.serverInstructions);
       const system = (server.includes(shared.GUIDANCE_START) ? shared.withoutSharedGuidance(own) : own) + (server ? '\n\n' + server : '') + shared.projectMemorySection(await loadProjectMemory()) + shared.learnedPreferenceSection(await loadLearned());
       const messages = [{ role: 'system', content: system }, ...turn.history, { role: 'user', content: text + shared.playtestNote(turn.playtest) }];
+      if(turn.modelSource){if(!turn.asset||typeof turn.asset.context.grantModelSource!=='function')fail('credential');await assetAck(turn,'grantModelSource',turn.modelSource.sessionId);}
       if (turn.asset) { await assetAck(turn, 'grantNextIntent'); await assetAck(turn, 'dispatched', turn.turnId); }
       const base = { turnId: turn.turnId, conversationId: turn.conversationId };
       let calls = 0, imagesShown = 0;

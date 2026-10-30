@@ -4,6 +4,8 @@ import { ArcaneError } from '../../../packages/protocol/src/providers.js';
 import { workflowProjectIdentity } from '../../../packages/storage/src/workflow-store.js';
 import type { NativeConversation } from '../../../packages/storage/src/conversation-work-store.js';
 import type { AppAssetConversationBinding } from '../../../packages/protocol/src/asset-conversation.js';
+import type {StudioTestTaskSettled} from '../../../packages/protocol/src/chat-task-playtest.js';
+import {advanceModelSourceBinding} from './model-source-binding.js';
 
 export type NativeAssetOperation = 'read' | 'mutate';
 /** Opaque host-only capability. A structurally identical JSON object grants nothing. */
@@ -34,6 +36,12 @@ export interface NativeAssetIncarnation {
   /** Trusted HUMAN Send only, immediately before actual dispatch. Never grants
    * before dispatch and expires with that exact intent; manual grants persist. */
   grantNextIntent(value: {connectionId: string; threadId: string; sessionId: string | null}): void;
+  /** Trusted original HUMAN admission only, before its first actual dispatch.
+   * A later task must receive a new incarnation and fresh explicit consent. */
+  grantModelSource(sessionId: string): void;
+  /** Existing original Codex owner only, after exact settled test + source check.
+   * This never creates consent, extends expiry or opens an operation. */
+  advanceModelSourceAfterOwnedPlay(report:StudioTestTaskSettled):void;
   revokeGrant(): void;
   /** Host dispatch intent, not provider-origin invocation/turn attestation. */
   dispatched(value: {connectionId: string; threadId: string; operationId: string}): void;
@@ -54,6 +62,8 @@ export interface NativeAssetRegistry {
   capture(credential: string, operation: NativeAssetOperation): NativeAssetActor;
   /** Classification alone grants no operation; pending/retired credentials cannot be used. */
   recognizes(credential: string): boolean;
+  /** Explicit human revocation fences new model-source effects, not accepted receipts. */
+  revokeModelSource(sessionId: string): void;
   close(): void;
 }
 const MAX_INCARNATIONS = 128, MAX_INTENTS = 128, MAX_WORK_LEASES = 128, MAX_WORK_HOLDS = 128;
@@ -71,6 +81,7 @@ interface Entry {
   sealed: Readonly<{connectionId:string;provider:NativeConversation['provider'];threadId:string;sessionId:string|null}> | null;
   binding: Readonly<NativeAssetSeal | AppAssetConversationBinding> | null; granted: boolean; active: string | null;
   nextIntent: boolean; automaticIntent: string | null;
+  modelSource: {sessionId:string;assertCurrent():void} | null;
   intents: Set<string>;
   work: Map<string, AbortController>;
 }
@@ -111,7 +122,7 @@ function compact(entry: Entry): void {
 }
 function retireEntry(entry: Entry): void {
   if (!entry.retired) {
-    entry.granted = false; entry.active = null; entry.nextIntent = false; entry.automaticIntent = null;
+    entry.granted = false; entry.active = null; entry.nextIntent = false; entry.automaticIntent = null; entry.modelSource=null;
     entry.retired = true; entry.cell.retired = true;
     if (Number.isSafeInteger(entry.generation) && entry.generation < 65535) entry.generation++;
   }
@@ -200,6 +211,14 @@ export function assertNativeAssetActor(actor: NativeAssetActor, operation: Nativ
 export function nativeAssetActorScope(actor: NativeAssetActor): NativeAssetScope {
   assertNativeAssetActor(actor,'read');return actors.get(actor)!.scope;
 }
+/** Recheck the original private entry AND operation. Neither actor JSON nor a
+ * session-wide manual browsing preference can supply this execution authority. */
+export function assertNativeModelSource(actor: NativeAssetActor, sessionId: string): void {
+  assertNativeAssetActor(actor,'mutate');
+  const entry=allocated(actors.get(actor)!.cell),grant=entry.modelSource;
+  if(entry.joining||!grant||grant.sessionId!==sessionId)fail();
+  grant.assertCurrent();
+}
 /** Host-only cancellation signal for the SAME actual dispatched operation.
  * It cannot be recovered from serialized actor/scope/operation claims. The
  * accepted worker may retain this signal after normal admission has ended.
@@ -254,8 +273,11 @@ export function claimNativeAssetRevisionOperation(actor:NativeAssetActor,jobId:s
 /** Volatile host authority only. It never reads provider auth/config or persists secrets.
  * Registry lifetime is one daemon/project. Restart retires every credential/intent;
  * durable conversation bindings live in the separate ConversationWorkStore. */
-export function createNativeAssetRegistry(options: {projectPath: string}): NativeAssetRegistry {
-  const input = data(options,['projectPath']);if (typeof input.projectPath !== 'string') fail();
+export function createNativeAssetRegistry(options: {projectPath: string;modelSourceBinding?:(sessionId:string)=>()=>void}): NativeAssetRegistry {
+  if(!options||typeof options!=='object'||types.isProxy(options))fail();
+  const input = data(options,['projectPath',...(Object.hasOwn(options,'modelSourceBinding')?['modelSourceBinding']:[])]);if (typeof input.projectPath !== 'string') fail();
+  if(input.modelSourceBinding!==undefined&&typeof input.modelSourceBinding!=='function')fail();
+  const modelSourceBinding=input.modelSourceBinding as ((sessionId:string)=>()=>void)|undefined;
   const project = workflowProjectIdentity(input.projectPath);
   if (project.projectPath !== input.projectPath) fail();
   const entries = new Map<string,{digest: Buffer;entry: Entry}>();let closed = false, issuance = 0n;
@@ -314,7 +336,18 @@ export function createNativeAssetRegistry(options: {projectPath: string}): Nativ
           if(a.sessionId!==live(entry).sessionId || entry.active!==null || entry.nextIntent) fail();
           entry.nextIntent=true;bump(entry);
         },
-        revokeGrant() {open();if(cell.retired)return;const entry=allocated(cell);entry.granted=false;entry.active=null;entry.nextIntent=false;entry.automaticIntent=null;bump(entry);},
+        grantModelSource(sessionId:string) {
+          open();const entry=allocated(cell);live(entry);
+          if(entry.joining||entry.intents.size!==0||entry.modelSource||!modelSourceBinding||typeof sessionId!=='string'||!/^[A-Za-z0-9_-]{1,128}(?![\s\S])/.test(sessionId))fail();
+          const assertCurrent=modelSourceBinding(sessionId);if(typeof assertCurrent!=='function')fail();assertCurrent();
+          entry.modelSource={sessionId,assertCurrent};
+        },
+        advanceModelSourceAfterOwnedPlay(report:StudioTestTaskSettled) {
+          open();const entry=allocated(cell);live(entry);
+          if(entry.joining||entry.active!==null||entry.intents.size===0||!entry.modelSource)fail();
+          advanceModelSourceBinding(entry.modelSource.assertCurrent,report);
+        },
+        revokeGrant() {open();if(cell.retired)return;const entry=allocated(cell);entry.granted=false;entry.active=null;entry.nextIntent=false;entry.automaticIntent=null;entry.modelSource=null;bump(entry);},
         dispatched(value: {connectionId:string;threadId:string;operationId:string}) {
           const entry=allocated(cell);
           try {
@@ -339,7 +372,7 @@ export function createNativeAssetRegistry(options: {projectPath: string}): Nativ
           const controllers = scope === 'incarnation' ? [...entry.work.values()] : entry.active === null ? [] : [entry.work.get(entry.active)!];
           // Fence admission before notifying any accepted worker. Completed
           // workers removed their listeners; other incarnations are untouched.
-          entry.active=null;entry.automaticIntent=null;entry.nextIntent=false;
+          entry.active=null;entry.automaticIntent=null;entry.nextIntent=false;entry.modelSource=null;
           if (!entry.retired) {
             // Stop remains effective at a saturated epoch; exhausting admission
             // history cannot strand an already accepted child process.
@@ -376,7 +409,7 @@ export function createNativeAssetRegistry(options: {projectPath: string}): Nativ
       const cell:EntryCell={entry:null,retired:false,sealed:false,released:false,normalJoin:null};
       const entry:Entry={...project,cell,credential,transportClosed:false,joining:false,leases:new Set(),
         reclaim(){entries.delete(key);digest.fill(0);},generation:0,retired:false,sealed:null,binding:null,
-        granted:false,active:null,nextIntent:false,automaticIntent:null,intents:new Set(),work:new Map()};
+        granted:false,active:null,nextIntent:false,automaticIntent:null,modelSource:null,intents:new Set(),work:new Map()};
       cell.entry=entry;entries.set(key,{digest,entry});return incarnation(cell);
     },
     capture(credential:string,operation:NativeAssetOperation):NativeAssetActor {
@@ -388,6 +421,7 @@ export function createNativeAssetRegistry(options: {projectPath: string}): Nativ
       actors.set(actor,{cell:entry.cell,generation:entry.generation,operation,scope});return actor;
     },
     recognizes(credential:string):boolean {if(closed)return false;const entry=find(credential);return !!entry&&!entry.retired&&!entry.joining&&entry.sealed!==null;},
+    revokeModelSource(sessionId:string):void {open();if(typeof sessionId!=='string'||!/^[A-Za-z0-9_-]{1,128}(?![\s\S])/.test(sessionId))fail();for(const {entry} of entries.values())if(entry.modelSource?.sessionId===sessionId)entry.modelSource=null;},
     close() {if(closed)return;closed=true;for(const {entry,digest} of entries.values()){retireEntry(entry);digest.fill(0);}entries.clear();},
   });
 }

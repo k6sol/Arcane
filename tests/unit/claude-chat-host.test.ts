@@ -712,6 +712,25 @@ test('image references are validated in the main process: PNG signature, canonic
   assert.equal(JSON.parse(f.turns()[0]!.child.input).message.content[0].source.data, PNG_1X1);
 });
 
+test('preload permits closed initial human model-source metadata only and preserves exact provider send boundaries',async()=>{
+ const vm=await import('node:vm'),source=await readFile(join(process.cwd(),'apps/desktop/electron/preload.cjs'),'utf8');
+ let exposed:any;const invoked:unknown[][]=[],turnId=randomUUID(),conversationId=randomUUID();
+ const context=vm.createContext({require:()=>({contextBridge:{exposeInMainWorld:(_name:string,value:unknown)=>{exposed=value;}},ipcRenderer:{on(){},removeListener(){},invoke:async(...args:unknown[])=>{
+  invoked.push(args);return vm.runInContext('('+JSON.stringify({turnId,conversationId})+')',context);
+ }}})});vm.runInContext(source,context);
+ const inner=(value:unknown)=>vm.runInContext('('+JSON.stringify(value)+')',context);
+ for(const [key,channel,model,effort]of [['claudeChat','arcane:claude-chat-send','sonnet','high'],['arcaneChat','arcane:arcane-chat-send','fixture','standard']]as const){
+  const base={conversationId:null,text:'A reviewed request',model,effort};
+  await exposed[key].send(inner({...base,modelSource:{sessionId:'studio-original'}}));
+  assert.deepEqual(JSON.parse(JSON.stringify(invoked.at(-1))),[channel,{...base,modelSource:{sessionId:'studio-original'}}]);
+  const before=invoked.length;
+  for(const bad of [true,{sessionId:'studio-original\n'},{sessionId:'studio-original',taskId:randomUUID()},{sessionId:''}])await assert.rejects(exposed[key].send(inner({...base,modelSource:bad})));
+  if(key==='claudeChat')await assert.rejects(exposed[key].steer(inner({turnId,text:'late scope',modelSource:{sessionId:'studio-original'}})));
+  else assert.equal(exposed[key].steer,undefined,'Credits has no steering permission surface');
+  assert.equal(invoked.length,before);
+ }
+});
+
 test('preload forwards optional PNG references only as exact bounded records', async () => {
   const vm = await import('node:vm');
   const source = await readFile(join(process.cwd(), 'apps/desktop/electron/preload.cjs'), 'utf8');

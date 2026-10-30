@@ -8,7 +8,7 @@ import { join, relative, isAbsolute, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createCodexService, type CodexActionOutcome,type CodexHostClient } from '../../apps/daemon/src/codex-service.js';
 import { codexRoutes } from '../../apps/daemon/src/codex-routes.js';
-import { createNativeAssetRegistry, assertNativeAssetActor } from '../../apps/daemon/src/native-asset-authority.js';
+import { createNativeAssetRegistry, assertNativeAssetActor,assertNativeModelSource } from '../../apps/daemon/src/native-asset-authority.js';
 import { CodexSession } from '../../packages/codex-client/src/session.js';
 import { nativeEnvironment } from '../../packages/codex-client/src/transport.js';
 import { limits } from '../../packages/codex-client/src/validation.js';
@@ -78,9 +78,9 @@ function packet(jobId=randomUUID(),outcome:'passed'|'failed'='failed'):StudioTes
       observations:1,logs:[],logsTruncated:false,requiresHumanReview:false,canStartAnotherOperation:true},
     scenario:{outcome,requiredEvidence:'complete',inputRelease:'complete',restoration:'complete',subjects:'current'}};
 }
-async function fixture(t:test.TestContext,options:{mode?:string;email?:(index:number)=>string|null;modalities?:(index:number)=>string[];revalidation?:'current'|'changed'|'unobserved';newThread?:(index:number)=>string;legacy?:true}={}){
+async function fixture(t:test.TestContext,options:{mode?:string;email?:(index:number)=>string|null;modalities?:(index:number)=>string[];revalidation?:'current'|'changed'|'unobserved';newThread?:(index:number)=>string;legacy?:true;modelSource?:true}={}){
  const boundary=await realpath(tmpdir()),root=await realpath(await mkdtemp(join(boundary,'arcane-managed-task-'))),project=join(root,'project');await mkdir(project);
- const registry=createNativeAssetRegistry({projectPath:await realpath(project)}),clients:CodexSession[]=[],tokens:string[]=[],audit=join(root,'wire.jsonl');
+ const registry=createNativeAssetRegistry({projectPath:await realpath(project),...(options.modelSource?{modelSourceBinding:(sessionId:string)=>{assert.equal(sessionId,'studio-original');return()=>{};}}:{})}),clients:CodexSession[]=[],tokens:string[]=[],audit=join(root,'wire.jsonl');
  const cancelled:{jobId:string;origin:StudioTestTaskOrigin}[]=[],validated:string[]=[];
  let expectedCloseFailure=false,originalCloseFailure:unknown;
  // Manual task packets below are controlled fixture jobs, not Play/native proof.
@@ -140,6 +140,45 @@ async function fixture(t:test.TestContext,options:{mode?:string;email?:(index:nu
    finish:(process=0,turn=1)=>writeFile(join(root,'finish-'+process+'-'+turn),'complete',{flag:'wx'}),
    releasePreflight:(process=0)=>writeFile(join(root,'finish-'+process+'-preflight'),'release',{flag:'wx'}),control,generic};
 }
+
+test('explicit human model consent follows only the original managed task repair; the next human Send starts off',async t=>{
+ const f=await fixture(t,{modelSource:true});await f.ready();
+ const input={requestId:randomUUID(),connectionId:f.service.state().snapshot!.connectionId,action:'turn-start',threadId:THREAD,
+   text:'Use the reviewed external model request',allowAssets:true,allowWorkspaceWrites:true,modelSource:{sessionId:'studio-original'}};
+ assert.equal((await f.post(input,f.generic)).status,403);assert.equal(f.clients[0]!.snapshot().operations.filter(row=>row.method==='turn/start').length,0);
+ const sent=await f.post(input);assert.equal(sent.data.record.state,'acknowledged');
+ const first=f.registry.capture(f.tokens[0]!,'mutate');assertNativeModelSource(first,'studio-original');
+ assert.equal((await f.post(input)).data.replayed,true);assert.equal((await f.wire()).filter(row=>row.method==='turn/start').length,1);
+ const original=f.taskOrigin(),report=packet();f.prepare(original,report);await f.finish();
+ await until(()=>f.clients[0]!.snapshot().thread!.turnStatus==='completed');assert.throws(()=>assertNativeModelSource(first,'studio-original'));
+ await f.terminal(original,report);await until(async()=>(await f.wire()).filter(row=>row.method==='turn/start').length===2);
+ const repair=f.registry.capture(f.tokens[0]!,'mutate');assertNativeModelSource(repair,'studio-original');
+ const turns=(await f.wire()).filter(row=>row.method==='turn/start');assert.deepEqual(turns.map(row=>row.process),[0,0]);
+ assert.ok(turns.every(row=>!Object.hasOwn(row.params,'modelSource')),'consent never enters provider wire metadata');
+ await f.finish(0,2);await until(()=>f.clients[0]!.snapshot().thread!.turnStatus==='completed');
+ assert.equal((await f.send('An unrelated human follow-up')).data.record.state,'acknowledged');assert.equal(f.tokens.length,2);
+ assert.throws(()=>assertNativeModelSource(f.registry.capture(f.tokens[1]!,'mutate'),'studio-original'));
+ assert.throws(()=>assertNativeModelSource(repair,'studio-original'));assert.equal((await f.wire()).filter(row=>row.method==='turn/start').length,3);
+});
+
+test('stopping an explicitly model-enabled message during native preflight never dispatches or lends consent',async t=>{
+ const f=await fixture(t,{mode:'hold-preflight',modelSource:true});await f.ready();
+ const pending=f.action('turn-start',{threadId:THREAD,text:'A reviewed request',allowAssets:true,allowWorkspaceWrites:true,modelSource:{sessionId:'studio-original'}});
+ await until(async()=>(await f.wire()).filter(row=>row.method==='mcpServerStatus/list').length===2);
+ assert.equal((await f.action('task-stop',{threadId:THREAD,taskId:f.task().taskId})).data.record.state,'acknowledged');await pending;
+ assert.equal((await f.wire()).filter(row=>row.method==='turn/start').length,0);assert.throws(()=>f.registry.capture(f.tokens[0]!,'mutate'));
+});
+
+test('model-source metadata is closed human Send input and cannot be added to other actions or claimed by a legacy client',async t=>{
+ const f=await fixture(t,{modelSource:true});await f.ready();const before=(await f.wire()).length;
+ for(const modelSource of [true,{sessionId:'studio-original',allow:true},{sessionId:'studio-original\n'},{sessionId:''}])
+   assert.equal((await f.action('turn-start',{threadId:THREAD,text:'not sent',allowAssets:true,modelSource})).status,400);
+ assert.equal((await f.action('select',{model:'fixture',effort:'low',modelSource:{sessionId:'studio-original'}})).status,400);
+ assert.equal((await f.wire()).length,before);
+ const legacy=await fixture(t,{legacy:true,modelSource:true});await legacy.ready();
+ assert.equal((await legacy.action('turn-start',{threadId:THREAD,text:'not sent',allowAssets:true,modelSource:{sessionId:'studio-original'}})).data.record.state,'rejected');
+ assert.equal((await legacy.wire()).filter(row=>row.method==='turn/start').length,0);
+});
 
 test('actual image HTTP Send reaches only its owned initial native turn; repair carries text and no image bytes',async t=>{
  const f=await fixture(t,{modalities:()=>['text','image']});await f.ready();const references=[referenceInput()];

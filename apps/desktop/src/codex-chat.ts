@@ -9,6 +9,7 @@ import type { ChatFeedbackHooks, ChatFeedbackTool } from './learned-preferences.
 import type { SubmittedChatMessage, SubmittedChatTranscript } from '../../../packages/storage/src/submitted-chat-store.js';
 import type {ChatQueueBridge,ChatQueueProvider,ChatQueueSnapshot,StoredChatQueueRow} from '../../../packages/protocol/src/chat-queue.js';
 import type {StudioStagingDiagnostic} from '../../../packages/asset-pipeline/src/failure-diagnostics.js';
+import type {ModelSourceConsentPort,ModelSourceContext,ModelSourceTicket,ModelSourceAdmission} from './toolbox-policy.js';
 
 export const CODEX_STATE_BYTES = 4 * 1024 * 1024;
 export const CODEX_INPUT_BYTES = 131072;
@@ -296,13 +297,17 @@ export function readCodexState(value: unknown): ChatState {
 export function prepareCodexAction(state: ChatState | null, action: string, fields: Record<string, unknown> = {}, requestId: string = crypto.randomUUID()): ChatAction {
   if (!uuid(requestId) || !ACTIONS.includes(action)) throw new Error('Choose an explicit native action and UUID request ID.');
   const accepted: Record<string, string[]> = { connect: [], disconnect: [], select:['model','effort'], 'thread-start':[], 'thread-resume':['threadId'], 'grant-writes':['threadId'], 'revoke-writes':['threadId'], 'grant-assets':['threadId'], 'revoke-assets':['threadId'], 'turn-start':['threadId','text'], 'turn-steer':['threadId','expectedTurnId','text'], 'turn-interrupt':['threadId','turnId'], 'task-stop':['threadId','taskId'], 'task-focus':['threadId','taskId'], approval:['threadId','turnId','handle','decision'], 'history-load':['threadId'] };
-  const optional = action==='turn-start'?['allowAssets','allowWorkspaceWrites','references','displayText']:action==='disconnect'?['preserveAssetWork']:[];
+  const optional = action==='turn-start'?['allowAssets','allowWorkspaceWrites','references','displayText','modelSource']:action==='disconnect'?['preserveAssetWork']:[];
   const keys = [...accepted[action]!, ...optional.filter(key=>Object.hasOwn(fields,key))];
   if (!dataObject(fields, keys)) throw new Error('Native action fields must match the exact browser envelope.');
   if (action==='disconnect' && Object.hasOwn(fields,'preserveAssetWork') && typeof fields.preserveAssetWork!=='boolean')
     throw new Error('Connection retirement intent requires a boolean.');
   if (action==='turn-start' && Object.hasOwn(fields,'allowWorkspaceWrites') && typeof fields.allowWorkspaceWrites!=='boolean')
     throw new Error('Send workspace permission requires a boolean.');
+  if(action==='turn-start'&&Object.hasOwn(fields,'modelSource')){
+    if(!dataObject(fields.modelSource,['sessionId'])||typeof fields.modelSource.sessionId!=='string'||!/^[A-Za-z0-9_-]{1,128}(?![\s\S])/.test(fields.modelSource.sessionId))throw new Error('Models permission requires one exact Studio session.');
+    fields={...fields,modelSource:Object.freeze({sessionId:fields.modelSource.sessionId})};
+  }
   if (action==='turn-start' && Object.hasOwn(fields,'allowAssets') &&
       (typeof fields.allowAssets!=='boolean' || fields.allowAssets && !state?.nativeAssets?.available))
     throw new Error('Send asset permission requires a boolean and an available managed asset capability.');
@@ -570,7 +575,7 @@ export class CodexChatApi {
     const state=readCodexState(value.state);
     if(state.snapshot?.connectionId!==connectionId||!state.snapshot.rateLimits)throw new CodexHttpError('Account usage belongs to a different connection.',false);
   }
-  async action(input: ChatAction, signal?: AbortSignal): Promise<{record: ChatActionRecord; replayed: boolean; state: ChatState}> {
+  async action(input: ChatAction, signal?: AbortSignal,beforeDispatch?:()=>boolean): Promise<{record: ChatActionRecord; replayed: boolean; state: ChatState}> {
     let expectedReferences:readonly {name:string;bytes:number;width:number;height:number;sha256:string}[]|undefined;
     if(input.action==='turn-start'&&input.references){
       // Snapshot before WebCrypto yields. A same-caption replacement cannot
@@ -597,6 +602,7 @@ export class CodexChatApi {
       }catch{throw new CodexHttpError('PNG reference verification was cancelled or unavailable. No message was sent.',false);}
       finally{if(timer)clearTimeout(timer);}
     }
+    if(beforeDispatch&&!beforeDispatch())throw new CodexHttpError('The Models message context changed. No message was sent; review the draft and Models setting.',false);
     const value=await this.request(input.action==='turn-start'&&input.references?'/v1/codex/reference-turn':'/v1/codex/action',input,signal);
     if(!object(value)||typeof value.replayed!=='boolean')throw new CodexHttpError('Native acknowledgement was unreadable; inspect this request ID.',true);
     try {
@@ -2740,6 +2746,10 @@ export class CodexChat {
   private queueSaveGeneration=0;
   private queueRun:{scope:string;connectionId:string;turnId:string;selection:string}|null=null;
   private beforeMessageSubmit:BeforeMessageSubmit|null=null;
+  private modelSourceConsent:ModelSourceConsentPort|null=null;
+  private modelSourceRevision=0;
+  private modelSourceOwnerRevision=0;
+  private modelSourceAccountSignature:string|null=null;
   private messageLifetime = 0;
   private restoredWorkflowDraft = false;
   private readonly tabDraftContexts = new Map<string,{origins:WorkflowDraftProvenance[];reviewed:ReviewedDraft|null;restored:boolean}>();
@@ -2891,7 +2901,7 @@ export class CodexChat {
     }
   }
   private value(id:string){return this.surfaceYielded&&id==='codex-composer'?this.yieldedComposer:this.el<HTMLInputElement>(id).value;}
-  private setComposer(value:string){if(this.surfaceYielded)this.yieldedComposer=value;else this.el<HTMLTextAreaElement>('codex-composer').value=value;}
+  private setComposer(value:string){if(this.value('codex-composer')!==value)this.modelSourceRevision++;if(this.surfaceYielded)this.yieldedComposer=value;else this.el<HTMLTextAreaElement>('codex-composer').value=value;}
   private on(id:string,event:string,fn:(e:Event)=>void){this.el(id).addEventListener(event,e=>{if(this.surfaceYielded&&SHARED_SURFACE_IDS.has(id))return;fn(e);});}
   /**
    * Presentation hand-off of the shared chat surface (transcript, composer, model picker) to another provider's chat.
@@ -2899,6 +2909,7 @@ export class CodexChat {
    */
   yieldSurface(yielded:boolean):void {
     if(yielded===this.surfaceYielded)return;
+    this.modelSourceRevision++;this.modelSourceOwnerRevision++;
     if(yielded){this.pauseQueue('Paused while another provider is shown. Choose Send next to resume.');this.closePicker();this.flushDraft();this.pendingSelection=null;this.yieldedComposer=this.el<HTMLTextAreaElement>('codex-composer').value;this.surfaceYielded=true;}
     else {this.surfaceYielded=false;this.el<HTMLTextAreaElement>('codex-composer').value=this.yieldedComposer;this.yieldedComposer='';this.messageSignature='';this.pickerSignature='';this.selectionSignature='';}
     this.render();
@@ -2911,6 +2922,7 @@ export class CodexChat {
    */
   observeWorkspaceProject(path:string|null):void {
     const previous=this.workspaceProject;this.workspaceProject=path||null;
+    if(this.workspaceProject!==previous)this.modelSourceOwnerRevision++;
     if(this.stopped||!this.workspaceProject||this.workspaceProject===previous||!this.tabs)return;
     const project=this.state?.projectPath??null;
     if(this.foreignDraft){if([this.foreignDraft.project,this.foreignDraft.workspace].includes(this.workspaceProject)){this.releaseForeignDraft();this.render();this.publishState();}return;}
@@ -3098,6 +3110,16 @@ export class CodexChat {
   subscribeStateChange(listener:()=>void):()=>void {this.stateListeners.add(listener);return()=>{this.stateListeners.delete(listener);};}
   subscribeTranscriptChange(listener:()=>void):()=>void{return this.subscribeStateChange(listener);}
   setBeforeMessageSubmit(callback:BeforeMessageSubmit|null):void{this.beforeMessageSubmit=callback;}
+  setModelSourceConsent(port:ModelSourceConsentPort|null):void{this.modelSourceConsent=port;}
+  private modelSourceOwner():string|null{
+    const source=this.conversationSource(),selection=this.tabs?.active()?.selection??this.displaySelection()??this.localPair();
+    if(!source||this.stopped||this.surfaceYielded||this.foreignDraft||!this.providerAllowsCodex()||!selection||this.snapshot()?.account?.auth!=='subscription')return null;
+    return JSON.stringify([source.projectPath,source.localId,this.messageLifetime,this.modelSourceOwnerRevision,selection,this.snapshot()?.account]);
+  }
+  modelSourceContext():ModelSourceContext|null{
+    const source=this.conversationSource(),owner=this.modelSourceOwner(),draft=this.value('codex-composer');
+    return source&&owner&&draft.trim()?{provider:'codex',...source,fingerprint:JSON.stringify([owner,this.modelSourceRevision,draft,this.attachments?.selectionRevision()])}:null;
+  }
   setQueuePersistence(port:ChatQueueBridge|null):Promise<void>{
     const preserveLocal=this.queue.length>0||this.queueEmptyCheckpoint!==null;this.queueSaveGeneration++;
     return this.queueJournal.attach(port,'codex',(rows,project)=>{
@@ -3186,6 +3208,7 @@ export class CodexChat {
   private flushDraft():void {if(this.draftDirty)this.stashTabDraft();}
   private composerInput():void {
     if(this.stopped||this.foreignDraft)return;
+    this.modelSourceRevision++;
     if(this.queueEnqueue)this.queueEnqueueContext=null;
     if(!this.value('codex-composer'))this.clearDraftOrigins();
     this.renderComposer();
@@ -3235,7 +3258,7 @@ export class CodexChat {
     if(!this.tabs)return false;
     const blocked=this.draftBlockReason();if(blocked){this.text('codex-notice',blocked);return false;}
     this.stashTabDraft();if(!this.tabs.createDraft()){this.text('codex-notice','Close an open tab before creating another draft. Saved native history is retained.');return false;}
-    this.loadTabDraft();const source=this.conversationSource();if(source)created?.(source);
+    this.modelSourceOwnerRevision++;this.loadTabDraft();const source=this.conversationSource();if(source)created?.(source);
     this.render();this.publishState();this.el('codex-composer').focus({preventScroll:true});return true;
   }
   async selectChat(key:string):Promise<boolean> {
@@ -3243,7 +3266,7 @@ export class CodexChat {
     if(this.tabs!.active()?.key===key&&(target.kind==='draft'||this.tabs!.bound(this.state)))return true;
     // Opening a draft tab is local; a saved chat may need a native resume and keeps every native gate.
     const blocked=target.kind==='draft'?this.draftBlockReason():this.tabBlockReason();if(blocked){this.text('codex-notice',blocked);return false;}
-    this.stashTabDraft();
+    this.modelSourceOwnerRevision++;this.stashTabDraft();
     if(target.kind==='native'&&!this.tabs!.owns(target))return false;
     if(target.kind==='native'&&!(this.state?.snapshot?.thread?.configured&&this.state.snapshot.thread.threadId===target.threadId&&this.state.snapshot.thread.sessionId===target.sessionId)) {
       if(!target.selection){this.text('codex-notice','This saved chat has no recorded model choice. Choose an exact reported model and effort before resuming it.');return false;}
@@ -3591,6 +3614,7 @@ export class CodexChat {
   /** Enter retains a plain prompt for this exact running conversation; attachments stay in the composer. */
   enqueue():boolean {
     if(this.queueEnqueue)return false;
+    if(this.modelSourceConsent?.pending()){this.text('codex-notice','Models applies to this typed Send only. Wait for the reply to finish, then send from the composer; your draft is retained.');return false;}
     if(!this.queueTargetKnown())return false;if(!this.queueJournal.available(this.queueProject())){this.text('codex-notice',this.queueJournal.notice()??'Wait for queued message recovery before adding another prompt.');return false;}const scope=this.queueScope(),draft=this.value('codex-composer'),message=draft.trim();if(!scope||!message)return false;
     if(utf8(message)>CODEX_INPUT_BYTES){this.text('codex-notice','This queued message exceeds the input limit. Your draft is retained.');return false;}
     try{if((this.attachments?.prepareText(draft)??draft)!==draft||this.attachments?.prepareReferences().length)throw Error('Attachments stay in the composer. Send them after this reply finishes.');}
@@ -3718,6 +3742,9 @@ export class CodexChat {
     try {message=queued?.text??this.attachments?.prepareText(draft)??draft;references=queued?[]:this.attachments?.prepareReferences()??[];}
     catch(error){this.text('codex-notice',error instanceof Error?error.message:'Attachments could not be prepared.');return;}
     if(!message.trim()||utf8(message)>CODEX_INPUT_BYTES)return;
+    let modelSourceTicket:ModelSourceTicket|null=null;
+    try{if(!queued)modelSourceTicket=this.modelSourceConsent?.capture()??null;}
+    catch(error){this.text('codex-notice',error instanceof Error?error.message:'Review Models before sending.');return;}
     const lifetime=this.messageLifetime,project=this.state!.projectPath,source=this.tabs?.active(),selection=source?.kind==='native'?this.displaySelection():this.localPair();
     const referenceRevision=this.attachments?.selectionRevision(),referenceFields=references.length?{references}:{};
     const visibleMessage=message;
@@ -3734,16 +3761,24 @@ export class CodexChat {
       finally{this.preparingMessage=false;this.renderControls();}
     }
     const displayFields=message===visibleMessage?{}:{displayText:visibleMessage};
+    const send=(threadId:string)=>{
+      const modelSource=modelSourceTicket?.consume()??null;
+      if(modelSourceTicket&&!modelSource){this.text('codex-notice','The Models message context changed. Review your draft, then enable Models again.');return Promise.resolve(undefined);}
+      const owner=this.modelSourceOwner();
+      return this.dispatch('turn-start',{threadId,text:message,...displayFields,...referenceFields,allowWorkspaceWrites:true,
+        ...(this.state?.nativeAssets?.available?{allowAssets:true}:{}),...(modelSource?{modelSource:modelSource.scope}:{})},false,queued,
+        modelSource?{current:()=>modelSource.current()&&owner!==null&&owner===this.modelSourceOwner()}:undefined);
+    };
     // Reject an oversized caption/reference envelope before opening a draft's
     // native thread or clearing its selected files. Unknown future thread IDs
     // reserve their maximum encoded space; dispatch checks the exact body again.
     if(references.length&&utf8(JSON.stringify({requestId:'f'.repeat(36),connectionId:this.snapshot()!.connectionId,action:'turn-start',
-      threadId:source?.kind==='native'?source.threadId:'X'.repeat(1024),text:message,references,allowWorkspaceWrites:true,allowAssets:true}))>1_000_000){
+      threadId:source?.kind==='native'?source.threadId:'X'.repeat(1024),text:message,references,allowWorkspaceWrites:true,allowAssets:true,...(modelSourceTicket?{modelSource:modelSourceTicket.scope}:{})}))>1_000_000){
       this.text('codex-notice','The complete message and PNG references are too large. Reduce the message or references; your draft and selected files are retained.');return;
     }
     const bound=!!this.snapshot()?.thread?.configured&&(!this.tabs||this.tabs.bound(this.state));
     const applyPreferred=bound&&!!selection&&(selection.model!==this.snapshot()!.thread!.selection.model||selection.effort!==this.snapshot()!.thread!.selection.effort);
-    if(bound&&!applyPreferred)return await this.dispatch('turn-start',{threadId:this.snapshot()!.thread!.threadId,text:message,...displayFields,...referenceFields,allowWorkspaceWrites:true,...(this.state?.nativeAssets?.available?{allowAssets:true}:{})},false,queued);
+    if(bound&&!applyPreferred)return await send(this.snapshot()!.thread!.threadId);
     if(!selection)return;
     this.preparingMessage=true;this.renderControls();
     try {
@@ -3759,7 +3794,7 @@ export class CodexChat {
       try {current=queued?.text??this.attachments?.prepareText(this.value('codex-composer'))??this.value('codex-composer');}
       catch {this.text('codex-notice','Your chat is ready. Review your attachments before sending.');return;}
       if(this.value('codex-composer')!==draft||!references.length&&current!==visibleMessage){this.text('codex-notice','Your chat is ready. Your edited draft is saved; send it when ready.');return;}
-      return await this.dispatch('turn-start',{threadId:live.threadId,text:message,...displayFields,...referenceFields,allowWorkspaceWrites:true,...(this.state?.nativeAssets?.available?{allowAssets:true}:{})},false,queued);
+      return await send(live.threadId);
     } finally {this.preparingMessage=false;if(!this.stopped){this.renderControls();this.publishState();}}
   }
   /**
@@ -4060,8 +4095,8 @@ export class CodexChat {
     this.on('codex-refresh','click',()=>void this.refresh());
     this.on('codex-disconnect','click',()=>void this.dispatch('disconnect'));
     this.on('codex-select','click',()=>void this.dispatch('select',{model:this.value('codex-model'),effort:this.value('codex-effort')}));
-    this.on('codex-model','change',()=>{this.populateEfforts();this.renderControls();});
-    this.on('codex-effort','change',()=>this.renderControls());
+    this.on('codex-model','change',()=>{this.modelSourceRevision++;this.modelSourceOwnerRevision++;this.populateEfforts();this.renderControls();});
+    this.on('codex-effort','change',()=>{this.modelSourceRevision++;this.modelSourceOwnerRevision++;this.renderControls();});
     const startConversation = (event: Event) => this.startConversation(event);
     this.on('codex-thread-start', 'click', startConversation);
     this.doc.getElementById('codex-conversation-start')?.addEventListener('click', startConversation);
@@ -4157,6 +4192,13 @@ export class CodexChat {
     if(button)button.disabled=this.stopped||!!this.usageController||!this.fresh||!this.providerAllowsCodex()||!!this.state?.connecting||!!this.state?.closing||!snapshot?.connected||!snapshot.ready||snapshot.account?.auth!=='subscription';
   }
   private applyState(state:ChatState) {
+    const account=state.snapshot?.account,accountSignature=account?JSON.stringify(account):null;
+    // Owned draft setup can close and reconnect its client. Ignore only that
+    // temporary absence; every reported account change still fences the ticket.
+    if(accountSignature!==null||!this.tabTransition){
+      if(this.modelSourceAccountSignature!==null&&accountSignature!==this.modelSourceAccountSignature){this.modelSourceRevision++;this.modelSourceOwnerRevision++;}
+      this.modelSourceAccountSignature=accountSignature;
+    }
     if(this.state&&this.state.projectPath!==state.projectPath){this.messageLifetime++;this.imageRequest?.abort();}
     this.flushDraft();
     const before=this.snapshot()?.connectionId??'',after=state.snapshot?.connectionId??'';
@@ -4194,7 +4236,7 @@ export class CodexChat {
       return !this.state!.connecting&&!this.state!.closing&&!this.state!.busy&&((u.input.connectionId!==null&&u.input.connectionId!==this.snapshot()?.connectionId)||(u.input.action==='connect'&&!this.snapshot()));
     });
   }
-  private async dispatch(action:string,fields:Record<string,unknown>={},internal=false,queued?:ChatQueueRow) {
+  private async dispatch(action:string,fields:Record<string,unknown>={},internal=false,queued?:ChatQueueRow,modelSource?:Pick<ModelSourceAdmission,'current'>) {
     if(this.stopped)return;
     if(queued&&(queued.scope!==this.queueScope()||queued.state!=='sending'))return;
     if(['turn-start','turn-steer','thread-start','thread-resume','select','grant-writes','grant-assets'].includes(action)&&!this.providerAllowsCodex())return;
@@ -4211,6 +4253,7 @@ export class CodexChat {
       if(this.tabs&&(this.tabs.active()?.kind==='draft'||!this.tabs.bound(this.state)||!this.normal()||!IDLE.includes(this.snapshot()?.thread?.turnStatus??''))) {
         try {prepareCodexAction(this.state,action,fields);}catch{return;}
         this.imageRequest?.abort();
+        this.modelSourceRevision++;this.modelSourceOwnerRevision++;
         this.tabs.updateDraft(this.value('codex-composer'),{model:fields.model as string,effort:fields.effort as string},!!this.workflowDraftOrigins.length||this.restoredWorkflowDraft);
         this.selectionSignature='';this.closePicker(true);this.render();this.publishState();return;
       }
@@ -4226,6 +4269,8 @@ export class CodexChat {
     if(action==='connect'&&(!this.fresh||this.snapshot()||this.uncertain.size||this.pending.size||this.state?.connecting||this.state?.closing))return;
     if(action==='turn-start'&&!queued&&this.draftNeedsReview()){this.text('codex-notice','This workflow draft belongs to another conversation or model. Review it before submitting; your text has been preserved.');this.renderControls();return;}
     let input:ChatAction;try{input=prepareCodexAction(this.state,action,fields);}catch(error){this.text('codex-notice',String(error));return;}
+    if(action==='select'&&!internal){this.modelSourceRevision++;this.modelSourceOwnerRevision++;}
+    if(safety&&!internal)this.modelSourceConsent?.invalidate();
     if(queued){
       const gesture=this.queueGesture();queued.requestId=input.requestId;queued.dispatched=false;
       if(!await this.queueSave(true)){queued.state='paused';queued.notice='Not sent: secure saving failed. Your text is retained.';this.renderControls();return;}
@@ -4262,10 +4307,11 @@ export class CodexChat {
       if(!queued){this.setComposer('');this.clearDraftOrigins();this.stashTabDraft();}
     }
     if(input.action==='turn-steer')this.transcript.messages.push({key:input.requestId,role:'human',threadId:input.threadId,scope:input.threadId,text:input.text,steered:true,acknowledgement:'Awaiting native acknowledgement'});
+    const modelSourceDraftRevision=this.modelSourceRevision;
     this.render();this.publishState();
     let acknowledgedStateApplied=false;
     try {
-      const outcome=await this.api.action(input,imageRequest?.signal);
+      const outcome=await this.api.action(input,imageRequest?.signal,modelSource?()=>modelSource.current()&&modelSourceDraftRevision===this.modelSourceRevision:undefined);
       const current=this.snapshot()?.connectionId;
       const freshTask=input.action==='turn-start'&&!!outcome.record.nextConnectionId&&(current===input.connectionId||current===outcome.record.nextConnectionId)&&
         outcome.state.snapshot?.connectionId===outcome.record.nextConnectionId&&outcome.state.snapshot.thread?.threadId===input.threadId&&outcome.state.snapshot.thread.sessionId===this.snapshot()?.thread?.sessionId;

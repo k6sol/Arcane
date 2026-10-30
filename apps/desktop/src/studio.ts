@@ -2679,6 +2679,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   if (chatLink && (window as unknown as { arcaneDesktop?: { arcaneChat?: unknown } }).arcaneDesktop?.arcaneChat) void import('./arcane-chat.js').then(module => {
     if (claudeChatStopped) return;
     const chat = arcaneChat = new module.ArcaneChat(document);
+    chat.setModelSourceConsent(toolboxPolicy.consent,()=>workbench.historyProjectPath()||null);
+    chat.subscribeTranscriptChange(()=>toolboxPolicy.refreshContext());
     if (reviewSelection) chat.subscribeTranscriptChange(syncReviewSelection);
     syncReviewSelection();
     // The sign-in card offers Arcane Credits when usable, or says plainly what is missing (an account, or the service).
@@ -2701,7 +2703,11 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   const taskUsageFooter = startTaskUsageFooter(document, codexChat, { onView: view => { codexUsageView = view; composerChrome?.refresh(); } });
   const playtestRoot=document.getElementById('playtest-panel');
   // Composer Playtest switch (remembered per project); when on, the panel approves the managed chat's requests itself.
-  const toolboxPolicy=startToolboxPolicy(document,{token:()=>token});
+  const toolboxPolicy=startToolboxPolicy(document,{token:()=>token,context:()=>{
+    const provider=providerSetup.chatSurface(),peer=provider==='claude'?claudeChat:provider==='arcane'?arcaneChat:codexChat;
+    const context=peer?.modelSourceContext()??null;
+    return context&&context.projectPath===workbench.historyProjectPath()?context:null;
+  }});
   window.addEventListener('pagehide',()=>toolboxPolicy.stop());
   window.addEventListener('pageshow',event=>{if(event.persisted)toolboxPolicy.resume();});
   const playtestToggle=startPlaytestToggle(document,{projectKey:()=>workbench.getCurrentProduct()?.projectId??null});
@@ -2715,6 +2721,12 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       assetScopeListeners.add(listener); return () => { assetScopeListeners.delete(listener); };
     },
   });
+  codexChat.setModelSourceConsent(toolboxPolicy.consent);
+  claudeChat?.setModelSourceConsent(toolboxPolicy.consent,()=>workbench.historyProjectPath()||null);
+  codexChat.subscribeStateChange(()=>toolboxPolicy.refreshContext());
+  claudeChat?.subscribeTranscriptChange(()=>toolboxPolicy.refreshContext());
+  providerSetup.subscribeChatSurface(()=>{toolboxPolicy.consent.invalidate();toolboxPolicy.refreshContext();});
+  workbench.subscribeProjectChange(()=>{toolboxPolicy.consent.invalidate();toolboxPolicy.refreshContext();});
   const startTests=()=>{
     removePlaytestAuth?.();removePlaytestAuth=providerSetup.subscribeSignInChange(()=>{playtestAuthEpoch++;void playtests?.refresh();});
     return playtestRoot?startPlaytestPanel({root:playtestRoot,token:()=>token,isSignedIn:()=>providerSetup.isSignedIn(),reports:true,

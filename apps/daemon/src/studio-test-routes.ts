@@ -1,6 +1,7 @@
 import {SDK_CUSTODY_UNCONFIRMED_MESSAGE} from './studio-test-native-custody.js';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { StudioTestService } from './studio-test-service.js';
+import type {NativeAssetActor} from './native-asset-authority.js';
 import {scenarioPlanSchema,SCENARIO_LIMITS,type ScenarioPlan} from '../../../packages/studio-test-controller/src/scenario.js';
 
 export interface StudioTestPrepareInput {
@@ -102,7 +103,7 @@ const ERRORS: Readonly<Record<string, readonly [number, string]>> = {
   NATIVE_REJECTED: [424, 'Roblox Studio rejected this request (for example a moderated prompt or unsupported parameters). Rephrase plainly or use the original local asset pipeline.'],
   ASSET_INSERT_REFUSED: [424, 'Roblox Studio refused the insertion (the asset may be private, paid, removed or not insertable). Nothing was adopted; choose another free result.'],
   BLENDER_REQUIRED: [403, 'Asset generation uses local Blender. Create original geometry, UVs and PBR there with assets_start or assets_procedural, inspect assets_preview, then prepare, stage, reconstruct and place the result. Studio AI mesh, material and texture generation is disabled; do not substitute Toolbox models or primitive stand-ins.'],
-  TOOLBOX_MODELS_DISABLED: [403, 'Toolbox models are off. Build original geometry with assets_procedural in Blender, inspect assets_preview, then prepare, stage, reconstruct and place the result. Only the user can enable Toolbox models in Settings > Tools for this Studio session. Do not substitute free models.'],
+  TOOLBOX_MODELS_DISABLED: [403, 'Toolbox models are off for this task. Build original geometry with assets_procedural in Blender. To request external models, review the next message, enable Models in Settings > Tools, then send that message. A manual browsing preference does not grant a later task permission.'],
   ASSET_NOT_SEARCHED: [409, 'Only free assets returned by studio_asset_search for this session in the last 30 minutes can be inserted. Search first.'],
   ASSET_WATCH_REQUIRED: [409, 'Insertion needs a fresh Arcane plugin watch for this session; use studio_asset_insert or studio_asset_generate, which arm it automatically.'],
   ASSET_JOB_NOT_FOUND: [404, 'The generation job is unknown, expired or owned by another caller.'],
@@ -288,7 +289,7 @@ async function readJson(request: IncomingMessage, signal: AbortSignal): Promise<
  * trusted daemon and must distinguish its human control audience from agents.
  * The service MUST invoke the approval guard after each await before consent/start.
  */
-export function studioTestRoutes(service: StudioTestRouteService, resolveActor: StudioTestActorResolver) {
+export function studioTestRoutes(service: StudioTestRouteService, resolveActor: StudioTestActorResolver, captureModelSource?:(request:IncomingMessage)=>NativeAssetActor|null) {
   return async (request: IncomingMessage, response: ServerResponse, url: URL, origin: string): Promise<boolean> => {
     if (url.pathname !== PREFIX && !url.pathname.startsWith(PREFIX + '/') && !url.pathname.startsWith(NATIVE_ASSET_PREFIX + '/')) return false;
     const authorization = request.headers.authorization;
@@ -335,6 +336,9 @@ export function studioTestRoutes(service: StudioTestRouteService, resolveActor: 
       const approving = url.pathname === PREFIX + '/approve' || policy;
       if (approving && initial.kind !== 'human') fail('HUMAN_AUTH_REQUIRED');
       if (approving && request.headers.origin !== origin) fail('ORIGIN');
+      // Capture the original actual operation before the body await. A held
+      // request must never borrow a later operation on the same credential.
+      const modelSource=nativeAsset&&initial.kind==='agent'?captureModelSource?.(request)??null:null;
       const guard = () => {
         if (expired || disconnected || response.destroyed || response.writableEnded || response.headersSent || request.aborted) fail('SCOPE');
         ingress(request, url, origin);
@@ -378,7 +382,7 @@ export function studioTestRoutes(service: StudioTestRouteService, resolveActor: 
           let result: unknown;
           // Only the internal actual-call boundary marks a possible effect;
           // entering the service or a pre-dispatch refusal does not mark it.
-          const scope={guard,signal:controller.signal,dispatched:()=>{if(nativeAsset.kind==='insert')nativeInsertDispatched=true;}};
+          const scope={guard,signal:controller.signal,dispatched:()=>{if(nativeAsset.kind==='insert')nativeInsertDispatched=true;},...(modelSource?{modelSource}:{})};
           try { result = await service.requests.nativeAssets[nativeAsset.kind](input, initial.id, scope); } catch (error) { throw nativeAssetRefusal(error); }
           guard();
           return result;

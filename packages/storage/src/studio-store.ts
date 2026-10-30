@@ -405,7 +405,8 @@ export class StudioStore {
   #testCommandAdmissions = new WeakMap<object,TestCommandAdmission>();
   #diagnostics = new Map<string,{placeName:string;placeId:number;entries:Map<string,StudioDiagnostic>}>();
   #pairingOffer: PairingOfferRecord | null = null;
-  #modelSourcePolicy: ((sessionId:string)=>boolean)|null = null;
+  #modelSourcePolicy: {read:(sessionId:string,admission?:object)=>boolean}|null = null;
+  #modelSourceGuards = new Map<string,()=>boolean>();
   #assetModelReview:((intent:StageRunIntent)=>void)|null=null;
   #assetDispatchGuards=new Map<string,()=>void>();
   #commandResultWaiters=new Map<string,Set<()=>void>>();
@@ -471,30 +472,48 @@ export class StudioStore {
     }
   }
   /** Trusted daemon composition only; no JSON route can install or invoke a policy callback. */
-  bindModelSourcePolicy(read:(sessionId:string)=>boolean):()=>void {
+  bindModelSourcePolicy(read:(sessionId:string,admission?:object)=>boolean):()=>void {
     if(typeof read!=='function'||this.#modelSourcePolicy)throw new ArcaneError('POLICY','A model-source policy is already bound or invalid.');
-    this.#modelSourcePolicy=read;
-    return ()=>{if(this.#modelSourcePolicy===read)this.#modelSourcePolicy=null;};
+    const binding=Object.freeze({read});
+    this.#modelSourcePolicy=binding;
+    return ()=>{if(this.#modelSourcePolicy===binding)this.#modelSourcePolicy=null;};
   }
-  private assertTemplateSources(sessionId:string,args:Record<string,Json>):void {
+  private modelSourceGuard(sessionId:string,admission?:object):()=>boolean {
+    const policy=this.#modelSourcePolicy;
+    return ()=>policy!==null&&this.#modelSourcePolicy===policy&&policy.read(sessionId,admission)===true&&this.#modelSourcePolicy===policy;
+  }
+  private assertPlacementModelSource(args:Record<string,Json>,externalGuard?:()=>boolean):boolean {
+    // The exact original reconstruction continues through its existing model
+    // review/receipt checks. Any other watch adopts an external model.
+    if(typeof args.watch==='string'&&/^editable-[a-f0-9]{64}$/.test(args.watch))return false;
+    let allowed=false;
+    try{allowed=externalGuard?.()===true;}catch{/* Missing or retired host admission never enables external models. */}
+    if(!allowed)throw new ArcaneError('TEMPLATE_SOURCE','External model placement requires explicit model-source permission. For an agent task, review the message, enable Models in Settings > Tools, then send that message. A manual browsing preference does not grant a later task permission.');
+    return true;
+  }
+  private assertTemplateSources(sessionId:string,args:Record<string,Json>,externalGuard?:()=>boolean):boolean {
     const templates=args.templates as InstanceRef[]|undefined;
-    if(!templates?.length)return;
-    let externalAllowed=false;
-    try{externalAllowed=this.#modelSourcePolicy?.(sessionId)===true;}catch{/* An unavailable choice never enables external models. */}
+    if(!templates?.length)return false;
+    let usedExternal=false;
     const current=this.session(sessionId);
     for(const ref of templates){
       // Only an authenticated placement receipt for a retained original reconstruction
       // attests a default template. Search results, names and agent claims do not.
       const row=this.db.prepare("SELECT payload FROM commands WHERE session_id=? AND state='succeeded' AND json_extract(payload,'$.method')='scene.place_asset' AND json_extract(payload,'$.result.mutation.ref.instanceId')=? ORDER BY created DESC,rowid DESC LIMIT 1").get(sessionId,ref.instanceId) as Row|undefined;
       const command=row?JSON.parse(row.payload as string) as StudioCommand:null;
-      if(externalAllowed&&(!command||typeof command.args.watch!=='string'||!/^editable-[a-f0-9]{64}$/.test(command.args.watch)))continue;
+      if(!command||typeof command.args.watch!=='string'||!/^editable-[a-f0-9]{64}$/.test(command.args.watch)){
+        let allowed=false;
+        try{allowed=externalGuard?.()===true;}catch{/* Missing or retired host admission never enables external models. */}
+        if(allowed){usedExternal=true;continue;}
+      }
       const mutation=(command?.result as {mutation?:{kind?:string;ref?:InstanceRef}}|null)?.mutation;
       const source=mutation?.ref;
       if(!command||command.clientSessionId!==current.clientSessionId||typeof command.args.watch!=='string'||!/^editable-[a-f0-9]{64}$/.test(command.args.watch)
         ||mutation?.kind!=='scene.place_asset'||!source||source.sessionId!==ref.sessionId||source.instanceId!==ref.instanceId||source.root!==ref.root||source.className!==ref.className)
-        throw new ArcaneError('TEMPLATE_SOURCE','This scene template is not recorded as an original Blender reconstruction. Create an original model with assets_procedural, inspect assets_preview, then prepare, stage, reconstruct and place it before scattering. Existing Toolbox or external templates require the user to enable them in Settings > Tools.');
+        throw new ArcaneError('TEMPLATE_SOURCE','This scene template is not recorded as an original Blender reconstruction. Create an original model with assets_procedural, inspect assets_preview, then prepare, stage, reconstruct and place it before scattering. For external templates in an agent task, review the message, enable Models in Settings > Tools, then send that message. A manual browsing preference does not grant a later task permission.');
       this.assertEditableModelReview(sessionId,command.args);
     }
+    return usedExternal;
   }
   constructor(options: Options) {
     this.now = options.now ?? Date.now;
@@ -681,7 +700,7 @@ export class StudioStore {
     this.db.prepare('INSERT INTO events(occurred_at,kind,entity_id,detail) VALUES(?,?,?,?)').run(this.iso(), kind, entityId, JSON.stringify(detail));
   }
   private saveSession(s: StudioSession): void { this.db.prepare('UPDATE sessions SET payload=? WHERE id=?').run(JSON.stringify(s), s.id); }
-  private saveCommand(c: StudioCommand): void { this.db.prepare('UPDATE commands SET state=?,payload=? WHERE id=?').run(c.state, JSON.stringify(c), c.id); if(c.state!=='queued'){this.#assetDispatchGuards.delete(c.id);this.#importRevisionGuards.delete(c.id);} if(c.state==='needs_reconciliation')this.clearStageContentHashes(); }
+  private saveCommand(c: StudioCommand): void { this.db.prepare('UPDATE commands SET state=?,payload=? WHERE id=?').run(c.state, JSON.stringify(c), c.id); if(c.state!=='queued'){this.#assetDispatchGuards.delete(c.id);this.#importRevisionGuards.delete(c.id);this.#modelSourceGuards.delete(c.id);} if(c.state==='needs_reconciliation')this.clearStageContentHashes(); }
   sessions(): ListedStudioSession[] { return (this.db.prepare('SELECT payload FROM sessions ORDER BY rowid DESC LIMIT 100').all() as Row[]).map(r => { const s = JSON.parse(r.payload as string) as StudioSession; return { ...s, live: this.live(s) }; }); }
   /** Unrevoked and heard from recently. The single plugin worker does not poll while it executes a
    * delivered command, so an unexpired dispatched lease also counts as a heartbeat. */
@@ -960,7 +979,10 @@ export class StudioStore {
     }
     this.event('studio_revoked', id, { reason });
   }
-  enqueue(input: unknown, internalRestore = false, admission?: object): StudioCommand {
+  /** The final host-only argument is never command JSON. Agent routes MUST pass
+   * their original opaque admission (an invalid sentinel on capture failure);
+   * undefined is reserved for the independent human/manual source preference. */
+  enqueue(input: unknown, internalRestore = false, admission?: object, modelSourceAdmission?:object): StudioCommand {
     const a = object(input); const sessionId = textField(a.sessionId, 'session ID');
     const requestId = textField(a.requestId, 'request ID', 128);
     if (!/^[a-zA-Z0-9_-]{8,128}$/.test(requestId)) throw new ArcaneError('INPUT', 'Request ID must be 8..128 safe characters.');
@@ -971,10 +993,15 @@ export class StudioStore {
     if ((method === 'asset.stage_packet'||method==='asset.reconstruct'||method==='scene.observe_import'||method==='asset.apply_revision') && (!admission || !this.#assetStageAdmissions.has(admission))) throw new ArcaneError('ASSET_STAGE_AUTHORITY', 'Asset intake and reconstruction require the trusted native import controller.');
     if (method === 'asset.keep_mesh' && (!admission || !this.#meshKeepAdmissions.has(admission))) throw new ArcaneError('MESH_KEEP_AUTHORITY', 'Keep this mesh uploads to the user\'s Roblox account; only the person can start it, with the Keep this mesh button and its Arcane confirmation.');
     const fingerprint = hash(canonical({ sessionId, method, args: a.args }));
-    return this.transaction(() => this.enqueueInTransaction(a,sessionId,requestId,method,fingerprint,internalRestore,admission));
+    const sourceCapture:{guard?:()=>boolean}={};
+    const command=this.transaction(() => this.enqueueInTransaction(a,sessionId,requestId,method,fingerprint,internalRestore,admission,modelSourceAdmission,sourceCapture));
+    // Do not retain an actor on a failed/rolled-back publication. This happens
+    // synchronously after commit, before the host can offer the queued command.
+    if(sourceCapture.guard)this.#modelSourceGuards.set(command.id,sourceCapture.guard);
+    return command;
   }
   /** Already inside a transaction. No callback, await or second commit here. */
-  private enqueueInTransaction(a:ReturnType<typeof object>,sessionId:string,requestId:string,method:StudioCommand['method'],fingerprint:string,internalRestore:boolean,admission?:object):StudioCommand {
+  private enqueueInTransaction(a:ReturnType<typeof object>,sessionId:string,requestId:string,method:StudioCommand['method'],fingerprint:string,internalRestore:boolean,admission?:object,modelSourceAdmission?:object,sourceCapture?:{guard?:()=>boolean}):StudioCommand {
       this.checkTestQueueAuthority(sessionId,requestId,admission);
       if((method==='asset.stage_packet'||method==='asset.reconstruct'||method==='scene.observe_import'||method==='asset.apply_revision')&&(!admission||!this.#assetStageAdmissions.has(admission)))throw new ArcaneError('ASSET_STAGE_AUTHORITY','Asset intake and reconstruction require trusted host admission.');
       if(method==='asset.keep_mesh'&&(!admission||!this.#meshKeepAdmissions.has(admission)))throw new ArcaneError('MESH_KEEP_AUTHORITY','Keep this mesh requires the person\'s confirmed host admission.');
@@ -987,7 +1014,9 @@ export class StudioStore {
       if (!this.live(s)) throw new ArcaneError('SESSION_OFFLINE', 'Studio session is not live: its plugin has not polled within ' + STUDIO_SESSION_LIVE_MS / 1000 + ' s. No command was queued. List sessions and choose a live one; do not retry against this session.');
       const args = validateCommandArgs(method, a.args, s, internalRestore);
       if(method==='scene.place_asset')this.assertEditableModelReview(sessionId,args);
-      if(method==='scene.build')this.assertTemplateSources(sessionId,args);
+      const sourceGuard=method==='scene.build'||method==='scene.place_asset'?this.modelSourceGuard(sessionId,modelSourceAdmission):undefined;
+      const externalSources=method==='scene.build'?this.assertTemplateSources(sessionId,args,sourceGuard):
+        method==='scene.place_asset'&&this.assertPlacementModelSource(args,sourceGuard);
       const activating = this.activationSource(method, args);
       const verification = admission ? this.#activationAdmissions.get(admission) : undefined;
       if (activating !== null && (!verification || verification.sourceSha256 !== hash(activating)))
@@ -1013,7 +1042,9 @@ export class StudioStore {
         }
       }
       if (verification) this.event('script_syntax_verified', c.id, { ...verification });
-      this.event('command_queued', c.id, { sessionId, method, leaseEpoch: c.leaseEpoch }); return c;
+      this.event('command_queued', c.id, { sessionId, method, leaseEpoch: c.leaseEpoch });
+      if(externalSources&&sourceGuard&&sourceCapture)sourceCapture.guard=sourceGuard;
+      return c;
   }
   private activationSource(method: StudioCommand['method'], args: Record<string, Json>): string | null {
     if (method === 'script.set_enabled' && args.enabled === true) return args.expectedSource as string;
@@ -1029,7 +1060,7 @@ export class StudioStore {
   }
   /** Normal command entry point. Awaited compilation never holds a SQLite
    * transaction; caller authority and the exact session are fenced afterwards. */
-  async enqueueVerified(input: unknown, verifier: ScriptSourceVerifier | null, guard: () => void = () => {}, internalRestore = false): Promise<StudioCommand> {
+  async enqueueVerified(input: unknown, verifier: ScriptSourceVerifier | null, guard: () => void = () => {}, internalRestore = false, modelSourceAdmission?:object): Promise<StudioCommand> {
     guard();
     const a = jsonObject(input, 600 * 1024);
     const sessionId = textField(a.sessionId, 'session ID');
@@ -1048,7 +1079,7 @@ export class StudioStore {
     const session = this.session(sessionId);
     const args = validateCommandArgs(method, a.args, session, internalRestore);
     const source = this.activationSource(method, args);
-    if (source === null) return this.enqueue(a, internalRestore);
+    if (source === null) return this.enqueue(a, internalRestore, undefined, modelSourceAdmission);
     if (!verifier) throw new ArcaneError('SOURCE_VERIFICATION', 'The trusted Luau syntax verifier is unavailable. No script was activated.');
     const identity = (s: StudioSession) => canonical({id:s.id,clientSessionId:s.clientSessionId,placeId:s.placeId,universeId:s.universeId,allowedRoots:s.allowedRoots,allowWrites:s.allowWrites,capabilities:s.capabilities,pluginVersion:s.pluginVersion,revokedAt:s.revokedAt});
     let proof: ScriptSourceVerification;
@@ -1060,7 +1091,7 @@ export class StudioStore {
       throw new ArcaneError('SOURCE_VERIFICATION', 'The trusted verifier did not attest this exact source.');
     const admission = Object.freeze({});
     this.#activationAdmissions.set(admission, Object.freeze({...proof}));
-    try { return this.enqueue(a, internalRestore, admission); }
+    try { return this.enqueue(a, internalRestore, admission, modelSourceAdmission); }
     finally { this.#activationAdmissions.delete(admission); }
   }
   command(id: string): StudioCommand {
@@ -1973,7 +2004,8 @@ export class StudioStore {
         if (!row) return [];
         const c = JSON.parse(row.payload as string) as StudioCommand;
         if (Date.parse(c.expiresAt) <= this.now()) { c.state = 'cancelled'; c.error = 'Undelivered command expired.'; c.finishedAt = this.iso(); this.saveCommand(c); continue; }
-        try{this.assertCommandModelReview(c);if(c.method==='scene.build')this.assertTemplateSources(sessionId,c.args);}
+        try{this.assertCommandModelReview(c);if(c.method==='scene.build')this.assertTemplateSources(sessionId,c.args,this.#modelSourceGuards.get(c.id));
+          if(c.method==='scene.place_asset')this.assertPlacementModelSource(c.args,this.#modelSourceGuards.get(c.id));}
         catch(error){if(!(error instanceof ArcaneError)||error.code!=='TEMPLATE_SOURCE'&&!error.code.startsWith('ASSET_REVIEW_'))throw error;
           this.#assetDispatchGuards.delete(c.id);c.state='cancelled';c.error='Import authority, model approval or source permission changed. This operation was not sent.';c.finishedAt=this.iso();this.saveCommand(c);this.event('command_cancelled',c.id,{sessionId});continue;}
         if(!this.guardTestDispatch(c))return [];
@@ -2135,7 +2167,7 @@ export class StudioStore {
     const a = resolve(directory), b = this.workspaceDirectory;
     return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
   }
-  close(): void { if (!this.closed) { this.closed = true; this.clearStageContentHashes();this.#convertedStageInspections.clear();this.#assetDispatchGuards.clear();this.#importRevisionGuards.clear();this.#importObservationClaims.clear();this.#importRevisionClaims.clear(); for(const waiters of this.#commandResultWaiters.values())for(const finish of waiters)finish();
+  close(): void { if (!this.closed) { this.closed = true; this.clearStageContentHashes();this.#convertedStageInspections.clear();this.#modelSourceGuards.clear();this.#assetDispatchGuards.clear();this.#importRevisionGuards.clear();this.#importObservationClaims.clear();this.#importRevisionClaims.clear(); for(const waiters of this.#commandResultWaiters.values())for(const finish of waiters)finish();
     const errors:unknown[]=[];for(const cleanup of [()=>this.db.close(),()=>this.#closeNativeDatabasePin(),()=>this.#releaseNativeLock()])try{cleanup();}catch(error){errors.push(error);}
     if(errors.length)throw errors[0];
   } }

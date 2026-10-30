@@ -6,7 +6,7 @@ import {randomUUID} from 'node:crypto';
 import * as nativeFs from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join,relative,isAbsolute} from 'node:path';
-import {createNativeAssetRegistry,nativeAssetActorScope,acquireNativeAssetWork,type NativeAssetIncarnation} from '../../apps/daemon/src/native-asset-authority.js';
+import {createNativeAssetRegistry,nativeAssetActorScope,acquireNativeAssetWork,assertNativeModelSource,type NativeAssetIncarnation} from '../../apps/daemon/src/native-asset-authority.js';
 import {createAssetConversationHost} from '../../apps/daemon/src/asset-conversation-host.js';
 import {assertStudioImportJobScope} from '../../apps/daemon/src/asset-import-adapter.js';
 import {ConversationWorkStore} from '../../packages/storage/src/conversation-work-store.js';
@@ -36,13 +36,13 @@ class Child extends EventEmitter {
   close(code:number|null=0){if(this.exitCode!==null||this.signalCode)return;this.exitCode=code;this.signalCode=code===null?'SIGTERM':null;this.emit('close',code,this.signalCode);}
   kill(){this.killed++;return true;} // A kill request deliberately does NOT manufacture close.
 }
-type Step='issue'|'bind'|'grant'|'dispatch';
+type Step='issue'|'bind'|'model-source'|'grant'|'dispatch';
 interface AssetRecord {conversationId:string;connectionId:string;handle:NativeAssetIncarnation;token:string;calls:string[];binding:AppAssetConversationBinding|null;operationId:string|null}
 async function fixture(t:TestContext,options:{assets?:boolean;autoSpawn?:boolean;throwSpawn?:boolean;failAt?:Step;nullIssue?:boolean;failPersistence?:boolean;cleanup?:'throw'|'hold';limits?:Record<string,number>}={}){
   const boundary=await nativeFs.realpath(tmpdir()),root=await nativeFs.realpath(await nativeFs.mkdtemp(join(boundary,'arcane-claude-assets-')));
   const project=join(root,'project'),state=join(root,'state');await nativeFs.mkdir(project);await nativeFs.mkdir(state);
   const beforeCleanup:(()=>void)[]=[];
-  const registry=createNativeAssetRegistry({projectPath:project}),records:AssetRecord[]=[],events:ChatEvent[]=[],children:Child[]=[],spawnEnvs:Record<string,string>[]=[],spawnArgs:string[][]=[],gates=new Map<Step,ReturnType<typeof gate>>();
+  const registry=createNativeAssetRegistry({projectPath:project,modelSourceBinding:sessionId=>{assert.equal(sessionId,'studio-original');return()=>{};}}),records:AssetRecord[]=[],events:ChatEvent[]=[],children:Child[]=[],spawnEnvs:Record<string,string>[]=[],spawnArgs:string[][]=[],gates=new Map<Step,ReturnType<typeof gate>>();
   let current=true,issues=0,host:Host|undefined;const cleanupGate=gate();
   const cleanupAck=async()=>{if(options.cleanup==='throw')throw Error('private '+CORE);if(options.cleanup==='hold')await cleanupGate.promise;};
   const invoke=async(r:AssetRecord,step:Step,effect:()=>void)=>{r.calls.push(step);effect();if(options.failAt===step)throw Error(r.token+' private bridge failure');await gates.get(step)?.promise;};
@@ -56,6 +56,7 @@ async function fixture(t:TestContext,options:{assets?:boolean;autoSpawn?:boolean
     return Object.freeze({
       launchEnvironment(){return Object.freeze(Object.defineProperty(Object.create(null),'ARCANE_ASSET_TOKEN',{value:r.token,enumerable:false}));},
       async bind(transport:Extract<AppAssetConversationBinding,{provider:'claude-code'}>['transport']){await invoke(r,'bind',()=>{r.binding={kind:'app-conversation',provider:'claude-code',conversationId:r.conversationId,connectionId:r.connectionId,transport};handle.bindAppConversation(r.binding);});},
+      async grantModelSource(sessionId:string){await invoke(r,'model-source',()=>handle.grantModelSource(sessionId));},
       async grantNextIntent(){await invoke(r,'grant',()=>handle.grantNextIntent({connectionId:r.connectionId,threadId:'app:'+r.conversationId,sessionId:null}));},
       async dispatched(id:string){await invoke(r,'dispatch',()=>{r.operationId=id;handle.dispatched({connectionId:r.connectionId,threadId:'app:'+r.conversationId,operationId:id});});},
       async ended(id:string){r.calls.push('ended');assert.equal(id,r.operationId);handle.ended(id);},
@@ -100,6 +101,29 @@ async function fixture(t:TestContext,options:{assets?:boolean;autoSpawn?:boolean
   return{host:chat,root,project,state,registry,records,events,children,spawnEnvs,spawnArgs,gates,input,done,complete,
     current(value:boolean){current=value;},beforeCleanup(close:()=>void){beforeCleanup.push(close);},issues:()=>issues};
 }
+
+test('Claude initial human model consent belongs to one original turn, not its later same-conversation Send',{timeout:15000},async t=>{
+ const f=await fixture(t),reply=await f.host.send({...f.input(),modelSource:{sessionId:'studio-original'}});
+ await until(()=>f.children[0]?.input.length===1);const owner=f.records[0]!;
+ assert.deepEqual(owner.calls.slice(0,5),['issue','bind','model-source','grant','dispatch']);
+ assertNativeModelSource(f.registry.capture(owner.token,'mutate'),'studio-original');
+ assert.ok(f.children[0]!.input.every(text=>!text.includes('modelSource')&&!text.includes('studio-original')));
+ f.complete(f.children[0]!);await f.done(reply.turnId);assert.throws(()=>f.registry.capture(owner.token,'mutate'));
+ const next=await f.host.send(f.input(reply.conversationId));await until(()=>f.children[1]?.input.length===1);
+ assert.equal(f.records[1]!.calls.includes('model-source'),false);
+ assert.throws(()=>assertNativeModelSource(f.registry.capture(f.records[1]!.token,'mutate'),'studio-original'));
+ assert.ok(!JSON.stringify(await f.host.history(reply.conversationId)).includes('modelSource'));
+ f.complete(f.children[1]!);await f.done(next.turnId);
+});
+
+test('Claude stopped while the original model grant acknowledgement is held never sends a prompt',{timeout:15000},async t=>{
+ const f=await fixture(t),held=gate();f.gates.set('model-source',held);
+ const reply=await f.host.send({...f.input(),modelSource:{sessionId:'studio-original'}});
+ await until(()=>f.records[0]?.calls.includes('model-source')===true);assert.equal(f.children[0]!.input.length,0);
+ await f.host.stop(reply.turnId);held.release();await until(()=>f.children[0]!.killed>0);f.children[0]!.close(null);await f.done(reply.turnId);
+ assert.equal(f.children[0]!.input.length,0);assert.throws(()=>f.registry.capture(f.records[0]!.token,'mutate'));
+ assert.equal(f.records[0]!.calls.filter(call=>call==='model-source').length,1);
+});
 
 for(const stage of ['bind','grant','dispatch'] as const)test('Claude assets await '+stage+' acknowledgement before first prompt input',{timeout:15000},async t=>{
   const f=await fixture(t),held=gate();f.gates.set(stage,held);const reply=await f.host.send(f.input());

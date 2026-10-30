@@ -7,7 +7,7 @@ import {mkdtempSync,realpathSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 interface Request {type:string;protocolVersion:1;sequence:number;requestId:string;projectId:string;epoch:string;command:{action:string;[key:string]:unknown}}
-interface Context {launchEnvironment():Record<string,string>;bind(value:unknown):Promise<void>;grantNextIntent():Promise<void>;dispatched(id:string):Promise<void>;ended(id:string):Promise<void>;cancelWork(scope:'active-operation'|'incarnation'):Promise<void>;retire():Promise<void>;transportClosed():Promise<void>}
+interface Context {launchEnvironment():Record<string,string>;bind(value:unknown):Promise<void>;grantModelSource(sessionId:string):Promise<void>;grantNextIntent():Promise<void>;dispatched(id:string):Promise<void>;ended(id:string):Promise<void>;cancelWork(scope:'active-operation'|'incarnation'):Promise<void>;retire():Promise<void>;transportClosed():Promise<void>}
 interface Host {ready():Promise<void>;isCurrent():boolean;selectHumanConversation(value:unknown):Promise<void>;issue(value:{provider:'claude-code'|'arcane';conversationId:string;connectionId:string}):Promise<Context>;fence():void;close():void}
 const require=createRequire(join(process.cwd(),'package.json'));
 const {createAppAssetHost}=require(join(process.cwd(),'apps/desktop/electron/app-asset-host.cjs')) as {createAppAssetHost(value:{child:EventEmitter;projectPath:string;timeoutMs?:number}):Host};
@@ -77,6 +77,15 @@ test('fixed validators reject provider impersonation extra fields unbounded IDs 
  assert.equal(f.child.sent.length,before);const context=await f.host.issue(f.input()),at=f.child.sent.length;
  for(const bad of [{kind:'claude-code-process',incarnationId:randomUUID(),nativeSessionId:null},{kind:'arcane-gateway-loop',incarnationId:'not-uuid'},{kind:'arcane-gateway-loop',incarnationId:randomUUID(),extra:true}])await assert.rejects(context.bind(bad),{code:'INPUT'});
  assert.equal(f.child.sent.length,at);await assert.rejects(context.dispatched('not-uuid'),{code:'INPUT'});
+});
+
+test('model-source host command retains exact original issue and never enters launch environment',{timeout:5000},async t=>{
+ const f=fixture(t),context=await f.host.issue(f.input());await context.bind({kind:'arcane-gateway-loop',incarnationId:randomUUID()});
+ await context.grantModelSource('studio-original');const command=f.child.sent.at(-1)!;
+ assert.deepEqual(command.command,{action:'model-source',sessionId:'studio-original',issueSequence:f.child.sent.find(row=>row.command.action==='issue')!.sequence,issueRequestId:f.child.sent.find(row=>row.command.action==='issue')!.requestId});
+ assert.equal(JSON.stringify(context.launchEnvironment()).includes('studio-original'),false);
+ const count=f.child.sent.length;await assert.rejects(context.grantModelSource('studio-original\n'),{code:'INPUT'});assert.equal(f.child.sent.length,count);
+ await context.retire();await assert.rejects(context.grantModelSource('studio-original'),{code:'CLOSED'});
 });
 
 test('normal end retirement and close never forge Stop or actual transport-closed acknowledgements',{timeout:5000},async t=>{

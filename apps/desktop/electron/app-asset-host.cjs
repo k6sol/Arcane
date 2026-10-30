@@ -31,7 +31,7 @@ function snapshotReply(value){
  if(d.value==='issue'){
   const a=fields(r.result,['action','issueSequence','issueRequestId','credential']);
   if(a.issueSequence!==r.sequence||a.issueRequestId!==r.requestId||typeof a.credential!=='string'||!HASH.test(a.credential))throw error('INPUT');r.result=a;
- }else{const a=fields(r.result,['action']);if(!['open','select-human','bind','grant-next','dispatched',...CLEANUP].includes(a.action))throw error('INPUT');r.result=a;}
+ }else{const a=fields(r.result,['action']);if(!['open','select-human','bind','model-source','grant-next','dispatched',...CLEANUP].includes(a.action))throw error('INPUT');r.result=a;}
  if(Buffer.byteLength(JSON.stringify(r))>LIMITS.messageBytes)throw error('INPUT');return r;
 }
 function transport(provider,value){
@@ -148,6 +148,7 @@ function createAppAssetHost({child,projectPath,timeoutMs=1000}){
     if(bindingKey!==null&&bindingKey!==encoded){localRetire();sendUnobserved({action:'retire',...ref});throw error('CONFLICT');}
     bindingKey=encoded;await invoke({action:'bind',binding:b});bound=encoded;
    },
+   async grantModelSource(sessionId){if(bound===null||typeof sessionId!=='string'||!/^[A-Za-z0-9_-]{1,128}(?![\s\S])/.test(sessionId))throw error('INPUT');await invoke({action:'model-source',sessionId});},
    async grantNextIntent(){if(bound===null)throw error('INPUT');await invoke({action:'grant-next'});},
    async dispatched(operationId){uuid(operationId);if(bound===null||active!==null)throw error('INPUT');active=operationId;await invoke({action:'dispatched',operationId});},
    async ended(operationId){uuid(operationId);await invoke({action:'ended',operationId});if(active===operationId)active=null;},

@@ -5,13 +5,13 @@ import {mkdtempSync,realpathSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createAppAssetControl,type AppAssetRequest,type AppAssetReply} from '../../apps/daemon/src/app-asset-control.js';
-import {createNativeAssetRegistry,nativeAssetActorScope,nativeAssetOperationSignal,acquireNativeAssetWork} from '../../apps/daemon/src/native-asset-authority.js';
+import {createNativeAssetRegistry,nativeAssetActorScope,nativeAssetOperationSignal,acquireNativeAssetWork,assertNativeModelSource} from '../../apps/daemon/src/native-asset-authority.js';
 import {workflowProjectIdentity} from '../../packages/storage/src/workflow-store.js';
 import type {AppAssetConversationBinding} from '../../packages/protocol/src/asset-conversation.js';
 import {createAppAssetHumanSelection,type AppAssetHumanSelectionHost} from '../../apps/daemon/src/app-asset-human-selection.js';
 
-function fixture(t:test.TestContext,humanSelection?:AppAssetHumanSelectionHost){
- const directory=realpathSync(mkdtempSync(join(tmpdir(),'arcane-app-assets-'))),project=workflowProjectIdentity(directory),registry=createNativeAssetRegistry({projectPath:directory});
+function fixture(t:test.TestContext,humanSelection?:AppAssetHumanSelectionHost,modelSourceBinding?:(sessionId:string)=>()=>void){
+ const directory=realpathSync(mkdtempSync(join(tmpdir(),'arcane-app-assets-'))),project=workflowProjectIdentity(directory),registry=createNativeAssetRegistry({projectPath:directory,...(modelSourceBinding?{modelSourceBinding}:{})});
  const control=createAppAssetControl({projectPath:directory,registry,...(humanSelection?{humanSelection}:{})}),epoch=randomUUID();let sequence=0;
  t.after(()=>{control.close();registry.close();rmSync(directory,{recursive:true,force:true});});
  function envelope(command:AppAssetRequest['command'],overrides:Partial<AppAssetRequest>={}):AppAssetRequest{return{type:'arcane-app-asset-request',protocolVersion:1,sequence:++sequence,requestId:randomUUID(),projectId:project.projectId,epoch,command,...overrides};}
@@ -40,6 +40,22 @@ test('parent human selection changes only the review scope and never binds or gr
  assert.throws(()=>f.registry.capture(a.credential,'mutate'),'human selection does not grant a native mutation');
  const epoch=selection.epoch();f.ok(f.send({action:'select-human',selection:null}));assert.notEqual(selection.epoch(),epoch);assert.equal(selection.current(),null);
  f.ok(f.send({action:'select-human',selection:{provider:'codex'}}));assert.equal(selection.current()?.threadId,'owned-thread');
+});
+
+for(const provider of ['claude-code','arcane']as const)test(provider+' original human model-source command cannot grant a later issue or revive a retired turn',t=>{
+ let grants=0;const f=fixture(t,undefined,sessionId=>{assert.equal(sessionId,'studio-a');grants++;return()=>{};}),a=f.issue(provider);
+ f.ok(f.send({action:'bind',...a.ref,binding:a.binding}));
+ const command=f.envelope({action:'model-source',...a.ref,sessionId:'studio-a'});f.ok(f.accept(command));f.ok(f.accept(command));assert.equal(grants,1,'exact IPC replay returns the original receipt without regranting');
+ f.ok(f.send({action:'grant-next',...a.ref}));const operationId=randomUUID();f.ok(f.send({action:'dispatched',...a.ref,operationId}));
+ const actor=f.registry.capture(a.credential,'mutate');assertNativeModelSource(actor,'studio-a');
+ const b=f.issue(provider);f.ok(f.send({action:'bind',...b.ref,binding:b.binding}));f.ok(f.send({action:'grant-next',...b.ref}));f.ok(f.send({action:'dispatched',...b.ref,operationId:randomUUID()}));
+ assert.throws(()=>assertNativeModelSource(f.registry.capture(b.credential,'mutate'),'studio-a'));
+ f.ok(f.send({action:'ended',...a.ref,operationId}));f.ok(f.send({action:'retire',...a.ref}));assert.throws(()=>assertNativeModelSource(actor,'studio-a'));
+ assert.equal(f.send({action:'model-source',...a.ref,sessionId:'studio-a'}).outcome,'rejected');assert.equal(grants,1);
+ const invalid=f.envelope({action:'model-source',...b.ref,sessionId:'studio-a'});
+ assert.equal(f.control.accept({...invalid,command:{...invalid.command,sessionId:'studio-a\n'}}),null);
+ assert.equal(f.control.accept({...invalid,command:{...invalid.command,grant:true}}),null);
+ assert.equal(grants,1);
 });
 
 test('human selection retains parent project/epoch/high-water validation and refuses unavailable ports',t=>{
