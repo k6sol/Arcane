@@ -30,6 +30,64 @@ function ownerOf(value: unknown): { signal: AbortSignal; assertActive: () => unk
   return { signal: signal.value, assertActive: assert.value };
 }
 
+const ids = (input: unknown, keys: string[]) => {
+  const value = detachPlain(input) as Record<string, unknown>;
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).sort().join(',') !== [...keys].sort().join(',') ||
+    keys.some(key => typeof value[key] !== 'string')) throw new TaskAcceptanceError('INPUT', 'Expected an exact task acceptance envelope.');
+  return value as Record<string, string>;
+};
+const status = (state: TaskAcceptanceState, reason: TaskAcceptanceReason | null, run: WorkRun | null): TaskAcceptanceStatus => Object.freeze({
+  state, reason, runId: run?.id ?? null, tasks: Object.freeze((run?.tasks ?? []).slice(0, 64).map(task => Object.freeze({ key: task.key, state: task.state }))) });
+
+/** Read-only historical predicate. The host supplies a fresh original project/view
+ * guard; no provider continuation, work request, review or native capability is restored. */
+export async function readTaskAcceptance(work: WorkStore, input: unknown, guard: () => void): Promise<TaskAcceptanceStatus> {
+  if(!(work instanceof WorkStore)||typeof guard!=='function'||types.isProxy(guard))throw new TaskAcceptanceError('INPUT','Expected an owned read-only acceptance context.');
+  const check=():void=>{
+    const result:unknown=guard();
+    if(types.isPromise(result))void Promise.prototype.catch.call(result,()=>{});
+    if(result!==undefined)throw new TaskAcceptanceError('OWNER_RETIRED','The acceptance read guard is no longer current.');
+  };
+  const value = ids(input, ['taskId', 'planId', 'runId']);
+  check(); await yieldTurn(); check();
+  let found: { binding: WorkTaskBinding; run: WorkRun } | null;
+  try { found = work.bindingFor(value.taskId!, value.planId!); } catch { return status('unavailable', 'store_unavailable', null); }
+  if (!found) return status('unavailable', 'binding_missing', null);
+  if (found.binding.runId !== value.runId || found.run.id !== value.runId) return status('unavailable', 'binding_mismatch', null);
+  const run = found.run;
+  if (!run.tasks.length) return status('unavailable', 'no_tasks', run);
+  if (run.tasks.some(task => task.state === 'failed')) return status('unavailable', 'task_failed', run);
+  if (run.tasks.some(task => task.state === 'needs_review')) return status('awaiting_human_review', null, run);
+  if (run.tasks.some(task => task.state === 'pending' && task.reviewNote !== null)) return status('changes_requested', null, run);
+  if (!run.tasks.every(task => task.state === 'complete')) return status('pending_submission', null, run);
+  for (const task of run.tasks) {
+    if (!task.evidence.length) return status('unavailable', 'evidence_missing', run);
+    for (const evidence of task.evidence) {
+      await yieldTurn(); check();
+      let current: { sha256: string; bytes: number } | null = null, missing = false;
+      try { current = work.verifyEvidence(evidence.path); } catch (error) { missing = !!error && typeof error === 'object' && (error as { code?: unknown }).code === 'ENOENT'; }
+      check();
+      if (!current) return status('unavailable', missing ? 'evidence_missing' : 'evidence_changed', run);
+      if (current.sha256 !== evidence.sha256 || current.bytes !== evidence.bytes) return status('unavailable', 'evidence_changed', run);
+    }
+  }
+  // Final freshness boundary: re-read the exact bound run and re-verify every evidence file in ONE synchronous
+  // pass with no further yield, so a change during an earlier yield cannot yield accepted. Cooperative filesystem
+  // checks only: a same-user process can still change files after this read.
+  check();
+  let fresh: { binding: WorkTaskBinding; run: WorkRun } | null;
+  try { fresh = work.bindingFor(value.taskId!, value.planId!); } catch { return status('unavailable', 'store_unavailable', null); }
+  if (!fresh || fresh.binding.id !== found.binding.id || fresh.run.id !== run.id || JSON.stringify(fresh.run.tasks.map(t => [t.id, t.state, t.evidence])) !== JSON.stringify(run.tasks.map(t => [t.id, t.state, t.evidence])))
+    return status('unavailable', 'binding_mismatch', fresh?.run ?? null);
+  for (const task of fresh.run.tasks) for (const evidence of task.evidence) {
+    let current: { sha256: string; bytes: number } | null = null;
+    try { current = work.verifyEvidence(evidence.path); } catch { current = null; }
+    if (!current || current.sha256 !== evidence.sha256 || current.bytes !== evidence.bytes) return status('unavailable', 'evidence_changed', fresh.run);
+  }
+  check();
+  return status('accepted', null, fresh.run);
+}
+
 /** Host-only port. No browser/model/MCP capability, no review() call, no engine effects. */
 export function createTaskAcceptancePort(options: { work: WorkStore; owner: TaskAcceptanceOwner }) {
   if (!options || typeof options !== 'object' || types.isProxy(options) || Object.getPrototypeOf(options) !== Object.prototype ||
@@ -46,14 +104,6 @@ export function createTaskAcceptancePort(options: { work: WorkStore; owner: Task
     if (result instanceof Promise) void result.catch(() => {});
     if (result !== undefined || owner.signal.aborted) throw new TaskAcceptanceError('OWNER_RETIRED', 'The original task is no longer active.');
   };
-  const ids = (input: unknown, keys: string[]) => {
-    const value = detachPlain(input) as Record<string, unknown>;
-    if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).sort().join(',') !== [...keys].sort().join(',') ||
-      keys.some(key => typeof value[key] !== 'string')) throw new TaskAcceptanceError('INPUT', 'Expected an exact task acceptance envelope.');
-    return value as Record<string, string>;
-  };
-  const status = (state: TaskAcceptanceState, reason: TaskAcceptanceReason | null, run: WorkRun | null): TaskAcceptanceStatus => Object.freeze({
-    state, reason, runId: run?.id ?? null, tasks: Object.freeze((run?.tasks ?? []).slice(0, 64).map(task => Object.freeze({ key: task.key, state: task.state }))) });
   return Object.freeze({
     /** Create (or rediscover after a lost acknowledgement) the one bound run. Snapshot before any await. */
     async request(input: unknown): Promise<{ runId: string; replayed: boolean }> {
@@ -64,45 +114,6 @@ export function createTaskAcceptancePort(options: { work: WorkStore; owner: Task
     },
     /** Actual WorkStore records only. Accepted requires >=1 bound task, every task reviewed complete, and
      * every evidence file re-verified byte-identical now. */
-    async status(input: unknown): Promise<TaskAcceptanceStatus> {
-      const value = ids(input, ['taskId', 'planId', 'runId']);
-      check(); await yieldTurn(); check();
-      let found: { binding: WorkTaskBinding; run: WorkRun } | null;
-      try { found = work.bindingFor(value.taskId!, value.planId!); } catch { return status('unavailable', 'store_unavailable', null); }
-      if (!found) return status('unavailable', 'binding_missing', null);
-      if (found.binding.runId !== value.runId || found.run.id !== value.runId) return status('unavailable', 'binding_mismatch', null);
-      const run = found.run;
-      if (!run.tasks.length) return status('unavailable', 'no_tasks', run);
-      if (run.tasks.some(task => task.state === 'failed')) return status('unavailable', 'task_failed', run);
-      if (run.tasks.some(task => task.state === 'needs_review')) return status('awaiting_human_review', null, run);
-      if (run.tasks.some(task => task.state === 'pending' && task.reviewNote !== null)) return status('changes_requested', null, run);
-      if (!run.tasks.every(task => task.state === 'complete')) return status('pending_submission', null, run);
-      for (const task of run.tasks) {
-        if (!task.evidence.length) return status('unavailable', 'evidence_missing', run);
-        for (const evidence of task.evidence) {
-          await yieldTurn(); check();
-          let current: { sha256: string; bytes: number } | null = null, missing = false;
-          try { current = work.verifyEvidence(evidence.path); } catch (error) { missing = !!error && typeof error === 'object' && (error as { code?: unknown }).code === 'ENOENT'; }
-          check();
-          if (!current) return status('unavailable', missing ? 'evidence_missing' : 'evidence_changed', run);
-          if (current.sha256 !== evidence.sha256 || current.bytes !== evidence.bytes) return status('unavailable', 'evidence_changed', run);
-        }
-      }
-      // Final freshness boundary: re-read the exact bound run and re-verify every evidence file in ONE synchronous
-      // pass with no further yield, so a change during an earlier yield cannot yield accepted. Cooperative filesystem
-      // checks only: a same-user process can still change files after this read.
-      check();
-      let fresh: { binding: WorkTaskBinding; run: WorkRun } | null;
-      try { fresh = work.bindingFor(value.taskId!, value.planId!); } catch { return status('unavailable', 'store_unavailable', null); }
-      if (!fresh || fresh.binding.id !== found.binding.id || fresh.run.id !== run.id || JSON.stringify(fresh.run.tasks.map(t => [t.id, t.state, t.evidence])) !== JSON.stringify(run.tasks.map(t => [t.id, t.state, t.evidence])))
-        return status('unavailable', 'binding_mismatch', fresh?.run ?? null);
-      for (const task of fresh.run.tasks) for (const evidence of task.evidence) {
-        let current: { sha256: string; bytes: number } | null = null;
-        try { current = work.verifyEvidence(evidence.path); } catch { current = null; }
-        if (!current || current.sha256 !== evidence.sha256 || current.bytes !== evidence.bytes) return status('unavailable', 'evidence_changed', fresh.run);
-      }
-      check();
-      return status('accepted', null, fresh.run);
-    },
+    status(input: unknown): Promise<TaskAcceptanceStatus> { return readTaskAcceptance(work,input,check); }
   });
 }

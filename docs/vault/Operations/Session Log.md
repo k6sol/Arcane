@@ -5,6 +5,12 @@ tags: [arcane]
 ---
 # Session log
 
+## 2026-10-30 · Native geometry proof and connected handoff
+
+Verified the actual foliage artifacts after both native Blender lanes passed all 39 cases. Rechecked authenticated digests, exact source forms, measured root/contact error, save/reopen and observed owned closure; inspected Windows front/side neutral contact renders. Checked off only these component criteria; full-tree and atlas-visible attachment remain open.
+
+Finished source and independent review of [[Bugs/Normal Task Handoff]] with actual session/registry/host consumers, Stop escalation, exact later-close handling, read-only original focus and fresh Send. Authored 35 expanded cases and a precise persistent-manual-grant companion, all awaiting hosted execution. Retained [[Bugs/PBR Staging Boundary]] and bound its historical receipt-loop failure through verified compiled artifact data; no downloaded code or Studio operation ran.
+
 ## 2026-10-30 · Original authoring and geometry
 
 Published capability-gated original Blender guidance and preserved its experimental integrity policy. Actual native conversion passed on both platforms; corrected stale instruction/reference companions and a separately observed Edge review-preparation fixture. Subsequent main checks exposed a distinct key-navigation timeout, retained with precise diagnostics rather than treated as the same failure.

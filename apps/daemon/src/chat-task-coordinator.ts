@@ -22,6 +22,8 @@ export interface ChatTaskOwner {
   repair(report: StudioTestTaskSettled): Promise<void>;
   revoke(): void;
   cancel(): Promise<void>;
+  /** Original host normal join; absent legacy ports grant no normal-retirement proof. */
+  retire?(): Promise<void>;
   /** Exact original-client request errors caused by its deliberate close only. */
   isOwnedCloseRequestError?(error: unknown): boolean;
   /** Live native account identity of this exact owned client. Owners without it gain no proposal authority. */
@@ -64,7 +66,7 @@ export class ChatTaskProposalError extends Error {
 }
 interface OwnedTask { origin: StudioTestTaskOrigin; admission: StudioTestTaskOrigin | null; admissionOperation: string | null;
   jobOrigins: Map<string,StudioTestTaskOrigin>; currentJob:StudioTestTaskPrepared|null; settledJobs:Set<string>;
-  actorId: string; owner: ChatTaskOwner; revoked: boolean; advancing: boolean;
+  actorId: string; owner: ChatTaskOwner; revoked: boolean; advancing: boolean; normalQueued: boolean;
   /** One re-request after an unapproved job expired/cancelled before start; in-memory like every task capability. */
   unstartedRetried: boolean;
   /** Aborted on EVERY retirement path, always before owner.revoke(). */
@@ -85,6 +87,8 @@ interface TaskWorkRecord {
 interface TaskFinalizer {
   promise: Promise<void>; resolve: () => void; reject: (error:unknown) => void;
   requested:boolean; started: boolean; failed: boolean; failure: unknown;
+  mode:'cancel'|'normal'; normalSettled:boolean; cancelRequested:boolean;
+  cancelJoin:Promise<JoinOutcome>|null; cancelTail:Promise<void>|null;
 }
 const WORK_LIMIT=64;
 const NativePromise=Promise, promisePrototype=Promise.prototype, promiseThen=Promise.prototype.then;
@@ -174,7 +178,10 @@ export class ChatTaskCoordinator {
   }
   async cancelFor(threadId:string,sessionId:string|null,reason:string):Promise<void>{
     const owned=[...this.#owners.values()].filter(entry=>entry.origin.threadId===threadId&&entry.origin.sessionId===sessionId);
-    const results=await Promise.allSettled(owned.map(entry=>this.cancel(entry.origin.taskId,reason)));
+    const results=await Promise.allSettled(owned.filter(entry=>{
+      const slot=this.#stopping.get(entry.origin.taskId);
+      return !(slot?.mode==='normal'&&!slot.failed&&(slot.normalSettled||reason==='human_changed_model'));
+    }).map(entry=>this.cancel(entry.origin.taskId,reason)));
     const failed=results.find(result=>result.status==='rejected');if(failed?.status==='rejected')throw failed.reason;
   }
   begin(input: { id: string; actorId: string; snapshot: Snapshot; allowWorkspaceWrites: boolean; allowAssets: boolean; owner: ChatTaskOwner; accountIdentity?: string }): StudioTestTaskOrigin {
@@ -191,7 +198,7 @@ export class ChatTaskCoordinator {
       repairDispatch: 'not_requested', prepared: null, evidence: [], reason: null });
     const origin = Object.freeze({ kind: 'studio-test-task-origin' as const, taskId: task.id, projectId: task.projectId, provider: 'codex' as const,
       threadId: task.threadId, sessionId: task.sessionId, incarnationId });
-    const entry: OwnedTask = { origin, admission:null, admissionOperation:null, jobOrigins:new Map(),currentJob:null,settledJobs:new Set(), actorId: input.actorId, owner: input.owner, revoked: false, advancing: false, unstartedRetried: false,
+    const entry: OwnedTask = { origin, admission:null, admissionOperation:null, jobOrigins:new Map(),currentJob:null,settledJobs:new Set(), actorId: input.actorId, owner: input.owner, revoked: false, advancing: false, normalQueued:false, unstartedRetried: false,
       controller: new AbortController(), accountIdentity: input.accountIdentity ?? null, proposal: null, planProposals: new Set(), planController: null, planDispatch: null, planCompletion: null,
       work:new Set(),jobWork:new Map(),joins:new Map(),generation:0,order:0 };
     this.#owners.set(task.id, entry); this.#actors.set(input.actorId, entry); this.#origins.set(origin, entry);
@@ -265,6 +272,7 @@ export class ChatTaskCoordinator {
     const completed=(outcome:JoinOutcome)=>{
       record.outcome=outcome;resolve(outcome);
       if(outcome.ok&&record.job===null&&record.compensation===null)this.#releaseWork(record);
+      this.#reevaluateNormal(entry);
     };
     // The descriptor checks above also protect the constructor/species lookup
     // performed by the captured intrinsic; no caller then/getter is evaluated.
@@ -283,7 +291,7 @@ export class ChatTaskCoordinator {
   #trackJoin<T>(entry:OwnedTask,promise:Promise<T>):void {
     if(entry.joins.has(promise))return;
     const joined=observe(promise);entry.joins.set(promise,{order:++entry.order,joined});entry.generation++;
-    void joined.then(outcome=>{if(outcome.ok&&!entry.revoked){entry.joins.delete(promise);entry.generation++;}});
+    void joined.then(outcome=>{if(outcome.ok&&!entry.revoked){entry.joins.delete(promise);entry.generation++;}this.#reevaluateNormal(entry);});
   }
   dispatched(id: string, operationId: string): void {
     const entry = this.#owners.get(id); if (!entry) throw new Error('Unknown owned task.'); this.#assertTask(entry);
@@ -317,9 +325,17 @@ export class ChatTaskCoordinator {
     this.#store.update(id, value => { value.nativeSettled = true; value.turnId = thread.turnId; }); this.#schedule(entry);
   }
   uncertain(id: string, reason: string, unknown = true): void {
-    const entry = this.#owners.get(id); if (!entry || entry.revoked) return;
+    const entry = this.#owners.get(id); if (!entry || entry.revoked&&this.#stopping.get(id)?.mode!=='normal') return;
     const slot=this.#reserveFinalizer(entry);
-    if(slot.requested)return;slot.requested=true;
+    if(slot.requested){
+      if(slot.mode==='normal'){
+        this.#keepFailure(slot,new Error(reason));
+        try{this.#store.update(id,task=>{if(ACTIVE.has(task.state))task.state='unknown';task.reason=reason;});}catch(error){this.#keepFailure(slot,error);}
+        void this.#escalateNormal(entry,slot).catch(()=>{});
+      }
+      return;
+    }
+    slot.requested=true;
     try{this.#retire(entry);}catch(error){this.#keepFailure(slot,error);}
     try{this.#store.update(id, task => { if (ACTIVE.has(task.state)) task.state = unknown ? 'unknown' : 'paused'; task.reason = reason;
       if (task.repairDispatch === 'reserved') task.repairDispatch = 'unknown'; });}catch(error){this.#keepFailure(slot,error);}
@@ -390,6 +406,75 @@ export class ChatTaskCoordinator {
     entry.settledJobs.add(value.jobId);
     this.#schedule(entry);
   }
+  #reevaluateNormal(entry:OwnedTask):void {
+    if(entry.normalQueued||entry.revoked||this.#closed||this.#fenced)return;entry.normalQueued=true;
+    queueMicrotask(()=>{
+      entry.normalQueued=false;
+      try{this.#tryNormal(entry);}catch(error){
+        const slot=this.#reserveFinalizer(entry);this.#keepFailure(slot,error);
+        try{this.uncertain(entry.origin.taskId,'normal_retirement_unconfirmed');}catch{/* Original finalizer retains the failure. */}
+      }
+    });
+  }
+  #normalCandidate(entry:OwnedTask,quiescent=true):boolean {
+    if(entry.revoked||this.#closed||this.#fenced||typeof entry.owner.retire!=='function')return false;
+    const task=this.#store.get(entry.origin.taskId),snapshot=entry.owner.snapshot(),thread=snapshot.thread;
+    if(!['working','verified'].includes(task.state)||!task.acknowledged||!task.nativeSettled||task.repairDispatch!=='not_requested'||
+      task.reason==='verification_not_started_rerequest_allowed'||snapshot.account?.auth!=='subscription'||!snapshot.connected||!snapshot.ready||snapshot.mcpIsolation!=='arcane-only-verified'||
+      !thread?.configured||thread.turnStatus!=='completed'||thread.threadId!==task.threadId||thread.sessionId!==task.sessionId||
+      snapshot.connectionId!==task.connectionId||thread.turnId!==task.turnId||snapshot.approvals.length||
+      snapshot.operations.some(op=>op.state==='pending'||op.state==='unknown')||
+      !snapshot.operations.some(op=>op.operationId===task.operationId&&op.state==='acknowledged'&&op.turnId===task.turnId)||
+      !entry.accountIdentity||entry.owner.accountIdentity?.()!==entry.accountIdentity||thread.selection.model!==task.model||thread.selection.effort!==task.effort)return false;
+    if([...entry.work].some(record=>!record.outcome?.ok||record.job!==null&&record.terminal===null))return false;
+    const plan=this.#store.plan(task.id);
+    if(plan){
+      const steps=this.#store.planSteps(plan.id),last=steps.filter(step=>step.kind==='incorporation').at(-1),evidence=steps.find(step=>step.kind==='evidence');
+      if(plan.state!=='awaiting_review'||last?.state!=='completed'||last.terminal!=='completed'||!evidence||evidence.state!=='acknowledged'||
+        !evidence.evidence?.runId||steps.some(step=>step.state==='reserved'||step.state==='unknown'))return false;
+    }
+    return !quiescent||!entry.advancing&&!entry.proposal&&!entry.planProposals.size&&!entry.planDispatch&&!entry.joins.size;
+  }
+  #tryNormal(entry:OwnedTask):void {
+    if(!this.#normalCandidate(entry))return;
+    const slot=this.#reserveFinalizer(entry);if(slot.requested)return;
+    slot.mode='normal';slot.requested=true;slot.started=true;
+    // These task-bound lifetimes have all settled. Fence admissions without
+    // rewriting the genuinely completed plan to parent_retired.
+    entry.revoked=true;entry.admission=null;
+    try{entry.controller.abort();entry.planController?.abort();}catch(error){this.#keepFailure(slot,error);}
+    this.#pending.add(slot.promise);void slot.promise.then(()=>this.#pending.delete(slot.promise),()=>this.#pending.delete(slot.promise));
+    const owner=this.#callCleanup(()=>entry.owner.retire!());
+    const finish=async()=>{
+      const outcome=await owner;
+      if(!outcome.ok){
+        let intentional=false;
+        if(slot.cancelRequested)try{intentional=entry.owner.isOwnedCloseRequestError?.(outcome.error)===true;}catch{/* Keep original error. */}
+        if(!intentional)this.#keepFailure(slot,outcome.error);
+      }
+      for(const record of [...entry.work].sort((a,b)=>a.order-b.order)){const result=await record.joined;if(!result.ok)this.#keepFailure(slot,result.error);}
+      for(const record of [...entry.joins.values()].sort((a,b)=>a.order-b.order)){const result=await record.joined;if(!result.ok)this.#keepFailure(slot,result.error);}
+      if(slot.cancelJoin){const cancelled=await slot.cancelJoin;if(!cancelled.ok)this.#keepFailure(slot,cancelled.error);}
+      for(const record of [...entry.work])if(record.outcome?.ok)this.#releaseWork(record);
+      if(slot.failed)throw slot.failure;
+    };
+    void finish().then(()=>{slot.normalSettled=true;slot.resolve();},error=>{slot.normalSettled=true;slot.reject(error);});
+  }
+  /** Original-host followup only. Historical normal slots are joined, never
+   * rewritten/cancelled merely because another human Send uses the same chat. */
+  async prepareFollowup(threadId:string,sessionId:string|null):Promise<void> {
+    const entries=[...this.#owners.values()].filter(entry=>entry.origin.threadId===threadId&&entry.origin.sessionId===sessionId);
+    const results=await Promise.allSettled(entries.map(async entry=>{
+      if(this.#normalCandidate(entry,false)){
+        for(const record of [...entry.joins.values()])await record.joined;
+        this.#tryNormal(entry);
+      }
+      const slot=this.#stopping.get(entry.origin.taskId);
+      if(slot?.mode==='normal'){await slot.promise;if(slot.failed)throw slot.failure;return;}
+      await this.cancel(entry.origin.taskId,'human_followup_superseded');
+    }));
+    const first=results.find(result=>result.status==='rejected');if(first?.status==='rejected')throw first.reason;
+  }
   #schedule(entry: OwnedTask): void {
     if (entry.advancing || this.#closed || this.#fenced || entry.revoked) return;
     entry.advancing = true;
@@ -398,12 +483,13 @@ export class ChatTaskCoordinator {
     const pending = advancing.catch(() => {
       try{this.uncertain(entry.origin.taskId, 'task_coordination_failed_no_replay');}catch{/* Cleanup still runs if the task journal fails. */}
     }).finally(() => {
-      entry.advancing = false; this.#pending.delete(pending);
+      entry.advancing = false; this.#pending.delete(pending);this.#reevaluateNormal(entry);
       if (!this.#closed && !entry.revoked) {
         const task = this.#store.get(entry.origin.taskId);
         if ((task.state === 'repair_queued' && task.repairDispatch === 'not_requested' || task.state === 'awaiting_verification' && task.evidence.at(-1)?.jobId === task.prepared?.jobId) && task.acknowledged && task.nativeSettled) this.#schedule(entry);
       }
     });
+    this.#trackJoin(entry,pending); // Includes scheduling/finally tails before normal handoff.
     void pending.catch(()=>{}); // Observe failure even before a lifecycle drain.
     this.#pending.add(pending);
   }
@@ -453,7 +539,12 @@ export class ChatTaskCoordinator {
   }
   async cancel(id: string, reason: string): Promise<void> {
     const entry = this.#owners.get(id); if (!entry) throw new Error('Task has no live owned incarnation.');
-    const slot=this.#reserveFinalizer(entry);if(slot.requested)return slot.promise;slot.requested=true;
+    const slot=this.#reserveFinalizer(entry);
+    if(slot.mode==='normal'){
+      if(!slot.normalSettled||slot.failed)try{this.#store.update(id,value=>{if(ACTIVE.has(value.state))value.state='cancelled';value.reason=reason;});}catch(error){this.#keepFailure(slot,error);}
+      return this.#escalateNormal(entry,slot);
+    }
+    if(slot.requested)return slot.promise;slot.requested=true;
     try{this.#retire(entry);}catch(error){this.#keepFailure(slot,error);}
     try{this.#store.update(id, value => { if (ACTIVE.has(value.state)) value.state = 'cancelled'; value.reason = reason; });}catch(error){this.#keepFailure(slot,error);}
     return this.#cleanup(entry);
@@ -462,7 +553,8 @@ export class ChatTaskCoordinator {
     const id=entry.origin.taskId,existing=this.#stopping.get(id);if(existing)return existing;
     let resolve!:()=>void,reject!:(error:unknown)=>void;
     const promise=new NativePromise<void>((yes,no)=>{resolve=yes;reject=no;});
-    const slot:TaskFinalizer={promise,resolve,reject,requested:false,started:false,failed:false,failure:undefined};
+    const slot:TaskFinalizer={promise,resolve,reject,requested:false,started:false,failed:false,failure:undefined,
+      mode:'cancel',normalSettled:false,cancelRequested:false,cancelJoin:null,cancelTail:null};
     this.#stopping.set(id,slot);void promise.catch(()=>{});return slot;
   }
   #keepFailure(slot:TaskFinalizer,error:unknown):void {if(!slot.failed){slot.failed=true;slot.failure=error;}}
@@ -492,8 +584,28 @@ export class ChatTaskCoordinator {
     });
     void result.then(resolve);return record.compensation;
   }
+  #escalateNormal(entry:OwnedTask,slot:TaskFinalizer):Promise<void> {
+    if(slot.cancelTail)return slot.cancelTail;
+    slot.cancelRequested=true;
+    let resolve!:()=>void,reject!:(error:unknown)=>void,joined!:(value:JoinOutcome)=>void;
+    const tail=new NativePromise<void>((yes,no)=>{resolve=yes;reject=no;});slot.cancelTail=tail;void tail.catch(()=>{});
+    slot.cancelJoin=new NativePromise<JoinOutcome>(done=>{joined=done;});
+    // Both placeholders precede reentrant callbacks. Stop starts every original
+    // compensation and physical owner close before waiting for normal joining.
+    const compensation=[...entry.work].map(record=>this.#compensate(record));
+    const owner=this.#callCleanup(()=>entry.owner.cancel());
+    const run=async()=>{
+      let failed=false,failure:unknown;
+      for(const result of [...compensation,owner]){const outcome=await result;if(!outcome.ok&&!failed){failed=true;failure=outcome.error;}}
+      const outcome:JoinOutcome=failed?{ok:false,error:failure}:{ok:true};joined(outcome);
+      if(slot.normalSettled&&!outcome.ok)this.#keepFailure(slot,outcome.error);
+      try{await slot.promise;}catch(error){this.#keepFailure(slot,error);}
+      if(slot.failed)throw slot.failure;
+    };
+    void run().then(resolve,reject);return tail;
+  }
   #cleanup(entry: OwnedTask): Promise<void> {
-    const slot=this.#reserveFinalizer(entry);if(slot.started)return slot.promise;
+    const slot=this.#reserveFinalizer(entry);if(slot.mode==='normal')return this.#escalateNormal(entry,slot);if(slot.started)return slot.promise;
     slot.requested=true;slot.started=true;this.#pending.add(slot.promise);
     void slot.promise.then(()=>this.#pending.delete(slot.promise),()=>this.#pending.delete(slot.promise));
     const finalizing=Promise.resolve().then(async()=>{
@@ -730,7 +842,7 @@ export class ChatTaskCoordinator {
     const keep=(error:unknown)=>{if(!failed){failed=true;failure=error;}};
     for(const[id,entry]of this.#owners){
       const slot=this.#reserveFinalizer(entry);
-      try{this.#store.update(id,task=>{if(ACTIVE.has(task.state))task.state='unknown';task.reason=reason;if(task.repairDispatch==='reserved')task.repairDispatch='unknown';});}catch(error){this.#keepFailure(slot,error);}
+      if(!(slot.mode==='normal'&&slot.normalSettled&&!slot.failed))try{this.#store.update(id,task=>{if(ACTIVE.has(task.state))task.state='unknown';task.reason=reason;if(task.repairDispatch==='reserved')task.repairDispatch='unknown';});}catch(error){this.#keepFailure(slot,error);}
       if(slot.failed)keep(slot.failure);
       cleanups.push(this.#cleanup(entry));
     }

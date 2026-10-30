@@ -8,7 +8,7 @@ import { join, relative, isAbsolute, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createCodexService, type CodexActionOutcome,type CodexHostClient } from '../../apps/daemon/src/codex-service.js';
 import { codexRoutes } from '../../apps/daemon/src/codex-routes.js';
-import { createNativeAssetRegistry } from '../../apps/daemon/src/native-asset-authority.js';
+import { createNativeAssetRegistry, assertNativeAssetActor } from '../../apps/daemon/src/native-asset-authority.js';
 import { CodexSession } from '../../packages/codex-client/src/session.js';
 import { nativeEnvironment } from '../../packages/codex-client/src/transport.js';
 import { limits } from '../../packages/codex-client/src/validation.js';
@@ -384,7 +384,16 @@ test('a later omitted Send never inherits the original automatic workspace or as
 test('existing explicit persistent grants survive exact human-task rotation without becoming automatic grants',async t=>{
  const f=await fixture(t);await f.ready();await f.action('grant-writes',{threadId:THREAD});await f.action('grant-assets',{threadId:THREAD});await f.send();await f.finish();await until(()=>f.clients[0]!.snapshot().thread!.turnStatus==='completed');
  const sent=await f.action('turn-start',{threadId:THREAD,text:'Follow up within existing manual grants',allowWorkspaceWrites:false,allowAssets:false});assert.equal(sent.data.record.state,'acknowledged');assert.equal(f.clients.length,2);
- await f.finish(1);await until(()=>f.clients[1]!.snapshot().thread!.turnStatus==='completed');assert.equal(f.service.state().snapshot!.thread!.writeGranted,true);assert.equal(f.service.state().nativeAssets!.granted,true);assert.equal(f.service.state().nativeAssets!.admissionOpen,false);
+ const previousClient=f.clients[1]!,previousToken=f.tokens[1]!,originalActor=f.registry.capture(previousToken,'mutate');
+ await f.finish(1);await until(()=>previousClient.snapshot().thread!.turnStatus==='completed');
+ await until(()=>!f.registry.recognizes(previousToken)); // Actual normal admission fence, not a fabricated close.
+ assert.equal(f.service.state().snapshot!.thread!.writeGranted,true);assert.equal(f.service.state().nativeAssets!.granted,false);assert.equal(f.service.state().nativeAssets!.admissionOpen,false);
+ assert.equal(previousClient.snapshot().connected,true);assert.equal(previousClient.snapshot().ready,true);assert.throws(()=>assertNativeAssetActor(originalActor,'mutate'),{code:'NATIVE_ASSET_AUTHORITY'});
+ const next=await f.action('turn-start',{threadId:THREAD,text:'Omitted permissions retain only the original explicit manual preference'});
+ assert.equal(next.data.record.state,'acknowledged');assert.equal(f.clients.length,3);assert.ok(f.clients[2]!==previousClient);assert.ok(f.tokens[2]!==previousToken);
+ assert.equal(previousClient.snapshot().connected,false);assert.equal(f.service.state().snapshot!.connectionId,f.clients[2]!.snapshot().connectionId);
+ assert.equal(f.service.state().snapshot!.thread!.writeGranted,true);assert.equal(f.service.state().nativeAssets!.granted,true);assert.equal(f.service.state().nativeAssets!.admissionOpen,true);
+ assertNativeAssetActor(f.registry.capture(f.tokens[2]!,'mutate'),'mutate');assert.throws(()=>assertNativeAssetActor(originalActor,'mutate'),{code:'NATIVE_ASSET_AUTHORITY'});
 });
 
 for(const code of ['TIMEOUT','BINDING_CHANGED','RUNTIME_ERROR'])test(code+' cannot be interpreted as an automatic gameplay repair assertion',async t=>{

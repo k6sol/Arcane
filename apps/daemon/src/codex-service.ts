@@ -20,7 +20,7 @@ import {snapshotReferenceImages,referenceImageMetadata,type ReferenceImageMetada
 import { WorkStore, type WorkTaskBinding } from '../../../packages/storage/src/work-store.js';
 import { CHAT_TASK_PLAN_INPUT_BYTES } from './chat-task-plan-runner.js';
 import { createChatTaskNativePlan, type NativePlanClient } from './chat-task-native-plan.js';
-import { createTaskAcceptancePort } from './chat-task-acceptance.js';
+import { readTaskAcceptance, createTaskAcceptancePort } from './chat-task-acceptance.js';
 import { SubmittedChatStore, type SubmittedChatTranscript } from '../../../packages/storage/src/submitted-chat-store.js';
 import { TASK_PLAN_REVIEW_TASK_STATES, type TaskPlanView, type TaskPlanReviewView, type TaskPlanReviewTaskState } from '../../../packages/protocol/src/chat-task-plan.js';
 import {codexActionFailureEvent,type FailureReporter} from './diagnostic-reporter.js';
@@ -119,7 +119,7 @@ export interface CodexProductState {
     state: string; round: 0 | 1; reason: string | null; reportDigest: string | null;retained?:boolean }[];
 }
 export interface CodexActionOutcome { record: CodexActionRecord; replayed: boolean; state: CodexProductState }
-export type CodexHostClient = Pick<CodexClient, 'snapshot'|'selectModel'|'startThread'|'resumeThread'|'grantThreadWrites'|'revokeThreadWrites'|'startTurn'|'interruptTurn'|'respondApproval'|'close'> & Partial<Pick<CodexClient,'steerTurn'|'readRateLimits'|'readThreadHistory'|'startManagedTask'|'continueTask'|'revokeTaskContinuation'|'taskAccountIdentity'|'openIncorporationChain'|'issueIncorporationPermit'|'continueIncorporation'|'isOwnedCloseRequestError'>>;
+export type CodexHostClient = Pick<CodexClient, 'snapshot'|'selectModel'|'startThread'|'resumeThread'|'grantThreadWrites'|'revokeThreadWrites'|'startTurn'|'interruptTurn'|'respondApproval'|'close'> & Partial<Pick<CodexClient,'steerTurn'|'readRateLimits'|'readThreadHistory'|'startManagedTask'|'continueTask'|'revokeTaskContinuation'|'taskAccountIdentity'|'openIncorporationChain'|'issueIncorporationPermit'|'continueIncorporation'|'isOwnedCloseRequestError'|'retireManagedTask'>>;
 export interface CodexServiceOptions {
   directory: string; projectPath: string;
   /** Parent-controlled client factory. Tests use a labelled fixture; never accept it from HTTP input. */
@@ -227,15 +227,77 @@ export function createCodexService(options: CodexServiceOptions) {
   });
   interface HumanAssetIntent { connectionId:string; threadId:string; sessionId:string|null; operationId:string|null }
   interface AssetContext { handle: NativeAssetIncarnation | null; retired: boolean; hooks: NativeAssetHooks; nextIntent:HumanAssetIntent|null;
-    actorId: string | null; taskId: string | null; ownerClient: CodexHostClient | null;manualAssets:boolean;manualWrites:boolean }
+    actorId: string | null; taskId: string | null; taskAccount:string|null; ownerClient: CodexHostClient | null;manualAssets:boolean;manualWrites:boolean;
+    normal:{promise:Promise<void>;state:'pending'|'succeeded'|'failed'}|null;
+    closePromise:Promise<void>|null;closeIntent:boolean;cancelRequested:boolean }
   let currentAssets: AssetContext | null = null;
   const taskContexts=new Map<string,AssetContext>();
+  const clientContexts=new WeakMap<CodexHostClient,AssetContext>();
+  function rememberClient(context:AssetContext|null,owned:CodexHostClient):void {
+    if(context){context.ownerClient=owned;clientContexts.set(owned,context);}
+  }
+  function readableNormal(context:AssetContext,snapshot=context.ownerClient?.snapshot()):boolean {
+    const thread=snapshot?.thread;
+    return context.normal?.state==='succeeded'&&!context.cancelRequested&&!!context.taskId&&taskContexts.get(context.taskId)===context&&
+      !!context.ownerClient&&context.ownerClient.taskAccountIdentity?.()===context.taskAccount&&!!context.taskAccount&&
+      !!snapshot?.connected&&snapshot.ready&&snapshot.account?.auth==='subscription'&&snapshot.mcpIsolation==='arcane-only-verified'&&
+      !!thread?.configured&&!!tasks?.belongs(context.taskId,thread.threadId,thread.sessionId);
+  }
+  function closeOwnedClient(owned:CodexHostClient,context=clientContexts.get(owned),plannedNormal=false):Promise<void> {
+    if(!context)return owned.close();
+    if(context.ownerClient!==owned)throw new CodexClientError('TASK_SCOPE','Only the original owned client may close.');
+    if(context.closePromise)return context.closePromise;
+    let resolve!:()=>void,reject!:(error:unknown)=>void;
+    const promise=new Promise<void>((yes,no)=>{resolve=yes;reject=no;});context.closePromise=promise;void promise.catch(()=>{});
+    // Installed before the actual close can synchronously invoke hooks.retired.
+    // A genuine close failure is still joined and propagated below.
+    context.closeIntent=context.cancelRequested||plannedNormal&&context.normal?.state==='succeeded';
+    const run=async()=>{
+      try{await owned.close();context.handle?.transportClosed();}
+      finally{context.closeIntent=false;}
+    };
+    void run().then(resolve,reject);return promise;
+  }
+  function normalRetire(owned:CodexHostClient,context:AssetContext,continuation:NativeTaskContinuation|null):Promise<void> {
+    if(context.normal)return context.normal.promise;
+    if(!continuation||context.ownerClient!==owned||!context.taskId||taskContexts.get(context.taskId)!==context||
+      !owned.retireManagedTask||!context.handle)throw new CodexClientError('TASK_SCOPE','Original normal retirement ports are unavailable.');
+    let resolve!:()=>void,reject!:(error:unknown)=>void;
+    const promise=new Promise<void>((yes,no)=>{resolve=yes;reject=no;});
+    const normal={promise,state:'pending' as 'pending'|'succeeded'|'failed'};context.normal=normal;void promise.catch(()=>{});
+    context.nextIntent=null;context.retired=true;
+    const attempt=(start:()=>Promise<void>)=>{try{return start().then(()=>({ok:true as const}),error=>({ok:false as const,error}));}
+      catch(error){return Promise.resolve({ok:false as const,error});}};
+    const session=attempt(()=>owned.retireManagedTask!(continuation));
+    const assets=attempt(()=>context.handle!.retireAndJoinWork());
+    const join=async()=>{
+      let failed=false,failure:unknown;
+      const native=await session;
+      if(!native.ok){
+        let intentional=false;if(context.cancelRequested)try{intentional=owned.isOwnedCloseRequestError?.(native.error)===true;}catch{/* Preserve original. */}
+        if(!intentional){failed=true;failure=native.error;}
+      }
+      const asset=await assets;if(!asset.ok&&!failed){failed=true;failure=asset.error;}
+      if(failed)throw failure;
+    };
+    void join().then(()=>{normal.state='succeeded';resolve();},error=>{normal.state='failed';reject(error);});return promise;
+  }
+  async function cancelOwnedTask(owned:CodexHostClient,context:AssetContext):Promise<void> {
+    context.cancelRequested=true;context.nextIntent=null;
+    let failed=false,failure:unknown;const keep=(error:unknown)=>{if(!failed){failed=true;failure=error;}};
+    try{context.handle?.cancelWork('incarnation');}catch(error){keep(error);}
+    try{retireAssets(context);}catch(error){keep(error);}
+    try{if(client===owned&&!busy){lastSnapshot=owned.snapshot();client=null;currentAssets=null;}}catch(error){keep(error);}
+    try{await closeOwnedClient(owned,context);}catch(error){keep(error);}
+    if(failed)throw failure;
+  }
   const retireAssets = (context: AssetContext | null = currentAssets): void => {
-    if (!context || context.retired) return; context.nextIntent=null; context.retired = true; context.handle?.retire();
+    if (!context) return; context.nextIntent=null; context.retired = true; context.handle?.retire();
   };
   function newAssets(): AssetContext | null {
     if (!options.assetRegistry) return null;
-    const context = {handle:null,retired:false,nextIntent:null,actorId:null,taskId:null,ownerClient:null,manualAssets:false,manualWrites:false} as AssetContext;
+    const context = {handle:null,retired:false,nextIntent:null,actorId:null,taskId:null,taskAccount:null,ownerClient:null,manualAssets:false,manualWrites:false,
+      normal:null,closePromise:null,closeIntent:false,cancelRequested:false} as AssetContext;
     context.hooks = Object.freeze({
       finalCredential(): string {
         if (context.retired || context.handle) throw new CodexClientError('ASSET_AUTHORITY','Native asset launch authority is unavailable.');
@@ -258,7 +320,7 @@ export function createCodexService(options: CodexServiceOptions) {
         if(permission)permission.operationId=intent.operationId;
       },
       ended(intent) { context.handle?.ended(intent.operationId); if(context.taskId)tasks!.ended(context.taskId,intent.operationId); },
-      retired() { retireAssets(context); if(context.taskId)tasks!.uncertain(context.taskId,'native_incarnation_retired'); },
+      retired() { retireAssets(context); if(context.taskId&&!context.closeIntent)tasks!.uncertain(context.taskId,'native_incarnation_retired'); },
     } satisfies NativeAssetHooks);
     return context;
   }
@@ -302,7 +364,7 @@ export function createCodexService(options: CodexServiceOptions) {
     return { provider:'codex', use:'personal-local', projectPath, connecting, closing, busy,
       snapshot, lastSnapshot:lastSnapshot ? structuredClone(lastSnapshot) : null,
       ...(options.assetRegistry ? {nativeAssets:assetState(snapshot)} : {}),
-      ...(tasks?.configured() ? {chatTasks:tasks.summaries().map(({id,...task})=>{const context=taskContexts.get(id);return{taskId:id,...task,retained:!!context?.ownerClient&&!context.retired};})} : {}),
+      ...(tasks?.configured() ? {chatTasks:tasks.summaries().map(({id,...task})=>{const context=taskContexts.get(id);return{taskId:id,...task,retained:!!context?.ownerClient&&(!context.retired||readableNormal(context))};})} : {}),
       actions:history(), nativeHistory:recordedHistory, nativeThreads:savedThreads(), ...(submittedScope?{submittedMessages:submitted.read(submittedScope)}:{}), nativeTools:{configured:options.arcaneMcp !== undefined || options.nativeToolsConfigured === true,verified:false} };
   }
   const save = (record: CodexActionRecord) => {
@@ -323,7 +385,7 @@ export function createCodexService(options: CodexServiceOptions) {
     journalFault = (async () => {
       try { await tasks?.stopAll('native_journal_failure'); }
       catch { /* Authority is already retired; cleanup cannot restore it. */ }
-      finally { try{if(owned){try{lastSnapshot=owned.snapshot();}catch{/* No trusted snapshot. */}await owned.close();}}finally{closing=false;} }
+      finally { try{if(owned){try{lastSnapshot=owned.snapshot();}catch{/* No trusted snapshot. */}await closeOwnedClient(owned);}}finally{closing=false;} }
     })();
     return journalFault;
   }
@@ -351,7 +413,7 @@ export function createCodexService(options: CodexServiceOptions) {
         generation++; closing = true;tasks?.fence();try{retireAssets();}catch{/* Still stop every owned native client. */}
         const owned = client; client = null;
         try { await tasks?.stopAll('native_journal_limit'); }
-        finally {try{if(owned){lastSnapshot=owned.snapshot();await owned.close();lastSnapshot=owned.snapshot();}}finally{closing=false;} }
+        finally {try{if(owned){lastSnapshot=owned.snapshot();await closeOwnedClient(owned);lastSnapshot=owned.snapshot();}}finally{closing=false;} }
       })();
       await saturatedClose;
       throw new CodexClientError('JOURNAL_LIMIT','The full native journal fenced the connection. Stop Arcane and archive its journal before reconnecting; old requests were not discarded or replayed.');
@@ -390,10 +452,10 @@ export function createCodexService(options: CodexServiceOptions) {
           const context = newAssets();
           pendingConnect = factory(context?.hooks);
           let connected: CodexHostClient;
-          try { connected = await pendingConnect; } catch(error) { retireAssets(context); throw error; }
-          if (closed || generation !== epoch) { retireAssets(context); await connected.close(); throw new CodexClientError('STALE_CONNECTION','Connection was cancelled before acknowledgement.'); }
+          try { connected = await pendingConnect;rememberClient(context,connected); } catch(error) { retireAssets(context); throw error; }
+          if (closed || generation !== epoch) { retireAssets(context); await closeOwnedClient(connected); throw new CodexClientError('STALE_CONNECTION','Connection was cancelled before acknowledgement.'); }
           client = connected; currentAssets = context; lastSnapshot = null; record.connectionId = connected.snapshot().connectionId;
-          if(context)context.ownerClient=connected;
+          rememberClient(context,connected);
         } finally { connecting = false; pendingConnect = null; }
       } else {
         let selected = exactClient(value.connectionId); actionClient = selected;
@@ -407,7 +469,7 @@ export function createCodexService(options: CodexServiceOptions) {
           if(preserve){currentAssets=null;closing=false;} // Task retains its exact client; no new tab can borrow it.
           else try {if(value.preserveAssetWork!==true&&thread)await tasks?.cancelFor(thread.threadId,thread.sessionId,'human_disconnected');}
           finally {try{if(value.preserveAssetWork!==true)context?.handle?.cancelWork('incarnation');}
-            finally{try{retireAssets(context);}finally{try{await selected.close();lastSnapshot=selected.snapshot();}finally{currentAssets=null;closing=false;}}}}
+            finally{try{retireAssets(context);}finally{try{await closeOwnedClient(selected,context??undefined,context?.normal?.state==='succeeded');lastSnapshot=selected.snapshot();}finally{currentAssets=null;closing=false;}}}}
         } else {
           // Cancellation and revocation fence immediately even while a normal request awaits its acknowledgement.
           const safety = value.action === 'turn-interrupt' || value.action === 'task-stop' || value.action === 'revoke-writes' || value.action === 'revoke-assets' || value.action === 'approval';
@@ -420,18 +482,22 @@ export function createCodexService(options: CodexServiceOptions) {
           switch (value.action) {
             case 'task-focus': {
               const binding=nativeHistory(value.threadId),context=taskContexts.get(value.taskId),owned=context?.ownerClient,snapshot=owned?.snapshot(),current=selected.snapshot();
-              if(!tasks?.available()||!binding||!context||context.retired||!owned||!snapshot?.connected||!snapshot.ready||!snapshot.thread?.configured||
+              const normal=!!context&&readableNormal(context,snapshot);
+              if(!tasks?.available()||!binding||!context||context.retired&&!normal||!owned||!snapshot?.connected||!snapshot.ready||!snapshot.thread?.configured||
                 !tasks.belongs(value.taskId,binding.threadId,binding.sessionId)||snapshot.thread.threadId!==binding.threadId||snapshot.thread.sessionId!==binding.sessionId)
                 throw new CodexClientError('TASK_SCOPE','Focus only the exact retained native task in this saved conversation.');
+              if(normal&&selected.taskAccountIdentity?.()!==context.taskAccount)
+                throw new CodexClientError('ACCOUNT_IDENTITY','Read this retained task only under its original current account.');
               if(owned!==selected){
                 if(current.approvals.length||current.operations.some(op=>op.state==='pending'||op.state==='unknown')||current.thread&&(!['idle','completed','failed','interrupted'].includes(current.thread.turnStatus)||current.thread.writeGranted)||assetState(current).granted)
                   throw new CodexClientError('BUSY','The selected conversation must settle before focusing another task.');
                 pendingTaskBinding=true;ownsTaskBinding=true;
                 record.nextConnectionId=snapshot.connectionId;try{save(record);}catch{await fenceJournalFailure();throw new CodexClientError('JOURNAL_FAILURE','Task selection could not be recorded. No task was dispatched.');}
                 const previous=currentAssets;
-                if(!previous?.taskId){try{retireAssets(previous);}finally{await selected.close();}}
+                if(!previous?.taskId){try{retireAssets(previous);}finally{await closeOwnedClient(selected);}}
                 const stillOwned=owned.snapshot();
-                if(closed||generation!==epoch||!tasks.available()||context.retired||!stillOwned.connected||!stillOwned.ready||stillOwned.connectionId!==snapshot.connectionId||stillOwned.thread?.threadId!==binding.threadId||stillOwned.thread.sessionId!==binding.sessionId)
+                if(closed||generation!==epoch||!tasks.available()||context.retired&&!readableNormal(context,stillOwned)||!stillOwned.connected||!stillOwned.ready||
+                  normal&&selected.taskAccountIdentity?.()!==context.taskAccount||stillOwned.connectionId!==snapshot.connectionId||stillOwned.thread?.threadId!==binding.threadId||stillOwned.thread.sessionId!==binding.sessionId)
                   throw new CodexClientError('STALE_CONNECTION','Task focus was cancelled before exact selection.');
                 client=owned;currentAssets=context;selected=owned;actionClient=owned;lastSnapshot=null;
               }
@@ -506,7 +572,8 @@ export function createCodexService(options: CodexServiceOptions) {
               if(managed) {
                 const original=selected.snapshot(),thread=original.thread,context=currentAssets;
                 if(!thread?.configured || thread.threadId!==value.threadId || !original.connected || !original.ready || original.approvals.length ||
-                  original.operations.some(op=>op.state==='unknown') || !context?.handle || !context.actorId || !assetState(original,context).sealed ||
+                  original.operations.some(op=>op.state==='unknown') || !context?.handle || !context.actorId || (!assetState(original,context).sealed&&
+                    !(context.normal&&context.taskId&&taskContexts.get(context.taskId)===context&&context.ownerClient===selected)) ||
                   !selected.startManagedTask || !selected.continueTask || !selected.revokeTaskContinuation)
                   throw new CodexClientError('TASK_SCOPE','Managed Send requires the exact attested native chat.');
                 allowWrites ||= context.manualWrites;allowAssets ||= context.manualAssets;
@@ -515,17 +582,19 @@ export function createCodexService(options: CodexServiceOptions) {
                 if(!identity)throw new CodexClientError('ACCOUNT_IDENTITY','Native account identity is unavailable for an exact managed task.');
                 taskAccount=identity;
                 pendingTaskBinding=true;ownsTaskBinding=true;
-                await tasks!.cancelFor(thread.threadId,thread.sessionId,'human_followup_superseded');
+                await tasks!.prepareFollowup(thread.threadId,thread.sessionId);
                 if(closed||generation!==epoch)throw new CodexClientError('STALE_CONNECTION','Human task was cancelled before dispatch.');
                 if(rotate) {
                   // Fresh process/profile, never assumed MCP hot reload. Resume
                   // uses the exact acknowledged native thread under this Send.
-                  context.nextIntent=null;context.handle.cancelWork('incarnation');retireAssets(context);await selected.close();
+                  const natural=context.normal?.state==='succeeded'&&!context.cancelRequested;
+                  context.nextIntent=null;if(!natural)context.handle.cancelWork('incarnation');retireAssets(context);
+                  await closeOwnedClient(selected,context,natural);
                   if(closed||generation!==epoch)throw new CodexClientError('STALE_CONNECTION','Human task was cancelled before fresh initialization.');
                   const freshContext=newAssets()!;
                   let fresh:CodexHostClient|null=null;
                   try {
-                    pendingConnect=factory(freshContext.hooks);fresh=await pendingConnect;freshContext.ownerClient=fresh;
+                    pendingConnect=factory(freshContext.hooks);fresh=await pendingConnect;rememberClient(freshContext,fresh);
                     if(closed || generation!==epoch || fresh.taskAccountIdentity?.()!==identity)throw new CodexClientError('ACCOUNT_IDENTITY','Fresh task account changed or its identity is unavailable.');
                     fresh.selectModel({initiatedBy:'human',...thread.selection});
                     await fresh.resumeThread({initiatedBy:'human',threadId:thread.threadId});
@@ -540,7 +609,7 @@ export function createCodexService(options: CodexServiceOptions) {
                     client=fresh;currentAssets=freshContext;selected=fresh;actionClient=fresh;
                     if(context.manualAssets){freshContext.handle!.grant({connectionId:resumed.connectionId,threadId:thread.threadId});freshContext.manualAssets=true;}
                     if(context.manualWrites){fresh.grantThreadWrites({initiatedBy:'human',threadId:thread.threadId});freshContext.manualWrites=true;}
-                  } catch(error) {retireAssets(freshContext);if(fresh)await fresh.close();throw error;}
+                  } catch(error) {retireAssets(freshContext);if(fresh)await closeOwnedClient(fresh,freshContext);throw error;}
                   finally {pendingConnect=null;}
                 }
               }
@@ -582,13 +651,10 @@ export function createCodexService(options: CodexServiceOptions) {
                       try {await owned.continueTask!({continuation,text:repairPrompt(report)});}
                       finally {ownedContext.nextIntent=null;}
                     },isOwnedCloseRequestError:error=>owned.isOwnedCloseRequestError?.(error)===true,
-                    cancel:async()=>{ownedContext.nextIntent=null;
-                      try{ownedContext.handle?.cancelWork('incarnation');}
-                      finally{try{retireAssets(ownedContext);}finally{
-                        if(client===owned&&!busy){lastSnapshot=owned.snapshot();client=null;currentAssets=null;}await owned.close();}}
-                    }
+                    ...(typeof owned.retireManagedTask==='function'?{retire:()=>normalRetire(owned,ownedContext,continuation)}:{}),
+                    cancel:()=>cancelOwnedTask(owned,ownedContext)
                   }});
-                ownedContext.taskId=origin.taskId;taskContexts.set(origin.taskId,ownedContext);taskAfterCommit=taskId;
+                ownedContext.taskId=origin.taskId;ownedContext.taskAccount=taskAccount;taskContexts.set(origin.taskId,ownedContext);taskAfterCommit=taskId;
                 if(options.automaticTaskPlanning===true&&options.workStore&&proposalFactory&&owned.openIncorporationChain&&owned.issueIncorporationPermit&&owned.continueIncorporation&&Buffer.byteLength(value.text)<=CHAT_TASK_PLAN_INPUT_BYTES)
                   planInputs.set(taskId,{objective:value.text,inputSha256:createHash('sha256').update(JSON.stringify({text:value.text,
                     references:value.references?referenceImageMetadata(value.references):[],allowWorkspaceWrites:allowWrites,allowAssets})).digest('hex')});
@@ -634,6 +700,8 @@ export function createCodexService(options: CodexServiceOptions) {
               const thread=selected.snapshot().thread;
               if(!thread || thread.threadId!==value.threadId || !tasks?.belongs(value.taskId,thread.threadId,thread.sessionId))
                 throw new CodexClientError('TASK_SCOPE','Stop only the owned task in this exact native conversation.');
+              const original=taskContexts.get(value.taskId);
+              if(pendingTaskBinding&&original?.normal?.state!=='succeeded')epoch=++generation;
               await tasks.cancel(value.taskId,'human_stopped_task');break;
             }
             case 'proposal-start': {
@@ -784,6 +852,7 @@ export function createCodexService(options: CodexServiceOptions) {
       return{task,plan};
     };
     const initial=assertScope();if(!initial.plan)return{taskId:scope.taskId,plan:null};
+    const capturedPlan=initial.plan;
     let steps=tasks!.planSteps(initial.plan.id),reference=steps.find(step=>step.kind==='evidence'),review:TaskPlanReviewView|null=null;
     if(reference&&options.workStore){
       let runId=reference.evidence?.runId??null;
@@ -796,8 +865,12 @@ export function createCodexService(options: CodexServiceOptions) {
         if(runId){
           if(reference.state!=='acknowledged')review={runId,state:'unavailable',reason:'request_uncertain',tasks:[]};
           else{
-            const owner=tasks!.planObservationOwner(scope.taskId),port=createTaskAcceptancePort({work:options.workStore,owner});
-            const status=await port.status({taskId:scope.taskId,planId:initial.plan.id,runId});
+            const guard=()=>{
+              const current=assertScope();
+              if(!current.plan||current.plan.id!==capturedPlan.id||current.plan.objectiveSha256!==capturedPlan.objectiveSha256||
+                !isDeepStrictEqual(current.plan.binding,capturedPlan.binding))throw new CodexClientError('TASK_SCOPE','The historical task binding changed.');
+            };
+            const status=await readTaskAcceptance(options.workStore,{taskId:scope.taskId,planId:initial.plan.id,runId},guard);
             if(!status.tasks.every(task=>TASK_PLAN_REVIEW_TASK_STATES.some(state=>state===task.state)))throw new Error('Invalid task review state.');
             review={runId,state:status.state,reason:status.reason,tasks:status.tasks.map(task=>({key:task.key,state:task.state as TaskPlanReviewTaskState}))};
           }
@@ -852,10 +925,10 @@ export function createCodexService(options: CodexServiceOptions) {
         if (pendingConnect) {
           let pending: CodexHostClient | null = null;
           try { pending = await pendingConnect; } catch { /* Original initialization failure owns its child cleanup. */ }
-          if (pending) try { await pending.close(); } catch (error) { keep(error); }
+          if (pending) try { await closeOwnedClient(pending); } catch (error) { keep(error); }
         }
         try { await tasks?.close(); } catch (error) { keep(error); }
-        if (client) try { await client.close(); } catch (error) { keep(error); }
+        if (client) try { await closeOwnedClient(client,undefined,clientContexts.get(client)?.normal?.state==='succeeded'); } catch (error) { keep(error); }
         if (journalFault) try { await journalFault; } catch (error) { keep(error); }
       } finally {
         client = null; planInputs.clear();

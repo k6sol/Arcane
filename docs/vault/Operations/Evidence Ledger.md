@@ -45,3 +45,9 @@ Original-authoring candidate `b72cdb9` passed real native Blender conversion on 
 `Proposed → Implemented → Controlled test → Packaged smoke → Authenticated customer → Native engine acceptance`
 
 Record the level explicitly; one cannot substitute for another. Use [[Templates/Evidence]] and [[Playbooks/Release Verification]].
+
+## Native foliage geometry result
+
+`1f87ea3` passed both native jobs in [run 41002979268](https://github.com/k6sol/Arcane/actions/runs/41002979268). Independently authenticated Linux artifact 12954995052 (`7109e27a7586f0e876a50638eb1de7ffb6744f1fe02b3eb968191dfa05a2eece`) and Windows artifact 12954087558 (`e8a9740dac87926f61d22778b78ed8af319abfcd0c7c9f9779c0e08fed450200`) bind all 39 actual mesh cases, save/reopen, source hashes and observed close. Windows front/side contact renders were visually inspected. [[Bugs/Foliage Card Attachment]] records the narrow measured result and remaining whole-tree/alpha limitations.
+
+[[Bugs/Normal Task Handoff]] is implemented with 35 authored expanded cases and an original manual-grant companion; hosted acceptance remains pending. [[Bugs/PBR Staging Boundary]] is a separate retained failure and investigation, not hidden by the native foliage success.

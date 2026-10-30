@@ -5,7 +5,7 @@ tags: [arcane, blender, geometry]
 ---
 # Foliage card attachment
 
-Status: original geometry correction and mandatory native regressions prepared; execution and visual review pending.
+Status: native geometry regressions passed on both platforms; bounded artifacts and Windows contact renders inspected. Full-tree quality remains outstanding.
 Related goal: [[Delivery/G05 Blender Quality]].
 
 The production curved-card constructor applies its cup displacement at the base as well as the tip. Its two basal corners therefore have a midpoint displaced from the declared attachment root by cup × width. A half-metre-wide oak card is shifted six centimetres, birch four and pine five. These are exact source-derived counterexamples, not new rendered measurements.
@@ -19,8 +19,10 @@ The separate mandatory hosted Blender fixture imports the full real worker, buil
 - [x] Trace the actual production tree route and identify the displaced root invariant.
 - [x] Prepare the narrow geometry correction and real Blender representation/contact tests.
 - [x] Independently review exact worker/mesh/atlas/process/workflow contracts.
-- [ ] Exact hosted native fixture passes on Windows and Linux.
-- [ ] Inspect the actual retained contact renders.
+- [x] Exact hosted native fixture passes on Windows and Linux.
+- [x] Inspect the actual Windows front/side contact renders and verify both platforms' measured artifacts.
 - [ ] Real trees pass complete branch/leaf attachment and reference-led quality review.
 
 This fixes a card's declared geometric anchor only. Some canopy roots still lie on virtual or pruned twig chains; texture stalks can be laterally offset inside the atlas. Neither full physical foliage connection, alpha-visible petiole contact, rock quality nor whole-tree realism is established by this change. The card fixture is a geometry regression, not a finished-tree showcase.
+
+Verified `1f87ea3` in [run 41002979268](https://github.com/k6sol/Arcane/actions/runs/41002979268): all 39 cases, native save/reopen and observed owned closure passed on each platform. Maximum root error was about `6.15e-8 m`; the measured capped-stem gap was about `1.87e-9 m`, both within the existing `4e-6 m` fixture bound. Authenticated artifact digests and actual source bytes were checked, including the exact Windows CRLF checkout transform for Python. Windows front/side views show geometric contact without an apparent gap; these are neutral component tests, not finished-tree showcases.

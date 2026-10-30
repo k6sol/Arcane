@@ -43,6 +43,8 @@ export interface NativeAssetIncarnation {
    * after retirement, without granting any new native operation. */
   cancelWork(scope: 'active-operation' | 'incarnation'): void;
   retire(): void;
+  /** Fence only new admissions, then join original guarded leases without aborting them. */
+  retireAndJoinWork(): Promise<void>;
   /** Actual owned transport closure or definitive proof that no child was launched. */
   transportClosed(): void;
   status(): Readonly<{sealed: boolean; granted: boolean; admissionOpen: boolean; retired: boolean; released: boolean}>;
@@ -61,9 +63,10 @@ const MAX_STAGE_CLAIMS = MAX_INTENTS * 64;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}(?![\s\S])/;
 const TOKEN = /^[a-f0-9]{64}(?![\s\S])/;
 const DUMMY = Buffer.alloc(32);
-interface EntryCell { entry: Entry | null; retired: boolean; sealed: boolean; released: boolean }
+interface NativeWorkJoin { promise: Promise<void>; resolve(): void; reject(error: unknown): void; settled: boolean }
+interface EntryCell { entry: Entry | null; retired: boolean; sealed: boolean; released: boolean; normalJoin: NativeWorkJoin | null }
 interface Entry {
-  cell: EntryCell; credential: string; transportClosed: boolean; leases: Set<WorkLeaseState>; reclaim(): void;
+  cell: EntryCell; credential: string; transportClosed: boolean; joining: boolean; leases: Set<WorkLeaseState>; reclaim(): void;
   projectId: string; projectPath: string; generation: number; retired: boolean;
   sealed: Readonly<{connectionId:string;provider:NativeConversation['provider'];threadId:string;sessionId:string|null}> | null;
   binding: Readonly<NativeAssetSeal | AppAssetConversationBinding> | null; granted: boolean; active: string | null;
@@ -114,10 +117,25 @@ function retireEntry(entry: Entry): void {
   }
   compact(entry);
 }
+function settleWorkJoin(entry: Entry): void {
+  const join=entry.cell.normalJoin;
+  if(!join||join.settled||[...entry.leases].some(state=>!state.finished||state.pending!==0))return;
+  join.settled=true;
+  if([...entry.leases].some(state=>state.unresolved)){
+    join.reject(new ArcaneError('NATIVE_ASSET_UNRESOLVED','Original asset work remains unresolved; inspect its retained outcome without replay.'));
+    return;
+  }
+  // Closed successes have already been folded out of the bounded live set.
+  // Only now may the generation change invalidate original acquired actors.
+  retireEntry(entry);join.resolve();
+}
 function finishLease(state: WorkLeaseState): void {
-  if (state.released || !state.finished || state.unresolved || state.pending) return;
-  const entry = allocated(state.cell);
-  state.released = true; entry.leases.delete(state); compact(entry);
+  if(state.released)return;
+  const entry=allocated(state.cell);
+  if(state.finished&&!state.unresolved&&state.pending===0){
+    state.released=true;entry.leases.delete(state);compact(entry);
+  }
+  settleWorkJoin(entry);
 }
 /** Assert a real private lease, not a serialized or structurally matching value. */
 export function assertNativeAssetWorkLease(value: NativeAssetWorkLease): void {
@@ -128,6 +146,7 @@ export function acquireNativeAssetWork(actor: NativeAssetActor, kind: NativeAsse
   if (!['generation', 'preparation', 'stage', 'reconstruction', 'revision'].includes(kind)) fail();
   assertNativeAssetActor(actor, 'mutate');
   const admission = actors.get(actor)!, entry = allocated(admission.cell), operationId = entry.active!;
+  if(entry.joining)fail();
   const controller = entry.work.get(operationId);
   if (!controller || entry.leases.size >= MAX_WORK_LEASES) fail();
   const state: WorkLeaseState = { cell: admission.cell, signal: controller.signal,
@@ -250,13 +269,13 @@ export function createNativeAssetRegistry(options: {projectPath: string}): Nativ
   }
   function incarnation(cell: EntryCell): NativeAssetIncarnation {
       const binding = (value: unknown, extra: readonly string[] = []): Record<string, unknown> => {
-        open();const entry = allocated(cell), seal = live(entry), a=data(value,['connectionId','threadId',...extra]);
+        open();const entry = allocated(cell);if(entry.joining)fail();const seal = live(entry), a=data(value,['connectionId','threadId',...extra]);
         if (opaque(a.connectionId)!==seal.connectionId || opaque(a.threadId)!==seal.threadId) fail();return a;
       };
       return Object.freeze({
-        credential() {open();const entry = allocated(cell);if (entry.retired) fail();return entry.credential;},
+        credential() {open();const entry = allocated(cell);if (entry.retired||entry.joining) fail();return entry.credential;},
         seal(value: NativeAssetSeal) {
-          open();const entry = allocated(cell);if (entry.retired) fail();const a=data(value,['connectionId','provider','threadId','sessionId']);
+          open();const entry = allocated(cell);if (entry.retired||entry.joining) fail();const a=data(value,['connectionId','provider','threadId','sessionId']);
           if (a.provider !== 'codex' || (a.sessionId !== null && typeof a.sessionId !== 'string')) fail();
           const seal=Object.freeze({connectionId:opaque(a.connectionId),provider:'codex' as const,
             threadId:opaque(a.threadId),sessionId:a.sessionId===null?null:opaque(a.sessionId)});
@@ -267,7 +286,7 @@ export function createNativeAssetRegistry(options: {projectPath: string}): Nativ
           entry.binding=seal;entry.sealed=seal;cell.sealed=true;bump(entry);
         },
         bindAppConversation(value: AppAssetConversationBinding) {
-          open();const entry = allocated(cell);if(entry.retired)fail();
+          open();const entry = allocated(cell);if(entry.retired||entry.joining)fail();
           const a=data(value,['kind','connectionId','provider','conversationId','transport']);
           if(a.kind!=='app-conversation'||a.provider!=='claude-code'&&a.provider!=='arcane'||typeof a.conversationId!=='string'||
             !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}(?![\s\S])/.test(a.conversationId))fail();
@@ -330,9 +349,19 @@ export function createNativeAssetRegistry(options: {projectPath: string}): Nativ
           for (const controller of controllers) controller.abort();
         },
         retire() {if(cell.entry)retireEntry(cell.entry);},
+        retireAndJoinWork():Promise<void> {
+          if(cell.normalJoin)return cell.normalJoin.promise;
+          open();const entry=allocated(cell);if(entry.retired)fail();
+          let resolve!:()=>void,reject!:(error:unknown)=>void;
+          const promise=new Promise<void>((yes,no)=>{resolve=yes;reject=no;});
+          cell.normalJoin={promise,resolve,reject,settled:false};void promise.catch(()=>{});
+          // Admission-only fence: assertNativeAssetActor remains unchanged for
+          // already acquired, genuinely scoped work until its actual tails end.
+          entry.joining=true;settleWorkJoin(entry);return promise;
+        },
         transportClosed() {if(!cell.entry)return;const entry=cell.entry;entry.transportClosed=true;retireEntry(entry);},
-        status() {const entry=cell.entry;return Object.freeze({sealed:cell.sealed,granted:entry?mutationGranted(entry):false,
-          admissionOpen:!!entry&&!entry.retired&&entry.active!==null,retired:cell.retired,released:cell.released});},
+        status() {const entry=cell.entry;return Object.freeze({sealed:cell.sealed,granted:entry&&!entry.joining?mutationGranted(entry):false,
+          admissionOpen:!!entry&&!entry.retired&&!entry.joining&&entry.active!==null,retired:cell.retired,released:cell.released});},
       });
   }
   return Object.freeze({
@@ -344,21 +373,21 @@ export function createNativeAssetRegistry(options: {projectPath: string}): Nativ
       if (entries.size >= MAX_INCARNATIONS) fail();
       const credential=prefix+randomBytes(24).toString('hex'),digest=createHash('sha256').update(credential).digest();
       const key=digest.toString('hex');if(entries.has(key)){digest.fill(0);fail();}
-      const cell:EntryCell={entry:null,retired:false,sealed:false,released:false};
-      const entry:Entry={...project,cell,credential,transportClosed:false,leases:new Set(),
+      const cell:EntryCell={entry:null,retired:false,sealed:false,released:false,normalJoin:null};
+      const entry:Entry={...project,cell,credential,transportClosed:false,joining:false,leases:new Set(),
         reclaim(){entries.delete(key);digest.fill(0);},generation:0,retired:false,sealed:null,binding:null,
         granted:false,active:null,nextIntent:false,automaticIntent:null,intents:new Set(),work:new Map()};
       cell.entry=entry;entries.set(key,{digest,entry});return incarnation(cell);
     },
     capture(credential:string,operation:NativeAssetOperation):NativeAssetActor {
-      open();if(operation!=='read'&&operation!=='mutate')fail();const entry=find(credential);if(!entry)fail();const seal=live(entry);
+      open();if(operation!=='read'&&operation!=='mutate')fail();const entry=find(credential);if(!entry||entry.joining)fail();const seal=live(entry);
       if(operation==='mutate'&&(!mutationGranted(entry)||entry.active===null))fail();
       const scope=Object.freeze({projectId:entry.projectId,projectPath:entry.projectPath,
         conversation:Object.freeze({provider:seal.provider,threadId:seal.threadId,sessionId:seal.sessionId})});
       const actor=Object.freeze({kind:'native-asset-actor' as const});
       actors.set(actor,{cell:entry.cell,generation:entry.generation,operation,scope});return actor;
     },
-    recognizes(credential:string):boolean {if(closed)return false;const entry=find(credential);return !!entry&&!entry.retired&&entry.sealed!==null;},
+    recognizes(credential:string):boolean {if(closed)return false;const entry=find(credential);return !!entry&&!entry.retired&&!entry.joining&&entry.sealed!==null;},
     close() {if(closed)return;closed=true;for(const {entry,digest} of entries.values()){retireEntry(entry);digest.fill(0);}entries.clear();},
   });
 }

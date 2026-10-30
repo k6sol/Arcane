@@ -68,6 +68,12 @@ function ownData(value: unknown, keys: readonly string[]): Record<string, unknow
   }
   return result;
 }
+interface ManagedTaskLife {
+  thread: ThreadState; selection: Selection; accountRevision: number; accountIdentity: string;
+  token: NativeTaskContinuation | null; calls: Set<Promise<void>>; operations: Set<Operation>;
+  terminals: Map<Operation, string>; failed: boolean; failure: unknown; externalRetired: boolean;
+  joining: boolean; join: Promise<void> | null; notify: (() => void) | null;
+}
 interface TurnPreflight { thread: ThreadState; selection: Selection; accountRevision: number; turnId: string | null; turnStatus: ThreadState['turnStatus']; revoked: boolean }
 const APPROVALS = new Set(['item/commandExecution/requestApproval','item/fileChange/requestApproval']);
 const TERMINAL = new Set(['completed','failed','interrupted']);
@@ -235,6 +241,8 @@ export class CodexSession {
   #incorporation: IncorporationChain | null = null;
   readonly #incorporationOpened = new WeakSet<NativeTaskContinuation>();
   #managedStarting = false;
+  readonly #managedLives = new WeakMap<NativeTaskContinuation, ManagedTaskLife>();
+  #managedLife: ManagedTaskLife | null = null;
   #catalogueLoading = false;
   #cancelledTurnId: string | null = null;
   #knownTurnIds = new Set<string>();
@@ -480,12 +488,17 @@ export class CodexSession {
     this.revokeTaskContinuation();
     if (this.mcpPolicy !== 'arcane-only' || !this.#nativeAssetHooks) fail('MCP_PROFILE', 'Managed tasks require an owned isolated MCP incarnation.');
     if(!this.#accountIdentity)fail('ACCOUNT_IDENTITY','Managed continuation requires a reported native subscription identity.');
+    const life:ManagedTaskLife={thread:this.#thread!,selection:{...this.#thread!.selection},accountRevision:this.#accountRevision,
+      accountIdentity:this.#accountIdentity,token:null,calls:new Set(),operations:new Set(),terminals:new Map(),
+      failed:false,failure:undefined,externalRetired:false,joining:false,join:null,notify:null};
+    this.#managedLife=life;const finish=this.#taskCall(life);
     this.#managedStarting = true;
     try {
-      const thread = await this.#startTurn(input, true);
+      const thread = await this.#startTurn(input, true,undefined,life);
       if (!this.#taskContinuation) throw new CodexClientError('TASK_SCOPE', 'The managed task continuation was not established.', true);
       return { thread, continuation: this.#taskContinuation.token };
-    } finally { this.#managedStarting = false; }
+    } catch(error){this.#taskFailure(life,error);throw error;}
+    finally { this.#managedStarting = false;finish(); }
   }
   /** Private application port, never a human action or provider/MCP parameter. */
   async continueTask(action: { continuation: NativeTaskContinuation; text: string }): Promise<ThreadState> {
@@ -500,9 +513,12 @@ export class CodexSession {
         !permit.allowWrites && thread.writeGranted) fail('TASK_SCOPE', 'The original task identity, policy or terminal operation changed.');
     const text = str(action.text, this.bounds.maxInputBytes);
     if (this.#incorporation?.inFlight) fail('BUSY', 'An incorporation turn is still being dispatched.');
+    const life=this.#managedLives.get(permit.token);if(!life||life.joining)fail('TASK_SCOPE','Original task admissions are retired.');
+    const finish=this.#taskCall(life);
     permit.used = true; // Reserve before asynchronous preflight; uncertain starts are never retried.
     this.#revokeIncorporation(); // Repair ends incorporation continuity; incorporation never spends repair.
-    return this.#startTurn({ threadId: thread.threadId, text, allowWorkspaceWrites: permit.allowWrites }, false);
+    try{return await this.#startTurn({threadId:thread.threadId,text,allowWorkspaceWrites:permit.allowWrites},false,undefined,life);}
+    catch(error){this.#taskFailure(life,error);throw error;}finally{finish();}
   }
   /** Open the one bounded incorporation chain for this exact live managed task. It does not spend repair. */
   openIncorporationChain(action: { continuation: NativeTaskContinuation; maxSteps: number }): NativeIncorporationChain {
@@ -536,10 +552,12 @@ export class CodexSession {
       fail('TASK_SCOPE', 'Incorporation permit is unavailable.');
     const text = str(input.text, this.bounds.maxInputBytes);
     this.#checkIncorporation(state);
+    const life=this.#managedLives.get(state.continuation);if(!life||life.joining)fail('TASK_SCOPE','Original task admissions are retired.');
+    const finish=this.#taskCall(life);
     record.used = true; state.inFlight = true;
-    try { return await this.#startTurn({ threadId: state.thread.threadId, text, allowWorkspaceWrites: state.allowWrites }, false, state); }
-    catch (error) { state.revoked = true; throw error; } // Refused or uncertain: fence the whole chain; no replacement step.
-    finally { state.inFlight = false; }
+    try { return await this.#startTurn({ threadId: state.thread.threadId, text, allowWorkspaceWrites: state.allowWrites }, false, state,life); }
+    catch (error) { state.revoked = true;this.#taskFailure(life,error); throw error; } // No replacement step.
+    finally { state.inFlight = false;finish(); }
   }
   #checkIncorporation(state: IncorporationChain): void {
     const repair = this.#taskContinuation;
@@ -561,13 +579,63 @@ export class CodexSession {
     if (state.inFlight && this.#turnPreflight) this.#turnPreflight.revoked = true;
   }
   revokeTaskContinuation(): void {
+    const life=this.#managedLife;if(life&&!life.joining){life.externalRetired=true;life.notify?.();}
     this.#revokeIncorporation(); // Works even after repair was spent or revoked.
     if (this.#managedStarting && this.#turnPreflight) this.#turnPreflight.revoked = true;
     if (!this.#taskContinuation || this.#taskContinuation.revoked) return;
     this.#taskContinuation.revoked = true;
     if (this.#turnPreflight) this.#turnPreflight.revoked = true;
   }
-  async #startTurn(action: { threadId: string; text: string; allowWorkspaceWrites: boolean; references?:readonly ReferenceImage[] }, managed: boolean, incorporation?: IncorporationChain): Promise<ThreadState> {
+  #taskCall(life:ManagedTaskLife):()=>void {
+    if(life.joining||life.externalRetired)fail('TASK_SCOPE','Original task admissions are retired.');
+    let resolve!:()=>void;const completion=new Promise<void>(done=>{resolve=done;});life.calls.add(completion);
+    return()=>{life.calls.delete(completion);resolve();life.notify?.();};
+  }
+  #taskFailure(life:ManagedTaskLife,error:unknown):void {if(!life.failed){life.failed=true;life.failure=error;}life.notify?.();}
+  #taskTerminal(operation:Operation,state:string):void {
+    const life=this.#managedLife;if(!life||!life.operations.has(operation)||!TERMINAL.has(state))return;
+    const previous=life.terminals.get(operation);
+    if(previous&&previous!==state)this.#taskFailure(life,new CodexClientError('PROTOCOL','The original task terminal changed.',true));
+    else life.terminals.set(operation,state);
+    life.notify?.();
+  }
+  /** Exact original-task quiescence only. No transport stop, global retirement,
+   * manual grant mutation or unrelated account/history/catalogue join. */
+  retireManagedTask(continuation:NativeTaskContinuation):Promise<void> {
+    const life=continuation&&typeof continuation==='object'?this.#managedLives.get(continuation):undefined;
+    if(!life||life.token!==continuation)fail('TASK_SCOPE','Only the original managed task may retire.');
+    if(life.join)return life.join;
+    if(life.externalRetired||this.#managedLife!==life||this.#thread!==life.thread||this.#accountIdentity!==life.accountIdentity||
+      this.#accountRevision!==life.accountRevision||life.thread.selection.model!==life.selection.model||life.thread.selection.effort!==life.selection.effort)
+      fail('TASK_SCOPE','Original task identity changed before normal retirement.');
+    let resolve!:()=>void,reject!:(error:unknown)=>void;
+    const joined=new Promise<void>((yes,no)=>{resolve=yes;reject=no;});life.join=joined;void joined.catch(()=>{});
+    life.joining=true;
+    const repair=this.#taskContinuation;if(repair?.token===continuation)repair.revoked=true;
+    if(this.#incorporation?.continuation===continuation){this.#incorporation.revoked=true;if(this.#incorporation.inFlight&&this.#turnPreflight)this.#turnPreflight.revoked=true;}
+    const deadline=Date.now()+this.bounds.requestTimeoutMs;
+    const settle=async()=>{
+      for(;;){
+        if(life.calls.size===0){
+          if(life.failed)throw life.failure;
+          if(life.externalRetired||!this.#transport.connected)throw new CodexClientError('TASK_SCOPE','Original task closure remains unconfirmed.');
+          const operations=[...life.operations];
+          if(!operations.length||operations.some(operation=>operation.state==='unknown'||operation.state==='rejected'||operation.state==='not-sent'))
+            throw new CodexClientError('TASK_SCOPE','Original task requests did not all complete successfully.');
+          if(operations.every(operation=>operation.state==='acknowledged'&&(operation.method!=='turn/start'||life.terminals.get(operation)==='completed')))return;
+          if(operations.some(operation=>operation.method==='turn/start'&&life.terminals.has(operation)&&life.terminals.get(operation)!=='completed'))
+            throw new CodexClientError('TASK_SCOPE','Original task did not reach a successful terminal.');
+        }
+        await new Promise<void>((yes,no)=>{
+          const remaining=deadline-Date.now();if(remaining<=0){no(new CodexClientError('TASK_SCOPE','Original task terminal remains unconfirmed.'));return;}
+          const timer=setTimeout(()=>{life.notify=null;no(new CodexClientError('TASK_SCOPE','Original task terminal remains unconfirmed.'));},remaining);
+          life.notify=()=>{life.notify=null;clearTimeout(timer);yes();};
+        });
+      }
+    };
+    void settle().then(resolve,reject);return joined;
+  }
+  async #startTurn(action: { threadId: string; text: string; allowWorkspaceWrites: boolean; references?:readonly ReferenceImage[] }, managed: boolean, incorporation?: IncorporationChain,life?:ManagedTaskLife): Promise<ThreadState> {
     const allowWorkspaceWrites = action.allowWorkspaceWrites === true;
     if(this.mcpPolicy==='proposal'&&(allowWorkspaceWrites||this.#operations.some(operation=>operation.method==='turn/start')))
       fail('PROPOSAL_READ_ONLY','Proposal workers permit one read-only turn and no automatic replay.');
@@ -622,11 +690,13 @@ export class CodexSession {
     if (incorporation?.revoked) fail('GRANT_REVOKED', 'The incorporation chain was revoked before dispatch. No turn was sent.');
     if (incorporation) this.#checkIncorporation(incorporation);
     const operation = this.#newOperation('turn/start', thread.threadId, null);
+    life?.operations.add(operation);
     if (incorporation) incorporation.last = operation; // Continuity is only this exact owned operation.
     if (managed) this.#taskContinuation = { token: Object.freeze({ kind: 'native-task-continuation' }), thread, operation,
       selection: { ...thread.selection }, accountRevision: this.#accountRevision,
       accountIdentity:this.#accountIdentity!,
       allowWrites: allowWorkspaceWrites || thread.writeGranted, used: false, revoked: false };
+    if(managed&&life){life.token=this.#taskContinuation!.token;this.#managedLives.set(life.token,life);}
     this.#turnOperation = operation;
     this.#cancelledTurnId = null;
     this.#clearApprovals('cancel');
@@ -654,7 +724,7 @@ export class CodexSession {
         if (TERMINAL.has(turnStatus) && !this.#endNativeAssetIntent(operation)) {
           throw new CodexClientError('UNKNOWN', 'Native asset completion is uncertain.', true);
         }
-        operation.state = 'acknowledged';
+        operation.state = 'acknowledged';this.#taskTerminal(operation,thread.turnStatus);
       });
       return structuredClone(thread);
     } catch (error) {
@@ -686,7 +756,12 @@ export class CodexSession {
     if(Buffer.byteLength(JSON.stringify({id:Number.MAX_SAFE_INTEGER,method:'turn/steer',params})+'\n')>this.bounds.maxFrameBytes)
       fail('FRAME_LIMIT','The complete steering message exceeds the native frame limit.');
     if(this.#operations.length>=this.bounds.maxOperations)fail('OPERATION_LIMIT','Steering operation history is full. The original turn remains active; do not replay this request.');
-    const operation=this.#newOperation('turn/steer',thread.threadId,expectedTurnId);this.#steerOperation=operation;
+    const life=this.#managedLife?.thread===thread&&[...this.#managedLife.operations].some(op=>op.turnId===expectedTurnId)?this.#managedLife:null;
+    const finish=life?this.#taskCall(life):()=>{};
+    let operation:Operation;
+    try{operation=this.#newOperation('turn/steer',thread.threadId,expectedTurnId);}
+    catch(error){if(life)this.#taskFailure(life,error);finish();throw error;}
+    this.#steerOperation=operation;life?.operations.add(operation);
     this.#steerMessageIds.add(clientUserMessageId); // At most one per bounded retained operation.
     let responseReceived=false;
     try{
@@ -703,8 +778,8 @@ export class CodexSession {
       operation.state=native.code==='REMOTE_REJECTED'?'rejected':native.dispatched||operation.state==='unknown'?'unknown':'not-sent';
       // An uncertain amendment fences later admissions through operation history;
       // it never retires, cancels or regrants the original accepted work.
-      throw native;
-    }finally{this.#steerOperation=null;}
+      if(life)this.#taskFailure(life,native);throw native;
+    }finally{this.#steerOperation=null;finish();}
   }
   async interruptTurn(action: HumanAction & { threadId: string; turnId: string }): Promise<void> {
     exact(action, ['initiatedBy','threadId','turnId']); human({ initiatedBy: action.initiatedBy });
@@ -1052,6 +1127,7 @@ export class CodexSession {
     }
   }
   #disconnect(error: CodexClientError): void {
+    this.#managedLife?.notify?.();
     this.#endAutomaticWrites();
     this.#retireNativeAssets();
     this.#ready = false; this.#failureCode ??= error.code;
@@ -1146,7 +1222,11 @@ export class CodexSession {
       if (method === 'turn/started' && TERMINAL.has(thread.turnStatus)) return;
       thread.turnStatus = state;
       if (TERMINAL.has(state) && usageCount(raw.durationMs, 31_536_000_000)) thread.durationMs = raw.durationMs;
-      if (TERMINAL.has(state)) { this.#endAutomaticWrites(); this.#endNativeAssetIntent(); this.#clearApprovals(null); }
+      if (TERMINAL.has(state)) {
+        const life=this.#managedLife,operation=this.#turnOperation??(life?[...life.operations].find(op=>op.method==='turn/start'&&op.turnId===id):undefined);
+        if(operation)this.#taskTerminal(operation,state);
+        this.#endAutomaticWrites(); this.#endNativeAssetIntent(); this.#clearApprovals(null);
+      }
       this.#event({ type: 'turn', threadId: thread.threadId, turnId: id, status: state,
         ...(TERMINAL.has(state) && thread.durationMs !== undefined ? { durationMs: thread.durationMs } : {}) }); return;
     }
