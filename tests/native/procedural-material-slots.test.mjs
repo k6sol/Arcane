@@ -16,5 +16,6 @@ test('generated union and fallback meshes bind their sole authored material', { 
   const result = JSON.parse(line.slice('ARCANE_GENERATED_MATERIAL_SLOTS_OK '.length));
   assert.equal(result.cases, 2);
   assert.equal(result.diagnosticCases, 1);
+  assert.equal(result.oakSprayCases, 4);
   assert.match(result.blender, /^5\.2\.3\b/);
 });

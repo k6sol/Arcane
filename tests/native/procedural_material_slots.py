@@ -3,6 +3,7 @@ import hashlib
 import json
 from pathlib import Path
 import sys
+import unittest
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[2]
@@ -85,4 +86,9 @@ for union in (inherited_slots, lambda *_: None):
         mesh.materials.clear()
         mesh.materials.append(authored)
 procedural.union_wood = original_union
-print("ARCANE_GENERATED_MATERIAL_SLOTS_OK " + json.dumps({"cases": 2, "diagnosticCases": 1, "blender": bpy.app.version_string}))
+import oak_spray_layout_test
+spray_suite = unittest.defaultTestLoader.loadTestsFromModule(oak_spray_layout_test)
+spray_result = unittest.TextTestRunner().run(spray_suite)
+assert spray_result.wasSuccessful() and spray_result.testsRun == 4 and not spray_result.skipped
+print("ARCANE_GENERATED_MATERIAL_SLOTS_OK " + json.dumps({"cases": 2, "diagnosticCases": 1,
+      "oakSprayCases": spray_result.testsRun, "blender": bpy.app.version_string}))

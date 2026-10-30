@@ -523,12 +523,17 @@ def _spray(np, rng, species, color, width, height, shade):
         n = len(points) - 1
         scale = 1.0 if number == 0 else .85
         if oak:
-            # Oak leaves crowd at shoot tips (a rosette) with a few along the shoot.
+            # Keep a small terminal rosette, with the remaining tip cohort
+            # stratified along the outer shoot instead of sharing one base.
             for k in range(rng.integers(3, 5) if number else rng.integers(4, 7)):
                 f = rng.uniform(.15, .85)
                 leaves.append((points, f, (1 if k % 2 else -1) * rng.uniform(.6, 1.2), scale * rng.uniform(.14, .19)))
-            for k in range(rng.integers(5, 8) if number == 0 else 4):
-                leaves.append((points, 1.0, rng.uniform(-1.2, 1.2), scale * rng.uniform(.16, .21)))
+            count = rng.integers(5, 8) if number == 0 else 4
+            terminal = 2 if number == 0 else 1
+            spread = count - terminal
+            for k in range(count):
+                f = .68 + .28 * (k + .5) / spread if k < spread else 1.0
+                leaves.append((points, f, rng.uniform(-1.2, 1.2), scale * rng.uniform(.16, .21)))
         else:
             # Birch: alternate leaves along thin, slightly drooping shoots.
             count = rng.integers(11, 15) if number == 0 else rng.integers(5, 8)
@@ -537,9 +542,17 @@ def _spray(np, rng, species, color, width, height, shade):
                 leaves.append((points, f, (1 if k % 2 else -1) * rng.uniform(.5, 1.2), scale * rng.uniform(.11, .14)))
     for i in sorted(range(len(leaves)), key=lambda i: rng.random()):
         points, f, swing, size = leaves[i]
-        index = min(len(points) - 1, int(round(f * (len(points) - 1))))
-        base = np.array(points[index])
-        ahead = np.array(points[min(len(points) - 1, index + 1)]) - np.array(points[max(0, index - 1)])
+        if oak:
+            position = f * (len(points) - 1)
+            index = min(len(points) - 2, int(position))
+            first, last = np.array(points[index]), np.array(points[index + 1])
+            base = first + (last - first) * (position - index)
+            ahead = last - first
+        else:
+            # Other species retain their original placement and RNG consumers.
+            index = min(len(points) - 1, int(round(f * (len(points) - 1))))
+            base = np.array(points[index])
+            ahead = np.array(points[min(len(points) - 1, index + 1)]) - np.array(points[max(0, index - 1)])
         heading = math.atan2(ahead[1], ahead[0]) + swing
         length = size * height
         # Keep every leaf inside its tile: swing it towards its shoot, then shorten it.
