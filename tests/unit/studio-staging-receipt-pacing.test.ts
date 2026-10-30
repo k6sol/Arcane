@@ -48,11 +48,11 @@ function generated(projectId:string,target:HostGeneratedStudioImport['target'],l
 }
 
 import {setImmediate as immediate} from 'node:timers/promises';
-async function pacedFixture(t:test.TestContext,large=false){
+async function pacedFixture(t:test.TestContext,large=false,storeNow?:()=>number){
   const base=await realpath(tmpdir()),root=await mkdtemp(join(base,'arcane-receipt-paced-')),projectPath=await realpath(root),work=new ConversationWorkStore({directory:join(root,'work'),projectPath});
   const conversation={provider:'codex' as const,threadId:'receipt-paced',sessionId:null};work.bind({conversation,kind:'asset-job',id:JOB});
   const registry=createNativeAssetRegistry({projectPath}),incarnation=registry.issue(),binding={connectionId:'receipt-paced',threadId:conversation.threadId};incarnation.seal({...binding,...conversation});incarnation.grant(binding);incarnation.dispatched({...binding,operationId:'paced-stage'});let actor=registry.capture(incarnation.credential(),'mutate');
-  const store=new StudioStore({directory:join(root,'studio')}),grant=store.createGrant({allowedRoots:['Workspace','ServerStorage'],allowWrites:true}),pair=store.pair({code:grant.code,protocolVersion:1,capabilities:['asset.stage_packet','asset.reconstruct','scene.import_context'],identity:{clientSessionId:'paced-plugin',pluginVersion:'0.1.9',name:'Paced fixture',placeId:12,universeId:34}});
+  const store=new StudioStore({directory:join(root,'studio'),...(storeNow?{now:storeNow}:{})}),grant=store.createGrant({allowedRoots:['Workspace','ServerStorage'],allowWrites:true}),pair=store.pair({code:grant.code,protocolVersion:1,capabilities:['asset.stage_packet','asset.reconstruct','scene.import_context'],identity:{clientSessionId:'paced-plugin',pluginVersion:'0.1.9',name:'Paced fixture',placeId:12,universeId:34}});
   const proof=()=>({sessionId:pair.sessionId,clientLifetimeId:'paced-plugin',pluginArtifactHash:PLUGIN,markerName:'ArcaneTestProof_paced',placeId:12,universeId:34,placeName:'Paced fixture',mode:'Edit',playEpoch:0,continuitySupported:true,connected:true});store.poll(pair.sessionId,proof());
   const target={sessionId:pair.sessionId,placeId:12,universeId:34,root:'Workspace' as const,parentRef:'paced-parent',creator:{kind:'group' as const,id:'56'}},g=generated(work.projectId,target,large),authority=createStudioImportManifestAuthority({loadGeneratedFiles:async()=>g}),prepared=authority.prepare(await authority.admit(JOB));authority.close();
   const payload=decodeStudioImportPayload(prepared,new Map(g.files.map(f=>[f.fileId,f.bytes]))),transfer=createStudioImportTransfer(prepared,payload),reference={reviewId:'99999999-9999-4999-8999-999999999999',subjectDigest:hash('paced-reviewed-source'),revision:1};
@@ -74,7 +74,7 @@ async function pacedFixture(t:test.TestContext,large=false){
     store.result({sessionId:pair.sessionId,commandId:c.id,state:'succeeded',result:result as Json});
   }
   async function firstQueued(){for(let i=0;i<256;i++){if(store.commands(pair.sessionId).some(c=>c.state==='queued'))return;await immediate();}throw Error('No first queued command');}
-  return {store,controller,transfer,payload,poll,ack,firstQueued,get actor(){return actor;},get counts(){return {count,bytes,checks};},reject(){approved=false;},changeSource(){sourceCurrent=false;},retire(){incarnation.ended(operation);},expire(){clockOffset=120001;},clock(value:number){clockValue=value;},newActor(){incarnation.ended(operation);operation='paced-reconstruct';incarnation.dispatched({...binding,operationId:operation});actor=registry.capture(incarnation.credential(),'mutate');}};
+  return {store,projectId:work.projectId,controller,transfer,payload,poll,ack,firstQueued,get actor(){return actor;},get counts(){return {count,bytes,checks};},reject(){approved=false;},changeSource(){sourceCurrent=false;},retire(){incarnation.ended(operation);},expire(){clockOffset=120001;},clock(value:number){clockValue=value;},newActor(){incarnation.ended(operation);operation='paced-reconstruct';incarnation.dispatched({...binding,operationId:operation});actor=registry.capture(incarnation.credential(),'mutate');}};
 }
 
 test('committed ACK queues the next packet before the next plugin I/O poll, with fallback timer held',async t=>{
@@ -115,8 +115,72 @@ test('fractional now and12.5ms remaining use the original bounded timeout semant
   t.mock.method(f.store,'command',(id:string)=>{const c=command(id);if(c.method==='asset.stage_packet'&&c.state==='queued')f.clock(start+9987.5);return c;});
   t.mock.method(f.store,'waitForCommandResult',(id:string,ms:number)=>{remaining=ms;return wait(id,ms);});
   const outcome=f.controller.stage(JOB,f.actor).then(value=>({value}),error=>({error}));
-  await f.firstQueued();assert.equal(remaining,12.5);assert.equal(f.store.commands().filter(c=>c.method==='asset.stage_packet').length,1);
+  await f.firstQueued();
+  for(let turn=0;turn<256&&remaining===undefined;turn++)await immediate();
+  assert.equal(remaining,12.5);assert.equal(f.store.commands().filter(c=>c.method==='asset.stage_packet').length,1);
   f.controller.close();t.mock.timers.tick(13);assert.ok('error'in await outcome);
+});
+
+test('a queued original packet gives a genuine paired poll an I/O turn before its expired receipt proof is checked',async t=>{
+  // Both clocks are controlled; the proof is minted only by actual poll(), not
+  // by a mocked session read. This is an event-loop boundary, not engine proof.
+  let clock=Date.UTC(2026,9,30);
+  const f=await pacedFixture(t,false,()=>clock);f.clock(clock);
+  const originalProof=f.store.sessions()[0]!.proof!;
+  const enqueue=f.store.enqueueStagePacket.bind(f.store);let advanced=false;
+  t.mock.method(f.store,'enqueueStagePacket',(...args:Parameters<StudioStore['enqueueStagePacket']>)=>{
+    const command=enqueue(...args);
+    if(!advanced){advanced=true;clock+=6001;f.clock(clock);}
+    return command;
+  });
+  // A pending plugin turn must find the original packet already queued. Before
+  // the queue-first barrier, the expired receipt guard cancels it first.
+  const pendingPoll=immediate().then(()=>f.poll());
+  const outcome=f.controller.stage(JOB,f.actor).then(value=>({value}),error=>({error}));
+  let commands=await pendingPoll;
+  assert.equal(Date.parse(originalProof.expiresAt),clock-1);
+  assert.equal(Date.parse(f.store.sessions()[0]!.proof!.observedAt),clock);
+  for(let ordinal=0;ordinal<f.transfer.packets.length;ordinal++){
+    assert.equal(commands.length,1,'the pending poll must not take the 2s empty-queue branch');
+    assert.equal(JSON.parse(commands[0]!.args.packet as string).ordinal,ordinal);
+    f.ack(commands[0]!);await immediate();
+    if(ordinal+1<f.transfer.packets.length)commands=f.poll();
+  }
+  const result=await outcome;assert.ok('value'in result);
+  assert.equal(result.value.packetCount,f.transfer.packets.length);
+  assert.equal(result.value.byteLength,f.transfer.byteLength);assert.equal(result.value.imported,false);
+});
+
+test('an expired proof without a genuine poll still cancels the queued original packet without replay',async t=>{
+  let clock=Date.UTC(2026,9,30);
+  const f=await pacedFixture(t,false,()=>clock);f.clock(clock);
+  const before=f.store.sessions()[0]!.proof!,enqueue=f.store.enqueueStagePacket.bind(f.store);
+  t.mock.method(f.store,'enqueueStagePacket',(...args:Parameters<StudioStore['enqueueStagePacket']>)=>{
+    const command=enqueue(...args);clock+=6001;f.clock(clock);return command;
+  });
+  const result=await f.controller.stage(JOB,f.actor).then(value=>({value}),error=>({error}));
+  assert.ok('error'in result);assert.equal((result.error as {code:string}).code,'STUDIO_STAGE_CONTINUITY');
+  assert.equal(f.store.sessions()[0]!.proof!.observedAt,before.observedAt);
+  const commands=f.store.commands();assert.equal(commands.length,1);assert.equal(commands[0]!.state,'cancelled');
+  assert.equal(f.store.readStageRun(f.projectId,JOB)!.receipt,null);
+  assert.throws(()=>assertNativeAssetStageOperationAvailable(f.actor,JOB));
+  await assert.rejects(f.controller.stage(JOB,f.actor));assert.equal(f.store.commands().length,1);
+});
+
+test('actor retirement in the queue-first I/O turn is rechecked before delivery or another enqueue',async t=>{
+  const f=await pacedFixture(t);t.mock.timers.enable({apis:['setTimeout']});
+  const retirement=immediate().then(()=>f.retire());let settled=false;
+  const outcome=f.controller.stage(JOB,f.actor).then(value=>({value}),error=>({error})).finally(()=>{settled=true;});
+  try{
+    await retirement;
+    for(let turn=0;turn<256&&!settled;turn++)await immediate();
+    assert.equal(settled,true,'the authority check must run without the held fallback timer');
+    const result=await outcome;assert.ok('error'in result);
+    assert.equal((result.error as {code:string}).code,'NATIVE_ASSET_AUTHORITY');
+    const commands=f.store.commands();assert.equal(commands.length,1);assert.equal(commands[0]!.state,'cancelled');
+    assert.deepEqual(f.poll(),[]);await assert.rejects(f.controller.stage(JOB,f.actor));
+    assert.equal(f.store.commands().length,1);
+  }finally{f.controller.close();t.mock.timers.tick(25);await outcome;}
 });
 
 test('full 20MiB PBR chain uses immediate ACK polls and real 2s idle pacing within unchanged120s deadline',{timeout:120000},async t=>{

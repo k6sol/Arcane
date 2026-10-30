@@ -1,5 +1,6 @@
 import {createHash,randomUUID} from 'node:crypto';
 import {isDeepStrictEqual} from 'node:util';
+import {setImmediate as yieldToPluginIo} from 'node:timers/promises';
 import {parseStudioImportObservationWitness} from '../../../packages/core/src/studio-policy.js';
 import {ArcaneError} from '../../../packages/protocol/src/providers.js';
 import {STUDIO_ASSET_TRANSFER_LIMITS, object, studioImportContextObservation, type Json, type StudioAssetStageArgs, type StudioAssetStageReceipt, type StudioCommand, type StudioAssetReconstructReceipt,type StudioImportRevisionReceipt} from '../../../packages/protocol/src/studio.js';
@@ -329,6 +330,9 @@ export function createStudioImportStagingController(config: StudioImportStagingC
           commandIds.push(queued.id);
           const deadline = Math.min(expires, now() + STUDIO_STAGING_LIMITS.packetDeadlineMs);
           phase='packet-receipt';
+          // Queue the next original packet before giving pending plugin polls an
+          // I/O turn. The original receipt and authority guards run after it.
+          await yieldToPluginIo();
           while (true) {
             boundary();
             const command = studio.command(queued.id);
