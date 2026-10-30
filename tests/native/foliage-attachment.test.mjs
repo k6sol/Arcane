@@ -30,10 +30,22 @@ function originalTextures(bytes) {
       '        painted = [np.array(p) for p in points]',
       '        if number == 0:',
       '            painted[0] = np.array((width * .5, 2.0))',
-      '        canvas.twig(painted, [w * (1 - .55 * k / (len(points) - 1)) for k in range(len(points))], bark)',
+      '        widths = [w * (1 - .55 * k / (len(points) - 1)) for k in range(len(points))]',
+      '        if dense and number == 0:',
+      '            # Only the basal raster footprint needs this small floor: bilinear',
+      '            # sampling at the declared UV root must remain opaque. All later',
+      '            # stations retain the scaled twig radius (no broad painted stems).',
+      '            widths[0] = max(widths[0], 1.25)',
+      '        canvas.twig(painted, widths, bark)',
     ], [
-      '    for points, w in shoots:',
-      '        canvas.twig([np.array(p) for p in points], [w * (1 - .55 * k / (len(points) - 1)) for k in range(len(points))], bark)',
+      '    for number, (points, w) in enumerate(shoots):',
+      '        widths = [w * (1 - .55 * k / (len(points) - 1)) for k in range(len(points))]',
+      '        if dense and number == 0:',
+      '            # Only the basal raster footprint needs this small floor: bilinear',
+      '            # sampling at the declared UV root must remain opaque. All later',
+      '            # stations retain the scaled twig radius (no broad painted stems).',
+      '            widths[0] = max(widths[0], 1.25)',
+      '        canvas.twig([np.array(p) for p in points], widths, bark)',
     ]],
     [[
       '        # Do not alter points: their arc length controls seeded needle counts.',
@@ -47,15 +59,15 @@ function originalTextures(bytes) {
     text = text.replace(fragment, before.join(newline));
   }
   const original = Buffer.from(text, 'utf8');
-  assert.ok(['d0f0f08795e14431e9609007ebe78bb2f6654a45d51df595cc0932380a45dc89',
-    '4c61f58d6281181bfcba3d1391de03b9cf90baf4c4aaa18976e00d2891eec187'].includes(sha(original)), 'Complete original module must match its reviewed LF/CRLF pin.');
+  assert.ok(['b869dc8be0f63281c3ca41c87e0acd775a08b47b3f623639fa0358c975bbd6e3',
+    '797ea1d251d1b936b0c3d700724eb7a44fd857613c0e13b020005bb2d79e26f4'].includes(sha(original)), 'Complete original module must match its reviewed LF/CRLF pin.');
   return original;
 }
 
 test('reviewed foliage baseline preserves current layout and refuses unrelated source edits', async () => {
   const text = (await readRegularFile(join(repository, 'workers/blender/textures.py'), 512 * 1024)).toString('utf8').replaceAll('\r\n', '\n');
-  for (const [source, expected] of [[text, 'd0f0f08795e14431e9609007ebe78bb2f6654a45d51df595cc0932380a45dc89'],
-    [text.replaceAll('\n', '\r\n'), '4c61f58d6281181bfcba3d1391de03b9cf90baf4c4aaa18976e00d2891eec187']]) {
+  for (const [source, expected] of [[text, 'b869dc8be0f63281c3ca41c87e0acd775a08b47b3f623639fa0358c975bbd6e3'],
+    [text.replaceAll('\n', '\r\n'), '797ea1d251d1b936b0c3d700724eb7a44fd857613c0e13b020005bb2d79e26f4']]) {
     const baseline = originalTextures(Buffer.from(source));
     assert.equal(sha(baseline), expected);
     assert.ok(baseline.toString('utf8').includes('terminal = 2 if number == 0 else 1'));

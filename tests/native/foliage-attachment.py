@@ -188,8 +188,8 @@ def alpha_probes(directory, args, failures):
     if baseline_path.resolve(strict=True).parent != directory or baseline_path.is_symlink():
         raise RuntimeError("Original control is outside owned native data")
     # Complete current-layout module with only the two basal-paint edits reversed.
-    if args.baseline_sha256 not in ("d0f0f08795e14431e9609007ebe78bb2f6654a45d51df595cc0932380a45dc89",
-                                  "4c61f58d6281181bfcba3d1391de03b9cf90baf4c4aaa18976e00d2891eec187"):
+    if args.baseline_sha256 not in ("b869dc8be0f63281c3ca41c87e0acd775a08b47b3f623639fa0358c975bbd6e3",
+                                  "797ea1d251d1b936b0c3d700724eb7a44fd857613c0e13b020005bb2d79e26f4"):
         raise RuntimeError("Unreviewed full original control")
     B = load_checked_module("arcane_original_textures", baseline_path, args.baseline_sha256)
     load_checked_module("arcane_checked_audit", SOURCE.with_name("audit.py"), args.audit_sha256)

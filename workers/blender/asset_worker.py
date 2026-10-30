@@ -90,6 +90,8 @@ def failure_report(error):
     elif text in ["Foliage has no emitted wood skin", "Foliage has no emitted wood skin at its planned root",
                   "Foliage root moved outside its emitted branch skin"]:
         code = "FOLIAGE_ATTACHMENT"
+    elif text in ["Invalid trusted oak leaf scale", "Oak leaf atlas density exceeds its trusted bound"]:
+        code = "FOLIAGE_SCALE"
     elif text == "Saved scene failed reopen validation":
         code = "SCENE_REOPEN"
     elif text.endswith(" export round trip failed"):

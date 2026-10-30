@@ -83,6 +83,10 @@ test('malformed and arbitrary worker failures fall back to stage plus observed e
   assert.equal(attachment.diagnostic?.reasonCode, 'FOLIAGE_ATTACHMENT');
   assert.match(attachment.message, /final emitted branch surface/);
   assert.deepEqual(decodeAssetJobError({ code: attachment.code, message: attachment.message, diagnostic: attachment.diagnostic }).diagnostic, attachment.diagnostic);
+  const scale = workerFailure(output({ schemaVersion: 1, stage: 'texture-authoring', reasonCode: 'FOLIAGE_SCALE', exceptionType: 'ValueError' }), 'generate');
+  assert.equal(scale.diagnostic?.reasonCode, 'FOLIAGE_SCALE'); assert.equal(scale.diagnostic?.stage, 'texture-authoring');
+  assert.match(scale.message, /foliage texture scale or density/); assert.ok(!JSON.stringify(scale).includes(secret));
+  assert.deepEqual(decodeAssetJobError({ code: scale.code, message: scale.message, diagnostic: scale.diagnostic }).diagnostic, scale.diagnostic);
 });
 
 test('journal decoder accepts legacy errors and rejects forged diagnostic text, paths and unbounded counters', () => {

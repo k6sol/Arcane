@@ -43,6 +43,8 @@ class WorkerFailureTests(unittest.TestCase):
         for reason in ["Foliage has no emitted wood skin", "Foliage has no emitted wood skin at its planned root",
                        "Foliage root moved outside its emitted branch skin"]:
             self.assertEqual(self.report(ValueError(reason))["reasonCode"], "FOLIAGE_ATTACHMENT")
+        for reason in ["Invalid trusted oak leaf scale", "Oak leaf atlas density exceeds its trusted bound"]:
+            self.assertEqual(self.report(ValueError(reason))["reasonCode"], "FOLIAGE_SCALE")
         self.assertEqual(self.report(ValueError("Review render is empty, uniform or nonfinite"))["reasonCode"], "RENDER_CONTENT")
 
     def test_only_written_audit_is_referenced_and_counters_are_retained(self):
