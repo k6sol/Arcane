@@ -14,6 +14,7 @@ import { proceduralInput, proceduralStartBody, registerProceduralTools, register
 import { ARCANE_NATIVE_TOOL_NAMES, ARCANE_TOOL_NAMES, ARCANE_TASK_INSTRUCTIONS } from '../../packages/protocol/src/arcane-tools.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { DaemonClient } from '../../apps/mcp/src/daemon-client.js';
+import { BridgeError } from '../../apps/mcp/src/daemon-client.js';
 
 const code = (expected: string) => (e: unknown): boolean => e instanceof AssetError && e.code === expected;
 const tree = (extra: Record<string, unknown> = {}) => normalizeRequest({ template: 'procedural', name: 'oak-tree', procedural: { kind: 'tree', species: 'oak', ...extra } });
@@ -221,4 +222,38 @@ test('placement reports its missing reconstruction before session lookup or muta
     assert.deepEqual(JSON.parse((result.content as { type: string; text: string }[])[0]!.text), data);
   }
   assert.equal(sessionReads, 0); assert.equal(mutations, 0);
+});
+
+test('structure preview reads only the exact retained job image and never generates a substitute', async t => {
+  const jobId = '11111111-1111-4111-8111-111111111111', reads: { jobId: string; path: string }[] = [];
+  let unavailable = false, starts = 0;
+  const fake = { assetAudience: 'native-session', redact: (v: unknown) => v,
+    assetsPreview: async (id: string, path: string) => {
+      reads.push({ jobId: id, path });
+      if (unavailable) throw new BridgeError('NOT_FOUND', 'No retained structure preview for this job.');
+      return png();
+    },
+    assetsManifest: async () => { throw new BridgeError('NOT_FOUND', 'No spec review.'); },
+    assetsStart: async () => { starts++; throw new Error('Preview must not generate'); },
+  };
+  const server = new McpServer({ name: 'fixture', version: '0' }); registerProceduralTools(server, fake as unknown as DaemonClient);
+  const [a, b] = InMemoryTransport.createLinkedPair(); const client = new Client({ name: 'c', version: '0' });
+  t.after(async () => { await client.close(); await server.close(); });
+  await server.connect(a); await client.connect(b);
+  const result = await client.callTool({ name: 'assets_preview', arguments: { jobId, view: 'structure' } });
+  assert.equal(result.isError, undefined);
+  assert.deepEqual(reads, [{ jobId, path: 'preview-structure.png' }]);
+  const summary = result.structuredContent as { jobId: string; previews: { path: string; bytes: number; sha256: string }[] };
+  assert.equal(summary.jobId, jobId);
+  assert.deepEqual(summary.previews, [{ path: 'preview-structure.png', bytes: png().length, sha256: sha256(png()) }]);
+  assert.ok(Array.isArray(result.content));
+  assert.equal(result.content.filter(block => block.type === 'image').length, 1);
+  unavailable = true;
+  const missing = await client.callTool({ name: 'assets_preview', arguments: { jobId, view: 'structure' } });
+  assert.equal(missing.isError, true);
+  assert.equal((missing.structuredContent as { error: { code: string } }).error.code, 'NOT_FOUND');
+  assert.deepEqual(reads, [{ jobId, path: 'preview-structure.png' }, { jobId, path: 'preview-structure.png' }]);
+  const malformed = await client.callTool({ name: 'assets_preview', arguments: { jobId, view: '../structure' } });
+  assert.equal(malformed.isError, true); assert.equal(reads.length, 2);
+  assert.equal(starts, 0);
 });

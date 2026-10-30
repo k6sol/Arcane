@@ -73,6 +73,14 @@ export interface RenderMetrics {
   path: string; width: number; height: number; finitePixels: boolean;
   minLuminance: number; maxLuminance: number; meanLuminance: number; standardDeviation: number;
 }
+/** Same-job diagnostic views of the finalized natural-tree bark; no approval or attachment proof. */
+export interface TreeStructureReview {
+  schemaVersion: 1;
+  path: 'preview-structure.png';
+  requestSha256: string;
+  sourceObjects: [{ sourceKey: 'bark'; sourceObjectId: string; geometrySha256: string }];
+  views: ['front', 'side', 'oblique', 'roots'];
+}
 export interface ExportMetrics { sockets?: SocketEvidence[]; path: string; objects: number; triangles: number; materials: number; finitePositions: boolean }
 export interface AssetAudit {
   schemaVersion: 1; template: AssetTemplate; meshes: MeshMetrics[];
@@ -83,6 +91,8 @@ export interface AssetAudit {
   assembly?: AssemblyEvidence;
   /** Optional for old jobs. Import preparation requires this producer evidence. */
   studioImport?: WorkerStudioImportEvidence;
+  /** Optional for retained jobs; current natural-tree generation must emit the bound third preview. */
+  treeStructure?: TreeStructureReview;
   savedSceneReopened: boolean; errors: string[]; warnings: string[];
 }
 /** Emitted by the bundled worker from actual exported GLB nodes, never host-guessed names.

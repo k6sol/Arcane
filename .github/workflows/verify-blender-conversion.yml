@@ -12,6 +12,7 @@ on:
       - 'scripts/blender-test-runtime.py'
       - 'scripts/compile-product.mjs'
       - 'tests/native/**'
+      - 'tests/unit/tree_structure_review_test.py'
       - 'tests/unit/asset-worker-identity-windows.test.ts'
       - 'package.json'
       - 'package-lock.json'
@@ -27,6 +28,7 @@ on:
       - 'scripts/blender-test-runtime.py'
       - 'scripts/compile-product.mjs'
       - 'tests/native/**'
+      - 'tests/unit/tree_structure_review_test.py'
       - 'tests/unit/asset-worker-identity-windows.test.ts'
       - 'package.json'
       - 'package-lock.json'
@@ -87,6 +89,11 @@ jobs:
           PYTHONDONTWRITEBYTECODE: '1'
           PYTHONUTF8: '1'
         run: python tests/native/conversion_fidelity_policy_test.py
+      - name: Verify same-job tree review identity and state restoration
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+          PYTHONUTF8: '1'
+        run: python tests/unit/tree_structure_review_test.py
       - name: Acquire and verify the pinned official Blender runtime
         env:
           PYTHONDONTWRITEBYTECODE: '1'
@@ -101,6 +108,21 @@ jobs:
       - name: Verify actual current boulder and retain native review views
         id: native-rock
         run: node --test --test-concurrency=1 tests/native/rock-quality.test.mjs
+      - name: Verify original tree structure views and exact-source reopen
+        id: native-tree
+        run: node --test --test-concurrency=1 tests/native/tree-structure.test.mjs
+      - name: Retain original tree structure evidence
+        if: ${{ always() && steps.native-tree.outcome != 'skipped' && steps.native-tree.outcome != '' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: arcane-tree-structure-${{ matrix.os }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            runtime/ci-tree-structure-artifacts/tree-structure.json
+            runtime/ci-tree-structure-artifacts/preview-hero.png
+            runtime/ci-tree-structure-artifacts/preview-side.png
+            runtime/ci-tree-structure-artifacts/preview-structure.png
+          if-no-files-found: error
+          retention-days: 7
       - name: Retain bounded native conversion evidence
         if: ${{ always() && steps.native-conversion.outcome != 'skipped' && steps.native-conversion.outcome != '' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

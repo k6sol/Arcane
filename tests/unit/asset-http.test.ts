@@ -187,6 +187,9 @@ test('manifest and raw PNG routes use verified indexed job identities and manife
   const preview = await h.call('/v1/assets/preview?jobId=' + f.jobId + '&path=preview-hero.png');
   assert.equal(preview.status, 200); assert.equal(preview.headers.get('content-type'), 'image/png'); assert.equal(preview.headers.get('cache-control'), 'no-store');
   assert.deepEqual(Buffer.from(await preview.arrayBuffer()), await readFile(join(f.directory, 'preview-hero.png')));
+  // Historical jobs without the optional structure artifact remain unavailable;
+  // a preview read must never generate a new model or weaken manifest membership.
+  assert.equal((await h.call('/v1/assets/preview?jobId=' + f.jobId + '&path=preview-structure.png')).status, 404);
   for (const path of ['../preview-hero.png', 'C:\\outside.png', 'asset.blend', 'manifest.json', 'preview-hero.png:stream', 'preview-other.png']) assert.equal((await h.call('/v1/assets/preview?jobId=' + f.jobId + '&path=' + encodeURIComponent(path))).status, 400);
   assert.equal((await fetch(h.origin + '/v1/assets/preview?jobId=' + f.jobId + '&path=preview-hero.png')).status, 401);
   assert.equal((await h.call('/v1/assets/manifest?jobId=' + randomUUID())).status, 404);

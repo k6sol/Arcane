@@ -1,10 +1,10 @@
-import { isDeepStrictEqual } from 'node:util';
+import { isDeepStrictEqual, types as utilTypes } from 'node:util';
 import { jsonSnapshot, normalizeRecipe, preflightRecipe, preflightPart, checkSockets, CUSTOM_REQUEST_BYTES } from './recipe.js';
 import { inflateSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
 import { AssetError } from './types.js';
 import { normalizeProcedural, proceduralColor, proceduralDefaultBudget, proceduralMinimumTriangles, proceduralRenderSourceKeys, proceduralSize, proceduralSurfaceMaterials, proceduralSurfacePattern, PROCEDURAL_LIMITS, PROCEDURAL_SURFACE_RESOLUTION } from './procedural.js';
-import type { AssemblyMaterial, AssetAudit, AssetManifest, AssetRequest } from './types.js';
+import type { AssemblyMaterial, AssetAudit, AssetManifest, AssetRequest, TreeStructureReview } from './types.js';
 import { assetName, artifactPath, regularFile, readRegularFile } from './paths.js';
 import { decodeMaterialPng } from './material-png.js';
 import { MODEL_WORKER_SCRIPTS } from './model-spec.js';
@@ -60,7 +60,47 @@ export async function readJson(path: string, max = 1024 * 1024): Promise<unknown
 }
 export const sha256 = (bytes: Uint8Array): string => createHash('sha256').update(bytes).digest('hex');
 
-export function validateAudit(value: unknown, request: AssetRequest, manifestVersion: AssetManifest['schemaVersion'] = 2): AssetAudit {
+export const TREE_STRUCTURE_WORKER_SCRIPTS: readonly string[] = ['tree_structure_review.py'];
+export function isNaturalTreeRequest(request: AssetRequest): boolean {
+  return request.template === 'procedural' && request.procedural?.kind === 'tree' && request.procedural.finish === 'natural';
+}
+function treeStructureRecord(value: unknown, keys: readonly string[]): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || utilTypes.isProxy(value) ||
+      ![Object.prototype, null].includes(Object.getPrototypeOf(value))) throw new AssetError('RENDER', 'Tree structure evidence requires plain data.');
+  const descriptors = Object.getOwnPropertyDescriptors(value), ownKeys = Reflect.ownKeys(value);
+  if (ownKeys.length !== keys.length || ownKeys.some(key => typeof key !== 'string' || !keys.includes(key)) ||
+      keys.some(key => !Object.hasOwn(descriptors, key) || !descriptors[key]!.enumerable || !('value' in descriptors[key]!)))
+    throw new AssetError('RENDER', 'Tree structure evidence has unsupported or missing fields.');
+  return Object.fromEntries(keys.map(key => [key, descriptors[key]!.value]));
+}
+function treeStructureArray(value: unknown, count: number): unknown[] {
+  if (!Array.isArray(value) || utilTypes.isProxy(value) || Object.getPrototypeOf(value) !== Array.prototype || value.length !== count)
+    throw new AssetError('RENDER', 'Tree structure evidence has invalid fixed membership.');
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  if (Reflect.ownKeys(value).length !== count + 1 || Array.from({ length: count }, (_, index) => String(index)).some(key =>
+      !Object.hasOwn(descriptors, key) || !descriptors[key]!.enumerable || !('value' in descriptors[key]!)))
+    throw new AssetError('RENDER', 'Tree structure arrays require exact data items.');
+  return Array.from({ length: count }, (_, index) => descriptors[String(index)]!.value);
+}
+/** Decode fixed producer metadata and bind it to the original request and finalized bark audit. */
+export function readTreeStructureReview(value: unknown, request: AssetRequest, meshes: readonly unknown[], expectedRequestSha256?: string): TreeStructureReview {
+  if (!isNaturalTreeRequest(request)) throw new AssetError('RENDER', 'Tree structure evidence is only supported for natural trees.');
+  const review = treeStructureRecord(value, ['schemaVersion', 'path', 'requestSha256', 'sourceObjects', 'views']);
+  const [rawSource] = treeStructureArray(review.sourceObjects, 1), source = treeStructureRecord(rawSource, ['sourceKey', 'sourceObjectId', 'geometrySha256']);
+  const views = treeStructureArray(review.views, 4), expectedViews = ['front', 'side', 'oblique', 'roots'];
+  const hash = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{64}(?![\s\S])/.test(value);
+  const sourceObjectId = 'arcane_' + sha256(Buffer.from(['arcane-semantic-v1', request.template, request.name, 'render', 'bark'].join('\0')));
+  const bark = meshes.map(mesh => record(mesh, 'tree structure source')).filter(mesh => mesh.role === 'render' && mesh.name === 'SM_' + request.name + '_bark');
+  if (review.schemaVersion !== 1 || review.path !== 'preview-structure.png' || !hash(review.requestSha256) ||
+      expectedRequestSha256 !== undefined && review.requestSha256 !== expectedRequestSha256 ||
+      source.sourceKey !== 'bark' || source.sourceObjectId !== sourceObjectId || !hash(source.geometrySha256) ||
+      bark.length !== 1 || bark[0]!.geometrySha256 !== source.geometrySha256 || views.some((view, index) => view !== expectedViews[index]))
+    throw new AssetError('RENDER', 'Tree structure source, request or fixed views differ from the audited tree.');
+  return { schemaVersion: 1, path: 'preview-structure.png', requestSha256: review.requestSha256,
+    sourceObjects: [{ sourceKey: 'bark', sourceObjectId, geometrySha256: source.geometrySha256 }], views: ['front', 'side', 'oblique', 'roots'] };
+}
+
+export function validateAudit(value: unknown, request: AssetRequest, manifestVersion: AssetManifest['schemaVersion'] = 2, expectedRequestSha256?: string): AssetAudit {
   const audit = record(value, 'asset audit');
   if (audit.schemaVersion !== 1 || audit.template !== request.template || audit.savedSceneReopened !== true || !Array.isArray(audit.errors) || audit.errors.length || !Array.isArray(audit.warnings)) throw new AssetError('MESH', 'Audit did not pass or saved scene was not reopened.');
   if (!Array.isArray(audit.meshes) || audit.meshes.length < 1 || audit.meshes.length > 128) throw new AssetError('MESH', 'Missing bounded mesh metrics.');
@@ -110,11 +150,16 @@ export function validateAudit(value: unknown, request: AssetRequest, manifestVer
     }
   }
   if (request.template === 'hero-prop' && (!totals.lod1Triangles || totals.lod1Triangles >= totals.renderTriangles)) throw new AssetError('MESH', 'Hero LOD must reduce geometry.');
-  if (!Array.isArray(audit.renders) || audit.renders.length !== 2) throw new AssetError('RENDER', 'Two review renders are required.');
+  const structureDescriptor = Object.getOwnPropertyDescriptor(audit, 'treeStructure');
+  if ('treeStructure' in audit && (!structureDescriptor || !structureDescriptor.enumerable || !('value' in structureDescriptor)))
+    throw new AssetError('RENDER', 'Tree structure evidence must be an own data field.');
+  const treeStructure = structureDescriptor ? readTreeStructureReview(structureDescriptor.value, request, audit.meshes, expectedRequestSha256) : undefined;
+  const renderPaths = ['preview-hero.png', 'preview-side.png', ...(treeStructure ? ['preview-structure.png'] : [])];
+  if (!Array.isArray(audit.renders) || audit.renders.length !== renderPaths.length) throw new AssetError('RENDER', 'Required review render membership differs.');
   const renderNames = new Set<string>();
   for (const raw of audit.renders) {
     const r = record(raw, 'render');
-    if (!['preview-hero.png', 'preview-side.png'].includes(String(r.path)) || r.width !== request.renderResolution || r.height !== request.renderResolution || r.finitePixels !== true) throw new AssetError('RENDER', 'Invalid review render metrics.');
+    if (!renderPaths.includes(String(r.path)) || r.width !== request.renderResolution || r.height !== request.renderResolution || r.finitePixels !== true) throw new AssetError('RENDER', 'Invalid review render metrics.');
     if (renderNames.has(String(r.path))) throw new AssetError('RENDER', 'Duplicate review render.'); renderNames.add(String(r.path));
     for (const field of ['minLuminance', 'maxLuminance', 'meanLuminance', 'standardDeviation']) if (typeof r[field] !== 'number' || !Number.isFinite(r[field])) throw new AssetError('RENDER', 'Nonfinite render measurements.');
     if (Number(r.maxLuminance) - Number(r.minLuminance) < 0.05 || Number(r.standardDeviation) < 0.005) throw new AssetError('RENDER', 'Review render is uniform or empty.');
@@ -378,7 +423,7 @@ export function usesMaterialLibrary(request: AssetRequest): boolean {
 export function workerScripts(request: AssetRequest): string[] {
   return ['asset_worker.py', 'audit.py', 'probe.py', ...(request.recipe ? ['assembly.py'] : []), ...(request.procedural ? ['procedural.py'] : []), ...(request.procedural?.variant ? ['variation.py'] : []),
     ...(request.recipe?.materials.some(material => material.surface) || request.procedural?.finish === 'natural' ? ['textures.py'] : []),
-    ...(request.procedural?.finish === 'natural' || request.procedural?.kind === 'spec' ? UV_WORKER_SCRIPTS : []), ...(request.procedural?.kind === 'spec' ? MODEL_WORKER_SCRIPTS : []),
+    ...(request.procedural?.finish === 'natural' || request.procedural?.kind === 'spec' ? UV_WORKER_SCRIPTS : []), ...(isNaturalTreeRequest(request) ? TREE_STRUCTURE_WORKER_SCRIPTS : []), ...(request.procedural?.kind === 'spec' ? MODEL_WORKER_SCRIPTS : []),
     ...(usesMaterialLibrary(request) ? MATERIAL_WORKER_SCRIPTS : [])];
 }
 function validateGeneratedSurface(value: unknown, wanted: AssemblyMaterial, pattern?: string): void {
@@ -469,7 +514,7 @@ export async function validateManifestFiles(directory: string, value: unknown): 
   if (!Array.isArray(m.limitations) || m.limitations.length > 32 || m.limitations.some(line => typeof line !== 'string' || line.length > 2048)) throw new AssetError('MANIFEST', 'Invalid limitations.');
   const request = normalizeRequest(m.request), audit = validateAudit(m.validation, request, m.schemaVersion);
   if (!Array.isArray(m.artifacts) || m.artifacts.length < 10 || m.artifacts.length > 64) throw new AssetError('MANIFEST', 'Invalid artifact list.');
-  const roles: Record<string, string> = { 'asset.blend': 'scene', 'blockout.blend': 'checkpoint', 'asset.glb': 'export', 'asset.fbx': 'export', 'collision.glb': 'export', 'asset-lod1.glb': 'export', 'preview-hero.png': 'preview', 'preview-side.png': 'preview', 'audit.json': 'audit', 'request.json': 'request', 'asset_worker.py': 'worker', 'audit.py': 'worker', 'probe.py': 'worker', 'assembly.py': 'worker', 'procedural.py': 'worker', ...Object.fromEntries(MODEL_WORKER_SCRIPTS.map(name => [name, 'worker'])), 'variation.py': 'worker', 'textures.py': 'worker', ...Object.fromEntries([...UV_WORKER_SCRIPTS, ...MATERIAL_WORKER_SCRIPTS].map(name => [name, 'worker'])), 'input.json': 'request', 'assembly.json': 'audit' };
+  const roles: Record<string, string> = { 'asset.blend': 'scene', 'blockout.blend': 'checkpoint', 'asset.glb': 'export', 'asset.fbx': 'export', 'collision.glb': 'export', 'asset-lod1.glb': 'export', 'preview-hero.png': 'preview', 'preview-side.png': 'preview', ...(audit.treeStructure ? { 'preview-structure.png': 'preview', ...Object.fromEntries(TREE_STRUCTURE_WORKER_SCRIPTS.map(name => [name, 'worker'])) } : {}), 'audit.json': 'audit', 'request.json': 'request', 'asset_worker.py': 'worker', 'audit.py': 'worker', 'probe.py': 'worker', 'assembly.py': 'worker', 'procedural.py': 'worker', ...Object.fromEntries(MODEL_WORKER_SCRIPTS.map(name => [name, 'worker'])), 'variation.py': 'worker', 'textures.py': 'worker', ...Object.fromEntries([...UV_WORKER_SCRIPTS, ...MATERIAL_WORKER_SCRIPTS].map(name => [name, 'worker'])), 'input.json': 'request', 'assembly.json': 'audit' };
   if (typeof m.createdAt !== 'string' || !Number.isFinite(Date.parse(m.createdAt))) throw new AssetError('MANIFEST', 'Invalid manifest timestamp.');
   const names = new Set<string>(), hashes = new Map<string, string>();
   let totalBytes = 0;
@@ -496,8 +541,14 @@ export async function validateManifestFiles(directory: string, value: unknown): 
   for (const required of ['asset.blend', 'blockout.blend', 'asset.glb', 'asset.fbx', 'collision.glb', 'preview-hero.png', 'preview-side.png', 'audit.json', 'request.json', 'asset_worker.py', 'audit.py', 'probe.py', ...(audit.totals.lod1Triangles ? ['asset-lod1.glb'] : []), ...(request.recipe ? ['assembly.py', 'assembly.json', 'input.json'] : []), ...(request.procedural ? ['procedural.py', 'input.json'] : []), ...(request.procedural?.variant ? ['variation.py'] : []), ...(request.procedural?.kind === 'spec' ? MODEL_WORKER_SCRIPTS : []), ...(usesMaterialLibrary(request) ? MATERIAL_WORKER_SCRIPTS : [])]) {
     if (!names.has(required)) throw new AssetError('MANIFEST', 'Required artifact is missing: ' + required);
   }
-  // Natural assets generated before the UV engine bundled no uv_*.py modules.
-  if (sha256(Buffer.from(workerScripts(request).filter(name => !UV_WORKER_SCRIPTS.includes(name) || names.has(name)).map(name => hashes.get(name)).join('\n'))) !== m.templateSha256) throw new AssetError('HASH', 'Worker template digest does not match.');
+  if (audit.treeStructure) {
+    if (audit.treeStructure.requestSha256 !== hashes.get('request.json')) throw new AssetError('MANIFEST', 'Tree structure request hash differs from the original request artifact.');
+    for (const required of ['preview-structure.png', ...workerScripts(request)]) {
+      if (!names.has(required)) throw new AssetError('MANIFEST', 'Required tree structure artifact is missing: ' + required);
+    }
+  }
+  // Historical jobs may predate the UV engine or the same-job tree structure renderer.
+  if (sha256(Buffer.from(workerScripts(request).filter(name => ![...UV_WORKER_SCRIPTS, ...TREE_STRUCTURE_WORKER_SCRIPTS].includes(name) || names.has(name)).map(name => hashes.get(name)).join('\n'))) !== m.templateSha256) throw new AssetError('HASH', 'Worker template digest does not match.');
   if (JSON.stringify(normalizeRequest(await readJson(artifactPath(directory, 'request.json')))) !== JSON.stringify(request) || JSON.stringify(await readJson(artifactPath(directory, 'audit.json'))) !== JSON.stringify(m.validation)) throw new AssetError('MANIFEST', 'Manifest request/audit differs from the original evidence.');
   if (m.sourceRequestSha256 !== undefined || request.recipe || request.procedural) {
     if (m.sourceRequestSha256 !== hashes.get('input.json') || !isDeepStrictEqual(normalizeRequest(await readJson(artifactPath(directory, 'input.json'), CUSTOM_REQUEST_BYTES)), request)) throw new AssetError('MANIFEST', 'Original input provenance differs from normalized request.');

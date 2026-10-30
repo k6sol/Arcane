@@ -445,10 +445,10 @@ export class DaemonClient {
     }finally{deadline.dispose();}
   }
 
-  /** Read one of the two manifest-approved review PNGs (preview-hero/preview-side) as bytes. */
-  async assetsPreview(jobId: string, path: 'preview-hero.png' | 'preview-side.png', options: WaitOptions = {}): Promise<Buffer> {
+  /** Read one fixed manifest-approved review PNG as bytes; never generates missing views. */
+  async assetsPreview(jobId: string, path: 'preview-hero.png' | 'preview-side.png' | 'preview-structure.png', options: WaitOptions = {}): Promise<Buffer> {
     (this.assetAudience === 'native-session' ? nativeAssetJobId : assetJobId).parse(jobId);
-    if (path !== 'preview-hero.png' && path !== 'preview-side.png') throw new BridgeError('INPUT', 'Choose preview-hero.png or preview-side.png.');
+    if (path !== 'preview-hero.png' && path !== 'preview-side.png' && path !== 'preview-structure.png') throw new BridgeError('INPUT', 'Choose a fixed manifest review PNG.');
     const deadline = this.deadline(options);
     try {
       const route = (this.assetAudience === 'native-session' ? '/v1/assets/native/preview' : '/v1/assets/preview') + '?jobId=' + encodeURIComponent(jobId) + '&path=' + encodeURIComponent(path);

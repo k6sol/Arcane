@@ -18,8 +18,8 @@ test('procedural natural finish is controlled, canonical and preserves legacy re
     assert.equal(normalized.procedural!.finish, finish);
     assert.deepEqual(normalizeRequest(JSON.parse(JSON.stringify(normalized))), normalized);
   }
-  // Natural finish bundles the surface author and the general UV engine modules (workers/blender/uv).
-  assert.deepEqual(workerScripts(normalizeRequest(input('natural'))), [...workerScripts(legacy), 'textures.py', 'uv_engine.py', 'uv_metrics.py', 'uv_stage.py']);
+  // Natural trees also bundle the fixed same-job structure renderer after the UV engine.
+  assert.deepEqual(workerScripts(normalizeRequest(input('natural'))), [...workerScripts(legacy), 'textures.py', 'uv_engine.py', 'uv_metrics.py', 'uv_stage.py', 'tree_structure_review.py']);
   for (const finish of [null, 1, {}, 'photo', 'https://example.test/bark.png', 'import os']) assert.throws(() => normalizeRequest(input(finish)));
 });
 

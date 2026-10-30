@@ -1371,7 +1371,7 @@ export async function createAssetService(options: AssetServiceOptions) {
     async preview(jobId: unknown, path: unknown): Promise<Buffer> {
       return retainedRead([id(jobId)],async()=>{
       ensureOpen();
-      if (path !== 'preview-hero.png' && path !== 'preview-side.png') throw new ArcaneError('INPUT', 'Only the two fixed manifest previews may be read.');
+      if (path !== 'preview-hero.png' && path !== 'preview-side.png' && path !== 'preview-structure.png') throw new ArcaneError('INPUT', 'Only fixed manifest previews may be read.');
       const e = await loadEntry(jobId);
       const manifest = await this.manifest(e.job.jobId);
       const artifact = manifest.artifacts.find(a => a.path === path && a.role === 'preview');

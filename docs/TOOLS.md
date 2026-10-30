@@ -517,12 +517,12 @@ Write: generate an original bounded mesh in the local Blender worker from a bund
 
 **Safety:** Read-only
 
-Read: see the Blender review render(s) of a completed asset job as PNG (hero three-quarter and/or side view, ortho camera, studio lighting). Critique silhouette, proportions, density and colour, then regenerate with adjusted parameters or a new seed if needed. A render is not Studio evidence. Spec jobs: side is a 2x2 sheet (front, right, top, wireframe) and the result includes measured review metrics and hints.
+Read: see the Blender review render(s) of a completed asset job as PNG (hero three-quarter and/or side view, ortho camera, studio lighting). Critique silhouette, proportions, density and colour, then regenerate with adjusted parameters or a new seed if needed. A render is not Studio evidence. Spec jobs: side is a 2x2 sheet (front, right, top, wireframe) and the result includes measured review metrics and hints. Natural tree jobs with a retained structure view: request structure to inspect the exact original tree with leaves hidden. Older or unsupported jobs report unavailable; this never regenerates a model or grants approval.
 
 | Parameter | Type | Required | Limits |
 |---|---|---|---|
 | `jobId` | string | yes |  |
-| `view` | "hero" / "side" / "both" | no | default "hero" |
+| `view` | "hero" / "side" / "both" / "structure" | no | default "hero" |
 | `timeoutMs` | integer | no | 1000–60000, default 20000 |
 
 ## Bundled skills

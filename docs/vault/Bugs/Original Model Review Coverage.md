@@ -17,7 +17,7 @@ Required outcome: original asset work must have a real authoring capability appr
 
 The nature skill asks for leafless multi-angle, root and fork inspection, but production `workers/blender/asset_worker.py` renders hero and side only. The fixed `assets_preview` enum and daemon retained-read allowlist expose those two manifest-hashed images. Native foliage harness views do not certify the full generated tree's actual branch structure.
 
-Proposed next implementation:
+Implemented candidate:
 
 1. During the original tree job, render one bounded structure sheet from its finalized mesh objects. Do not create another job, rebuild the tree, change the seed, or replace it with a leaf-density-zero generation.
 2. Resolve exact expected source identities/roles, hide only the validated leaves render object, keep actual bark visible and collision/LOD/helpers hidden. Add no synthetic twigs or people.
@@ -25,6 +25,8 @@ Proposed next implementation:
 4. Retain the sheet and bounded metadata in the original manifest, tied to final request/geometry/export hashes. Serve through the existing retained-read/hash path and a fixed view enum. Old or unsupported jobs report unavailable; never regenerate their source implicitly.
 5. Verify genuine multi-angle/root/fork images plus negative membership, visibility, image/metadata-hash, old-job and size-limit cases. These views inform human review; they confer no approval, attachment proof or import authority.
 
-Status: source audit and implementation proposal only. No new review renderer, provider authoring capability or actual Studio acceptance was implemented by this audit.
+Status: same-job renderer, strict manifest/file binding, fixed preview API and desktop display are implemented as a candidate. All 644 product sources compile; 98 affected TypeScript cases, nine controlled worker cases, 40 skill cases and two generated-tool-document checks pass. Native rendering/color/framing and hosted acceptance remain pending. The provider authoring capability gap remains open. No Studio operation or artistic approval is established.
+
+New natural-tree production jobs must emit the structure view before publication. Historical jobs can remain two-view jobs; a read never regenerates them. Rendering failures retain the review-render stage and fixed structure filename in the existing finite diagnostic protocol. The nature skill requests the view without changing its experimental status or context budget. Hosted native verification now includes the real original tree pipeline and retained review images on both platforms.
 
 Related: [[Delivery/G05 Blender Quality]], [[Bugs/Original Asset Authoring]], [[Bugs/Forest Blender Workflow]].

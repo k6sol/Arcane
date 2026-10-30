@@ -73,6 +73,11 @@ test('malformed and arbitrary worker failures fall back to stage plus observed e
   assert.equal(native.diagnostic?.stage, 'export'); assert.match(native.message, /SIGTERM/);
   const located = workerFailure(output({ ...report, stage: 'export', reasonCode: 'BLENDER_API', exceptionType: 'AttributeError', artifactPath: 'asset.fbx' }), 'generate');
   assert.equal(located.diagnostic?.artifactPath, 'asset.fbx'); assert.match(located.message, /AttributeError; BLENDER_API/);
+  const structure = workerFailure(output({ ...report, stage: 'review-render', reasonCode: 'RENDER_CONTENT', artifactPath: 'preview-structure.png' }), 'generate');
+  assert.equal(structure.diagnostic?.stage, 'review-render');
+  assert.equal(structure.diagnostic?.reasonCode, 'RENDER_CONTENT');
+  assert.equal(structure.diagnostic?.artifactPath, 'preview-structure.png');
+  assert.deepEqual(decodeAssetJobError({ code: structure.code, message: structure.message, diagnostic: structure.diagnostic }).diagnostic, structure.diagnostic);
   assert.equal(workerFailure(output({ ...report, artifactPath: '../private.blend' }), 'export').diagnostic?.reasonCode, 'WORKER_EXIT');
 });
 

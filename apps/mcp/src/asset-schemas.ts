@@ -200,6 +200,10 @@ const mesh = z.object({ name: id, role: z.enum(['render', 'lod1', 'collision']),
 const exported = z.object({ path: artifactName, objects: count, triangles: count, materials: count, finitePositions: z.boolean(),
   sockets: z.array(socketEvidence).max(64).optional(),
 }).transform(({ sockets, ...value }) => ({ ...value, ...(sockets === undefined ? {} : { sockets }) }));
+const treeStructure = z.strictObject({ schemaVersion: z.literal(1), path: z.literal('preview-structure.png'), requestSha256: hash,
+  sourceObjects: z.tuple([z.strictObject({ sourceKey: z.literal('bark'), sourceObjectId: z.string().regex(/^arcane_[a-f0-9]{64}(?![\s\S])/), geometrySha256: hash })]),
+  views: z.tuple([z.literal('front'), z.literal('side'), z.literal('oblique'), z.literal('roots')]),
+});
 const audit = z.object({ schemaVersion: z.literal(1), template, meshes: z.array(mesh).min(1).max(128),
   totals: z.object({ renderTriangles: count, lod1Triangles: count, collisionTriangles: count, materials: count }),
   renders: z.array(z.object({ path: artifactName, width: count, height: count, finitePixels: z.boolean(), minLuminance: finite, maxLuminance: finite,
@@ -207,7 +211,9 @@ const audit = z.object({ schemaVersion: z.literal(1), template, meshes: z.array(
   savedSceneReopened: z.boolean(), errors: z.array(text).max(128), warnings: z.array(text).max(128), assembly: assemblyEvidence.optional(),
   // Model spec self-check metrics (workers/blender/grammar/model_review.py): bounded, informational.
   review: z.record(z.string(), z.unknown()).refine(value => Buffer.byteLength(JSON.stringify(value)) <= 64 * 1024, 'Review metrics exceed 64 KiB.').optional(),
-}).transform(({ assembly, review, ...value }) => ({ ...value, ...(assembly === undefined ? {} : { assembly }), ...(review === undefined ? {} : { review }) }));
+  treeStructure: treeStructure.optional(),
+}).transform(({ assembly, review, treeStructure, ...value }) => ({ ...value, ...(assembly === undefined ? {} : { assembly }), ...(review === undefined ? {} : { review }),
+  ...(treeStructure === undefined ? {} : { treeStructure }) }));
 const generatedAssetManifest: z.ZodType<AssetManifest> = z.object({
   schemaVersion: z.union([z.literal(1), z.literal(2)]), jobId: assetJobId, createdAt: id, request: assetRequest, runtime, templateSha256: hash,
   sourceRequestSha256: hash.optional(), assembly: assemblyEvidence.optional(),

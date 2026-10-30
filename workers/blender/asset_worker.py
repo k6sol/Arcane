@@ -467,6 +467,9 @@ def main():
     if len(request_bytes) > 256 * 1024 or hashlib.sha256(request_bytes).hexdigest() != args.request_sha256:
         raise ValueError("Request byte provenance gate failed")
     request = json.loads(request_bytes)
+    tree_review = None
+    if request.get("template") == "procedural" and request.get("procedural", {}).get("kind") == "tree" and request["procedural"].get("finish") == "natural":
+        import tree_structure_review as tree_review
     if request["template"] == "custom-assembly":
         request["_recipeSha256"] = args.recipe_sha256
         request["_estimatedTriangles"] = json.loads(args.estimated_triangles)
@@ -476,6 +479,12 @@ def main():
         bpy.ops.wm.open_mainfile(filepath=blender_path(directory / "asset.blend"), use_scripts=False)
         objects = [obj for obj in bpy.context.scene.objects if obj.type == "MESH" and obj.get("arcane_role") in ["render", "lod1", "collision"]]
         meshes, totals, errors = audit_scene(objects, request)
+        if tree_review is not None:
+            retained = tree_review.retained_structure(directory, args.request_sha256)
+            if retained is not None:
+                tree_review.enrich_tree_meshes(request, objects, meshes, semantic_id, bpy.context.evaluated_depsgraph_get())
+                if retained != tree_review.structure_metadata(request, [obj for obj in objects if obj.get("arcane_role") == "render"], meshes, args.request_sha256, semantic_id):
+                    raise ValueError("Tree structure retained audit changed")
         report = {"meshes": meshes, "totals": totals, "errors": errors}
         if request["template"] == "custom-assembly":
             report["assembly"] = assembly_evidence(request)
@@ -524,6 +533,8 @@ def main():
             from procedural import author_finish
         author_finish(request, directory, main_objects + lods)
     meshes, totals, errors = audit_scene(main_objects + lods + collision, request)
+    if tree_review is not None:
+        tree_review.enrich_tree_meshes(request, main_objects + lods + collision, meshes, semantic_id, bpy.context.evaluated_depsgraph_get())
     if errors:
         _failure_metrics = {"renderTriangles": totals["renderTriangles"], "triangleBudget": request["triangleBudget"],
                             "collisionTriangles": totals["collisionTriangles"], "errorCount": len(errors),
@@ -538,7 +549,7 @@ def main():
     if request["template"] == "procedural":
         # Large organic assets: keep albedo readable under the span-scaled preview lights.
         scene.view_settings.exposure = -1.4
-    renders, review = [], None
+    renders, review, tree_structure = [], None, None
     if request.get("procedural", {}).get("kind") == "spec":
         # Model spec self-check: hero render, 2x2 review sheet and measured review metrics.
         from model_build import review as spec_review
@@ -551,6 +562,15 @@ def main():
         scene.render.filepath = str(directory / name)
         bpy.ops.render.render(write_still=True)
         renders.append(render_metrics(directory / name))
+    if tree_review is not None:
+        event("review-render", "preview-structure.png")
+        metrics, tree_structure = tree_review.render_tree_structure(bpy, request, directory, camera, main_objects, meshes,
+                                                                   args.request_sha256, semantic_id, render_metrics)
+        renders.append(metrics)
+        checked, checked_totals, checked_errors = audit_scene(main_objects + lods + collision, request)
+        tree_review.enrich_tree_meshes(request, main_objects + lods + collision, checked, semantic_id, bpy.context.evaluated_depsgraph_get())
+        if checked != meshes or checked_totals != totals or checked_errors != errors:
+            raise ValueError("Tree structure source audit changed")
     event("scene-save", "asset.blend")
     bpy.ops.wm.save_as_mainfile(filepath=blender_path(directory / "asset.blend"), check_existing=False)
     event("export")
@@ -579,6 +599,8 @@ def main():
     bpy.ops.wm.open_mainfile(filepath=blender_path(directory / "asset.blend"), use_scripts=False)
     reopened = [obj for obj in bpy.context.scene.objects if obj.type == "MESH" and obj.get("arcane_role") in ["render", "lod1", "collision"]]
     again, again_totals, again_errors = audit_scene(reopened, request)
+    if tree_review is not None:
+        tree_review.enrich_tree_meshes(request, reopened, again, semantic_id, bpy.context.evaluated_depsgraph_get())
     if again_errors or again_totals != totals or again != meshes:
         raise ValueError("Saved scene failed reopen validation")
     report = {"schemaVersion": 1, "template": request["template"], "meshes": meshes, "totals": totals,
@@ -594,6 +616,8 @@ def main():
         write_json(directory / "assembly.json", report["assembly"])
     if review is not None:
         report["review"] = review
+    if tree_structure is not None:
+        report["treeStructure"] = tree_structure
     event("audit-write", "audit.json")
     write_json(directory / "audit.json", report)
     print("ARCANE_RESULT " + json.dumps({"audit": "audit.json"}), flush=True)

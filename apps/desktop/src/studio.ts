@@ -774,7 +774,7 @@ export class StudioApi {
   assetCancel(jobId: string) { return this.request<{ job: AssetJobRecord }>('/v1/assets/cancel', { jobId }); }
   assetManifest(jobId: string) { return this.request<{ manifest: AssetManifest }>('/v1/assets/manifest?jobId=' + encodeURIComponent(jobId)); }
   assetPreview(jobId: string, path: string) {
-    if (!['preview-hero.png', 'preview-side.png'].includes(path)) throw new StudioRequestError('Choose a fixed manifest preview.', 'rejected');
+    if (!['preview-hero.png', 'preview-side.png', 'preview-structure.png'].includes(path)) throw new StudioRequestError('Choose a fixed manifest preview.', 'rejected');
     return this.request<Blob>('/v1/assets/preview?jobId=' + encodeURIComponent(jobId) + '&path=' + encodeURIComponent(path), undefined, 'preview');
   }
   runs() { return this.request<{ runs: WorkRun[] }>('/v1/work/runs'); }
@@ -2172,7 +2172,7 @@ export class StudioWorkbench {
       this.text('asset-manifest', json(manifest));
       this.assetDownloads.show(manifest, job.jobId);
       const viewer = this.assetViewer.show(manifest, job.jobId, () => this.assetCurrent(ticket) && epoch === this.assetPreviewEpoch && this.assetJobId === job.jobId);
-      const previews = manifest.artifacts.filter(a => a.role === 'preview' && ['preview-hero.png', 'preview-side.png'].includes(a.path));
+      const previews = manifest.artifacts.filter(a => a.role === 'preview' && ['preview-hero.png', 'preview-side.png', 'preview-structure.png'].includes(a.path));
       const reads = await Promise.allSettled(previews.map(async artifact => {
         const blob = await this.api.assetPreview(job.jobId, artifact.path);
         if (!this.assetCurrent(ticket) || epoch !== this.assetPreviewEpoch || this.assetJobId !== job.jobId) return;
@@ -2183,8 +2183,9 @@ export class StudioWorkbench {
         const bitmap = await createImageBitmap(blob);
         try {
           if (!this.assetCurrent(ticket) || epoch !== this.assetPreviewEpoch || this.assetJobId !== job.jobId) return;
-          const figure = this.make('figure'), canvas = this.make('canvas'); canvas.width = bitmap.width; canvas.height = bitmap.height; canvas.setAttribute('role', 'img'); canvas.setAttribute('aria-label', artifact.path + ' for job ' + job.jobId); canvas.getContext('2d')!.drawImage(bitmap, 0, 0);
-          figure.append(canvas, this.make('figcaption', artifact.path + ' · SHA-256 verified')); this.el('asset-previews').append(figure);
+          const label = artifact.path === 'preview-structure.png' ? 'Tree structure: front, side, oblique and roots, with leaves hidden' : artifact.path;
+          const figure = this.make('figure'), canvas = this.make('canvas'); canvas.width = bitmap.width; canvas.height = bitmap.height; canvas.setAttribute('role', 'img'); canvas.setAttribute('aria-label', label + ' for job ' + job.jobId); canvas.getContext('2d')!.drawImage(bitmap, 0, 0);
+          figure.append(canvas, this.make('figcaption', label + ' · SHA-256 verified')); this.el('asset-previews').append(figure);
           const EventType = this.doc.defaultView?.CustomEvent;
           if (EventType) this.doc.dispatchEvent(new EventType<WorkspaceAssetActivity>(WORKSPACE_ASSET_ACTIVITY_EVENT, {detail:{jobId:job.jobId,state:'succeeded'},bubbles:false}));
         } finally { bitmap.close(); }

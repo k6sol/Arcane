@@ -69,7 +69,7 @@ export const proceduralInput = z.strictObject({
   renderSamples: z.number().int().min(4).max(64).optional().describe('Preview render samples (default 16). Use 4 with a smaller renderResolution for draft look development; UV, PBR and export checks still run.'),
   timeoutMs: wait(20_000),
 });
-export const previewInput = z.strictObject({ jobId: assetJobId, view: z.enum(['hero', 'side', 'both']).default('hero'), timeoutMs: wait(20_000) });
+export const previewInput = z.strictObject({ jobId: assetJobId, view: z.enum(['hero', 'side', 'both', 'structure']).default('hero'), timeoutMs: wait(20_000) });
 
 const n3 = z.tuple([n.min(-100000).max(100000), n.min(-100000).max(100000), n.min(-100000).max(100000)]);
 export const placeInput = z.strictObject({
@@ -92,7 +92,8 @@ const PROCEDURAL = 'Write: generate an original bounded mesh in the local Blende
   'Open the 3D preview for human Approve; agents cannot approve. Studio delivery (native sessions): assets_prepare_studio_import → assets_stage_studio_import → assets_reconstruct_studio_import → assets_place_studio_import. Never auto-retry; on timeout inspect assets_jobs.';
 const PREVIEW = 'Read: see the Blender review render(s) of a completed asset job as PNG (hero three-quarter and/or side view, ortho camera, studio lighting). ' +
   'Critique silhouette, proportions, density and colour, then regenerate with adjusted parameters or a new seed if needed. A render is not Studio evidence. ' +
-  'Spec jobs: side is a 2x2 sheet (front, right, top, wireframe) and the result includes measured review metrics and hints.';
+  'Spec jobs: side is a 2x2 sheet (front, right, top, wireframe) and the result includes measured review metrics and hints. ' +
+  'Natural tree jobs with a retained structure view: request structure to inspect the exact original tree with leaves hidden. Older or unsupported jobs report unavailable; this never regenerates a model or grants approval.';
 const PLACE = 'Write: turn the reconstructed meshes of this exact job (after assets_reconstruct_studio_import succeeded in the same Studio session) into MeshParts via AssetService:CreateMeshPartAsync, ' +
   'then adopt them like studio_asset_insert in one undo step: authored UV0 and bounded embedded PNG colour, tangent normal, roughness and metalness through SurfaceAppearance, plus flat material factors when no maps were authored; invisible collision proxy, ' +
   'anchored, fitted (maxSize) or true scale (1 m ≈ 3.57 studs), bottom-centre pivot, grounded, parented; returns a receipt (receipt_restore removes it). ' +
@@ -152,7 +153,8 @@ export function registerProceduralTools(server: McpServer, client: DaemonClient,
   server.registerTool<z.ZodRawShape, typeof preview>('assets_preview', { description: PREVIEW + scope, inputSchema: preview, annotations: READ }, async (input, extra) => {
     try {
       const a = input as z.output<typeof preview>;
-      const paths = a.view === 'both' ? ['preview-hero.png', 'preview-side.png'] as const : [a.view === 'side' ? 'preview-side.png' : 'preview-hero.png'] as const;
+      const paths = a.view === 'both' ? ['preview-hero.png', 'preview-side.png'] as const
+        : [a.view === 'structure' ? 'preview-structure.png' : a.view === 'side' ? 'preview-side.png' : 'preview-hero.png'] as const;
       const images: { path: string; bytes: Buffer }[] = [];
       for (const path of paths) images.push({ path, bytes: await client.assetsPreview(a.jobId, path, { timeoutMs: a.timeoutMs, signal: extra.signal }) });
       const total = images.reduce((sum, image) => sum + image.bytes.length, 0);

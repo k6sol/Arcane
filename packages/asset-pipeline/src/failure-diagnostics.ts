@@ -155,7 +155,7 @@ const REASONS: Record<string, string> = {
 };
 const METRICS = new Set(['renderTriangles', 'triangleBudget', 'collisionTriangles', 'invalidMeshes', 'errorCount']);
 const ARTIFACTS = new Set(['request.json', 'blockout.blend', 'asset.blend', 'asset.glb', 'asset.fbx', 'collision.glb',
-  'asset-lod1.glb', 'preview-hero.png', 'preview-side.png', 'audit.json', 'assembly.json']);
+  'asset-lod1.glb', 'preview-hero.png', 'preview-side.png', 'preview-structure.png', 'audit.json', 'assembly.json']);
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new AssetError('RECOVERY', 'Invalid failure diagnostic.');
   return value as Record<string, unknown>;

@@ -12,7 +12,7 @@ import { runBounded, workerEnvironment, type CommandOptions, type CommandResult,
 import { workerLaunchDirectory, workerFileArgument, workerDirectoryArgument } from './launch-paths.js';
 import { WorkerSupervision } from './worker-journal.js';
 import type { ProcessQueryHost, WorkerRole } from './worker-identity.js';
-import { MATERIAL_WORKER_SCRIPTS, normalizeRequest, readJson, record, sha256, usesMaterialLibrary, UV_WORKER_SCRIPTS, validateAudit, validateManifestFiles, workerScripts, workerSourcePath } from './validation.js';
+import { MATERIAL_WORKER_SCRIPTS, TREE_STRUCTURE_WORKER_SCRIPTS, isNaturalTreeRequest, normalizeRequest, readJson, record, sha256, usesMaterialLibrary, UV_WORKER_SCRIPTS, validateAudit, validateManifestFiles, workerScripts, workerSourcePath } from './validation.js';
 import { MODEL_WORKER_SCRIPTS } from './model-spec.js';
 import { AssetError } from './types.js';
 import { atomicAssetJson, AtomicJsonFailure } from './atomic-json.js';
@@ -29,7 +29,7 @@ export type { ConvertedGlbCreation, ConvertedGlbJob, ConvertedGlbJobMetadata } f
 export * from './types.js';
 export { discoverExecutables } from './discovery.js';
 export { normalizeRecipe, preflightRecipe, RECIPE_LIMITS, CUSTOM_REQUEST_BYTES } from './recipe.js';
-export { normalizeRequest } from './validation.js';
+export { normalizeRequest, readTreeStructureReview } from './validation.js';
 export { normalizeProcedural, PROCEDURAL_KINDS, PROCEDURAL_LIMITS, PROCEDURAL_PART_MATERIALS } from './procedural.js';
 
 // Two independent generation jobs per Node worker, including across pipeline instances.
@@ -98,9 +98,9 @@ async function atomicJson(directory: string, filename: string, value: unknown): 
   }
 }
 const COLLECTION_FILENAMES = new Set(['asset.blend', 'blockout.blend', 'asset.glb', 'asset.fbx', 'collision.glb', 'asset-lod1.glb',
-  'preview-hero.png', 'preview-side.png', 'audit.json', 'request.json', 'input.json', 'assembly.json',
+  'preview-hero.png', 'preview-side.png', 'preview-structure.png', 'audit.json', 'request.json', 'input.json', 'assembly.json',
   'source.glb', 'import-source.glb', 'parent-manifest.json', 'source-map.json', 'conversion-audit.json', ...GLB_CONVERSION_WORKERS,
-  'asset_worker.py', 'audit.py', 'probe.py', 'assembly.py', 'procedural.py', 'variation.py', 'textures.py', ...MODEL_WORKER_SCRIPTS, ...UV_WORKER_SCRIPTS, ...MATERIAL_WORKER_SCRIPTS]);
+  'asset_worker.py', 'audit.py', 'probe.py', 'assembly.py', 'procedural.py', 'variation.py', 'textures.py', ...MODEL_WORKER_SCRIPTS, ...UV_WORKER_SCRIPTS, ...TREE_STRUCTURE_WORKER_SCRIPTS, ...MATERIAL_WORKER_SCRIPTS]);
 /** Only host-selected inventory filenames may appear in collection errors. */
 async function withArtifactFile<T>(name: string, action: () => Promise<T>): Promise<T> {
   try { return await action(); }
@@ -278,10 +278,12 @@ export class AssetPipeline {
       if (process.exitCode !== 0) throw workerFailure(process, stage);
       if (resultLine(process.stdout).audit !== 'audit.json') throw new AssetError('WORKER_PROTOCOL', 'Worker did not return its audit artifact.');
       progress('host-validation'); remaining(end, signal);
-      const audit = await withArtifactFile('audit.json', async () => validateAudit(await readJson(artifactPath(directory, 'audit.json')), request));
+      const audit = await withArtifactFile('audit.json', async () => validateAudit(await readJson(artifactPath(directory, 'audit.json')), request, 2, sha256(Buffer.from(requestText))));
+      if (isNaturalTreeRequest(request) && !audit.treeStructure) throw new AssetError('RENDER', 'Current natural-tree generation requires its same-job structure review.');
       const artifacts: Artifact[] = [];
       const files: [string, Artifact['role']][] = [['asset.blend', 'scene'], ['blockout.blend', 'checkpoint'], ['asset.glb', 'export'], ['asset.fbx', 'export'], ['collision.glb', 'export'], ['preview-hero.png', 'preview'], ['preview-side.png', 'preview'], ['audit.json', 'audit'], ['request.json', 'request'], ['asset_worker.py', 'worker'], ['audit.py', 'worker'], ['probe.py', 'worker']];
       files.push(['input.json', 'request']);
+      if (audit.treeStructure) files.push(['preview-structure.png', 'preview'], ...TREE_STRUCTURE_WORKER_SCRIPTS.map(name => [name, 'worker'] as [string, Artifact['role']]));
       if (request.recipe) files.push(['assembly.py', 'worker'], ['assembly.json', 'audit']);
       if (request.recipe?.materials.some(material => material.surface) || request.procedural?.finish === 'natural') files.push(['textures.py', 'worker']);
       if (request.procedural) files.push(['procedural.py', 'worker']);
