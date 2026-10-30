@@ -916,6 +916,11 @@ export function createCodexService(options: CodexServiceOptions) {
     void promise.finally(() => usageReads.delete(promise)).catch(() => {}); return promise;
   }
   return { state, action, refreshUsage, proposals, taskPlan,
+    recordedHistory(threadId:unknown):CodexHistoryState|null {
+      if(closed)throw new CodexClientError('CLOSED','The recorded history reader is closed.');
+      if(!historyIdentifier.safeParse(threadId).success)throw new CodexClientError('HISTORY_INVALID','Invalid saved conversation identifier.');
+      return nativeHistory(threadId as string);
+    },
     authorizeBoundWork(actorId:string,binding:WorkTaskBinding){if(!tasks)throw new Error('Native work authority is unavailable.');tasks.authorizeBoundWork(actorId,binding);},
     playtestTasks:tasks?.playtests??null,
     attachPlaytestCancellation(port:StudioTestTaskCancellation){if(!tasks)throw new Error('Native task authority is unavailable.');tasks.attachCancellation(port);}, close(): Promise<void> {
@@ -951,6 +956,6 @@ export function createCodexService(options: CodexServiceOptions) {
   },fenceTaskAdmission(){generation++;tasks?.fence();} };
 }
 export type CodexService = Pick<ReturnType<typeof createCodexService>, 'state'|'action'|'close'> &
-  Partial<Pick<ReturnType<typeof createCodexService>, 'refreshUsage'|'proposals'|'taskPlan'|'authorizeBoundWork'|'playtestTasks'|'attachPlaytestCancellation'|'fenceTaskAdmission'>>;
+  Partial<Pick<ReturnType<typeof createCodexService>, 'recordedHistory'|'refreshUsage'|'proposals'|'taskPlan'|'authorizeBoundWork'|'playtestTasks'|'attachPlaytestCancellation'|'fenceTaskAdmission'>>;
 
 

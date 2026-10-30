@@ -68,7 +68,7 @@ async function discard(request: IncomingMessage,response: ServerResponse): Promi
       const supplied=request.headers.authorization?.startsWith('Bearer ')?request.headers.authorization.slice(7):'';
       if(!matches(supplied,controlToken))throw new RouteError(matches(supplied,agentToken)?'HUMAN_ONLY':'AUTH',matches(supplied,agentToken)?403:401);
       if(request.headers.origin&&request.headers.origin!==origin)throw new RouteError('ORIGIN',403);
-      if(url.search&&url.pathname!=='/v1/codex/task-plan')throw new RouteError('QUERY',400);
+      if(url.search&&!['/v1/codex/task-plan','/v1/codex/history'].includes(url.pathname))throw new RouteError('QUERY',400);
       if(url.pathname==='/v1/codex/task-plan'){
         if(request.method!=='GET')throw new RouteError('METHOD',405);
         if(!service.taskPlan)throw new RouteError('TASK_PLAN_UNAVAILABLE',404);
@@ -86,6 +86,12 @@ async function discard(request: IncomingMessage,response: ServerResponse): Promi
       }
       if(url.pathname==='/v1/codex/history'){
         if(request.method!=='GET')throw new RouteError('METHOD',405);
+        if(url.search){
+          if(url.search.length>1024||[...url.searchParams.keys()].length!==1||url.searchParams.getAll('threadId').length!==1||
+            !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(url.searchParams.get('threadId')!))throw new RouteError('QUERY',400);
+          if(!service.recordedHistory)throw new RouteError('HISTORY_UNAVAILABLE',404);
+          send(200,{nativeHistory:service.recordedHistory(url.searchParams.get('threadId')!)});return true;
+        }
         send(200,{nativeHistory:service.state().nativeHistory ?? null});return true;
       }
       if(url.pathname==='/v1/codex/usage'){

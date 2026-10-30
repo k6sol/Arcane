@@ -484,7 +484,7 @@ export class CodexChatApi {
   safe(value: string): string {
     return value.replaceAll(this.#token || '\0', '[REDACTED]').replace(/\barcane_local_v1_[0-9]+_[a-f0-9]{64}\b/g,'[REDACTED]').replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi,'Bearer [REDACTED]').replace(/\b(?:sk-|ghp_|github_pat_)[A-Za-z0-9_-]{8,}/g,'[REDACTED]').replace(/("?(?:accessToken|access_token|apiKey|api_key|password|secret)"?\s*[:=]\s*["']?)[^"',;\s]+/gi,'$1[REDACTED]').replace(/\x1b\[[0-?]*[ -/]*[@-~]/g,'').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\u202a-\u202e\u2066-\u2069]/g,'');
   }
-  async request(path: '/v1/codex/state' | '/v1/codex/action' | '/v1/codex/reference-turn' | '/v1/codex/usage' | '/v1/codex/proposals', input?: ChatAction|{connectionId:string}|TaskProposalRead, signal?: AbortSignal): Promise<unknown> {
+  async request(path: '/v1/codex/state' | '/v1/codex/action' | '/v1/codex/reference-turn' | '/v1/codex/usage' | '/v1/codex/proposals' | `/v1/codex/history?threadId=${string}`, input?: ChatAction|{connectionId:string}|TaskProposalRead, signal?: AbortSignal): Promise<unknown> {
     if (!/^[a-f0-9]{64}$/.test(this.#token)) throw new CodexHttpError('Open the launcher’s human control link.',false);
     const controller = new AbortController(), abort = () => controller.abort();
     signal?.addEventListener('abort',abort,{once:true}); if(signal?.aborted) controller.abort();
@@ -512,6 +512,12 @@ export class CodexChatApi {
     finally {clearTimeout(timer);signal?.removeEventListener('abort',abort);}
   }
   async state(signal?: AbortSignal) { const value=await this.request('/v1/codex/state',undefined,signal); if(!object(value))throw new Error('Missing native state envelope.');return readCodexState(value.state); }
+  async recordedHistory(threadId:string,signal?:AbortSignal):Promise<unknown> {
+    if(!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(threadId))throw new Error('Invalid saved conversation identifier.');
+    const value=await this.request(`/v1/codex/history?threadId=${encodeURIComponent(threadId)}`,undefined,signal);
+    if(!object(value)||Object.keys(value).length!==1||!Object.hasOwn(value,'nativeHistory'))throw new Error('Invalid saved conversation response.');
+    return value.nativeHistory;
+  }
   /** Display-only read of one exact owned task; it never starts or retries work. */
   async proposals(scope:TaskProposalRead,signal?:AbortSignal):Promise<TaskProposalView[]> {
     if(!uuid(scope.connectionId)||!uuid(scope.taskId)||!text(scope.threadId))throw new CodexHttpError('Choose the exact current task.',false);
@@ -2733,6 +2739,9 @@ export class CodexChat {
   private reviewedDraftTarget: ReviewedDraft | null = null;
   private tabs: ChatTabs | null = null;
   private tabTransition = false;
+  /** The original navigation owner; update waits for it rather than treating a read as a running reply. */
+  private navigation:Promise<boolean>|null=null;
+  private savedRecordingRead:AbortController|null=null;
   private preparingMessage = false;
   private queue:ChatQueueRow[]=[];
   private queueJournal=new ChatQueueJournal();
@@ -2768,6 +2777,7 @@ export class CodexChat {
    * still describes, that hidden project: its unsent draft stays in its own tab and the composer shows nothing.
    */
   private workspaceProject:string|null=null;
+  private workspaceRevision=0;
   private foreignDraft:{project:string;workspace:string;handoff:string}|null=null;
   private crossProvider:CrossProviderModels|null=null;
   private pendingSelection:{model:string;effort:string|null;at:number}|null=null;
@@ -2910,6 +2920,7 @@ export class CodexChat {
   yieldSurface(yielded:boolean):void {
     if(yielded===this.surfaceYielded)return;
     this.modelSourceRevision++;this.modelSourceOwnerRevision++;
+    this.savedRecordingRead?.abort();this.savedRecordingRead=null;
     if(yielded){this.pauseQueue('Paused while another provider is shown. Choose Send next to resume.');this.closePicker();this.flushDraft();this.pendingSelection=null;this.yieldedComposer=this.el<HTMLTextAreaElement>('codex-composer').value;this.surfaceYielded=true;}
     else {this.surfaceYielded=false;this.el<HTMLTextAreaElement>('codex-composer').value=this.yieldedComposer;this.yieldedComposer='';this.messageSignature='';this.pickerSignature='';this.selectionSignature='';}
     this.render();
@@ -2922,7 +2933,7 @@ export class CodexChat {
    */
   observeWorkspaceProject(path:string|null):void {
     const previous=this.workspaceProject;this.workspaceProject=path||null;
-    if(this.workspaceProject!==previous)this.modelSourceOwnerRevision++;
+    if(this.workspaceProject!==previous){this.modelSourceOwnerRevision++;this.workspaceRevision++;this.savedRecordingRead?.abort();this.savedRecordingRead=null;}
     if(this.stopped||!this.workspaceProject||this.workspaceProject===previous||!this.tabs)return;
     const project=this.state?.projectPath??null;
     if(this.foreignDraft){if([this.foreignDraft.project,this.foreignDraft.workspace].includes(this.workspaceProject)){this.releaseForeignDraft();this.render();this.publishState();}return;}
@@ -3041,7 +3052,11 @@ export class CodexChat {
   chatTabsView(): readonly ChatTabView[] { return this.safeView((this.tabs?.views()??[]).map(tab=>this.draftView(tab)!)); }
   async readyForRuntimeRecovery():Promise<void> { await this.queueJournal.ready();if((this.queue.length||this.queueEmptyCheckpoint)&&!this.queueJournal.available(this.queueProject()))throw new Error('Saved queued messages could not be read.');if(this.tabs?.persistenceStatus()==='native-error')throw new Error('Saved chat drafts could not be read.'); }
   async prepareForRuntimeRecovery():Promise<void> { await this.checkpointDrafts(false); }
-  async prepareForRestart():Promise<void> { await this.checkpointDrafts(true); }
+  async prepareForRestart():Promise<void> {
+    const navigation=this.navigation;
+    if(navigation)await navigation;
+    await this.checkpointDrafts(true);
+  }
   private finishedUnknownConnect(record:ChatActionRecord):boolean {
     return record.action==='connect'&&record.state==='unknown'&&record.finishedAt!==null&&record.errorCode!==null&&record.connectionId===null&&record.threadId===null&&record.turnId===null&&record.model===null&&record.effort===null;
   }
@@ -3054,6 +3069,7 @@ export class CodexChat {
   private async checkpointDrafts(checkActivity:boolean):Promise<void> {
     const restartProject=this.state?.projectPath,connectRequests=checkActivity?[...this.uncertain.keys()]:[],connectCheckpoint=connectRequests.length>0;
     const idle=()=>{const thread=this.snapshot()?.thread;
+      if(checkActivity&&this.navigation)throw new Error('Wait for the conversation to finish opening before restarting.');
       if(connectCheckpoint&&this.state?.projectPath!==restartProject)throw new Error('The workspace changed. Review your draft before restarting.');
       if(connectCheckpoint&&(this.uncertain.size!==connectRequests.length||connectRequests.some(id=>!this.uncertain.has(id))))throw new Error('The recorded connection changed. Review it before restarting.');
       if(checkActivity&&(this.pending.size||this.uncertain.size&&(!connectCheckpoint||!this.restartableConnectUncertainty())||this.state?.busy||this.state?.connecting||this.state?.closing||thread&&!IDLE.includes(thread.turnStatus)))throw new Error('Finish or stop the current chat before restarting.');
@@ -3227,6 +3243,7 @@ export class CodexChat {
     return this.snapshot()?.models.some(row=>row.model===model&&row.efforts.includes(effort))?{model,effort}:null;
   }
   private loadTabDraft():void {
+    this.savedRecordingRead?.abort();this.savedRecordingRead=null;
     const active=this.tabs?.active();if(!active)return;
     if(this.foreignDraft){this.setComposer('');return;}
     this.setComposer(active.draft);
@@ -3268,9 +3285,15 @@ export class CodexChat {
     const blocked=target.kind==='draft'?this.draftBlockReason():this.tabBlockReason();if(blocked){this.text('codex-notice',blocked);return false;}
     this.modelSourceOwnerRevision++;this.stashTabDraft();
     if(target.kind==='native'&&!this.tabs!.owns(target))return false;
-    if(target.kind==='native'&&!(this.state?.snapshot?.thread?.configured&&this.state.snapshot.thread.threadId===target.threadId&&this.state.snapshot.thread.sessionId===target.sessionId)) {
+    if(target.kind==='native'&&(this.tabs!.needsOpening(key)||!(this.state?.snapshot?.thread?.configured&&this.state.snapshot.thread.threadId===target.threadId&&this.state.snapshot.thread.sessionId===target.sessionId))) {
       if(!target.selection){this.text('codex-notice','This saved chat has no recorded model choice. Choose an exact reported model and effort before resuming it.');return false;}
+      // Selecting saved text is local presentation. The existing exact native binding
+      // still gates Send, model changes and tools while its connection catches up.
+      if(!this.tabs!.beginOpening(key))return false;
+      this.loadTabDraft();this.render();this.publishState();
+      this.loadSavedRecording(target);
       if(!await this.bindNativeChat('thread-resume',target.selection,target.threadId!))return false;
+      if(!this.tabs!.confirmOpening(key,this.state))return false;
     }
     if(this.state?.projectPath!==target.projectPath||target.kind==='native'&&!this.tabs!.owns(target))return false;
     this.flushDraft(); // Capture edits made while the explicit native resume was awaiting a receipt.
@@ -3318,18 +3341,41 @@ export class CodexChat {
     // A restored active tab still needs an explicit native resume after daemon/EXE restart.
     if(this.tabs.active()?.key===target.key&&!this.tabs.bound(this.state)) {
       if(!target.selection)return false;
-      const bound=await this.bindNativeChat('thread-resume',target.selection,target.threadId!);this.render();this.publishState();return bound;
+      if(!this.tabs.beginOpening(target.key))return false;
+      this.loadSavedRecording(target);
+      const bound=await this.bindNativeChat('thread-resume',target.selection,target.threadId!);
+      const confirmed=bound&&this.tabs.confirmOpening(target.key,this.state);this.render();this.publishState();return confirmed;
     }
     const selected=await this.selectChat(target.key);this.render();this.publishState();return selected;
+  }
+  private loadSavedRecording(target:ChatTabView):void {
+    if(target.kind!=='native'||!target.threadId||this.tabs?.recording(target)?.recorded)return;
+    this.savedRecordingRead?.abort();const controller=new AbortController();this.savedRecordingRead=controller;
+    const project=this.state?.projectPath,workspace=this.workspaceProject,lifetime=this.messageLifetime;
+    void this.api.recordedHistory(target.threadId,controller.signal).then(value=>{
+      const current=this.tabs?.active();
+      if(controller.signal.aborted||this.stopped||this.surfaceYielded||this.foreignDraft||this.workspaceProject!==workspace||this.messageLifetime!==lifetime||this.state?.projectPath!==project||
+        current?.key!==target.key||current.localId!==target.localId||current.threadId!==target.threadId||current.sessionId!==target.sessionId)return;
+      if(!object(value)||value.projectPath!==target.projectPath||value.threadId!==target.threadId||value.sessionId!==target.sessionId)return;
+      if(this.tabs?.cacheRecording(value)){this.render();this.publishState();}
+    }).catch(()=>{/* An unavailable cache never certifies readiness; the original native open retains its own outcome. */})
+      .finally(()=>{if(this.savedRecordingRead===controller)this.savedRecordingRead=null;});
   }
   async startCurrentChat():Promise<boolean> {
     if(!this.tabs||this.tabs.active()?.kind!=='draft'||!this.canStartThread())return false;
     this.stashTabDraft();const pair=this.localPair();return !!pair&&await this.bindNativeChat('thread-start',pair);
   }
-  private async bindNativeChat(action:'thread-start'|'thread-resume',selection:ChatSelection,threadId?:string):Promise<boolean> {
+  private bindNativeChat(action:'thread-start'|'thread-resume',selection:ChatSelection,threadId?:string):Promise<boolean> {
+    if(this.navigation)return Promise.resolve(false);
+    const navigation=this.bindNativeChatOwned(action,selection,threadId);
+    this.navigation=navigation;
+    void navigation.finally(()=>{if(this.navigation===navigation)this.navigation=null;}).catch(()=>{});
+    return navigation;
+  }
+  private async bindNativeChatOwned(action:'thread-start'|'thread-resume',selection:ChatSelection,threadId?:string):Promise<boolean> {
     if(!this.providerAllowsCodex()){this.text('codex-notice','Choose Codex to open this saved chat. Claude Code uses its native handoff.');return false;}
-    const lifetime=this.messageLifetime,originProject=this.state?.projectPath,provider=this.providerPreference();let source=this.tabs?.active();
-    const sameNavigation=()=>this.messageLifetime===lifetime&&this.state?.projectPath===originProject&&this.providerPreference()===provider;
+    const lifetime=this.messageLifetime,workspaceRevision=this.workspaceRevision,originProject=this.state?.projectPath,provider=this.providerPreference();let source=this.tabs?.active();
+    const sameNavigation=()=>this.messageLifetime===lifetime&&this.workspaceRevision===workspaceRevision&&this.state?.projectPath===originProject&&this.providerPreference()===provider;
     const sameSource=()=>{const current=this.tabs?.active();return !!source&&!!current&&current.localId===source.localId&&current.key===source.key&&
       current.kind===source.kind&&current.projectPath===source.projectPath&&current.threadId===source.threadId&&current.sessionId===source.sessionId;};
     await this.refresh();const project=this.state?.projectPath;
@@ -3429,7 +3475,7 @@ export class CodexChat {
     if(!this.providerAllowsCodex())return null;
     if(this.tabs) {
       const active=this.tabs.active(),state=this.state;
-      if(!active||!state||active.kind!=='native'||!this.tabs.owns(active)||active.projectPath!==state.projectPath)return null;
+      if(!active||!state||active.kind!=='native'||!this.tabs.owns(active)||this.tabs.needsOpening(active.key)||active.projectPath!==state.projectPath)return null;
       const live=state.snapshot?.thread;
       const binding=live?.configured?live:state.nativeHistory;
       return binding?.threadId===active.threadId&&binding.sessionId===active.sessionId?{provider:'codex',projectPath:active.projectPath,threadId:active.threadId!,sessionId:active.sessionId}:null;
@@ -4146,7 +4192,7 @@ export class CodexChat {
     this.imageRequest?.abort();
     this.attachments?.stop();
     this.preferenceController?.stop();this.stashTabDraft();this.tabs?.stop();
-    this.stopped=true;this.generation++;this.readVersion++;this.readController?.abort();if(this.timer)clearTimeout(this.timer);
+    this.stopped=true;this.generation++;this.readVersion++;this.readController?.abort();this.savedRecordingRead?.abort();if(this.timer)clearTimeout(this.timer);
     for(const input of this.pending.values())this.uncertain.set(input.requestId,{input,read:false});
     this.closePicker();for(const cleanup of this.pickerCleanup.splice(0))cleanup();
     for(const cleanup of this.draftCleanup.splice(0))cleanup();

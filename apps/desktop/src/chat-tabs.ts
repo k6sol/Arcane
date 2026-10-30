@@ -93,6 +93,7 @@ export class ChatTabs {
   private presentationRevision = 0;
   private catalogueRevision = 0;
   private readonly recordings = new Map<string, HistoryBinding>();
+  private readonly unconfirmedOpenings = new Set<string>();
   private readonly preferredSelections = new Set<string>();
   private readonly observedSelections = new Set<string>();
   private readonly preferences = new Map<string,string>();
@@ -176,9 +177,31 @@ export class ChatTabs {
   bound(state: ChatState | null): boolean {
     // This predicate runs while typing; keep the full draft out of cloning work.
     const active = this.rows.find(row=>row.key===this.activeKey), thread = state?.snapshot?.thread;
-    return !!active && this.owns(active) && state?.projectPath===active.projectPath && !!thread?.configured && thread.threadId===active.threadId && thread.sessionId===active.sessionId;
+    return !!active && !this.unconfirmedOpenings.has(active.key) && this.owns(active) && state?.projectPath===active.projectPath && !!thread?.configured && thread.threadId===active.threadId && thread.sessionId===active.sessionId;
+  }
+  needsOpening(key:string):boolean {return this.unconfirmedOpenings.has(key);}
+  beginOpening(key:string):boolean {
+    const tab=this.rows.find(row=>row.key===key);if(!tab||!this.owns(tab))return false;
+    this.unconfirmedOpenings.add(key);return this.activate(key);
+  }
+  confirmOpening(key:string,state:ChatState|null):boolean {
+    if(this.activeKey!==key)return false;
+    const wasPending=this.unconfirmedOpenings.delete(key);
+    if(this.bound(state))return true;
+    if(wasPending)this.unconfirmedOpenings.add(key);return false;
   }
   recording(tab = this.active()): HistoryBinding | null { return tab && this.owns(tab) ? structuredClone(this.recordings.get(tab.key) ?? null) : null; }
+  /** Display-only, from the host's existing project-scoped SQLite recording. Never binds a native connection. */
+  cacheRecording(value:unknown):boolean {
+    if(!this.projectPath)return false;
+    const binding=validateHistoryBinding(value,this.projectPath);
+    if(!binding)return false;
+    const key=nativeChatKey(binding);
+    if(!this.catalogueByKey.has(key)||!this.rows.some(row=>row.kind==='native'&&row.key===key))return false;
+    const previous=this.recordings.get(key)?.recorded;
+    if(previous&&(!binding.recorded||Date.parse(previous.loadedAt)>=Date.parse(binding.recorded.loadedAt)))return false;
+    this.recordings.set(key,binding);return true;
+  }
   sync(state: ChatState, followNative = false): boolean {
     const before = this.activeKey;
     const presentationBefore=this.presentationRevision;

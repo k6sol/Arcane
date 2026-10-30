@@ -409,13 +409,24 @@ test('explicit start binds only its local draft to a real acknowledged native th
 });
 
 
-async function historyNavigationFixture(t:test.TestContext,options:{timers?:boolean}={}) {
+async function historyNavigationFixture(t:test.TestContext,options:{timers?:boolean;cold?:boolean}={}) {
   const f=await serviceFixture(t),a=await f.seed(),b=await f.seed('fixture-alt','high'),doc=new DocumentFixture(),posts:ChatAction[]=[];
+  if(options.cold){
+    const prior=f.service.state().snapshot;
+    if(prior)assert.equal((await f.service.action({requestId:randomUUID(),action:'disconnect',connectionId:prior.connectionId})).record.state,'acknowledged');
+    const connected=await f.service.action({requestId:randomUUID(),action:'connect',connectionId:null}),connectionId=connected.state.snapshot!.connectionId;
+    assert.equal(connected.record.state,'acknowledged');
+    assert.equal((await f.service.action({requestId:randomUUID(),action:'select',connectionId,model:'fixture-sol',effort:'low'})).record.state,'acknowledged');
+    assert.equal((await f.service.action({requestId:randomUUID(),action:'thread-resume',connectionId,threadId:a})).record.state,'acknowledged');
+    assert.equal((await f.service.action({requestId:randomUUID(),action:'history-load',connectionId,threadId:a})).record.state,'acknowledged');
+  }
   let stateTransform=(value:ChatState)=>value,replyTransform=(value:CodexActionOutcome,_input:ChatAction)=>value,getHook:(()=>Promise<void>)|null=null,settleHook:((input:ChatAction)=>Promise<void>)|null=null;
+  let cacheHook:(()=>Promise<void>)|null=null,cacheTransform=(value:unknown):unknown=>value;
   // Mocked before the chat exists, so its 1500 ms background poll fires only on an explicit tick.
   if(options.timers)t.mock.timers.enable({apis:['setTimeout']});
   const api=new CodexChatApi(TOKEN,async(path,init)=>{
     if(path==='/v1/codex/state'){await getHook?.();return Response.json({state:stateTransform(f.service.state())});}
+    if(String(path).startsWith('/v1/codex/history?')){await cacheHook?.();return Response.json({nativeHistory:cacheTransform(f.service.recordedHistory!(new URL(String(path),'http://fixture.invalid').searchParams.get('threadId')))});}
     const input=JSON.parse(String(init?.body))as ChatAction;posts.push(input);
     const acknowledged=await f.service.action(input);
     await settleHook?.(input); // The service journal has settled; only the HTTP reply is held.
@@ -431,15 +442,86 @@ async function historyNavigationFixture(t:test.TestContext,options:{timers?:bool
     transformState:(transform:typeof stateTransform)=>{stateTransform=transform;},
     transformReply:(transform:typeof replyTransform)=>{replyTransform=transform;},
     beforeGet:(hook:typeof getHook)=>{getHook=hook;},
+    beforeCache:(hook:typeof cacheHook)=>{cacheHook=hook;},
+    transformCache:(transform:typeof cacheTransform)=>{cacheTransform=transform;},
     holdReply:(hook:typeof settleHook)=>{settleHook=hook;},
     limit:()=>f.setHistoryHook(async id=>{if(id===a)throw new CodexClientError('FRAME_LIMIT','Synthetic bounded history response.',true);})};
 }
 function historyGate(t:test.TestContext) {
   let release!:()=>void,entered!:()=>void;
   const wait=new Promise<void>(resolve=>{release=resolve;}),started=new Promise<void>(resolve=>{entered=resolve;});
+  t.signal.addEventListener('abort',()=>release(),{once:true});
   t.after(()=>release());return{wait,started,release,entered};
 }
 const HISTORY_LIMIT_NOTICE='Opened this conversation. The previous conversation\u2019s history exceeded the display limit; its earlier recording and unsent draft were retained.';
+
+test('saved conversation text appears from SQLite while the original native history request is held',{timeout:15000},async t=>{
+  const f=await historyNavigationFixture(t,{cold:true}),gate=historyGate(t);
+  f.setHistoryHook(async id=>{if(id===f.a){gate.entered();await gate.wait;}});
+  const opening=f.chat.openSavedChat(f.b);await gate.started;await drain();
+  assert.equal(f.chat.currentStateView().activeChat!.threadId,f.b);
+  assert.equal(f.chat.currentStateView().nativeBoundToActiveChat,false,'cached text never certifies the native connection');
+  assert.match(f.doc.getElementById('codex-messages').textContent,new RegExp('Public answer for '+f.b));
+  assert.doesNotMatch(f.doc.getElementById('codex-messages').textContent,new RegExp('Public answer for '+f.a));
+  assert.equal(f.doc.getElementById('codex-submit').disabled,true);
+  assert.deepEqual(f.posts.map(row=>row.action),['history-load']);
+  gate.release();assert.equal(await opening,true);
+  assert.equal(f.chat.currentStateView().nativeBoundToActiveChat,true);
+});
+
+test('restart joins the original saved-chat navigation instead of reporting a running reply',async t=>{
+  const f=await historyNavigationFixture(t),gate=historyGate(t);
+  f.holdReply(async input=>{if(input.action==='thread-resume'){gate.entered();await gate.wait;}});
+  const opening=f.chat.openSavedChat(f.b);await gate.started;
+  let settled=false;const restarting=f.chat.prepareForRestart().then(()=>{settled=true;});
+  await drain();assert.equal(settled,false);assert.equal(f.posts.filter(row=>row.action==='thread-resume').length,1);
+  gate.release();assert.equal(await opening,true);await restarting;
+  assert.equal(settled,true);assert.equal(f.posts.filter(row=>row.action==='thread-resume').length,1);
+  assert.equal(f.posts.some(row=>row.action==='turn-start'||row.action==='turn-interrupt'),false);
+});
+
+test('late cached history cannot replace a newly selected local draft',{timeout:15000},async t=>{
+  const f=await historyNavigationFixture(t,{cold:true}),native=historyGate(t),cached=historyGate(t);
+  f.beforeCache(async()=>{cached.entered();await cached.wait;});
+  f.setHistoryHook(async id=>{if(id===f.a){native.entered();await native.wait;}});
+  const opening=f.chat.openSavedChat(f.b);await cached.started;await native.started;
+  assert.equal(await f.chat.newChat(),true);
+  f.doc.getElementById('codex-composer').value='New draft stays here';f.doc.getElementById('codex-composer').dispatchEvent(new Event('input'));
+  cached.release();await drain();native.release();assert.equal(await opening,false);
+  assert.equal(f.chat.currentStateView().activeChat!.kind,'draft');
+  assert.equal(f.doc.getElementById('codex-composer').value,'New draft stays here');
+  assert.doesNotMatch(f.doc.getElementById('codex-messages').textContent,/Public answer/);
+  assert.deepEqual(f.posts.map(row=>row.action),['history-load']);
+});
+
+test('a cached response for another exact thread does not populate the selected conversation',{timeout:15000},async t=>{
+  const f=await historyNavigationFixture(t,{cold:true}),gate=historyGate(t);
+  f.transformCache(()=>f.service.recordedHistory!(f.a));
+  f.setHistoryHook(async id=>{if(id===f.a){gate.entered();await gate.wait;}});
+  const opening=f.chat.openSavedChat(f.b);await gate.started;await drain();
+  assert.equal(f.chat.currentStateView().activeChat!.threadId,f.b);
+  assert.doesNotMatch(f.doc.getElementById('codex-messages').textContent,/Public answer/);
+  assert.equal(f.chat.currentStateView().nativeBoundToActiveChat,false);
+  gate.release();assert.equal(await opening,true);
+  assert.match(f.doc.getElementById('codex-messages').textContent,new RegExp('Public answer for '+f.b));
+});
+
+for(const change of ['workspace-hold','workspace-return','workspace-null-return','surface-return']as const)
+test('a held saved-history read is retired by '+change,{timeout:15000},async t=>{
+  const f=await historyNavigationFixture(t,{cold:true}),native=historyGate(t),cached=historyGate(t);
+  f.chat.observeWorkspaceProject(f.projectPath);
+  f.beforeCache(async()=>{cached.entered();await cached.wait;});
+  f.setHistoryHook(async id=>{if(id===f.a){native.entered();await native.wait;}});
+  const opening=f.chat.openSavedChat(f.b);await cached.started;await native.started;
+  if(change==='surface-return'){f.chat.yieldSurface(true);f.chat.yieldSurface(false);}
+  else {f.chat.observeWorkspaceProject(change==='workspace-null-return'?null:f.projectPath+'-away');if(change!=='workspace-hold')f.chat.observeWorkspaceProject(f.projectPath);}
+  cached.release();await drain();
+  if(change==='workspace-hold')f.chat.observeWorkspaceProject(f.projectPath);
+  assert.doesNotMatch(f.doc.getElementById('codex-messages').textContent,/Public answer/);
+  assert.equal(f.chat.currentStateView().nativeBoundToActiveChat,false);
+  native.release();const opened=await opening;
+  assert.equal(opened,change==='surface-return','surface drawing changes do not cancel the original native worker');
+});
 
 for(const source of ['native','draft']as const)test('exact terminal history FRAME_LIMIT permits only scoped outgoing navigation from a '+source+' while retaining prior recording and edits',async t=>{
   const gate=historyGate(t),f=await historyNavigationFixture(t);
@@ -448,14 +530,15 @@ for(const source of ['native','draft']as const)test('exact terminal history FRAM
   f.doc.getElementById('codex-composer').value='Original unsent '+source;f.doc.getElementById('codex-composer').dispatchEvent(new Event('input'));
   f.setHistoryHook(async id=>{if(id===f.a){gate.entered();await gate.wait;throw new CodexClientError('FRAME_LIMIT','Synthetic large history.',true);}});
   const switching=f.chat.openSavedChat(f.b);await gate.started;
-  // Same-tab text edits are retained; they do not change navigation authority.
+  // The destination is already visible. Edits belong there, while the outgoing draft remains intact.
   f.doc.getElementById('codex-composer').value='Edited while history awaited';f.doc.getElementById('codex-composer').dispatchEvent(new Event('input'));gate.release();
   assert.equal(await switching,true);assert.equal(f.chat.currentStateView().conversation!.threadId,f.b);
   assert.deepEqual(f.posts.map(row=>row.action),['history-load','disconnect','connect','select','thread-resume','history-load']);
   assert.equal((f.posts[1]as Extract<ChatAction,{action:'disconnect'}>).preserveAssetWork,true);
   assert.equal(f.doc.getElementById('codex-notice').textContent,HISTORY_LIMIT_NOTICE);
   assert.equal(f.recording(),f.originalRecording);
-  assert.equal(f.chat.chatTabsView().find(row=>row.localId===sourceTab.localId)!.draft,'Edited while history awaited');
+  assert.equal(f.chat.chatTabsView().find(row=>row.localId===sourceTab.localId)!.draft,'Original unsent '+source);
+  assert.equal(f.doc.getElementById('codex-composer').value,'Edited while history awaited');
   const rejection=f.service.state().actions.find(row=>row.action==='history-load'&&row.threadId===f.a&&row.state==='rejected')!;
   assert.equal(rejection.errorCode,'FRAME_LIMIT');assert.ok(rejection.finishedAt);
   const stored=JSON.parse((f.reader.prepare('SELECT payload FROM actions WHERE id=?').get(rejection.requestId)as {payload:string}).payload);
@@ -621,14 +704,18 @@ test('a background poll already in flight when a saved-chat transition begins ca
   assert.notEqual(f.doc.getElementById('codex-notice').textContent,WAITING);
 });
 
-for(const change of ['project-away-back','stop','explicit-foreign-connection']as const)
+for(const change of ['project-away-back','workspace-away','workspace-away-back','workspace-null-return','stop','explicit-foreign-connection']as const)
 test('a held acknowledged resume is still fenced by '+change,async t=>{
   const gate=historyGate(t),f=await historyNavigationFixture(t,{timers:true});await stagedDraft(f);
+  f.chat.observeWorkspaceProject(f.projectPath);
   f.holdReply(async input=>{if(input.action==='thread-resume'){gate.entered();await gate.wait;}});
   const switching=f.chat.openSavedChat(f.b);await gate.started;
   if(change==='project-away-back'){
     const internal=f.chat as unknown as {applyState(value:ChatState):void},baseline=f.service.state();
     internal.applyState(state(f.projectPath+'-away'));internal.applyState(baseline);
+  }else if(change==='workspace-away'||change==='workspace-away-back'||change==='workspace-null-return'){
+    f.chat.observeWorkspaceProject(change==='workspace-null-return'?null:f.projectPath+'-away');
+    if(change!=='workspace-away')f.chat.observeWorkspaceProject(f.projectPath);
   }else if(change==='stop')f.chat.stop();
   else {f.transformState(value=>({...value,snapshot:{...value.snapshot!,connectionId:'11111111-1111-4111-8111-111111111111'}}));await f.chat.refresh();}
   gate.release();assert.equal(await switching,false);

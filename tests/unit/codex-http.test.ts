@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { request as httpRequest } from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
-import { mkdtemp,mkdir,rm,readFile } from 'node:fs/promises';
+import { mkdtemp,mkdir,rm,readFile,writeFile } from 'node:fs/promises';
 import { join,resolve,relative,sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createConnectionLab } from '../../apps/daemon/src/lab-server.js';
@@ -36,6 +36,25 @@ async function thread(t:test.TestContext,mode='normal'){
   const f=await connected(t,mode);assert.equal((await f.action({action:'select',connectionId:f.id,model:'fixture-sol',effort:'ultra'})).record.state,'acknowledged');
   const opened=await f.action({action:'thread-start',connectionId:f.id});assert.equal(opened.record.state,'acknowledged');return {...f,threadId:opened.state.snapshot!.thread!.threadId};
 }
+
+test('saved history reads SQLite for one exact thread without connecting, resuming or journaling',async t=>{
+  const f=await thread(t,'image-history-resume');
+  await writeFile(join(f.directory,'image-history.json'),'[]');
+  assert.equal((await f.action({action:'history-load',connectionId:f.id,threadId:f.threadId})).record.state,'acknowledged');
+  assert.equal((await f.action({action:'disconnect',connectionId:f.id})).record.state,'acknowledged');
+  const before=await f.state(),starts=f.starts();
+  const url='/v1/codex/history?threadId='+encodeURIComponent(f.threadId),result=await f.call(url);
+  assert.equal(result.status,200);const recorded=JSON.parse(result.text).nativeHistory;
+  assert.equal(recorded.projectPath,ROOT);assert.equal(recorded.threadId,f.threadId);assert.ok(recorded.recorded);
+  assert.deepEqual((await f.state()).actions,before.actions);assert.equal((await f.state()).snapshot,null);assert.equal(f.starts(),starts);
+  assert.equal((await f.call('/v1/codex/history?threadId=not-owned')).status,200);
+  assert.equal(JSON.parse((await f.call('/v1/codex/history?threadId=not-owned')).text).nativeHistory,null);
+  assert.equal((await f.call(url,undefined,f.lab.agentToken)).status,403);
+  assert.equal((await f.call(url,undefined,f.lab.token,'https://foreign.invalid')).status,403);
+  for(const query of ['?threadId=','?threadId=../other','?threadId=a&threadId=b','?threadId=a&projectPath=other','?threadId='+('a'.repeat(257))])
+    assert.equal((await f.call('/v1/codex/history'+query)).status,400);
+  assert.equal(f.starts(),starts);
+});
 
 test('human account-usage refresh uses the actual SDK without starting or journaling a model turn',async t=>{
   const f=await connected(t),before=f.service.state();
