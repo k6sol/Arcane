@@ -20,12 +20,22 @@ The mandatory native fixture retains its original 39 geometry cases, save/reopen
 ## Acceptance
 
 - [ ] Exact source passes component/package gates and native Blender on both supported CI platforms.
-- [ ] The complete original module fails filtered-root attachment while the candidate passes actual root and continuous-stalk checks.
-- [ ] Actual embedded PNG bytes, exported UV orientation and sampler/material settings agree with native readback.
-- [ ] Original 39 geometry cases, source preservation, original limits and owned process closure pass.
-- [ ] Actual cutout front and oblique images are inspected and their visual limitations recorded.
+- [x] The complete original module fails filtered-root attachment while the candidate passes actual root and continuous-stalk checks.
+- [x] Actual embedded PNG bytes, exported UV orientation and sampler/material settings agree with native readback.
+- [x] Original 39 geometry cases, source preservation, original limits and owned process closure pass.
+- [x] Actual cutout front and oblique images are inspected and their visual limitations recorded.
 - [ ] Complete tree branch/leaf connectivity and appearance are evaluated separately.
 
-Implementation and fixtures are prepared; no native positive result or quality verdict is claimed before execution. The child remains bounded at 180 seconds, the test at 210 seconds and the workflow at 25 minutes. Virtual or pruned twig-to-rendered-wood chains, minified foliage LOD, complete tree realism and Studio/customer acceptance remain separate requirements.
+The native positive checks below passed, while overall component/package and visual acceptance remain incomplete. The child remains bounded at 180 seconds, the test at 210 seconds and the workflow at 25 minutes. Virtual or pruned twig-to-rendered-wood chains, minified foliage LOD, complete tree realism and Studio/customer acceptance remain separate requirements.
 
 [[Operations/Current State]] · [[Operations/Evidence Ledger]]
+
+## Actual native evidence · 30 October 2026
+
+[Run 41010961594](https://github.com/k6sol/Arcane/actions/runs/41010961594) passed both Windows and Linux native Blender jobs on exact `9151892`. Both authenticated evidence archives were downloaded and their closed inventories, SHA-256 digests, five actual source fingerprints, measurements and four PNG headers verified. Native inputs remain byte-identical at `499261b`; the Windows files use the exact expected CRLF checkout transform.
+
+Both platforms passed the original 39 geometry cases, 96 filtered atlas probes, 12 original-versus-candidate RNG/upper-canvas comparisons, 24 actual exported-image/UV probes and three real-data tamper negatives. The complete original-module control had minimum root alpha zero; the candidate's minimum exported root alpha is 1 and continuous-stalk alpha is approximately 0.999856. All three measured native contact gaps are zero. Saved-scene reopening, actual owned child closure and temporary-data cleanup were confirmed. These are bounded component results, not a complete tree assessment.
+
+### Visual result still requires work
+
+All four actual cutout views were inspected. The oblique views show three brown stem ends meeting dark stalks. In both front views, the upper pine sprig appears disconnected; foliage is also dark and cropped. The source/composition/material/occlusion cause needs a focused follow-up. Keep this visible finding open even though the numerical root checks pass. No whole-tree, virtual-twig, photorealism or Studio acceptance is implied.
