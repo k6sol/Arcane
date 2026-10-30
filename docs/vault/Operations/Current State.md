@@ -5,7 +5,7 @@ tags: [arcane]
 ---
 # Current state
 
-Recorded 30 October 2026. Current published verification candidate: SSH-verified `5b84a41be92c60cc35fb4c37ab0a989565d4776d`. Main remains `c5aa882`; installed source remains `62da083`. The candidate is not installed or accepted from local results alone.
+Recorded 30 October 2026. Latest functional source is signed `e91780f`, following material diagnostics `753459d`; its final evidence-only publication must receive exact-source hosted checks. Prior verification candidate is SSH-verified `5b84a41be92c60cc35fb4c37ab0a989565d4776d`. Main remains `c5aa882`; installed source remains `62da083`. Local results alone do not establish installation or release acceptance.
 
 ## Source, delivery and live checks
 
@@ -26,6 +26,8 @@ Recorded 30 October 2026. Current published verification candidate: SSH-verified
 - Independent exported topology/UV matching on functional `34863c1` proves all322 leaf-card bases within1micrometre of actual bark, versus110 roots over10cm outside before. Geometry contact does not prove visible alpha contact or artistic acceptance.
 - `5b84a41` compiles645 sources. All50 affected source-contract/live-activity cases execute and pass, including separately enabled owned Edge. Prior12 progress/browser,19 foliage diagnostics,13 review,4 failure-evidence and3 classifier cases passed at their recorded source scopes.
 - Controlled full-PBR import staging preserves queue fairness, exact authority, continuity and deadlines. Placement is separate from persistent upload/Asset Manager registration.
+- Measured material diagnostics on `753459d` pass645-source compilation,22 affected TypeScript cases,6 Python classifier methods, actual Blender audit classification and9 hosted-service diagnostics tests. Specific reasons require exclusively measured material errors, consistent counters and written audit; old journal reason strings stay unchanged. Hosted deployment is separate.
+- Oak spray `e91780f` passes4 layout methods on host Python and Blender's bundled NumPy, sampled same-host birch byte/RNG preservation and one full original Blender4.5 tree pipeline with three inspected previews and observed closures. All eight actual exported geometry accessors match before/after byte-for-byte; only the intended oak texture output changes. Pinned5.2 and art acceptance for this source remain pending.
 
 ## Remaining failures and acceptance
 

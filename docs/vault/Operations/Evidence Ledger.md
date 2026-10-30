@@ -121,3 +121,11 @@ Functional `34863c1` passed one original local Blender4.5 job through union/atta
 ## 30 October: generated material slots
 
 Authenticated candidate923 native reports identify one bark material-node error per platform, with clean structural/UV error counts. Signed `972c5f0` explicitly binds fresh procedural meshes to their authored material and resets polygon indices, retaining strict audit behavior. Actual Blender4.5 regression passes inherited empty/foreign slots and fallback with identical geometry/UVs/smoothing. A separate original product job passes the complete 14,116-triangle tree pipeline, three inspected previews, UV/PBR, GLB/FBX, round-trip/reopen and three observed closures. Hosted5.2 and art/Studio/customer acceptance remain open; main and installation unchanged. Two unrelated hosted timing failures are retained, despite isolated local passes under original deadlines.
+
+## 30 October: material diagnostics and oak sprays
+
+Signed `5b84a41` passes both pinned5.2 platforms in [native41087633487](https://github.com/k6sol/Arcane/actions/runs/41087633487). Exact Windows/Linux tree artifact hashes and all three retained PNG hashes verified; all six images inspected, all original worker exits observed. Five component lanes pass while Windows release/package gates remain pending at this checkpoint.
+
+Signed `753459d` adds measured material reasons without changing legacy reason strings or accepting mixed defects as material-only:645 sources compile,22 affected TypeScript and6 classifier methods pass. Actual Blender4.5 audit verifies the node reason and mixed-global fallback; nine existing hosted-service diagnostics tests and service type checking pass. No hosted service deployment is implied.
+
+Signed `e91780f` improves oak spray placement with unchanged counts/roots/UVs. Four layout methods pass host Python and Blender4.5 NumPy. Independent same-host eight-row before/after checks prove unchanged birch bytes for the sampled seeds/shades; sampled final RNG states match both species. Its complete original Blender4.5 tree pipeline passes, with three inspected views and observed original closures. Manifest-verified GLBs retain all eight geometry accessors byte-for-byte. Art/visible-alpha, new hosted5.2 and installed/customer/Studio acceptance remain open.
