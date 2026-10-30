@@ -301,19 +301,86 @@ def alpha_probes(directory, args, failures):
             "upperAndRngChecks": upper_checks, "minimumContinuousAlpha": min(minima), "probes": probes}, snapshots
 
 
+def alpha_contact_frame(scene, camera, contacts, failures, label):
+    # Measure the actual evaluated geometry and camera used for this render.
+    # These projections establish framing/isolation, not visible-alpha acceptance.
+    bpy.context.view_layer.update()
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    actual_camera = camera.evaluated_get(depsgraph)
+    camera_world = actual_camera.matrix_world
+    camera_inverse = camera_world.inverted()
+    scale = actual_camera.data.ortho_scale
+    width = int(scene.render.resolution_x * scene.render.resolution_percentage / 100)
+    height = int(scene.render.resolution_y * scene.render.resolution_percentage / 100)
+    require(actual_camera.data.type == "ORTHO" and width == height == 512
+            and scene.render.pixel_aspect_x == scene.render.pixel_aspect_y,
+            label + ":square-orthographic-camera", failures)
+
+    def project(point):
+        local = camera_inverse @ point
+        return [width * (.5 + local.x / scale), height * (.5 - local.y / scale), -local.z]
+
+    def world_points(obj):
+        evaluated = obj.evaluated_get(depsgraph)
+        mesh = evaluated.to_mesh()
+        try:
+            if not 1 <= len(mesh.vertices) <= 512:
+                raise RuntimeError("Cutout framing requires bounded actual mesh vertices")
+            return [evaluated.matrix_world @ vertex.co for vertex in mesh.vertices]
+        finally:
+            evaluated.to_mesh_clear()
+
+    def bounds(points, dimensions):
+        return [[min(point[i] for point in points) for i in range(dimensions)],
+                [max(point[i] for point in points) for i in range(dimensions)]]
+
+    def measured(points):
+        projected = [project(point) for point in points]
+        return {"vertices": len(points), "worldBounds": bounds(points, 3),
+                "pixelBounds": bounds(projected, 2),
+                "depthRange": [min(point[2] for point in projected), max(point[2] for point in projected)]}
+
+    cases = []
+    for obj, stem in contacts:
+        card_points, stem_points = world_points(obj), world_points(stem)
+        require(len(card_points) == 8, label + ":evaluated-card-size", failures)
+        root = (card_points[0] + card_points[5]) * .5
+        card_measure, stem_measure = measured(card_points), measured(stem_points)
+        low, high = stem_measure["worldBounds"]
+        # This fixture's actual capped horizontal stem: derive both cap centres
+        # from its evaluated vertex bounds, rather than echoing its construction.
+        base = Vector((low[0], (low[1]+high[1])*.5, (low[2]+high[2])*.5))
+        tip = Vector((high[0], base.y, base.z))
+        require((root-tip).length <= EPS_NATIVE, label + ":evaluated-root-at-stem-tip", failures)
+        cases.append({"name": obj.name, "stemName": stem.name, "card": card_measure, "stem": stem_measure,
+                      "rootWorld": list(root), "rootPixels": project(root)[:2],
+                      "stemAxisWorld": [list(base), list(tip)],
+                      "stemAxisPixels": [project(base)[:2], project(tip)[:2]]})
+    intervals = sorted((min(item["card"]["pixelBounds"][0][1], item["stem"]["pixelBounds"][0][1]),
+                        max(item["card"]["pixelBounds"][1][1], item["stem"]["pixelBounds"][1][1])) for item in cases)
+    return {"name": label, "width": width, "height": height,
+            "camera": {"location": list(camera_world.translation), "right": list(camera_world.col[0][:3]),
+                       "up": list(camera_world.col[1][:3]), "forward": [-v for v in camera_world.col[2][:3]],
+                       "orthographicScale": scale,
+                       "clipRange": [actual_camera.data.clip_start, actual_camera.data.clip_end]},
+            "cases": cases, "minimumCaseGapPixels": min(intervals[i+1][0]-intervals[i][1] for i in range(len(intervals)-1))}
+
+
 def render_alpha_contact(directory, failures):
-    gaps = []
+    gaps, contacts, frames = [], [], []
     for obj in bpy.context.scene.objects:
         obj.hide_render = True
     for index, name in enumerate(("alpha-oak-0-0", "alpha-birch-2-1", "alpha-pine-0-0")):
         obj = bpy.data.objects[name]
-        obj.location = (0, (index-1)*.18, 0)
+        # Full-width cards must not overlap at their coplanar transparent bases.
+        obj.location = (0, (index-1)*.65, 0)
         obj.hide_render = False
         data = P.MeshData()
         data.tube([(-.15, 0, 0), (0, 0, 0)], [.015, .015], 12, tip=False)
         stem = mesh_object("alpha-contact-stem-" + str(index), data, True)
         stem.location = obj.location
         stem.data.materials.append(bpy.data.materials["contact-stem"])
+        contacts.append((obj, stem))
         bm = bmesh.new()
         try:
             bm.from_mesh(stem.data)
@@ -329,13 +396,16 @@ def render_alpha_contact(directory, failures):
     scene = bpy.context.scene
     camera = scene.camera
     camera.hide_render = False
-    camera.data.ortho_scale = .6
-    for name, location in (("foliage-alpha-front.png", (0, 0, 3)), ("foliage-alpha-oblique.png", (1.6, -1., 3))):
+    camera.data.ortho_scale = 2.
+    target = Vector((.425, 0, -.02875))
+    # Both rays have dy=0, keeping the separated cases disjoint in projection.
+    for name, location in (("foliage-alpha-front.png", (.425, 0, 3.97125)), ("foliage-alpha-oblique.png", (3.425, 0, 3.97125))):
         camera.location = location
-        camera.rotation_euler = (Vector((0, 0, 0)) - camera.location).to_track_quat('-Z', 'Y').to_euler()
+        camera.rotation_euler = (target - camera.location).to_track_quat('-Z', 'Y').to_euler()
+        frames.append(alpha_contact_frame(scene, camera, contacts, failures, name))
         scene.render.filepath = str(directory / name)
         bpy.ops.render.render(write_still=True)
-    return gaps
+    return gaps, frames
 
 
 def render_contact(directory):
@@ -438,7 +508,7 @@ def run(args):
                 and T.surface_evidence(obj.data.materials[0]) == before["surface"], name + ":textured-save-reopen", failures)
     gap = render_contact(directory)
     require(gap <= EPS_NATIVE, "native-capped-stem-contact", failures)
-    alpha["renderedContactGapsMeters"] = render_alpha_contact(directory, failures)
+    alpha["renderedContactGapsMeters"], alpha["renderedFrames"] = render_alpha_contact(directory, failures)
     return {"schemaVersion": 1, "version": bpy.app.version_string, "versionTuple": list(bpy.app.version), "complete": not failures, "cases": cases,
             "workerSha256": args.worker_sha256, "texturesSha256": hashlib.sha256(SOURCE.with_name("textures.py").read_bytes()).hexdigest(),
             "failures": failures, "savedSceneReopened": True, "contactGapMeters": gap,

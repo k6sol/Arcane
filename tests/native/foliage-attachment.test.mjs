@@ -123,6 +123,67 @@ function probeExport(data, probe) {
   return { name: probe.name, rootUv: root, rootAlpha: value, minimumContinuousAlpha: minimum, material: primitive.material, texture: info.index, minFilter: sampler.minFilter };
 }
 
+function checkAlphaFraming(frames) {
+  const vector = (value, size) => {
+    assert.ok(Array.isArray(value)); assert.equal(value.length, size); assert.ok(value.every(Number.isFinite)); return value;
+  };
+  const near = (actual, expected, tolerance = 1e-3) => assert.ok(Math.abs(actual-expected) <= tolerance);
+  const distance = (a, b) => Math.hypot(...a.map((value, i) => value-b[i]));
+  const dot = (a, b) => a.reduce((sum, value, i) => sum+value*b[i], 0);
+  const bounds = (value, size) => {
+    assert.ok(Array.isArray(value)); assert.equal(value.length, 2);
+    vector(value[0], size); vector(value[1], size); assert.ok(value[0].every((v, i) => v <= value[1][i])); return value;
+  };
+  assert.ok(Array.isArray(frames)); assert.equal(frames.length, 2);
+  assert.deepEqual(frames.map(frame => frame.name), ['foliage-alpha-front.png', 'foliage-alpha-oblique.png']);
+  for (const frame of frames) {
+    assert.equal(frame.width, 512); assert.equal(frame.height, 512);
+    const camera = frame.camera, location = vector(camera.location, 3);
+    const right = vector(camera.right, 3), up = vector(camera.up, 3), forward = vector(camera.forward, 3);
+    for (const axis of [right, up, forward]) near(Math.hypot(...axis), 1, 1e-6);
+    near(dot(right, up), 0, 1e-6); near(dot(right, forward), 0, 1e-6); near(dot(up, forward), 0, 1e-6);
+    near(up[0], 0, 1e-6); near(up[1], 1, 1e-6); near(up[2], 0, 1e-6); near(forward[1], 0, 1e-6);
+    assert.equal(camera.orthographicScale, 2);
+    const clip = vector(camera.clipRange, 2); assert.ok(clip[0] > 0 && clip[1] > clip[0]);
+    const project = world => {
+      const delta = vector(world, 3).map((value, i) => value-location[i]);
+      return [512*(.5+dot(delta, right)/camera.orthographicScale), 512*(.5-dot(delta, up)/camera.orthographicScale)];
+    };
+    const measured = item => {
+      assert.ok(Number.isSafeInteger(item.vertices) && item.vertices > 0 && item.vertices <= 512);
+      const world = bounds(item.worldBounds, 3), pixels = bounds(item.pixelBounds, 2), depth = vector(item.depthRange, 2);
+      assert.ok(depth[0] >= clip[0] && depth[1] >= depth[0] && depth[1] <= clip[1]);
+      assert.ok(pixels[0].every(value => value >= 24) && pixels[1].every(value => value <= 488), 'Every actual evaluated vertex must be framed with a readable margin.');
+      return { world, pixels };
+    };
+    assert.ok(Array.isArray(frame.cases)); assert.equal(frame.cases.length, 3);
+    assert.deepEqual(frame.cases.map(item => item.name), ['alpha-oak-0-0', 'alpha-birch-2-1', 'alpha-pine-0-0']);
+    const intervals = frame.cases.map((item, index) => {
+      assert.equal(item.stemName, 'alpha-contact-stem-'+index); assert.equal(item.card.vertices, 8);
+      const card = measured(item.card), stem = measured(item.stem), root = vector(item.rootWorld, 3), pixel = vector(item.rootPixels, 2);
+      near(card.world[1][0]-card.world[0][0], 1, 1e-6); near(card.world[1][1]-card.world[0][1], .5, 1e-6);
+      near(root[0], card.world[0][0], 1e-6); near(root[1], (card.world[0][1]+card.world[1][1])*.5, 1e-6);
+      const actual = project(root); actual.forEach((value, i) => near(pixel[i], value));
+      assert.ok(pixel.every(value => value >= 24 && value <= 488));
+      for (const piece of [card, stem]) assert.ok(pixel.every((value, i) => value >= piece.pixels[0][i]-1e-3 && value <= piece.pixels[1][i]+1e-3));
+      assert.ok(Array.isArray(item.stemAxisWorld) && item.stemAxisWorld.length === 2);
+      assert.ok(Array.isArray(item.stemAxisPixels) && item.stemAxisPixels.length === 2);
+      item.stemAxisWorld.forEach((point, end) => {
+        vector(point, 3); vector(item.stemAxisPixels[end], 2);
+        project(point).forEach((value, i) => near(item.stemAxisPixels[end][i], value));
+      });
+      assert.ok(distance(root, item.stemAxisWorld[1]) <= 4e-6, 'The actual card root must meet its evaluated stem cap centre.');
+      near(distance(...item.stemAxisWorld), .15, 1e-6);
+      assert.ok(distance(...item.stemAxisPixels) >= 30, 'Each actual stem must remain readable at the retained resolution.');
+      assert.ok(stem.pixels[1][1]-stem.pixels[0][1] >= 7, 'Each stem must retain a readable projected diameter.');
+      return [Math.min(card.pixels[0][1], stem.pixels[0][1]), Math.max(card.pixels[1][1], stem.pixels[1][1])];
+    }).sort((a, b) => a[0]-b[0]);
+    const gaps = intervals.slice(1).map((interval, i) => interval[0]-intervals[i][1]);
+    assert.ok(gaps.every(gap => gap >= 37), 'The full actual case extents must be separated; coplanar neighboring alpha cards cannot overlap.');
+    assert.ok(Number.isFinite(frame.minimumCaseGapPixels)); near(frame.minimumCaseGapPixels, Math.min(...gaps));
+  }
+}
+
 // Separate mandatory hosted test: the original conversion acceptance inventory,
 // deadlines, source fixtures, supervisor and evidence names are untouched.
 test('real Blender preserves a cupped foliage card declared root through native save/reopen', { timeout: 210000 }, async t => {
@@ -198,6 +259,7 @@ test('real Blender preserves a cupped foliage card declared root through native 
   assert.ok(alpha.baseline.some(probe => probe.filteredRootAlpha < .5), 'Full original module control must refuse visible-root attachment.');
   assert.equal(alpha.rawChecks, 96); assert.equal(alpha.upperAndRngChecks, 12); assert.ok(alpha.minimumContinuousAlpha >= .5); assert.equal(alpha.probes.length, 24);
   assert.equal(alpha.renderedContactGapsMeters.length, 3); assert.ok(alpha.renderedContactGapsMeters.every(gap => Number.isFinite(gap) && gap <= 4e-6));
+  checkAlphaFraming(alpha.renderedFrames);
   const bytes = await readRegularFile(join(root, 'alpha-contact.glb'), 20_000_000), data = model(bytes);
   const probes = alpha.probes.map(probe => probeExport(data, probe));
   const first = alpha.probes[0], row = probes[0];
