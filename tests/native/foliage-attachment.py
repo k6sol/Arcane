@@ -94,9 +94,9 @@ def check_card(data, root, axis, face, length, width, thickness, cup, bend, droo
 
 
 def atlas_diagnostics():
-    # The visible stalk may be laterally offset inside the unchanged tile.
-    # Report actual production alpha; never equate card-centre contact with
-    # visible-petiole contact or whole-tree/wood connectivity.
+    # Retain the original single-texel diagnostic. Filtered root coverage and
+    # encoded PNG/UV orientation are checked separately below; no diagnostic
+    # pixel alone certifies visible-petiole or whole-tree/wood connectivity.
     texture_spec = importlib.util.spec_from_file_location("arcane_actual_textures", SOURCE.with_name("textures.py"))
     T = importlib.util.module_from_spec(texture_spec)
     texture_spec.loader.exec_module(T)
@@ -112,6 +112,230 @@ def atlas_diagnostics():
                              "coveredMaxX": max(coverage) if coverage else None,
                              "centreAlpha": float(alpha[y, start + 64])})
     return rows
+
+
+def load_checked_module(name, path, expected):
+    info = path.stat()
+    if path.is_symlink() or not path.is_file() or info.st_nlink != 1 or not 0 < info.st_size <= 512*1024:
+        raise RuntimeError("Native fixture module is not a bounded ordinary file")
+    if hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+        raise RuntimeError("Native fixture source provenance changed")
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def linear_alpha(alpha, x, y):
+    # Source/bpy order: pixel centres are x+.5,y+.5. No nearest-texel shortcut.
+    x, y = x - .5, y - .5
+    ix, iy = math.floor(x), math.floor(y)
+    fx, fy = x - ix, y - iy
+    return float(alpha[iy, ix] * (1-fx) * (1-fy) + alpha[iy, ix+1] * fx * (1-fy)
+                 + alpha[iy+1, ix] * (1-fx) * fy + alpha[iy+1, ix+1] * fx * fy)
+
+
+def trace_atlas(T, species, seed, failures):
+    generated, painted = [], []
+    original_shoot, original_twig = T._shoot, T._Canvas.twig
+    main_count = 18 if species == "pine" else 14
+
+    def shoot(*args, **kwargs):
+        result = original_shoot(*args, **kwargs)
+        if len(result) == main_count:
+            generated.append((result, [tuple(p) for p in result]))
+        return result
+
+    def twig(canvas, points, widths, color):
+        if len(points) == main_count:
+            painted.append(([tuple(p) for p in points], list(widths)))
+        return original_twig(canvas, points, widths, color)
+
+    T._shoot, T._Canvas.twig = shoot, twig
+    try:
+        surface = T.tree_surface(species + "-leaves", (.12, .25, .06), seed, 512)
+    finally:
+        T._shoot, T._Canvas.twig = original_shoot, original_twig
+    require(len(generated) == 8 and len(painted) == 8, "paint-trace-count", failures)
+    minimum = 1.0
+    for tile, ((original, captured), (drawn, widths)) in enumerate(zip(generated, painted)):
+        label = species + ":" + str(seed) + ":" + str(tile)
+        require([tuple(p) for p in original] == captured, label + ":unmodified-main", failures)
+        require(drawn[0] == (64., 2.) and drawn[1:] == captured[1:], label + ":paint-only-root", failures)
+        w = 2.4 if species == "pine" else 2.6 if species == "oak" else 1.7
+        taper = .6 if species == "pine" else .55
+        require(widths == [w * (1-taper*k/(len(captured)-1)) for k in range(len(captured))], label + ":widths", failures)
+        col, row = tile % 4, tile // 4
+        root = linear_alpha(surface[1], col*128+64, row*256+2)
+        require(root >= 1-1/255, label + ":filtered-root", failures)
+        # Follow the actual painted first segment, not the unjittered vertical axis.
+        first, second = drawn[:2]
+        steps = max(1, math.ceil(math.dist(first, second) * 2))
+        segment_minimum = 1.0
+        for k in range(steps+1):
+            t = k/steps
+            value = linear_alpha(surface[1], col*128+first[0]+(second[0]-first[0])*t,
+                                 row*256+first[1]+(second[1]-first[1])*t)
+            minimum = min(minimum, value)
+            segment_minimum = min(segment_minimum, value)
+        require(segment_minimum >= .5, label + ":continuous-petiole", failures)
+    return surface, minimum
+
+
+def alpha_probes(directory, args, failures):
+    T = load_checked_module("arcane_petiole_textures", SOURCE.with_name("textures.py"), args.textures_sha256)
+    baseline_path = directory / "baseline-textures.py"
+    if baseline_path.resolve(strict=True).parent != directory or baseline_path.is_symlink():
+        raise RuntimeError("Original control is outside owned native data")
+    if args.baseline_sha256 not in ("166392242ea95622b92f0cf51d14c9dbe433381f4f3d161921cc1ef030f62cd2",
+                                    "37aabeae667a63db3e608293b2268356aff5cdc216a2bb2d3394837e331eae4d"):
+        raise RuntimeError("Unreviewed full original control")
+    B = load_checked_module("arcane_original_textures", baseline_path, args.baseline_sha256)
+    load_checked_module("arcane_checked_audit", SOURCE.with_name("audit.py"), args.audit_sha256)
+    W = load_checked_module("arcane_actual_asset_worker", SOURCE.with_name("asset_worker.py"), args.exporter_sha256)
+    if Path(sys.modules["audit"].__file__).resolve(strict=True) != SOURCE.with_name("audit.py").resolve(strict=True):
+        raise RuntimeError("Production exporter imported a different audit module")
+    np = T._np()
+    baseline, raw_checks, upper_checks, minima = [], 0, 0, []
+    for species in ("oak", "birch", "pine"):
+        upper_hashes = []
+        for seed in (0, 1, 31, 2147483647):
+            actual, minimum = trace_atlas(T, species, seed, failures)
+            minima.append(minimum)
+            raw_checks += 8
+            rng_a, rng_b = np.random.default_rng(seed), np.random.default_rng(seed)
+            fn = "_needle_spray" if species == "pine" else "_spray"
+            params = ((.12, .25, .06), 128, 256, False)
+            a = getattr(B, fn)(np, rng_a, *params) if species == "pine" else getattr(B, fn)(np, rng_a, species, *params)
+            b = getattr(T, fn)(np, rng_b, *params) if species == "pine" else getattr(T, fn)(np, rng_b, species, *params)
+            require(rng_a.bit_generator.state == rng_b.bit_generator.state, species + ":rng-schedule", failures)
+            require(all(np.array_equal(getattr(a, key)[24:], getattr(b, key)[24:])
+                        for key in ("rgb", "alpha", "height", "rough")), species + ":upper-spray", failures)
+            upper_hashes.append(hashlib.sha256(b.rgb[24:].tobytes() + b.alpha[24:].tobytes()).hexdigest())
+            upper_checks += 1
+            if seed == 31:
+                again = T.tree_surface(species + "-leaves", (.12, .25, .06), seed, 512)
+                require(all(np.array_equal(a, b) for a, b in zip(actual, again)), species + ":repeat-seed", failures)
+        require(len(set(upper_hashes)) == 4, species + ":seed-variation", failures)
+        original = B.tree_surface(species + "-leaves", (.12, .25, .06), 31, 512)[1]
+        baseline.extend({"species": species, "column": col, "row": row,
+                         "filteredRootAlpha": linear_alpha(original, col*128+64, row*256+2)}
+                        for row in range(2) for col in range(4))
+    require(any(item["filteredRootAlpha"] < .5 for item in baseline), "original-control-must-fail", failures)
+
+    objects, materials, captured = [], [], {}
+    for species in ("oak", "birch", "pine"):
+        key = species.capitalize() + "Leaves"
+        material = bpy.data.materials.new("MAT_" + key)
+        material.use_nodes = True
+        materials.append({"id": key, "color": [.12, .25, .06], "metallic": 0., "roughness": .8,
+                          "surface": {"profile": "leaf", "resolution": 512}, "pattern": species + "-leaves"})
+        for row in range(2):
+            for col in range(4):
+                data = P.MeshData()
+                data.card((0, 0, 0), (1, 0, 0), (0, 0, 1), 1., .5, .005, P.atlas_rect(col, row), bend=.1, droop=.08, cup=P.CANOPY[species]["cup"])
+                obj = mesh_object("alpha-" + species + "-" + str(col) + "-" + str(row), data)
+                obj.data.materials.append(material)
+                objects.append(obj)
+    original_pixels = T.tree_pixels
+
+    def pixels(*args, **kwargs):
+        mains, original_shoot = [], T._shoot
+
+        def shoot(*shoot_args, **shoot_kwargs):
+            points = original_shoot(*shoot_args, **shoot_kwargs)
+            if len(points) == (18 if args[0] == "pine-leaves" else 14):
+                mains.append([tuple(point) for point in points])
+            return points
+
+        T._shoot = shoot
+        try:
+            result = original_pixels(*args, **kwargs)
+        finally:
+            T._shoot = original_shoot
+        require(len(mains) == 8, args[0] + ":authored-main-count", failures)
+        captured[args[0]] = (args[3], np.asarray(result["baseColor"]).reshape(512, 512, 4)[..., 3].copy(), mains)
+        return result
+
+    T.tree_pixels = pixels
+    try:
+        T.author_surfaces({"seed": 31, "recipe": {"materials": materials}}, directory, objects, normal_relief=.008)
+    finally:
+        T.tree_pixels = original_pixels
+    probes, snapshots = [], {}
+    for obj in objects:
+        _, species, col, row = obj.name.split("-")
+        col, row = int(col), int(row)
+        material = obj.data.materials[0]
+        image = material.node_tree.nodes["Arcane_BaseColor"].image
+        loaded = bpy.data.images.load(image.filepath_raw, check_existing=False)
+        try:
+            values = np.empty(512*512*4, dtype=np.float32)
+            loaded.pixels.foreach_get(values)
+            alpha = values.reshape(512, 512, 4)[..., 3]
+            derived_seed, authored, mains = captured[species + "-leaves"]
+            require(float(np.max(np.abs(alpha-authored))) <= 1/255+1e-7, obj.name + ":png-native-order", failures)
+            root_alpha = linear_alpha(alpha, col*128+64, row*256+2)
+            require(root_alpha >= 1-1/255, obj.name + ":packed-filtered-root", failures)
+            distal = mains[row*4+col][1]
+            steps = max(1, math.ceil(math.dist((64, 2), distal)*2))
+            minimum = min(linear_alpha(alpha, col*128+64+(distal[0]-64)*k/steps,
+                                       row*256+2+(distal[1]-2)*k/steps) for k in range(steps+1))
+            require(minimum >= .5, obj.name + ":packed-continuous-petiole", failures)
+            top_down_sha = hashlib.sha256(np.rint(np.clip(alpha[::-1], 0, 1)*255).astype(np.uint8).tobytes()).hexdigest()
+        finally:
+            bpy.data.images.remove(loaded)
+        clip = material.node_tree.nodes["Arcane_AlphaClip"]
+        shader = material.node_tree.nodes.get("Principled BSDF")
+        require(clip.operation == "ROUND" and shader.inputs["Alpha"].is_linked
+                and shader.inputs["Alpha"].links[0].from_node == clip, obj.name + ":actual-cutout", failures)
+        probes.append({"name": obj.name, "species": species, "column": col, "row": row,
+                       "derivedSeed": str(derived_seed), "materialName": material.name,
+                       "rootUv": [(col+.5)/4, row/2+2/512], "rootAlpha": root_alpha,
+                       "firstDistalPixel": list(distal), "minimumContinuousAlpha": minimum,
+                       "pngAlphaTopDownSha256": top_down_sha,
+                       "basalPoints": [list(obj.data.vertices[i].co) for i in (0, 5)]})
+        snapshots[obj.name] = {"mesh": snapshot(obj), "surface": T.surface_evidence(material)}
+    W.export_glb(directory / "alpha-contact.glb", objects)
+    return {"baselineSha256": args.baseline_sha256, "baseline": baseline, "rawChecks": raw_checks,
+            "upperAndRngChecks": upper_checks, "minimumContinuousAlpha": min(minima), "probes": probes}, snapshots
+
+
+def render_alpha_contact(directory, failures):
+    gaps = []
+    for obj in bpy.context.scene.objects:
+        obj.hide_render = True
+    for index, name in enumerate(("alpha-oak-0-0", "alpha-birch-2-1", "alpha-pine-0-0")):
+        obj = bpy.data.objects[name]
+        obj.location = (0, (index-1)*.18, 0)
+        obj.hide_render = False
+        data = P.MeshData()
+        data.tube([(-.15, 0, 0), (0, 0, 0)], [.015, .015], 12, tip=False)
+        stem = mesh_object("alpha-contact-stem-" + str(index), data, True)
+        stem.location = obj.location
+        stem.data.materials.append(bpy.data.materials["contact-stem"])
+        bm = bmesh.new()
+        try:
+            bm.from_mesh(stem.data)
+            # These two actual objects have identical translations. Measure the
+            # SAME basal midpoint whose UV/alpha was checked, in their local frame.
+            point = (obj.data.vertices[0].co + obj.data.vertices[5].co) * .5
+            hit = BVHTree.FromBMesh(bm).find_nearest(point)
+            gap = hit[3] if hit is not None else math.inf
+            require(gap <= EPS_NATIVE, name + ":textured-stem-contact", failures)
+            gaps.append(gap)
+        finally:
+            bm.free()
+    scene = bpy.context.scene
+    camera = scene.camera
+    camera.hide_render = False
+    camera.data.ortho_scale = .6
+    for name, location in (("foliage-alpha-front.png", (0, 0, 3)), ("foliage-alpha-oblique.png", (1.6, -1., 3))):
+        camera.location = location
+        camera.rotation_euler = (Vector((0, 0, 0)) - camera.location).to_track_quat('-Z', 'Y').to_euler()
+        scene.render.filepath = str(directory / name)
+        bpy.ops.render.render(write_still=True)
+    return gaps
 
 
 def render_contact(directory):
@@ -200,31 +424,45 @@ def run(args):
         obj, result, actual = check_card(data, (0, 0, 0), (1, 0, 0), (0, 0, 1), 1., .5, .005, 0., .1, .08, failures, "zero-cup-" + species)
         cases.append(result)
         snapshots[obj.name] = actual
+    alpha, alpha_snapshots = alpha_probes(directory, args, failures)
     path = directory / "attachment.blend"
     bpy.ops.wm.save_as_mainfile(filepath=str(path), check_existing=False)
     bpy.ops.wm.open_mainfile(filepath=str(path), use_scripts=False)
     for name, before in snapshots.items():
         obj = bpy.data.objects.get(name)
         require(obj is not None and snapshot(obj) == before, name + ":save-reopen", failures)
+    T = load_checked_module("arcane_reopened_textures", SOURCE.with_name("textures.py"), args.textures_sha256)
+    for name, before in alpha_snapshots.items():
+        obj = bpy.data.objects.get(name)
+        require(obj is not None and snapshot(obj) == before["mesh"]
+                and T.surface_evidence(obj.data.materials[0]) == before["surface"], name + ":textured-save-reopen", failures)
     gap = render_contact(directory)
     require(gap <= EPS_NATIVE, "native-capped-stem-contact", failures)
+    alpha["renderedContactGapsMeters"] = render_alpha_contact(directory, failures)
     return {"schemaVersion": 1, "version": bpy.app.version_string, "versionTuple": list(bpy.app.version), "complete": not failures, "cases": cases,
             "workerSha256": args.worker_sha256, "texturesSha256": hashlib.sha256(SOURCE.with_name("textures.py").read_bytes()).hexdigest(),
             "failures": failures, "savedSceneReopened": True, "contactGapMeters": gap,
-            "atlasDiagnostics": atlas_diagnostics(), "nativeStudioVerified": False,
+            "atlasDiagnostics": atlas_diagnostics(), "alphaContact": alpha, "nativeStudioVerified": False,
             "limitations": ["Declared card base anchor only", "Virtual twig/rendered wood connection not proved",
-                            "Atlas offsets are diagnostic; alpha-visible petiole contact not certified",
-                            "Neutral contact renders require inspection; no whole-tree quality acceptance"]}
+                            "Filtered alpha/native exported UV checks concern the declared card root only",
+                            "Actual textured contact renders require inspection; no whole-tree quality acceptance"]}
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--directory", required=True)
     parser.add_argument("--worker-sha256", required=True)
+    parser.add_argument("--textures-sha256", required=True)
+    parser.add_argument("--baseline-sha256", required=True)
+    parser.add_argument("--exporter-sha256", required=True)
+    parser.add_argument("--audit-sha256", required=True)
     args = parser.parse_args(sys.argv[sys.argv.index("--") + 1:])
     report = run(args)
+    encoded = json.dumps(report, allow_nan=False, sort_keys=True)
+    if len(encoded.encode("utf-8")) > 65536:
+        raise RuntimeError("Native foliage diagnostic exceeds its fixed bound")
     with (Path(args.directory) / "native-foliage.json").open("x", encoding="utf-8") as stream:
-        json.dump(report, stream, allow_nan=False, sort_keys=True)
+        stream.write(encoded)
     print("ARCANE_RESULT " + json.dumps({"complete": report["complete"], "cases": len(report["cases"])}), flush=True)
     if not report["complete"]:
         raise RuntimeError("Native foliage declared-root regression failed")

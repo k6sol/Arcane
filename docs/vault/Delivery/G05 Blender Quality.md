@@ -29,3 +29,5 @@ Depends on: 1; coordinate previews with 2 and job ownership with 4. Owner: asset
 Verify the exact instruction/skill delivery change, then test realistic tree, rock and architectural briefs against their actual source geometry, UV/PBR and reviewed multi-angle outputs. Preserve original intent and actual provider capabilities.
 
 [[Delivery/Goal Board]] · [[Operations/Evidence Ledger]]
+
+Current next acceptance: [[Bugs/Foliage Texture Attachment]] retains the 39 verified geometry cases and adds full original-module controls, actual exported-UV/embedded-PNG filtered-alpha checks and cutout contact views. This is a narrow attachment correction; whole trees, rocks and architectural model quality still require real output evaluation. No whole-goal checkbox changes.

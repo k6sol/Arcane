@@ -511,8 +511,13 @@ def _spray(np, rng, species, color, width, height, shade):
             side = -side
         heading = math.pi / 2 + side * rng.uniform(.45, .8)
         shoots.append((_shoot(main[index], heading, height * rng.uniform(.25, .36) * (1 if oak else 1.1), 8, -side * rng.uniform(.1, .4)), 1.6 if oak else 1.1))
-    for points, w in shoots:
-        canvas.twig([np.array(p) for p in points], [w * (1 - .55 * k / (len(points) - 1)) for k in range(len(points))], bark)
+    for number, (points, w) in enumerate(shoots):
+        # Only the painted basal endpoint follows the card's fixed UV root.
+        # Keep generated shoots and their random consumers unchanged.
+        painted = [np.array(p) for p in points]
+        if number == 0:
+            painted[0] = np.array((width * .5, 2.0))
+        canvas.twig(painted, [w * (1 - .55 * k / (len(points) - 1)) for k in range(len(points))], bark)
     leaves = []
     for number, (points, _) in enumerate(shoots):
         n = len(points) - 1
@@ -685,7 +690,9 @@ def _needle_spray(np, rng, color, width, height, shade):
     marks = []
     for number, (points, w, bare) in enumerate(shoots):
         widths = [w * (1 - .6 * k / (len(points) - 1)) for k in range(len(points))]
-        marks.append((0.0, "twig", (points, widths)))
+        # Do not alter points: their arc length controls seeded needle counts.
+        painted = [(width * .5, 2.0), *points[1:]] if number == 0 else points
+        marks.append((0.0, "twig", (painted, widths)))
         arc = sum(math.dist(a, b) for a, b in zip(points, points[1:]))
         count = int(arc * (2.2 if number == 0 else 1.9))
         phi = 0.0

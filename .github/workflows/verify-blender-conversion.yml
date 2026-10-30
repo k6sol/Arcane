@@ -115,5 +115,7 @@ jobs:
             runtime/ci-foliage-attachment-artifacts/foliage-attachment.json
             runtime/ci-foliage-attachment-artifacts/foliage-front.png
             runtime/ci-foliage-attachment-artifacts/foliage-side.png
+            runtime/ci-foliage-attachment-artifacts/foliage-alpha-front.png
+            runtime/ci-foliage-attachment-artifacts/foliage-alpha-oblique.png
           if-no-files-found: error
           retention-days: 7
