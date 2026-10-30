@@ -7,7 +7,8 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { AssetPipeline, normalizeRequest } from '../../dist/packages/asset-pipeline/src/index.js';
 import { validateManifestFiles, workerScripts, workerSourcePath } from '../../dist/packages/asset-pipeline/src/validation.js';
-import { parseWorkerRecords } from '../../dist/packages/asset-pipeline/src/worker-journal.js';
+import { parseWorkerRecords, WorkerSupervision } from '../../dist/packages/asset-pipeline/src/worker-journal.js';
+import { defaultProcessQueryHost, WORKER_ROLES } from '../../dist/packages/asset-pipeline/src/worker-identity.js';
 import { noLinks, readRegularFile, regularFile } from '../../dist/packages/asset-pipeline/src/paths.js';
 import { decodeMaterialPng, materialPngPixels } from '../../dist/packages/asset-pipeline/src/material-png.js';
 import { validateGlb } from '../../dist/apps/desktop/src/glb-preflight.js';
@@ -36,6 +37,82 @@ function requireClosed(journal, job, result) {
   assert.ok(workers && workers.length >= 1 && workers.length <= 6, 'Closure requires the original bounded worker journal.');
   assert.ok(workers.every(worker => worker.state === 'closed'), 'Unresolved original worker ownership forbids evidence success and cleanup.');
   return workers;
+}
+// Test-owned observations only. Original capture Promise, helper handle, callback
+// data/receiver/return and thrown values pass through unchanged, exactly once.
+// No second capture/query, replacement host, runner, parser or closure claim.
+function observeSupervision(t) {
+  const evidence = { captureCalls: 0, queryCalls: 0, overflow: false, observerFailures: 0, captures: [] };
+  const mocks = []; let current = null;
+  const observe = action => { try { action(); } catch { evidence.observerFailures = Math.min(7, evidence.observerFailures + 1); } };
+  const elapsed = start => Math.max(0, Math.min(600000, Math.floor(performance.now() - start)));
+  const originalCapture = WorkerSupervision.prototype.captureFor, originalQuery = defaultProcessQueryHost.execFile;
+  try {
+    mocks.push(t.mock.method(WorkerSupervision.prototype, 'captureFor', function (...args) {
+      let start = 0, row = null; observe(() => { start = performance.now(); });
+      observe(() => {
+        evidence.captureCalls = Math.min(7, evidence.captureCalls + 1);
+        if (evidence.captures.length >= 6) { evidence.overflow = true; return; }
+        row = { ordinal: evidence.captures.length, role: WORKER_ROLES.includes(args[0]?.role) ? args[0].role : 'other',
+          outcome: 'pending', elapsedMs: null, supervisionBroken: null, parserReason: 'not-exposed', queries: [] };
+        evidence.captures.push(row);
+      });
+      const previous = current; current = row;
+      let promise;
+      try { promise = Reflect.apply(originalCapture, this, args); }
+      catch (error) { observe(() => { if (row) { row.outcome = 'threw'; row.elapsedMs = elapsed(start); } }); throw error; }
+      finally { current = previous; }
+      observe(() => { Promise.prototype.then.call(promise,
+        outcome => observe(() => { if (row) { row.outcome = ['captured', 'unsupported', 'uncertain'].includes(outcome) ? outcome : 'other'; row.elapsedMs = elapsed(start); row.supervisionBroken = this.broken === true; for (const query of row.queries) query.callbackObservedAtCaptureEnd = query.callbackCount > 0; } }),
+        () => observe(() => { if (row) { row.outcome = 'rejected'; row.elapsedMs = elapsed(start); row.supervisionBroken = this.broken === true; for (const query of row.queries) query.callbackObservedAtCaptureEnd = query.callbackCount > 0; } })); });
+      return promise;
+    }));
+    mocks.push(t.mock.method(defaultProcessQueryHost, 'execFile', function (...args) {
+      const capture = current; let start = 0, row = null; observe(() => { start = performance.now(); });
+      observe(() => {
+        evidence.queryCalls = Math.min(7, evidence.queryCalls + 1);
+        if (!capture || capture.queries.length || evidence.queryCalls > 6) { evidence.overflow = true; return; }
+        row = { callbackCount: 0, callbackObservedAtCaptureEnd: null, threw: false, category: 'callback-not-observed', elapsedMs: null,
+          stdoutBytes: null, stderrBytes: null, byteCountsSaturated: false };
+        capture.queries.push(row);
+      });
+      const callback = args[3], forwarded = function (...values) {
+        observe(() => {
+          if (!row) return;
+          const [error, stdout, stderr] = values;
+          row.callbackCount = Math.min(2, row.callbackCount + 1); if (row.callbackCount > 1) return; row.elapsedMs = elapsed(start);
+          row.category = error ? error.killed === true || error.signal === 'SIGTERM' ? 'query-timeout'
+            : error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' ? 'output-oversized' : 'query-failed' : 'callback-success';
+          for (const [key, value] of [['stdoutBytes', stdout], ['stderrBytes', stderr]]) {
+            const bytes = typeof value === 'string' ? Buffer.byteLength(value) : null;
+            row[key] = bytes === null ? null : Math.min(4097, bytes); if (bytes !== null && bytes > 4097) row.byteCountsSaturated = true;
+          }
+        });
+        return Reflect.apply(callback, this, values);
+      };
+      try { return Reflect.apply(originalQuery, this, [...args.slice(0, 3), forwarded, ...args.slice(4)]); }
+      catch (error) { observe(() => { if (row) { row.threw = true; if (!row.callbackCount) { row.category = 'query-threw'; row.elapsedMs = elapsed(start); } } }); throw error; }
+    }));
+  } catch { observe(() => { evidence.observerFailures++; }); }
+  return { evidence, restore() { for (const mocked of mocks.reverse()) observe(() => mocked.mock.restore()); } };
+}
+async function failureJournalEvidence(job, result) {
+  const summary = { status: 'unavailable', schemaMatches: false, jobMatches: false, directoryMatches: false,
+    resultStateMatches: false, requestMatches: false, state: null, diagnosticStage: null, diagnosticReason: null, workers: [] };
+  try {
+    const journal = JSON.parse((await readRegularFile(join(job.directory, 'job.json'), 1024 * 1024)).toString('utf8'));
+    summary.schemaMatches = journal.schemaVersion === 1; summary.jobMatches = journal.jobId === job.id;
+    summary.directoryMatches = journal.directory === job.directory; summary.resultStateMatches = journal.state === result.state;
+    try { requireCurrentBoulder(journal.request); summary.requestMatches = true; } catch { /* Observation only. */ }
+    summary.state = ['running', 'succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted'].includes(journal.state) ? journal.state : 'other';
+    const diagnostic = journal.error?.diagnostic;
+    summary.diagnosticStage = stages.has(diagnostic?.stage) ? diagnostic.stage : diagnostic ? 'other' : null;
+    summary.diagnosticReason = ['HOST_FAILURE', 'RUNTIME_PROCESS_IDENTITY'].includes(diagnostic?.reasonCode) ? diagnostic.reasonCode : diagnostic ? 'other' : null;
+    const workers = parseWorkerRecords(journal.workers); summary.status = workers ? 'readable-valid-workers' : 'readable-invalid-workers';
+    if (workers) summary.workers = workers.map(worker => ({ role: worker.role, state: worker.state,
+      closure: worker.state === 'closed' ? worker.closure : null, identityPresent: 'identity' in worker && worker.identity !== null }));
+  } catch { /* No paths, native text, IDs or identity data escape a failed read. */ }
+  return summary;
 }
 function requirePreview(bytes) {
   assert.ok(Buffer.isBuffer(bytes) && bytes.length > 0 && bytes.length <= PNG_LIMIT, 'An actual bounded preview is required.');
@@ -127,8 +204,10 @@ test('real current boulder: original native geometry, 512px world bake, saved sc
   const evidence = { schemaVersion: 1, kind: 'arcane-current-boulder-native-review', platform: process.platform,
     sourceRevision: /^[a-f0-9]{40}$/.test(process.env.GITHUB_SHA ?? '') ? process.env.GITHUB_SHA : null,
     request: expectedRequest, runtimeAcquisition: null, runtime: null, result: null, stages: [], artifacts: [], sources: [], validation: null,
-    nativeEvidence: null, cleanup, visualReview: 'pending', nativeStudioVerification: 'unverified', complete: false };
+    nativeEvidence: null, supervisionObservation: null, failureJournal: null, cleanup, visualReview: 'pending', nativeStudioVerification: 'unverified', complete: false };
+  const observation = observeSupervision(t); evidence.supervisionObservation = observation.evidence;
   t.after(async () => {
+    try {
     let safe = false;
     if (job) {
       job.cancel();
@@ -152,6 +231,7 @@ test('real current boulder: original native geometry, 512px world bake, saved sc
     const json = Buffer.from(JSON.stringify(evidence) + '\n'); assert.ok(json.length <= 65536);
     await writeFile(join(evidenceDirectory, 'rock-quality.json'), json, { flag: 'wx' });
     if (assertionsComplete) { assert.deepEqual((await readdir(evidenceDirectory)).sort(), evidenceNames); assert.equal(evidence.complete, true); }
+    } finally { observation.restore(); }
   });
   evidence.runtimeAcquisition = await pinnedRuntime(executable);
   const workerRoot = await realpath(join(repository, 'workers', 'blender'));
@@ -161,6 +241,7 @@ test('real current boulder: original native geometry, 512px world bake, saved sc
   } });
   result = await job.completion;
   evidence.result = { state: result.state, code: result.error && /^[A-Z0-9_]{1,64}$/.test(result.error.code) ? result.error.code : result.error ? 'OTHER' : null };
+  evidence.failureJournal = await failureJournalEvidence(job, result);
   assert.equal(result.state, 'succeeded', JSON.stringify(evidence.result)); assert.equal(result.error, null); assert.equal(result.manifestPath, join(job.directory, 'manifest.json'));
   const manifestRaw = await readRegularFile(result.manifestPath, 1024 * 1024), manifest = await validateManifestFiles(job.directory, JSON.parse(manifestRaw.toString('utf8')));
   requireCurrentBoulder(manifest.request); assert.equal(manifest.schemaVersion, 2); assert.equal(manifest.jobId, job.id);
