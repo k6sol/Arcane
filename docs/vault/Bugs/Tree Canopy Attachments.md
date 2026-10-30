@@ -53,4 +53,10 @@ For that exact request, all59 emitted IDs and33 tertiary axes remain. Tertiary m
 
 Fourteen focused pure methods pass: six new station/allocator/actual-tube/root-lineage/finite-UV cases, six existing budget/root/variant cases and two deterministic wood/UV-winding cases. The native workflow now runs the new checks and the affected deterministic cases on both platforms. These measurements do not certify final unioned bark, changed UV partitions or canopy placement. Fresh original Blender authoring, export/reopen, multi-angle comparison and artistic review remain required before shipping this geometry change.
 
+## Fresh natural broadleaf detail
+
+Fresh `assets_procedural` requests for natural, nonvariant oak/birch now select branch depth3 when omitted, matching the explicit reviewed benchmark. This includes the tool's default oak. Explicit depths, flat requests, pine/palm, every variant body, generic `assets_start` and canonical stored-request default2 are unchanged. Existing variant resolution still selects age/family branching independently; no variant-family improvement is claimed.
+
+All645 sources compile and32 focused procedural/scene-kit cases pass, including the actual in-memory registered SDK handler for both audiences. The benchmark's depth3 emitted33 tertiary branches, while depth2 excludes tertiary wood; no matched depth2 visual comparison was retained. The new default adds supported detail without raising budgets or creating new authoring capabilities. Reference-quality art remains unaccepted.
+
 Native workflow now requires separate complete9m/18m original pipeline jobs under unchanged per-job deadlines, deep reopen and original worker-closure gates. Actual tall-tree leaf map digests must differ while bark tiles remain identical. Height evidence is retained separately. Real paired exports/renders, pinned5.2 verification, filtering/coverage and art acceptance are still required.512px detail and clipped/overlapping glyphs remain limitations; no realism guarantee or Studio acceptance follows from the pure tests.

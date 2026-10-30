@@ -29,7 +29,7 @@ const finish = z.enum(PROCEDURAL_FINISHES).default('natural').describe('Original
 const tree = z.strictObject({ kind: z.literal('tree'), finish, species: z.enum(TREE_SPECIES).default('oak'),
   height: between(...L.treeHeight).default(9).describe('Metres (1 m ≈ 3.57 studs).'),
   trunkTaper: between(0.2, 0.95).optional().describe('Top/base trunk radius ratio (default 0.55).'),
-  branchLevels: z.number().int().min(1).max(3).optional().describe('Branch recursion depth (palm ignores).'),
+  branchLevels: z.number().int().min(1).max(3).optional().describe('Branch recursion depth. Fresh natural oak/birch without a variant default to 3; other omitted requests default to 2. Variants select age/family depth. Palm ignores.'),
   leafDensity: between(0, 1).optional(), trunkRadius: between(...L.trunkRadius).optional().describe('Metres; default from species and height.'),
   secondaryColor: color.optional().describe('Leaf colour, linear RGB 0..1 (default per species).') });
 const rock = z.strictObject({ kind: z.literal('rock'), finish, size: z.tuple([between(...L.rockSize), between(...L.rockSize), between(...L.rockSize)]).default([1.6, 1.2, 0.9]).describe('[x,y,z] metres; z is height.'),
@@ -134,7 +134,12 @@ export async function specReview(client: Pick<DaemonClient, 'assetsManifest'>, j
 export function proceduralStartBody(input: z.output<typeof proceduralInput>): Record<string, unknown> {
   const { timeoutMs: _wait, generator, variant, ...rest } = input;
   const drop = (value: Record<string, unknown>) => Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined));
-  return drop({ template: 'procedural', ...rest, procedural: drop({ ...generator, variant }) });
+  // Fresh tool requests only: shared normalization keeps legacy/flat/variant
+  // omission semantics. Explicit depth and all unrelated species remain intact.
+  const broadleafDepth = generator.kind === 'tree' && generator.finish === 'natural' &&
+    (generator.species === 'oak' || generator.species === 'birch') && variant === undefined && generator.branchLevels === undefined
+    ? { branchLevels: 3 } : {};
+  return drop({ template: 'procedural', ...rest, procedural: drop({ ...generator, ...broadleafDepth, variant }) });
 }
 
 export function registerProceduralTools(server: McpServer, client: DaemonClient, scope = '', learned: LearnedDefaults | null = null): void {

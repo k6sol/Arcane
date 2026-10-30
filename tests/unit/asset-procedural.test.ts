@@ -157,6 +157,70 @@ test('assets_procedural maps typed generator input onto the shared start body', 
     assert.equal(proceduralInput.safeParse(bad).success, false, JSON.stringify(bad));
 });
 
+test('only fresh natural nonvariant oak and birch tool requests receive depth3 while canonical defaults stay2', () => {
+  for (const species of [undefined, 'oak', 'birch', 'pine', 'palm']) {
+    for (const finish of [undefined, 'natural', 'flat']) {
+      for (const variant of [undefined, [2, 4]]) {
+        const input = proceduralInput.parse({ name:'tree-default',seed:31,
+          generator:{kind:'tree',...(species === undefined ? {} : {species}),...(finish === undefined ? {} : {finish})},
+          ...(variant === undefined ? {} : {variant}) });
+        const before = structuredClone(input), body = proceduralStartBody(input), spec = body.procedural as Record<string,unknown>;
+        const fresh = (species === undefined || species === 'oak' || species === 'birch') && finish !== 'flat' && variant === undefined;
+        assert.equal(Object.hasOwn(spec,'branchLevels'),fresh,JSON.stringify({species,finish,variant}));
+        if (fresh) assert.equal(spec.branchLevels,3);
+        else assert.deepEqual(spec,{...input.generator,...(variant === undefined ? {} : {variant})},'unchanged routes keep their exact omitted-depth body');
+        assert.deepEqual(input,before,'the adapter does not mutate parsed input');
+        const normalized = normalizeRequest(body);
+        assert.equal((normalized.procedural as {branchLevels:number}).branchLevels,fresh ? 3 : 2);
+        assert.equal((normalized.procedural as {leafDensity:number}).leafDensity,.7);assert.equal(normalized.triangleBudget,16000);
+        assert.deepEqual(normalizeRequest(JSON.parse(JSON.stringify(normalized))),normalized);
+      }
+    }
+  }
+  for (const finish of [undefined,'natural','flat']) {
+    const legacy=tree(finish === undefined ? {} : {finish});
+    assert.equal((legacy.procedural as {branchLevels:number}).branchLevels,2,'generic assets_start/core normalization stays2');
+    assert.deepEqual(normalizeRequest(JSON.parse(JSON.stringify(legacy))),legacy);
+  }
+});
+
+test('explicit tree depth1/2/3 is preserved in mapped requests for every species, finish and variant route', () => {
+  for (const species of ['oak','birch','pine','palm']) for (const finish of ['natural','flat'])
+    for (const variant of [undefined,[2,4]]) for (const branchLevels of [1,2,3]) {
+      const input=proceduralInput.parse({name:'explicit-depth',generator:{kind:'tree',species,finish,branchLevels},
+        ...(variant === undefined ? {} : {variant})});
+      const body=proceduralStartBody(input),spec=body.procedural as Record<string,unknown>;
+      assert.equal(spec.branchLevels,branchLevels);assert.deepEqual(spec,{...input.generator,...(variant === undefined ? {} : {variant})});
+      const normalized=normalizeRequest(body);assert.equal((normalized.procedural as {branchLevels:number}).branchLevels,branchLevels);
+      assert.deepEqual(normalizeRequest(JSON.parse(JSON.stringify(normalized))),normalized);
+    }
+});
+
+for (const audience of ['generic','native-session'] as const)
+test(`registered assets_procedural SDK handler sends only the scoped fresh broadleaf default for ${audience}`, async t => {
+  const starts:Record<string,unknown>[]=[];
+  const fake={assetAudience:audience,redact:(value:unknown)=>value,
+    assetsStart:async(body:Record<string,unknown>,options:{timeoutMs:number})=>{starts.push(structuredClone(body));assert.equal(options.timeoutMs,20000);return{jobId:'11111111-1111-4111-8111-111111111111',state:'queued'};}};
+  const server=new McpServer({name:'fixture',version:'0'});registerProceduralTools(server,fake as unknown as DaemonClient);
+  const [a,b]=InMemoryTransport.createLinkedPair(),client=new Client({name:'c',version:'0'});
+  t.after(async()=>{await client.close();await server.close();});await server.connect(a);await client.connect(b);
+  const cases=[{generator:{kind:'tree'},expected:3},{generator:{kind:'tree',species:'birch'},expected:3},
+    {generator:{kind:'tree',finish:'flat'},expected:2},{generator:{kind:'tree',species:'pine'},expected:2},
+    {generator:{kind:'tree'},variant:[2,4],expected:2},{generator:{kind:'tree',branchLevels:1},expected:1},
+    {generator:{kind:'tree',branchLevels:2},expected:2}];
+  for (const [index,value] of cases.entries()) {
+    const {expected,...args}=value;
+    const result=await client.callTool({name:'assets_procedural',arguments:{name:'sdk-tree-'+index,seed:31,...args}});
+    assert.equal(result.isError,undefined);assert.equal(starts.length,index+1);
+    const body=starts[index]!,spec=body.procedural as Record<string,unknown>;
+    assert.equal((normalizeRequest(body).procedural as {branchLevels:number}).branchLevels,expected);
+    assert.equal(Object.hasOwn(spec,'branchLevels'),expected !== 2 || Object.hasOwn(value.generator,'branchLevels'));
+    assert.equal(Object.hasOwn(body,'timeoutMs'),false);assert.equal(Object.hasOwn(body,'variant'),false);
+    assert.equal(Object.hasOwn(body,'triangleBudget'),false);assert.equal(Object.hasOwn(spec,'leafDensity'),false);
+    if ('variant' in value) assert.deepEqual(spec.variant,[2,4]);
+  }
+});
+
 test('procedural tools are in the reviewed surface and registered per audience', async () => {
   for (const name of ['assets_procedural', 'assets_preview']) { assert.ok(ARCANE_TOOL_NAMES.includes(name as never)); assert.ok(ARCANE_NATIVE_TOOL_NAMES.includes(name as never)); }
   assert.ok(ARCANE_NATIVE_TOOL_NAMES.includes('assets_place_studio_import' as never)); assert.ok(!ARCANE_TOOL_NAMES.includes('assets_place_studio_import' as never));
