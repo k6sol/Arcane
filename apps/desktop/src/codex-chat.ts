@@ -1553,7 +1553,8 @@ export function toolResultFacts(tool:string,args:Record<string,unknown>|null,res
         const spawn=activityNumber(activityRecord(kit.spawn)?.top);if(spawn!==null)facts.push('spawn at '+Math.round(spawn)+' studs');
       }
       const tris=kits.reduce((sum,kit)=>sum+(activityNumber(kit.triangles)??0),0);if(tris>0)facts.push(compactCount(tris)+' tris');
-      if(kits.some(kit=>Object.keys(activityRecord(kit.originals)??{}).length))facts.push('Blender originals');
+      // Numbered template names establish a variant family, not authoring provenance.
+      if(kits.some(kit=>Object.keys(activityRecord(kit.originals)??{}).length))facts.push('Template variants');
       if(!kits.length){
         const placed=list(outcome.scatter).reduce((sum:number,row)=>sum+(activityNumber(activityRecord(row)?.placed)??0),0);
         facts.push(countFact(activityRecord(plugin?.created)?.count??after?.count??outcome.plannedInstances,'instance','instances'),placed>0?compactCount(placed)+' scattered':null);
@@ -1653,7 +1654,7 @@ function toolGroupInfo(tool:string,args:Record<string,unknown>|null):ToolGroupIn
     case 'script_search':return make(['Running','Ran'],['script search','script searches'],null);
     case 'script_set_enabled':{const enabled=args?.enabled!==false;
       return make(enabled?['Enabling','Enabled']:['Disabling','Disabled'],['script','scripts'],parentPath(ref),enabled?'on':'off');}
-    case 'assets_procedural':return make(['Modelling','Modelled'],['mesh','meshes'],null);
+    case 'assets_start':case 'assets_procedural':return make(['Starting','Started'],['Blender job','Blender jobs'],null);
     case 'receipt_status':return make(['Checking','Checked'],['change receipt','change receipts'],null);
     case 'skills_get':return make(['Reading','Read'],['skill guide','skill guides'],null);
   }
@@ -1665,6 +1666,7 @@ function describeToolCall(name:string,input:unknown,result:unknown,state:ToolAct
   const args=activityRecord(input)??activityRecord(command?.args);
   const phrase=toolPhrase(tool,args).trim();
   const text=state==='started'?phrase+'…':phrase;
+  if(state==='finished'&&(tool==='assets_start'||tool==='assets_procedural'))return {text:'Blender job started',change:null};
   const receipt=activityText(outcome?.commandId,256);
   // An offline Studio session refuses commands (SESSION_OFFLINE): say so plainly instead of a bare failure.
   if(state==='failed'&&activityRecord(outcome?.error)?.code==='SESSION_OFFLINE')return {text:phrase+' — '+STUDIO_OFFLINE_TOOL_TEXT,change:null};
@@ -1956,9 +1958,11 @@ export function groupToolCards(container:HTMLElement,open:ReadonlySet<string>=ne
 // Liveness comes from #codex-messages[data-turn-live], which each chat sets while its visible turn runs.
 /** Calls needed in one turn before its lines move into a build progress group. */
 export const BUILD_PROGRESS_MIN=2;
-/** Tools that change the place or make assets: a turn with one reads "Built", otherwise "Done". */
+/** Async job acknowledgements complete tool steps, not the underlying asset work. */
+const ASYNC_ASSET_TOOLS=new Set(['assets_start','assets_procedural','assets_adopt_glb','assets_convert_glb']);
+/** Tools that change the place or request assets; later model completion is separate evidence. */
 const BUILDING_TOOLS=new Set(['scene_create','scene_update','scene_build','scene_delete','environment_apply','terrain_generate','studio_asset_insert',
-  'assets_procedural','assets_place_studio_import','assets_stage_studio_import','assets_reconstruct_studio_import','assets_adopt_glb',
+  ...ASYNC_ASSET_TOOLS,'assets_place_studio_import','assets_stage_studio_import','assets_reconstruct_studio_import',
   'script_update','script_set_enabled','receipt_restore']);
 /** 900 -> '<1s', 42000 -> '42s', 134000 -> '2m 14s', 3900000 -> '1h 05m'. */
 export function formatElapsed(ms:number):string {
@@ -1991,7 +1995,8 @@ export function buildProgressSummary(rows:readonly BuildProgressRow[],live:boole
     return {title:building?'Build progress':'Working',meta,state:'started',steps,done,retried,failed};
   }
   const unfinished=steps-done;
-  const lead=(failed&&failed===steps?'Stopped':failed||unfinished?'Incomplete':building?'Built':'Done')+(time?' in '+time:'');
+  const asyncAssets=rows.some(row=>!!row.tool&&ASYNC_ASSET_TOOLS.has(row.tool));
+  const lead=(failed&&failed===steps?'Stopped':failed||unfinished?'Incomplete':building?asyncAssets?'Build steps finished':'Built':'Done')+(time?' in '+time:'');
   const title=[lead,plural(steps,'step'),retried?retried+' retried':'',failed?failed+' failed':'',unfinished?unfinished+' unfinished':''].filter(Boolean).join(' · ');
   return {title,meta:'',state:failed||unfinished?'failed':'finished',steps,done,retried,failed};
 }

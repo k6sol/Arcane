@@ -59,8 +59,10 @@ test('actual closed staging descriptors reach loaded-history and shared named-re
 const forestKit = { kind: 'forest', key: 'grove', parts: 0, triangles: 11500, placed: 240, requested: 260, originals: { oak: ['oak-1', 'oak-2'] } };
 const plinthKit = { kind: 'plinth', key: 'spawn', parts: 14, triangles: 2400, top: 52.7, spawn: { at: [0, 52.7, 0], top: 53.2 } };
 
-test('scene kits report trees placed and skipped, triangles, spawn height and Blender originals', () => {
-  assert.deepEqual(toolResultFacts('scene_build', null, outcome('scene.build', { created: { count: 260 } }, { kits: [forestKit] })), ['240 placed', '20 skipped', '11.5k tris', 'Blender originals']);
+test('scene kits report placement and template variants without inferring Blender provenance', () => {
+  const forestFacts=toolResultFacts('scene_build', null, outcome('scene.build', { created: { count: 260 } }, { kits: [forestKit] }));
+  assert.deepEqual(forestFacts, ['240 placed', '20 skipped', '11.5k tris', 'Template variants']);
+  assert.doesNotMatch(forestFacts.join(' '),/Blender|authored|approved/i,'numbered templates do not prove authoring or review');
   assert.deepEqual(toolResultFacts('scene_build', null, outcome('scene.build', null, { kits: [{ ...forestKit, placed: 2312, requested: 2340 }] })).slice(0, 2), ['2,312 placed', '28 skipped'], 'exact grouped counts, as the canvas reads them');
   assert.deepEqual(toolResultFacts('scene_build', null, outcome('scene.build', null, { kits: [plinthKit] })), ['spawn at 53 studs', '2.4k tris']);
   assert.deepEqual(toolResultFacts('scene_build', null, outcome('scene.build', null, { kits: [forestKit, plinthKit] })), ['240 placed', '20 skipped', 'spawn at 53 studs', '13.9k tris'], 'kit triangles add up');
@@ -98,8 +100,8 @@ test('counts, times and the turn summary', () => {
   const row = (tool: string, state: 'started' | 'finished' | 'failed', text = tool) => ({ tool, state, text });
   const rows = [row('studio_output_read', 'finished'), row('terrain_generate', 'finished'), row('scene_build', 'failed'), row('scene_build', 'finished'),
     row('environment_apply', 'finished'), row('studio_viewport_capture', 'finished'), row('assets_procedural', 'finished'), row('assets_jobs', 'finished'), row('skills_get', 'finished')];
-  assert.deepEqual(buildProgressSummary(rows, false, 134_000), { title: 'Built in 2m 14s · 9 steps · 1 retried', meta: '', state: 'finished', steps: 9, done: 9, retried: 1, failed: 0 });
-  assert.equal(buildProgressSummary(rows, false, null).title, 'Built · 9 steps · 1 retried', 'saved history has no observed time');
+  assert.deepEqual(buildProgressSummary(rows, false, 134_000), { title: 'Build steps finished in 2m 14s · 9 steps · 1 retried', meta: '', state: 'finished', steps: 9, done: 9, retried: 1, failed: 0 });
+  assert.equal(buildProgressSummary(rows, false, null).title, 'Build steps finished · 9 steps · 1 retried', 'saved history has no observed time or asset completion proof');
   const live = buildProgressSummary([...rows.slice(0, 3), row('scene_build', 'started', 'Placing forest on terrain…')], true, 62_000);
   assert.deepEqual([live.title, live.meta, live.state, live.done, live.steps], ['Build progress', 'Placing forest on terrain · 3 of 4 · 1 failed · 1m 02s', 'started', 3, 4], 'the running step, N of M ended, no ellipsis');
   assert.equal(buildProgressSummary([...rows.slice(0, 4), row('studio_viewport_capture', 'started', 'Capturing viewport…')], true, 128_000).meta, 'Capturing viewport · 4 of 5 · 1 retried · 2m 08s');
@@ -107,6 +109,22 @@ test('counts, times and the turn summary', () => {
   assert.equal(buildProgressSummary([row('script_read', 'finished'), row('scene_search', 'finished')], false, 4000).title, 'Done in 4s · 2 steps', 'read-only turns are not "built"');
   assert.deepEqual(buildProgressSummary([row('scene_build', 'failed'), row('terrain_generate', 'failed')], false, 3000), { title: 'Stopped in 3s · 2 steps · 2 failed', meta: '', state: 'failed', steps: 2, done: 2, retried: 0, failed: 2 });
   assert.equal(buildProgressSummary([row('scene_build', 'finished'), row('terrain_generate', 'started')], false, null).title, 'Incomplete · 2 steps · 1 unfinished');
+});
+
+test('background asset acknowledgements finish request steps without claiming completed models',()=>{
+  for(const tool of ['assets_start','assets_procedural']){
+    const activity=describeToolActivity(tool,null,{job:{jobId:'fixture-job',state:'running'}},'finished');
+    assert.equal(activity.text,'Blender job started');assert.equal(activity.change,null);
+    assert.deepEqual(activity.group?.verbs,['Starting','Started']);
+    assert.deepEqual(activity.group?.noun,['Blender job','Blender jobs']);
+  }
+  for(const tool of ['assets_start','assets_procedural','assets_adopt_glb','assets_convert_glb']){
+    const rows=[{tool,state:'finished' as const,text:'Request acknowledged'},
+      {tool:'assets_jobs',state:'finished' as const,text:'Checking Blender progress'}];
+    const summary=buildProgressSummary(rows,false,null);
+    assert.match(summary.title,/^Build steps finished/);assert.doesNotMatch(summary.title,/^Built/);
+    assert.equal(summary.state,'finished');assert.equal(summary.done,2);
+  }
 });
 
 test('completed progress is incomplete when failures remain after successful retries', () => {
@@ -185,7 +203,7 @@ test('every step reads in plain words: Arcane tools, Claude Code tools and a ver
   assert.equal(describeToolActivity('studio_viewport_capture', null, null, 'started').text, 'Capturing viewport…');
   for (const [tool, text] of [['Bash', 'Running a command'], ['Edit', 'Editing a file'], ['Read', 'Reading a file'], ['TodoWrite', 'Updating the plan'], ['Task', 'Running a helper agent']] as const)
     assert.equal(label(tool), text, tool);
-  for (const [tool, text] of [['scene_remove', 'Removing objects'], ['assets_import', 'Importing models'], ['assets_' + 'start', 'Modelling in Blender'],
+  for (const [tool, text] of [['scene_remove', 'Removing objects'], ['assets_import', 'Importing models'], ['assets_' + 'start', 'Blender job started'],
     ['studio_capture_frame', 'Capturing viewport'], ['mystery_tool', UNNAMED_TOOL_TEXT], ['<b onmouseover=x>', UNNAMED_TOOL_TEXT]] as const) {
     assert.equal(label(tool), text, tool);
     assert.ok(!label(tool).includes(tool), 'the raw id never shows: ' + tool);
@@ -363,7 +381,7 @@ test('Edge: build progress group, live and collapsed, with facts, retry, reason 
       await page.evaluate(([id, name, state, result, image]) => (window as any).fx.tool(id, name, state, undefined, result, image), [id, name, state, result, image] as const);
       await page.clock.runFor(1500);
     }
-    assert.deepEqual(await group.locator('.build-progress-items .tool-activity-text').allInnerTexts(), ['Reading Studio Output', 'Carving caves', 'Generating oak model', 'Checking Blender progress',
+    assert.deepEqual(await group.locator('.build-progress-items .tool-activity-text').allInnerTexts(), ['Reading Studio Output', 'Carving caves', 'Blender job started', 'Checking Blender progress',
       'Placing forest on terrain', 'Placing forest on terrain', 'Building the spawn plinth', 'Applying forest lighting', 'Capturing viewport']);
     assert.deepEqual(await group.locator('.build-progress-items .tool-fact').allInnerTexts(), ['2 lines', 'no errors', '3 chambers', '2 entrances', '1 done',
       '240 placed', '20 skipped', 'spawn at 53 studs', '2.4k tris', '768×432'], 'at most two chips per row');
@@ -385,7 +403,7 @@ test('Edge: build progress group, live and collapsed, with facts, retry, reason 
     await page.evaluate(() => (window as any).fx.emit({ turnId: 'turn-1', conversationId: 'conv-forest', type: 'done', ok: true, error: null, usage: { inputTokens: 52000, outputTokens: 4100, costUsd: 0.31 } }));
     await page.waitForFunction(() => (document.querySelector('#codex-messages .build-progress') as HTMLDetailsElement | null)?.open === false);
     const summary = await group.locator('.build-progress-title').innerText();
-    assert.match(summary, /^Built in 2m \d\ds · 9 steps · 1 retried$/, summary);
+    assert.match(summary, /^Build steps finished in 2m \d\ds · 9 steps · 1 retried$/, summary);
     assert.equal(await group.getAttribute('data-tool-state'), 'finished');
     assert.deepEqual(await group.locator('.build-progress-facts .tool-fact').allInnerTexts(), ['3 chambers', '240 placed', 'spawn at 53 studs'], 'key facts stay visible when collapsed');
     assert.equal(await page.locator('#codex-messages > .codex-message.tool').count(), 0, 'every call is inside the group');
