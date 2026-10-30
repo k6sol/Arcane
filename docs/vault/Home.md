@@ -15,7 +15,7 @@ tags: [arcane, dashboard]
 
 The [[Delivery/Goal Board|ten urgent goals]] track the path to a dependable customer release. Open a goal for its outcome, dependencies and acceptance criteria. Check it off only after recording evidence.
 
-Current priority: validate the connected task handoff and full-map staging diagnostics, then continue real model quality and customer delivery. Main `1f87ea3` passed all nine component, packaged and native Blender checks. Its 39-case foliage anchor evidence and Windows contact views are verified. The installed app remains unchanged because the activation memory gate failed. [[Operations/Current State|Current state]] separates verified main from newer validation work.
+Current priority: fix the actual Blender forest regression, revise all 62 product skills toward complete game delivery, and implement the supplied interface reference with usable chat organization. [[Operations/Requirements Ledger|All earlier requirements remain tracked]]. [[Design/Interface Reference|Interface reference]] · [[Skills/Production Upgrade|Skill upgrade]] · [[Bugs/Forest Blender Workflow|Forest regression]]. Verified main is `499261b`; the running app is a separate older installation.
 
 ## Build with knowledge
 
