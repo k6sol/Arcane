@@ -1856,14 +1856,55 @@ test('Edge: Claude activity lines, change card, queue chips, usage meter and the
   for (const scheme of ['dark', 'light'] as const) {
     const page = await browser.newPage({ viewport: { width: 1280, height: 900 }, colorScheme: scheme }); page.setDefaultTimeout(8000);
     const errors: string[] = []; page.on('pageerror', error => errors.push(error.message));
+    // Observe only a failed original wait; never replace its predicate, deadline or rejection.
+    const waitPhase = async (phase: 'ready'|'provider-visible'|'first-send'|'queued-send'|'failed-turn-paused', wait: () => Promise<unknown>) => {
+      try { await wait(); }
+      catch (original) {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          const observation = page.isClosed() ? { availability: 'closed' as const } : await Promise.race([
+            page.evaluate(() => {
+              const fx = (window as any).fx;
+              const queueStates = { queued: 0, paused: 0, sending: 0, unknown: 0, rejected: 0, other: 0 };
+              const rows = document.querySelectorAll('#claude-chat-queue .queue-row');
+              for (let index = 0; index < Math.min(rows.length, 65); index++) {
+                switch ((rows[index] as HTMLElement).dataset.queueState) {
+                  case 'queued': queueStates.queued++; break;
+                  case 'paused': queueStates.paused++; break;
+                  case 'sending': queueStates.sending++; break;
+                  case 'unknown': queueStates.unknown++; break;
+                  case 'rejected': queueStates.rejected++; break;
+                  default: queueStates.other++;
+                }
+              }
+              const hidden = (id: string) => document.getElementById(id)?.hidden ?? null;
+              const composer = document.getElementById('codex-composer') as HTMLTextAreaElement | null;
+              return {
+                ready: typeof fx?.ready === 'boolean' ? fx.ready : null,
+                running: typeof fx?.claude?.running === 'function' ? fx.claude.running() === true : null,
+                sendCount: Array.isArray(fx?.calls) ? Math.min(fx.calls.length, 65) : null,
+                queueStates, queueRowCount: Math.min(rows.length, 65),
+                tabsHidden: hidden('claude-chat-tabs'), queueHidden: hidden('claude-chat-queue'),
+                composerDisabled: composer?.disabled ?? null,
+                documentVisibility: document.visibilityState === 'visible' ? 'visible' : document.visibilityState === 'hidden' ? 'hidden' : 'other',
+              };
+            }).then(state => ({ availability: 'available' as const, state }), () => ({ availability: 'evaluation-failed' as const })),
+            new Promise<{ availability: 'observation-deadline' }>(done => { timer = setTimeout(() => done({ availability: 'observation-deadline' }), 250); }),
+          ]);
+          t.diagnostic(JSON.stringify({ schemaVersion: 1, phase, scheme, pageErrorCount: Math.min(errors.length, 65), observation }));
+        } catch { /* Diagnostic collection or output must preserve the original wait failure. */ }
+        finally { if (timer !== undefined) clearTimeout(timer); }
+        throw original;
+      }
+    };
     await page.goto('http://127.0.0.1:' + (server.address() as { port: number }).port + '/studio');
-    await page.waitForFunction(() => (window as any).fx?.ready === true);
+    await waitPhase('ready', () => page.waitForFunction(() => (window as any).fx?.ready === true));
     await page.evaluate(() => document.dispatchEvent(new CustomEvent('workspace:providerpreference', { detail: { provider: 'claude' } })));
-    await page.waitForFunction(() => !document.getElementById('claude-chat-tabs')!.hidden);
+    await waitPhase('provider-visible', () => page.waitForFunction(() => !document.getElementById('claude-chat-tabs')!.hidden));
     await page.evaluate(() => (window as any).fx.refreshed);
     const composer = page.locator('#codex-composer');
     await composer.fill('Add a spawn platform with a spawner script'); await composer.press('Enter');
-    await page.waitForFunction(() => (window as any).fx.calls.length === 1);
+    await waitPhase('first-send', () => page.waitForFunction(() => (window as any).fx.calls.length === 1));
     await page.evaluate(() => {
       const fx = (window as any).fx, ref = (root: string, ...pathSegments: string[]) => ({ instanceId: 'i', sessionId: 's', root, pathSegments, className: 'Script' });
       const ok = (commandId: string, method: string, args: unknown) => JSON.stringify({ commandId, state: 'succeeded', terminal: true, command: { method, args } });
@@ -1893,7 +1934,7 @@ test('Edge: Claude activity lines, change card, queue chips, usage meter and the
       fx.emit({ turnId: 'turn-1', conversationId: 'conv-spawn', type: 'done', ok: true, error: null, usage: { inputTokens: 18234, outputTokens: 1620, costUsd: 0.0412 } });
     });
     await page.locator('#codex-messages .chat-change-card').waitFor();
-    await page.waitForFunction(() => (window as any).fx.calls.length === 2);
+    await waitPhase('queued-send', () => page.waitForFunction(() => (window as any).fx.calls.length === 2));
     assert.equal(await page.evaluate(() => (window as any).fx.calls[1].text), 'Now make the platform glow', 'the next queued message is sent after success');
     assert.deepEqual(await page.locator('#claude-chat-queue .queue-text').allInnerTexts(), ['Then add a checkpoint']);
     assert.equal(await page.locator('#codex-messages .chat-change-summary').innerText(), '1 created · 1 script edited');
@@ -1927,8 +1968,8 @@ test('Edge: Claude activity lines, change card, queue chips, usage meter and the
     // A failed reply retains its remaining row separately and never replays it into the composer.
     const retainedComposer = await composer.inputValue();
     await page.evaluate(() => (window as any).fx.emit({ turnId: 'turn-2', conversationId: 'conv-spawn', type: 'done', ok: false, error: 'Claude stopped before finishing.', usage: null }));
-    await page.waitForFunction(() => !(window as any).fx.claude.running() &&
-      document.querySelectorAll('#claude-chat-queue .queue-row[data-queue-state="paused"]').length === 1);
+    await waitPhase('failed-turn-paused', () => page.waitForFunction(() => !(window as any).fx.claude.running() &&
+      document.querySelectorAll('#claude-chat-queue .queue-row[data-queue-state="paused"]').length === 1));
     assert.deepEqual(await page.locator('#claude-chat-queue .queue-text').allInnerTexts(), ['Then add a checkpoint']);
     assert.equal(await composer.inputValue(), retainedComposer, 'the original composer stays independent of the paused row');
     assert.equal(await page.evaluate(() => (window as any).fx.calls.length), 2, 'a failed reply never sends the next row');
