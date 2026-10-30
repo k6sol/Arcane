@@ -24,3 +24,5 @@ Original scopes, unsupported-conversion refusals, unknown-acknowledgement no rep
 - [ ] Actual models pass geometry, UV/PBR and multi-angle rendered review.
 
 The existing 4,096-character MCP instruction guard remains unchanged. Source arithmetic suggests 4,093 characters; the real hosted assertion decides acceptance. Instruction delivery is not model training, obedience or proof of realism. This correction does not establish why an earlier response reused a particular scene.
+
+30 October validation: native Blender conversion passed on both platforms in [run 40992537597](https://github.com/k6sol/Arcane/actions/runs/40992537597). Component run 40992537559 exposed one additional legacy wording assertion in arcane-tool-readiness; its exact explicit-Toolbox-request check is migrated without changing the case, inventory or refusal assertions. Connected component acceptance remains pending on the corrected revision. Native conversion is controlled source-conversion evidence, not realistic model quality or Studio/customer acceptance.

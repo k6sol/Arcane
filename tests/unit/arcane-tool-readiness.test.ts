@@ -77,7 +77,7 @@ test('native Studio asset tools remain available with original assets as the def
  }
  assert.equal(new Set(ARCANE_TOOL_NAMES).size,ARCANE_TOOL_NAMES.length,'no name collisions with the assets_* pipeline');
  assert.match(ARCANE_TASK_INSTRUCTIONS,/Original assets by default/);
- assert.match(ARCANE_TASK_INSTRUCTIONS,/Do not search for or insert Toolbox\/Creator Store models unless the user explicitly requests them/);
+ assert.match(ARCANE_TASK_INSTRUCTIONS,/Toolbox\/Creator Store needs an explicit request/);
  assert.doesNotMatch(ARCANE_TASK_INSTRUCTIONS,/studio_asset_search first|studio_asset_generate only when nothing suitable exists/);
 });
 
