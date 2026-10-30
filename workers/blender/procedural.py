@@ -236,6 +236,12 @@ class MeshData:
                 self.face((a[j], a[k], b[k], b[j]), uvs=((j / sides, distances[index] / distance), ((j + 1) / sides, distances[index] / distance),
                           ((j + 1) / sides, distances[index + 1] / distance), (j / sides, distances[index + 1] / distance)))
         self.face(tuple(reversed(rings[0])), smooth=False)
+        if wood_uv is not None:
+            # Natural bark caps need positive UV winding regardless of projection axis.
+            cap_uv = self.uvs[-1]
+            twice_area = sum(a[0] * b[1] - b[0] * a[1] for a, b in zip(cap_uv, cap_uv[1:] + cap_uv[:1]))
+            if twice_area < 0:
+                self.uvs[-1] = tuple((v, u) for u, v in cap_uv)
         if blunt and wood_uv is not None:
             apex = self.vertex(add(spine[-1], mul(tangents[-1], apex_length)))
             top = rings[-1]

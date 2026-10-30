@@ -338,6 +338,52 @@ class GeneratorContract(unittest.TestCase):
                 normal = procedural.norm(procedural.cross(procedural.sub(card[2], card[0]), procedural.sub(card[5], card[0])))
                 self.assertGreater(abs(procedural.dot(procedural.sub(card[1], card[0]), normal)), 1e-4)
 
+    def test_natural_wood_cap_uv_winding_preserves_geometry_and_other_authored_uvs(self):
+        def signed(points):
+            return sum(a[0] * b[1] - b[0] * a[1] for a, b in zip(points, points[1:] + points[:1])) / 2
+
+        original_face = procedural.MeshData.face
+        mirrored_controls, positive_controls = 0, 0
+        directions = ((0, 0, 1), (0, 0, -1), (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (1, 2, 3))
+        for direction in directions:
+            along = procedural.norm(direction)
+            spine = [procedural.mul(along, distance) for distance in (0.0, .5, 1.0)]
+            for sides in (8, 24):
+                with self.subTest(direction=direction, sides=sides):
+                    natural, legacy = procedural.MeshData(), procedural.MeshData()
+                    authored = []
+
+                    def observe_face(mesh, *args, **kwargs):
+                        result = original_face(mesh, *args, **kwargs)
+                        if mesh is natural:
+                            authored.append(mesh.uvs[-1])
+                        return result
+
+                    options = {"spine": spine, "radii": [.3, .19, .075], "sides": sides, "blunt": True}
+                    with patch.object(procedural.MeshData, "face", observe_face):
+                        natural.tube(**options, wood_uv={"around": 1, "period": 1.0})
+                    legacy.tube(**options)
+                    self.assertEqual((natural.vertices, natural.faces, natural.smooth), (legacy.vertices, legacy.faces, legacy.smooth))
+                    cap = (len(spine) - 1) * sides
+                    self.assertEqual(authored[cap], legacy.uvs[cap], "General face projection remains unchanged")
+                    self.assertGreater(signed(natural.uvs[cap]), 0)
+                    for index in range(1, sides - 1):
+                        triangle = (natural.uvs[cap][0], natural.uvs[cap][index], natural.uvs[cap][index + 1])
+                        self.assertGreater(signed(triangle), 0, "Every convex cap triangle must keep positive UV winding")
+                    for index, uv in enumerate(natural.uvs):
+                        self.assertTrue(all(0 <= coordinate <= 1 for point in uv for coordinate in point))
+                        if index != cap:
+                            self.assertEqual(uv, authored[index], "Side/apex UVs retain their original authored values")
+                    if signed(authored[cap]) < 0:
+                        mirrored_controls += 1
+                        self.assertLess(signed(legacy.uvs[cap]), 0)
+                        self.assertNotEqual(natural.uvs[cap], authored[cap])
+                    else:
+                        positive_controls += 1
+                        self.assertEqual(natural.uvs[cap], authored[cap])
+        self.assertGreater(mirrored_controls, 0, "The original negative cap is a real regression control")
+        self.assertGreater(positive_controls, 0, "Already positive projections must remain untouched")
+
     def test_natural_bark_tile_repeats_along_branches_inside_uv0(self):
         for species in ("oak", "birch"):
             bark = procedural.plan(request(natural(species, density=0.0), 16000, 103))[0][2]
