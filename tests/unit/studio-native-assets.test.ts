@@ -446,10 +446,10 @@ test('MCP: asset tools are registered with bounded schemas; insert arms a watch,
 
 test('instructions: original assets are the default and Toolbox models require explicit requests', () => {
   assert.match(ARCANE_TASK_INSTRUCTIONS, /Original assets by default/);
-  assert.match(ARCANE_TASK_INSTRUCTIONS, /Do not search for or insert Toolbox\/Creator Store models unless the user explicitly requests them/);
-  assert.match(ARCANE_TASK_INSTRUCTIONS, /realism or general permission to build is not that request/);
-  assert.match(ARCANE_TASK_INSTRUCTIONS, /Author models, UVs and PBR in Blender/);
-  assert.match(ARCANE_TASK_INSTRUCTIONS, /Never buy or publish assets/);
+  assert.match(ARCANE_TASK_INSTRUCTIONS, /Toolbox\/Creator Store needs an explicit request/);
+  assert.match(ARCANE_TASK_INSTRUCTIONS, /not realism\/build permission/);
+  assert.match(ARCANE_TASK_INSTRUCTIONS, /Blender geometry\/UV\/PBR/);
+  assert.match(ARCANE_TASK_INSTRUCTIONS, /No Studio AI, buying\/publishing/);
   assert.match(ARCANE_TASK_INSTRUCTIONS, /studio_viewport_capture, critique the image against the request, then fix what you see/);
   assert.doesNotMatch(ARCANE_TASK_INSTRUCTIONS, /studio_asset_search first|studio_asset_generate only when nothing suitable exists/);
   for (const skill of ['arcane-natural-scenes', 'arcane-architectural-features', 'arcane-photoreal', 'arcane-world-building']) {

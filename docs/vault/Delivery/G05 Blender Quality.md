@@ -5,7 +5,7 @@ tags: [arcane]
 ---
 # Enforce a measurable Blender quality pipeline
 
-Status: **Queued**. Priority and original scope: Enforce a measurable Blender quality pipeline — P0, queued.
+Status: **In progress**. Priority: P0.
 
 Deliver: original Blender-authored geometry, deliberate species/form structure, connected foliage, credible rocks, production UVs and PBR textures, scale/pivots, useful LOD/collision output, and an interactive model review before approval. Toolbox models require explicit user request.
 
@@ -22,10 +22,10 @@ Depends on: 1; coordinate previews with 2 and job ownership with 4. Owner: asset
 
 ## Evidence
 
-No whole-goal completion evidence recorded yet. Add actual revision/run/artifact links and distinguish controlled tests from customer/native proof.
+[[Bugs/Original Asset Authoring]] corrects connected guidance that overstated bounded generators and omitted the existing native authoring route. Two SDK/MCP regressions are authored; hosted validation and actual generated geometry/rendered quality remain pending. This is not model training or whole-goal completion.
 
 ## Next action
 
-Resolve listed dependencies, then reproduce the missing outcome before editing.
+Verify the exact instruction/skill delivery change, then test realistic tree, rock and architectural briefs against their actual source geometry, UV/PBR and reviewed multi-angle outputs. Preserve original intent and actual provider capabilities.
 
 [[Delivery/Goal Board]] · [[Operations/Evidence Ledger]]

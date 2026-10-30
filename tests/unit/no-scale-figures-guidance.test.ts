@@ -10,16 +10,16 @@ import {ARCANE_TASK_INSTRUCTIONS} from '../../packages/protocol/src/arcane-tools
 function assetScaleGuidance(text:string):void {
   // Keep the exception attached to the asset-scoped default: an explicit NPC,
   // character or mannequin request remains within the user's chosen scene.
-  assert.match(text,/Do not add people, mannequins or human scale figures to asset previews or generated scenes unless explicitly requested; verify scale with measured dimensions\./);
+  assert.match(text,/No unrequested people\/mannequins\/scale figures; measure dimensions\./);
 }
 
 test('managed asset guidance uses measured dimensions and keeps requested characters and human review available',()=>{
   assetScaleGuidance(ARCANE_TASK_INSTRUCTIONS);
   assert.ok(ARCANE_TASK_INSTRUCTIONS.length<5200);
   assert.ok(Buffer.byteLength(ARCANE_TASK_INSTRUCTIONS,'utf8')<5200,'instruction budget is UTF-8 bytes as well as characters');
-  assert.ok(ARCANE_TASK_INSTRUCTIONS.includes('Open the 3D preview for human Approve before import; only the human can approve.'));
+  assert.ok(ARCANE_TASK_INSTRUCTIONS.includes('Human Approve in 3D before import; agents cannot approve.'));
   assert.ok(ARCANE_TASK_INSTRUCTIONS.includes('Start up to two independent Blender jobs before polling.'));
-  assert.ok(ARCANE_TASK_INSTRUCTIONS.includes('No Studio AI generation.'));
+  assert.ok(ARCANE_TASK_INSTRUCTIONS.includes('No Studio AI, buying/publishing.'));
 });
 
 test('standalone MCP initialize delivers the same asset-scoped default without daemon or provider access',async t=>{

@@ -160,7 +160,7 @@ test('procedural tools are in the reviewed surface and registered per audience',
   for (const name of ['assets_procedural', 'assets_preview']) { assert.ok(ARCANE_TOOL_NAMES.includes(name as never)); assert.ok(ARCANE_NATIVE_TOOL_NAMES.includes(name as never)); }
   assert.ok(ARCANE_NATIVE_TOOL_NAMES.includes('assets_place_studio_import' as never)); assert.ok(!ARCANE_TOOL_NAMES.includes('assets_place_studio_import' as never));
   assert.match(ARCANE_TASK_INSTRUCTIONS, /Original assets by default/);
-  assert.match(ARCANE_TASK_INSTRUCTIONS, /Author models, UVs and PBR in Blender/);
+  assert.match(ARCANE_TASK_INSTRUCTIONS, /Blender geometry\/UV\/PBR/);
   assert.equal(MESH_PARTS_CAPABILITY, 'asset.mesh_parts');
   for (const audience of ['generic', 'native-session'] as const) {
     const server = new McpServer({ name: 'fixture', version: '0' });

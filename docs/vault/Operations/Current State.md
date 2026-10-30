@@ -18,6 +18,6 @@ Recorded 30 October 2026. Revalidate Git refs, installed identity and live jobs 
 | Installed plugin | File SHA-256 `9b950f506f2975ebcfe8fcce6c2a42ce011c9e1d2764110216e279657fdfec28`, 429,197 bytes | File presence does not prove Studio loaded it |
 | Knowledge | Committed notes and skill sources project into the user's real Obsidian vault with conflict protection | Private receipts and downloaded builds stay outside the shared vault |
 
-Current priorities: [[Delivery/G01 Release Baseline]], [[Delivery/G04 Task Lifetimes]] and [[Delivery/G10 Customer Release]]. Original Blender-authoring capability routing is being prepared under [[Delivery/G05 Blender Quality]]; instructions alone do not prove output quality or train a model.
+Current priorities: [[Delivery/G01 Release Baseline]], [[Delivery/G04 Task Lifetimes]] and [[Delivery/G10 Customer Release]]. [[Bugs/Original Asset Authoring]] implements original Blender-authoring capability routing under [[Delivery/G05 Blender Quality]] for hosted validation; instructions alone do not prove output quality or train a model.
 
 Next: [[Operations/Next Session]]. Evidence: [[Operations/Evidence Ledger]] and [[Sessions/2026-10-30 Verified Desktop Delivery]]. The full production objective remains active, including accounts/billing configuration, connected import, modular plugin and customer acceptance.

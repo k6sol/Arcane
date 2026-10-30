@@ -14,8 +14,9 @@ import { DaemonClient } from '../../apps/mcp/src/daemon-client.js';
 import { SkillRegistry } from '../../apps/mcp/src/skills.js';
 import { productInstructions, recommendSkills, SKILLS_RECOMMEND_TOOL, SKILL_ROUTER_LIMITS } from '../../apps/mcp/src/skill-router.js';
 import { properties, createClass } from '../../apps/mcp/src/schemas.js';
-import { ARCANE_GUIDANCE, ARCANE_GUIDANCE_START, ARCANE_MANAGED_TAIL_START, ARCANE_TASK_INSTRUCTIONS, ARCANE_TOOL_NAMES, missingArcaneTools } from '../../packages/protocol/src/arcane-tools.js';
+import { ARCANE_GUIDANCE, ARCANE_GUIDANCE_START, ARCANE_MANAGED_TAIL_START, ARCANE_TASK_INSTRUCTIONS, ARCANE_TOOL_NAMES, ARCANE_NATIVE_TOOL_NAMES, missingArcaneTools } from '../../packages/protocol/src/arcane-tools.js';
 import { createRequire } from 'node:module';
+import { createHash } from 'node:crypto';
 
 const ROOT = resolve(process.cwd());
 const ENTRY = fileURLToPath(new URL('../../apps/mcp/src/main.js', import.meta.url));
@@ -120,6 +121,76 @@ test('automatic task routing loads authentic relevant experimental bodies and de
   assert.deepEqual((await call(client, 'skills_list')).data.items, []);
   assert.equal((await call(client, 'skills_get', { ids: ['arcane-studio-context'] })).data.error.code, 'UNAPPROVED');
   assert.equal(network.mock.callCount(), 0);
+});
+
+test('custom Blender brief receives the actual hash-bound props guidance and deferred reference only with experimental opt-in', async t => {
+  // This exercises instruction delivery/integrity, not model obedience or asset quality.
+  const network = t.mock.method(globalThis, 'fetch', async () => { throw Error('Guidance must not call a daemon or model.'); });
+  const f = await dataFixture(t), client = await linked(t, f.registry);
+  const request = 'Create one original Blender mesh prop: a cast-iron water pump with an asymmetric curved housing and separate mechanical handle. Preserve its source and measured dimensions.';
+  const registryPath = join(f.root, 'skills/registry.json'), originalRegistry = await readFile(registryPath);
+  const registry = JSON.parse(originalRegistry.toString()) as { runtimeIntegrated: boolean; defaultLoadPolicy: string;
+    skills: { id: string; path: string; sha256: string; status: string; approved: boolean; references: { name: string; path: string; sha256: string }[] }[] };
+  const props = registry.skills.find(row => row.id === 'arcane-blender-props'); assert.ok(props);
+  const body = await readFile(join(f.root, props.path)), reference = props.references.find(row => row.name === 'model-spec'); assert.ok(reference);
+  assert.equal(createHash('sha256').update(body).digest('hex'), props.sha256);
+  assert.equal(registry.runtimeIntegrated, false); assert.equal(registry.defaultLoadPolicy, 'approved-only');
+  const { result, data } = await call(client, SKILLS_RECOMMEND_TOOL, { request });
+  assert.notEqual(result.isError, true); assert.equal(data.available, true); assert.equal(data.approvalChanged, false);
+  assert.equal(data.allowExperimental, true); assert.ok(data.ids.includes(props.id));
+  assert.ok(data.context.includes(body.toString())); assert.equal(data.bytes, Buffer.byteLength(data.context));
+  assert.ok(data.bytes <= data.byteBudget); assert.ok(!data.references.includes('arcane-blender-props:model-spec'));
+  const selected = data.selected.find((row: { id: string }) => row.id === props.id); assert.ok(selected);
+  assert.equal(selected.status, 'experimental'); assert.equal(selected.approved, false);
+  const referenceArgs = { ids: [props.id], references: ['arcane-blender-props:model-spec'], byteBudget: 32768 };
+  const refused = await call(client, 'skills_get', referenceArgs);
+  assert.equal(refused.result.isError, true); assert.equal(refused.data.error.code, 'UNAPPROVED');
+  const loaded = await call(client, 'skills_get', { ...referenceArgs, allowExperimental: true });
+  const referenceBytes = await readFile(join(f.root, reference.path));
+  assert.equal(createHash('sha256').update(referenceBytes).digest('hex'), reference.sha256);
+  assert.notEqual(loaded.result.isError, true); assert.equal(loaded.data.approvalChanged, false);
+  assert.deepEqual(loaded.data.references, referenceArgs.references);
+  assert.ok(loaded.data.context.includes(body.toString())); assert.ok(loaded.data.context.includes(referenceBytes.toString()));
+  assert.equal(loaded.data.bytes, Buffer.byteLength(loaded.data.context)); assert.ok(loaded.data.bytes <= referenceArgs.byteBudget);
+  const approvedOnly = await call(client, SKILLS_RECOMMEND_TOOL, { request, allowExperimental: false });
+  assert.equal(approvedOnly.data.available, false); assert.equal(approvedOnly.data.context, '');
+  assert.equal(approvedOnly.data.approvalChanged, false); assert.deepEqual((await call(client, 'skills_list')).data.items, []);
+  assert.deepEqual(await readFile(registryPath), originalRegistry);
+  assert.deepEqual(await readFile(join(ROOT, 'skills/registry.json')), originalRegistry);
+  await writeFile(join(f.root, props.path), Buffer.concat([body, Buffer.from('\nTampered custom-asset guidance.\n')]));
+  const tampered = await call(client, 'skills_get', { ...referenceArgs, allowExperimental: true });
+  assert.equal(tampered.result.isError, true); assert.equal(tampered.data.error.code, 'INTEGRITY');
+  assert.deepEqual(await readFile(registryPath), originalRegistry); assert.equal(network.mock.callCount(), 0);
+});
+
+test('real tool inventories retain closed authority while the procedural description exposes the capability-dependent route', async t => {
+  const network = t.mock.method(globalThis, 'fetch', async () => { throw Error('Tool metadata must stay local.'); });
+  const generic = await linked(t), native = await linked(t, undefined, ROOT, new DaemonClient({
+    url: 'http://127.0.0.1:1', token: 'synthetic-native-guidance-bearer', assetAudience: 'native-session' }));
+  const genericTools = (await generic.listTools()).tools, nativeTools = (await native.listTools()).tools;
+  assert.deepEqual(genericTools.map(tool => tool.name), [...ARCANE_TOOL_NAMES]);
+  assert.deepEqual(nativeTools.map(tool => tool.name), [...ARCANE_NATIVE_TOOL_NAMES]);
+  for (const name of ['assets_start', 'assets_procedural', 'skills_recommend', 'skills_list', 'skills_get']) {
+    const tool = genericTools.find(row => row.name === name), nativeTool = nativeTools.find(row => row.name === name);
+    assert.ok(tool); assert.ok(nativeTool);
+    assert.deepEqual(nativeTool.inputSchema, tool.inputSchema); assert.deepEqual(nativeTool.annotations, tool.annotations);
+  }
+  for (const tools of [genericTools, nativeTools]) {
+    const description = tools.find(tool => tool.name === 'assets_procedural')?.description; assert.ok(description);
+    assert.match(description, /no code accepted/); assert.match(description, /faithfully expressible as a bounded declarative part graph/);
+    assert.doesNotMatch(description, /ANY other original object/);
+    assert.match(description, /actual native filesystem\/process capabilities, current workspace permission and advertised native GLB tools/);
+    assert.match(description, /otherwise report the capability limit, never substitute a different asset/);
+    assert.match(description, /unsupported-conversion refusals and original scopes/);
+    assert.match(description, /Toolbox models require an explicit user request/); assert.match(description, /Never auto-retry/);
+  }
+  const instructions = generic.getInstructions(); assert.equal(instructions, productInstructions()); assert.ok(instructions);
+  assert.match(instructions, /Use assets_start\/assets_procedural only if faithful/);
+  assert.match(instructions, /With native file\/process tools, current workspace permission and advertised tools/);
+  assert.match(instructions, /owned project-relative embedded GLB → assets_adopt_glb → assets_convert_glb/);
+  assert.match(instructions, /Else report the limit; never substitute/);
+  assert.match(instructions, /original scopes\/unsupported-conversion refusals/);
+  assert.equal(native.getInstructions(), instructions); assert.equal(network.mock.callCount(), 0);
 });
 
 test('router combines combat and server security rather than routing a multi-domain task to generic scene guidance', async () => {
