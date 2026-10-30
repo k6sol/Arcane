@@ -23,4 +23,6 @@ Main `c5aa882` passed all seven checks. Functional `3e2ea8f` passed a real origi
 
 ## Branch/contact follow-up
 
+Candidate923 retained reports now identify bark material setup rather than a structural mesh defect. Verify the fresh single-material-slot correction on both pinned Blender platforms and the original pipeline; do not relax the audit. Actual local union/fallback regression passes with unchanged geometry and UVs. Keep the hosted Edge attachment timeout visible until the next exact-source lane passes. Do not promote or install from partial green checks.
+
 Functional34863c1 passed an original Blender 4.5 tree, inspected views, exact deep audit and independently verified exported contact for all322 cards. Preserve old871d3ad native failures; its seven component checks passed but both native tree jobs failed before previews with the exact mesh defect unavailable. The new native test captures bounded actual audit measurements without changing assertions. Poll the next exact candidate handles; do not promote from component-only green or reinstall unverified code. Geometry/contact is improved; UV/art/visible-alpha, Blender5.2 and Studio/customer acceptance remain open.

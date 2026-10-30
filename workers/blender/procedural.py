@@ -3464,7 +3464,13 @@ def build(request, make_material, make_collection, select, make_box):
         obj["arcane_surface_uv"] = True
         if data.uv_report:
             obj["arcane_uv_intent"], obj["arcane_uv_texture"] = data.uv_report["intent"], data.uv_report["textureSize"]
+        # Each freshly authored part has exactly one material. Evaluated Boolean
+        # meshes may retain empty slots; appending would leave faces on an empty
+        # slot instead of the authored PBR material. This never touches adopted meshes.
+        mesh.materials.clear()
         mesh.materials.append(mat)
+        for polygon in mesh.polygons:
+            polygon.material_index = 0
         main.append(obj)
         if key == "bark":
             bark_skin = mesh

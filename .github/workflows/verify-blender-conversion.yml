@@ -114,6 +114,8 @@ jobs:
       - name: Verify real source conversion and owned cancellation
         id: native-conversion
         run: node --test --test-concurrency=1 tests/native/blender-conversion.test.mjs
+      - name: Verify generated mesh material slots in actual Blender
+        run: node --test tests/native/procedural-material-slots.test.mjs
       - name: Verify actual foliage card attachment and native save/reopen
         id: native-foliage
         run: node --test --test-concurrency=1 tests/native/foliage-attachment.test.mjs
