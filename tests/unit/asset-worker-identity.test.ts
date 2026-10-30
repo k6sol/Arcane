@@ -45,7 +45,7 @@ test('fixed argv, env, cwd and bounds; only the validated PID reaches the query'
   assert.match(WORKER_QUERY_SCRIPT, /\[uint32\]0x101000,\[int32\]0,\$workerPid/);
   assert.match(WORKER_QUERY_SCRIPT, /\$queryLastError = \$openArguments\[3\]/);
   assert.match(WORKER_QUERY_SCRIPT, /OpCodes\]::Call, \$imports\['OpenProcess'\][\s\S]*OpCodes\]::Call, \[Runtime.InteropServices.Marshal\].GetMethod\('GetLastWin32Error'[\s\S]*OpCodes\]::Stind_I4/);
-  assert.match(WORKER_QUERY_SCRIPT, /\$queryLastError -eq 87[\s\S]*else \{ \$failed = \$true \}/);
+  assert.match(WORKER_QUERY_SCRIPT, /\$queryLastError -eq 87[\s\S]*else \{ \$failed = \$true; \$queryFailureStage = 4 \}/);
   assert.match(WORKER_QUERY_SCRIPT, /SetLastError/); assert.match(WORKER_QUERY_SCRIPT, /GetCustomAttributes/);
   assert.match(WORKER_QUERY_SCRIPT, /PreserveSig/); assert.match(WORKER_QUERY_SCRIPT, /FromFileTimeUtc/);
   assert.match(WORKER_QUERY_SCRIPT, /OutputEncoding = \[Text.UTF8Encoding\]::new\(\$false\)/);
