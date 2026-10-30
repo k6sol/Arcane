@@ -32,7 +32,7 @@ test('actual finite MCP envelopes decode to safe failure reasons without receipt
   }
   for(const kind of ['mcp-error','details-unavailable']){
     const text=mcpToolFailureEnvelope({schemaVersion:1,kind,tool:null,code:null});assert.ok(text);
-    assert.match(toolFailureReason(readToolResultText(text).result)!,/unavailable/);
+    assert.match(toolFailureReason(readToolResultText(text).result)!,/No recognized safe error detail is available\./);
   }
   assert.equal(mcpToolFailureEnvelope({schemaVersion:1,kind:'arcane-code',tool:'skills_get',code:'PRIVATE_UNKNOWN'}),null);
 });
