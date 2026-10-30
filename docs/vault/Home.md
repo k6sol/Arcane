@@ -15,7 +15,7 @@ tags: [arcane, dashboard]
 
 The [[Delivery/Goal Board|ten urgent goals]] track the path to a dependable customer release. Open a goal for its outcome, dependencies and acceptance criteria. Check it off only after recording evidence.
 
-Current priority: fix the actual Blender forest regression, revise all 62 product skills toward complete game delivery, and implement the supplied interface reference with usable chat organization. [[Operations/Requirements Ledger|All earlier requirements remain tracked]]. [[Design/Interface Reference|Interface reference]] · [[Skills/Production Upgrade|Skill upgrade]] · [[Bugs/Forest Blender Workflow|Forest regression]]. Verified main is `499261b`; the running app is a separate older installation.
+Current priority: fix the actual Blender forest regression, revise all 62 product skills toward complete game delivery, and implement the supplied interface reference with usable chat organization. [[Operations/Requirements Ledger|All earlier requirements remain tracked]]. [[Design/Interface Reference|Interface reference]] · [[Skills/Production Upgrade|Skill upgrade]] · [[Bugs/Forest Blender Workflow|Forest regression]]. Verified code `62da083` is on main and installed; the older running window shows Restart to update. Restart and customer workflow acceptance remain separate.
 
 ## Build with knowledge
 

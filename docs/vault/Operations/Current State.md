@@ -5,23 +5,19 @@ tags: [arcane]
 ---
 # Current state
 
-Recorded 30 October 2026. Revalidate Git, hosted runs and installed identity. Prepared code candidate: `6da527c`; hosted acceptance is pending.
+Recorded 30 October 2026. Source `62da083` is on main, SSH verified, and passed all nine hosted component/package/native Blender jobs. The supported immutable desktop installation completed successfully. The existing older window visibly offers **Restart to update**; it was not restarted.
 
 | Area | Verified evidence | Remaining boundary |
 |---|---|---|
-| Main | Signed `34ac27f`; all seven component/package jobs passed in 41050597788 and both native Blender jobs passed in 41050597728 | These are the exact tested source; the running desktop has not been updated |
-| Connection discovery | One actual native inventory overflow was reproduced; one-server pagination then read all seven servers and 357 tools with original closure | Published `105de62` passed 330 focused local cases but its full run reported three separate unit failures; see below |
-| Local candidate | All 643 product sources compile; strengthened lifecycle cases pass 36/36; joint chat/playtest cases pass 4/4 with pinned Luau | Timeout diagnostics are observational; the original hosted scenario timeout phase remains unproved |
-| Import pacing | Queue-first I/O yield preserves all original proof, authority and deadline checks; 57 staging cases and the unchanged 20 MiB PBR case pass | Actual Studio appearance, upload and Asset Manager registration remain unverified |
-| Original models | Real local Blender 4.5.3 LTS authored boulder and oak, UV/PBR, GLB/FBX, round-trip/reopen and three original worker closures | Neither model is accepted as final art; no Studio import or human model approval occurred |
-| Bark cap UVs | Same-input 10,310-triangle oak: mirrored bark faces 22 to 0, with identical exported bark geometry; 38 pure generator cases pass | Stretch warnings, two folded bark faces and canopy quality remain open |
-| Skills and forest sources | All 62 revised; technical guides/hashes aligned; unresolved forest sources refuse before dispatch | No implicit primitive substitution or unrequested Toolbox models; references/templates alone do not prove Blender authorship |
-| Running desktop | Existing installed directory begins `66f74350`; original diagnostic prompt remains retained | No installation, restart, manual acknowledgement or prompt replay; a source push does not create an update banner |
-| Interface | Exact supplied HTML retained; usability proposal recorded | Claude's external redesign assignment still needs its actual acknowledgement and rendered acceptance |
-| Knowledge | Committed notes and skill sources project into the existing Obsidian vault | Preserve personal notes and settings; use exact-revision check then apply |
+| Delivery | Exact-source archive, closed payload and same-run receipts verified; original installer exited zero with both pipes closed and selected the new immutable release | User-chosen restart, retained login/drafts and updated customer chat remain unverified |
+| Plugin | Download digest, manifest hashes and all three modular artifact bytes match canonical source `62da083` | Artifact verification is not installation, Studio execution, upload or Asset Manager registration |
+| Discovery | Actual native one-server pagination read seven servers and 357 tools with original closure | No successful updated customer turn yet; retained unknown-acknowledgement prompt was not replayed |
+| Import | Queue-first I/O yield preserves proof/authority/deadlines; 57 staging cases and unchanged full PBR transfer pass; hosted checks pass | Actual Studio appearance and persistent upload remain unverified |
+| Forest regression | Missing model sources refuse before dispatch; unmatched failures say Incomplete; finite Details reasons supported | Original failed skill-selection cause remains unavailable; no full Blender-to-Studio forest acceptance |
+| Original models | Actual Blender boulder/oak, UV/PBR, GLB/FBX, round-trip/reopen and original closures observed | Both remain artistically unaccepted; branch/canopy, realistic rocks and scene finishing need work |
+| Bark UVs | Same-input oak mirrored faces 22 to 0 with identical exported bark geometry; 38 generator cases pass | Two folded bark faces and stretch warnings remain |
+| Interface and knowledge | Exact supplied HTML retained; managed Obsidian projection preserves personal notes | External Claude redesign still needs actual acknowledgement and visual acceptance |
 
-The `105de62` hosted failures were a lifecycle fixture that synchronized on a concurrently written audit, a measured-scenario timeout, and a large-PBR receipt continuity expiry. The candidate replaces the fixture's synchronization with actual dispatch/held-turn witnesses, records finite scenario phase/VM timings, and gives an already queued packet an I/O turn before unchanged receipt checks. No retry, invented heartbeat, relaxed assertion or larger deadline was added.
+Passing runs: [components and package 41060603115](https://github.com/k6sol/Arcane/actions/runs/41060603115), [native Blender 41060603111](https://github.com/k6sol/Arcane/actions/runs/41060603111). Older releases, profiles, stable launcher and user work were preserved. No restart, manual acknowledgement, old-prompt replay or Studio operation occurred during this delivery.
 
-Priorities: [[Bugs/Native Connection Inventory]], [[Bugs/Studio Packet Poll Fairness]], [[Bugs/Natural Bark UV Caps]], [[Bugs/Forest Blender Workflow]] and the [[Delivery/Goal Board|ten release goals]]. All whole-product goals remain active. [[Operations/Requirements Ledger]] retains the complete user requirements.
-
-Scoped prompt/visual testing is authorized in the open app and designated Test place. Preserve existing work and unrelated places; do not close/restart the running app without applicable authorization. Arcane only. Main release evidence, controlled tests, actual native model output and customer/Studio acceptance are distinct.
+All ten whole-product goals remain active. Read [[Operations/Requirements Ledger]], [[Bugs/Forest Blender Workflow]], [[Delivery/G05 Blender Quality]], [[Delivery/G06 Connected Import]] and [[Delivery/Supported Desktop Activation]].
