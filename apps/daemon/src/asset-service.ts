@@ -29,6 +29,7 @@ import { ConversationWorkStore } from '../../../packages/storage/src/conversatio
 import { decodeStudioImportPayload, type StudioImportPayload } from '../../../packages/asset-pipeline/src/studio-import-payload.js';
 import { createStudioImportTransfer, type StudioImportTransfer } from '../../../packages/asset-pipeline/src/studio-import-transfer.js';
 import {AssetArchiveStore,type AssetArchiveScan,type AssetJobDirectory} from './asset-archive-store.js';
+import {captureAssetSave,type AssetSaveOutcome} from './asset-save-tail.js';
 import { decodeAssetJobError } from '../../../packages/asset-pipeline/src/failure-diagnostics.js';
 import type { AssetJobError } from '../../../packages/asset-pipeline/src/types.js';
 import type {ArchiveHostFacts} from '../../../packages/asset-pipeline/src/archive-ledger.js';
@@ -215,6 +216,7 @@ export async function createAssetService(options: AssetServiceOptions) {
   let artifactReadActive = false;
   let studioImportActive = false;
   let pending: Promise<void> = Promise.resolve(), persistenceError = false, closed = false;
+  let saveTail:Promise<AssetSaveOutcome>=Promise.resolve<AssetSaveOutcome>({ok:true});
   let scheduledIndex: string | null = null;
   let closing: Promise<void> | null = null;
   let persistenceIssue: {phase:'path-check'|'write'|'replace';code:string}|null=null;
@@ -225,23 +227,25 @@ export async function createAssetService(options: AssetServiceOptions) {
   }
   const ordered = () => [...entries.values()].map(e => e.job).sort((a, b) => b.startedAt.localeCompare(a.startedAt) || b.jobId.localeCompare(a.jobId));
   const snapshot = () => structuredClone(ordered());
-  const persist = () => {
+  const persist = ():Promise<AssetSaveOutcome> => {
     // The advisory index stores only observed events. Full requests remain in journals/manifests.
-    if (persistenceError) return;
+    if (persistenceError) return saveTail;
     const jobs = [...entries.values()].map(({ job }) => ({ jobId: job.jobId, events: structuredClone(job.events),...(job.reportId?{reportId:job.reportId}:{}) }));
     const text = JSON.stringify({ schemaVersion: 1, jobs }, null, 2) + '\n';
     // Completion changes job state, not the event-only index. Avoid replacing identical bytes.
-    if (text === scheduledIndex) return;
+    if (text === scheduledIndex) return saveTail;
     scheduledIndex = text;
-    pending = pending.then(async () => {
-      if (persistenceError) return;
-      await atomicAssetJson(root, 'index.json', text);
-    }).catch((error: unknown) => {
+    const captured=captureAssetSave(saveTail,()=>atomicAssetJson(root,'index.json',text));
+    saveTail=captured;
+    pending = captured.then(outcome => {
+      if(outcome.ok)return;
+      const error=outcome.error;
       persistenceError = true;
       if (!persistenceIssue) persistenceIssue = error instanceof AtomicJsonFailure
         ? { phase: error.phase, code: error.code } : { phase: 'path-check', code: 'UNKNOWN' };
       // First fatal failure latches. Keep original journals and the uncommitted snapshot.
     });
+    return captured;
   };
   const flushed = async () => {
     // Events may enqueue a new snapshot while the previous tail is being awaited.
@@ -1140,8 +1144,9 @@ export async function createAssetService(options: AssetServiceOptions) {
             closedResult=false;work.finish('unresolved');job.state='interrupted';job.stage='supervision-lost';job.manifestAvailable=false;job.manifestPath=null;
             job.error={code:'SUPERVISION_LOST',message:'Converted supervision or retained completion is unknown; inspect the original job without replay.'};
             await reportFailure(job);
-          }).finally(()=>{
-            active.delete(handle.id);if(closedResult)releaseConversionParent(handle.id);persist();
+          }).finally(async()=>{
+            active.delete(handle.id);if(closedResult)releaseConversionParent(handle.id);
+            const saved=await persist();if(!saved.ok)work.finish('unresolved');
           });
         };
         // The real completion owns the work hold before a creation/binding ACK
@@ -1229,7 +1234,7 @@ export async function createAssetService(options: AssetServiceOptions) {
         }).catch(async() => { work?.finish('unresolved'); job.state = 'interrupted'; job.stage = 'supervision-lost'; job.error = { code: 'SUPERVISION_LOST', message: 'Asset supervision ended unexpectedly; inspect the job directory.' };
           await reportFailure(job);
         })
-          .finally(() => { active.delete(handle.id); persist(); });
+          .finally(async() => { active.delete(handle.id);const saved=await persist();if(!saved.ok)work?.finish('unresolved'); });
         return completion;
         };
         // Register the real pipeline and its listener-cleanup completion BEFORE

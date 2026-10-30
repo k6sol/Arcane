@@ -26,6 +26,6 @@ Depends on: 1. Owner: task/runtime integration.
 
 ## Next action
 
-Review, publish and verify the original adoption lifetime and deliberate-close provenance changes. Then connect normal retirement and preserve independent later human review/import paths.
+Verify adoption, cancellation provenance and [[Bugs/Final Asset Save]] on their exact published revision. Then connect normal retirement and preserve independent later human review/import paths. Full task settlement, human acceptance and bounded archival remain required.
 
 [[Delivery/Goal Board]] · [[Operations/Evidence Ledger]]

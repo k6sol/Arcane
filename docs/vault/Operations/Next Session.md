@@ -13,9 +13,10 @@ tags: [arcane]
 
 ## Resume the actual work
 
-- Re-read remote main. Baseline `ee7534c` has one Windows outer test timeout; inspect the subsequent correction's actual hosted run before promoting further work. See [[Bugs/Converted Import Timeout]]. The old observer pinned to `2531c06` is obsolete.
+- Re-read main and the existing validation ref. Main `98ae294` passed the corrected Windows observation case but its full run cancelled a different task test. Adoption `6bab6cc` and cancellation `7ecbdc2` are newer validation candidates. Inspect their actual runs before promotion. See [[Bugs/Converted Import Timeout]]. The old observer pinned to `2531c06` is obsolete.
 - Preserve the shared checkout's existing modifications. Use the current authoritative source and a narrow change, with isolated Git plumbing/checkouts if necessary.
-- Finish original adoption lifetime and deliberate-close request provenance changes against current source. The five adoption paths were unchanged from the old draft baseline; the registry's newer Stop-after-close behavior needs a companion regression. The coordinator changed, so cancellation work needs a current-source merge.
+- Adoption and deliberate-close provenance implementations are now connected and published for validation. [[Bugs/Final Asset Save]] adds exact final-save joins next. Review actual hosted outcomes, correct concrete failures and promote only the tested revision.
+- Retain the already-tested portable desktop bundle with same-run provenance so it can feed the supported existing installation flow. The current watcher sees local installation changes only; GitHub source pushes and metadata artifacts do not update the app or display a banner by themselves. No remote updater or silent restart is implemented by artifact retention.
 - The active desktop directory was installed 20 October (Electron 44.7.0); metadata has no Git revision. Identify release/source fingerprints before any installation. The installed plugin file was inspected, not loaded or exercised.
 - Update the goal's acceptance checklist and evidence, then publish a concise SSH-signed commit.
 

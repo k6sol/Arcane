@@ -9,11 +9,12 @@ Recorded 30 October 2026. Revalidate before acting. Source baseline for this wor
 
 | Area | Observed evidence | Boundary |
 |---|---|---|
-| Source baseline | Main `ee7534c`; validation ref `7e52f67` when inspected | Shared working checkout differs; do not overwrite its work |
+| Source baseline | Main `98ae294`; validation branch includes adoption `6bab6cc` and cancellation `7ecbdc2` | Re-read refs for subsequent publication; shared working checkout differs |
 | Signature | GitHub reports verified SSH signature | Distribution signing is a separate deliverable |
 | Earlier green baseline | Runs 40621420963 and 40618732969 succeeded on `7e52f67` | Component/packaged smoke is not customer acceptance |
-| Latest baseline run | Run 40975403615 failed: one Windows converted-import test cancelled at its 30-second outer timeout | See [[Bugs/Converted Import Timeout]]; correction requires new hosted verification |
-| Implementation work | Adoption lifetime is on validation commit `6bab6cc`; connected deliberate-close provenance is prepared next | Hosted checks are pending; not an installed-app update |
+| Main verification | Strengthened observation case passed on Windows in run 40983762974; another Windows task test cancelled | Full main run failed; see [[Bugs/Converted Import Timeout]] for distinct evidence |
+| Implementation work | Adoption and cancellation provenance are on validation; [[Bugs/Final Asset Save]] is prepared next | Exact candidate hosted checks remain pending; not an installed-app update |
+| Delivery gap | Current CI retains packaged evidence, but no reusable verified app directory | A bounded same-run portable artifact export is being implemented; no remote updater claimed |
 | Active desktop | Installed 20 October; version 0.1.0, Electron 44.7.0; directory manifest SHA-256 `66f74350b49f1049db1c58941f56876fb1d527a0acb3f7bbcc05260904421818` | Manifest has no Git revision; no launch or update performed |
 | Installed plugin file | SHA-256 `9b950f506f2975ebcfe8fcce6c2a42ce011c9e1d2764110216e279657fdfec28`, 429197 bytes | File inspection does not prove it is loaded in Studio |
 

@@ -15,6 +15,10 @@ Prepared the connected adoption work-lifetime implementation for the existing va
 
 Finished source review of deliberate-close request provenance. Original transport errors retain their identity through session preflight and the captured task owner. Only intentional Stop request interruption is benign; actual remote or physical-close failures remain. Fourteen new controlled cases cover the transport and real service/coordinator/session composition. [[Bugs/Cancellation Request Provenance]] records acceptance still required.
 
+The strengthened Windows observation test passed with its actual held-observation assertion. The full main run cancelled a different task test; that unchanged case passed on the adoption candidate, so retained both results without declaring the full run green. Reviewed [[Bugs/Final Asset Save]]: exact captured final saves stay joined, later unrelated snapshots do not prolong original work, and failed save outcomes remain unresolved. Thirteen regression cases are authored; hosted execution is pending.
+
+Distribution review found why newer GitHub source has not produced an installed update: CI preserves smoke receipts but drops the full verified app directory, and the desktop watcher reads only the local installation record. Preparing a bounded success-only portable artifact export with same-run provenance, preserving the original evidence artifact and installation/update controls.
+
 ## 2026-10-29 · Working knowledge foundation
 
 Located the user's new Arcane Obsidian vault. Established versioned knowledge notes, ten linked delivery goals, original developer skills, a catalog of the existing product skills, templates and a Canvas map. Added a conflict-protecting committed-source sync and repository startup guidance.

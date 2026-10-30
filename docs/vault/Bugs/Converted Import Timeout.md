@@ -24,6 +24,8 @@ The new assertion strengthens the intended schedule. A repeated timeout or stage
 
 ## Evidence still needed
 
-- [ ] Corrected Windows controlled fixture passes on the published revision.
+- [x] Corrected Windows controlled fixture passes on the published revision.
 - [ ] Relevant component inventory remains green.
 - [ ] Distinguish these controlled receipts from actual native Studio/customer acceptance.
+
+30 October evidence: Windows unit shard 2 of [run 40983762974](https://github.com/k6sol/Arcane/actions/runs/40983762974/job/123829786015), source `98ae294`, passed the strengthened case in 3579 ms. Its stage diagnostics recorded fixture setup at 167 ms, initial placement at 900 ms and revision reconstruction at 3107 ms. The full run is not green: a different task test cancelled in Windows shard 1. That unchanged task test passed on the descendant adoption candidate; keep the outcomes separate.
