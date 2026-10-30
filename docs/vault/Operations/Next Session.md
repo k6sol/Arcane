@@ -16,3 +16,7 @@ Read [[Home]], [[Operations/Current State]], [[Delivery/Goal Board]] and relevan
 6. Check Claude's actual mailbox for redesign acknowledgements. Keep exact supplied design and all earlier requirements connected. Update evidence at its true scope; sync an explicit committed vault revision after checking conflicts.
 
 No whole release goal is complete from installation or green checks alone.
+
+## Latest tree-review boundary
+
+Main `c5aa882` passed all seven checks. Functional `3e2ea8f` passed a real original Blender tree job, inspected structure/hero views and exact new/legacy deep validation. The new hosted candidate must pass before main promotion or installation. Poll its exact recorded run handles; do not restart jobs or replay old prompts. The exact-job structure view is now implemented and locally verified; arbitrary original authoring for every provider and model art acceptance remain open. See [[Bugs/Original Model Review Coverage]].

@@ -36,3 +36,9 @@ The first actual original job on `6bb9336` failed at the structure render; its t
 All 13 controlled review tests and three safe-classifier tests pass. The corrected read-only native diagnostic produced a real 512-square four-view sheet; it was visually inspected. That verifies the render bridge, not a newly completed original job. Full original generation/export/reopen and hosted Blender 5.2 Windows/Linux checks remain pending. Existing models still lack artistic acceptance; the structure view exposes remaining branch/canopy problems rather than fixing them by itself.
 
 Related: [[Delivery/G05 Blender Quality]], [[Bugs/Original Asset Authoring]], [[Bugs/Forest Blender Workflow]].
+
+## Original job and legacy revalidation
+
+The corrected original pipeline completed on signed `3e2ea8f` with local Blender 4.5.3 LTS: the same seed-31 oak, 16,000-triangle budget, 512-square previews and 16 samples passed UV/PBR, hero/side/structure renders, GLB/FBX, round-trip, saved-scene reopen and host validation. All three original workers closed with observed exits. Structure metadata binds original request bytes and finalized bark geometry. Both actual structure and canopy hero views were inspected; the model remains artistically unaccepted.
+
+Current-code deep validation separately passed this tree and the retained pre-feature tree, preserving exact old audit rows without regeneration. These supersede the earlier local-original-job boundary; hosted Blender 5.2 and installed/customer acceptance remain pending. No Studio operation, upload, model approval or app restart occurred.

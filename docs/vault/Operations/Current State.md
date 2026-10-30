@@ -5,25 +5,21 @@ tags: [arcane]
 ---
 # Current state
 
-Recorded 30 October 2026. Source `62da083` is on main, SSH verified, and passed all nine hosted component/package/native Blender jobs. The supported immutable desktop installation completed successfully. The existing older window visibly offers **Restart to update**; it was not restarted.
+Recorded 30 October 2026. Main is SSH-verified `c5aa882`, with all seven component/package jobs passing in 41068083887. Installed source is `62da083`; the older running window visibly offers Restart to update and was not restarted. The newer tree-review candidate is based on functional `3e2ea8f` and awaits hosted acceptance.
 
 | Area | Verified evidence | Remaining boundary |
 |---|---|---|
-| Delivery | Exact-source archive, closed payload and same-run receipts verified; original installer exited zero with both pipes closed and selected the new immutable release | User-chosen restart, retained login/drafts and updated customer chat remain unverified |
-| Plugin | Download digest, manifest hashes and all three modular artifact bytes match canonical source `62da083` | Artifact verification is not installation, Studio execution, upload or Asset Manager registration |
-| Discovery | Actual native one-server pagination read seven servers and 357 tools with original closure | No successful updated customer turn yet; retained unknown-acknowledgement prompt was not replayed |
-| Import | Queue-first I/O yield preserves proof/authority/deadlines; 57 staging cases and unchanged full PBR transfer pass; hosted checks pass | Actual Studio appearance and persistent upload remain unverified |
-| Forest regression | Missing model sources refuse before dispatch; unmatched failures say Incomplete; finite Details reasons supported | Original failed skill-selection cause remains unavailable; no full Blender-to-Studio forest acceptance |
-| Original models | Actual Blender boulder/oak, UV/PBR, GLB/FBX, round-trip/reopen and original closures observed | Both remain artistically unaccepted; branch/canopy, realistic rocks and scene finishing need work |
-| Bark UVs | Same-input oak mirrored faces 22 to 0 with identical exported bark geometry; 38 generator cases pass | Two folded bark faces and stretch warnings remain |
-| Interface and knowledge | Exact supplied HTML retained; managed Obsidian projection preserves personal notes | External Claude redesign still needs actual acknowledgement and visual acceptance |
+| Main | `c5aa882` passed all seven component/package jobs and advanced main without force; native-workflow inputs unchanged from passing `62da083` | No updated customer journey follows from these checks |
+| Desktop/plugin | `62da083` immutable installation succeeded; original exit zero/both pipes closed; banner observed. Modular plugin hashes/source bytes verified | No app restart, plugin installation, auth/draft retention or Studio operation |
+| Connection | Actual one-server discovery read seven servers/357 tools with original closure | Retained unknown-acknowledgement prompt untouched; no updated model turn verified |
+| Asset Details | Supported Blender/reconstruction/plugin/session reasons survive live and saved chats; missing reconstruction refuses before mutation | Original forest skill-selection cause remains unknown |
+| Tree review | Four original bark views, strict source/request/artifact binding, full restoration checks, fixed API/desktop access | Hosted Blender 5.2 Windows/Linux and customer preview pending |
+| Actual tree job | Local Blender 4.5.3 on `3e2ea8f` completed UV/PBR, three previews, GLB/FBX, round-trip/reopen and three observed original closures; actual structure and hero views inspected | Artistic acceptance, Studio import and upload remain open |
+| Compatibility | Current-code deep validation passes new and retained legacy trees with exact old audit rows | No regeneration or relaxed row comparison |
+| Import | Queue-first I/O yield preserves proof/authority/deadlines; controlled full PBR staging passes | Actual Studio rendering, Asset Manager registration and later revisions unverified |
+| Quality | Bark cap mirrors corrected; actual rocks/trees inspected | Branch/canopy shape, realistic rocks, UV folds/stretch and finished scenes still need work |
+| Provider/interface | Exact redesign and requirements retained; native Codex and in-app Claude/Credits capabilities distinguished | Arbitrary original authoring for every provider and external Claude redesign acceptance incomplete |
 
-Passing runs: [components and package 41060603115](https://github.com/k6sol/Arcane/actions/runs/41060603115), [native Blender 41060603111](https://github.com/k6sol/Arcane/actions/runs/41060603111). Older releases, profiles, stable launcher and user work were preserved. No restart, manual acknowledgement, old-prompt replay or Studio operation occurred during this delivery.
+Current local verification: 644 compiled sources, 98 affected TypeScript cases, 13 controlled review cases, three classifier cases, 40 skill cases and two tool-reference checks pass. The first tree run exposed an empty headless Render Result pixel buffer; a bounded scene-linear EXR transfer corrected it before publication. Failed attempts remain retained. No model approval, Studio operation, old-prompt replay or app restart occurred.
 
-All ten whole-product goals remain active. Read [[Operations/Requirements Ledger]], [[Bugs/Forest Blender Workflow]], [[Delivery/G05 Blender Quality]], [[Delivery/G06 Connected Import]] and [[Delivery/Supported Desktop Activation]].
-
-Next source candidate adds [[Bugs/Asset Failure Details|tool-bound asset refusal Details]] and an explicit missing-reconstruction error before placement. All 643 sources compile; 195 affected cases pass with one browser-only skip. This candidate is separate from installed `62da083` and still needs hosted verification. [[Bugs/Original Model Review Coverage]] records the distinct provider authoring and exact-job structure-preview gaps; those capabilities are not implemented by a diagnostic improvement.
-
-A subsequent candidate implements same-job tree structure previews: four retained leafless views, exact original bark/request bindings, full source-state restoration checks, fixed API/desktop access and legacy compatibility. All 644 sources compile; 98 affected TypeScript tests, nine controlled worker tests, 40 skill tests and two tool-reference checks pass. Actual Blender rendering and hosted checks are next; no model art approval or Studio acceptance is claimed.
-
-Latest verification: diagnostics `c5aa882` passed all seven exact-source component/package jobs in [41068083887](https://github.com/k6sol/Arcane/actions/runs/41068083887) and advanced main by ordinary fast-forward. Its native-workflow inputs are unchanged from passing `62da083`. The newer tree candidate stays local while native acceptance proceeds: an original run failed because headless Render Result pixels were empty; the corrected scene-linear EXR bridge passes 13 controlled review plus three classifier cases and a real read-only four-view render, visually inspected. A new original job and hosted validation still remain. Installed source is still `62da083`, and the older window was not restarted.
+[Main component/package run 41068083887](https://github.com/k6sol/Arcane/actions/runs/41068083887), [prior native Blender run 41060603111](https://github.com/k6sol/Arcane/actions/runs/41060603111). All ten whole-product goals remain active. See [[Operations/Requirements Ledger]], [[Bugs/Original Model Review Coverage]], [[Bugs/Forest Blender Workflow]], [[Delivery/G05 Blender Quality]] and [[Delivery/G06 Connected Import]].
