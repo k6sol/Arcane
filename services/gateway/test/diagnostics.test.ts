@@ -147,3 +147,25 @@ test('configured collector accepts only the finite staging event and keeps origi
   const disabled=await fixture(t,{DIAGNOSTICS_ENABLED:'0'});assert.equal((await disabled.request('/v1/diagnostics/events',event(),{Authorization:'Bearer '+disabled.token})).status,503);
   assert.equal(disabled.db.prepare("SELECT name FROM sqlite_master WHERE name='diagnostic_events'").get(),undefined);
 });
+
+
+test('Node gateway admits only the finite chat-frame boundary and preserves encrypted auth and byte limits',async t=>{
+ const h=await fixture(t),headers={Authorization:'Bearer '+h.token};
+ const context={operationId:randomUUID(),nativeFrameDirection:'inbound',nativeFramePhase:'discovery-inventory',
+  nativeFrameByteKind:'at-least',nativeFrameBytes:1048577,nativeFrameLimit:1048576,nativeFramePendingMask:512,nativeFramePendingCount:1};
+ const event={...h.event(),component:'chat',stage:'authenticate',code:'NATIVE_FRAME_LIMIT',context};
+ assert.equal((await h.request('/v1/diagnostics/events',event)).status,401);
+ assert.deepEqual(await (await h.request('/v1/diagnostics/events',event,headers)).json(),{accepted:true,eventId:event.eventId});
+ const secret='private prompt source token';
+ for(const bad of [{...event,component:'studio'},{...event,stage:'request-submit'},
+  {...event,context:{...context,nativeFramePendingMask:1024}},{...event,context:{...context,nativeFramePendingCount:0}},
+  {...event,context:{...context,nativeFramePhase:'not-connect'}},{...event,context:{...context,nativeFrameByteKind:'exact'}},
+  {...event,context:{...context,method:secret}},{...event,message:secret}])
+  assert.equal((await h.request('/v1/diagnostics/events',{...bad,eventId:randomUUID()},headers)).status,400);
+ assert.equal((await h.request('/v1/diagnostics/events',{...event,eventId:randomUUID(),padding:'x'.repeat(8192)},headers)).status,413);
+ const response=await h.request('/v1/admin/diagnostics',undefined,{Cookie:h.cookie()});assert.equal(response.status,200);
+ const view=await response.json() as {events:{event:{code:string;context:unknown}}[]};
+ assert.equal(view.events.length,1);assert.equal(view.events[0]!.event.code,'NATIVE_FRAME_LIMIT');assert.deepEqual(view.events[0]!.event.context,context);
+ const raw=JSON.stringify(h.db.prepare('SELECT * FROM diagnostic_events').all());
+ assert.doesNotMatch(raw,/NATIVE_FRAME_LIMIT|discovery-inventory/);assert.ok(!raw.includes(context.operationId));assert.ok(!h.logs.join('\n').includes(secret));
+});

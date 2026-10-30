@@ -4,6 +4,9 @@ import {EventEmitter} from 'node:events';
 import {randomUUID} from 'node:crypto';
 import {assetFailureEvent, codexActionFailureEvent, studioStagingFailureEvent, createDiagnosticReporter, type DiagnosticChannel} from '../../apps/daemon/src/diagnostic-reporter.js';
 import {readStudioStagingDiagnostic, type StudioStagingDiagnostic} from '../../packages/asset-pipeline/src/failure-diagnostics.js';
+import {JsonlTransport, readNativeFrameEvidence, annotateNativeConnectFrame} from '../../packages/codex-client/src/transport.js';
+import {CodexClientError} from '../../packages/codex-client/src/types.js';
+import {limits} from '../../packages/codex-client/src/validation.js';
 const jobId='8e6bc8a1-a0ea-4823-8998-0f82d14469ba';
 const event=()=>assetFailureEvent(jobId,{code:'BLENDER_FAILED',message:'private C:\\Users\\me\\script.py prompt and token',
   diagnostic:{schemaVersion:1,stage:'mesh-validation',reasonCode:'MESH_AUDIT',reason:'private raw reason',exceptionType:'ValueError',metrics:{renderTriangles:17000,triangleBudget:16000},logPath:'failure.json'}},1792500000000);
@@ -105,4 +108,33 @@ test('actual staging events still require durable owner acknowledgements and clo
   reporter.close();const count=c.messages.length;assert.equal(await reporter.report(studioStagingFailureEvent(diagnostic)),null);assert.equal(c.messages.length,count);
   const absent=channel();absent.wire.connected=false;const unavailable=createDiagnosticReporter(absent.wire);
   assert.equal(await unavailable.report(studioStagingFailureEvent(diagnostic)),null);assert.equal(absent.messages.length,0);unavailable.close();
+});
+
+test('only an actual frame refusal can produce a connect-frame report; copies and worker labels cannot',async t=>{
+  const transport=new JsonlTransport({command:process.execPath,cwd:process.cwd(),env:{},
+    args:['-e',"process.stdin.once('data',()=>process.stdout.write('x'.repeat(128)));process.stdin.resume();"]},
+    limits({maxFrameBytes:64,requestTimeoutMs:5000}),()=>{},()=>{});
+  t.after(()=>transport.close());
+  let original:unknown;
+  await assert.rejects(transport.request('initialize',{}),error=>{original=error;return error instanceof CodexClientError&&error.code==='FRAME_LIMIT';});
+  assert.ok(original instanceof CodexClientError);assert.equal(original.dispatched,true);
+  assert.equal(readNativeFrameEvidence(original)?.connectPhase,'not-connect');
+  assert.equal(codexActionFailureEvent(jobId,'connect','FRAME_LIMIT',1792500000000,original).code,'HOST_FAILURE');
+  annotateNativeConnectFrame(original,'discovery-initialize');
+  const frame=readNativeFrameEvidence(original);assert.ok(frame);assert.ok(frame.byteCount>64&&frame.byteCount<=128);
+  const event=codexActionFailureEvent(jobId,'connect','FRAME_LIMIT',1792500000000,original);
+  assert.equal(event.code,'NATIVE_FRAME_LIMIT');assert.equal(event.stage,'authenticate');
+  assert.deepEqual(event.context,{operationId:jobId,nativeFrameDirection:'inbound',nativeFramePhase:'discovery-initialize',
+    nativeFrameByteKind:'at-least',nativeFrameBytes:frame.byteCount,nativeFrameLimit:64,nativeFramePendingMask:1,nativeFramePendingCount:1});
+  assert.equal(codexActionFailureEvent(jobId,'turn-start','FRAME_LIMIT',1792500000000,original).code,'HOST_FAILURE');
+  assert.equal(codexActionFailureEvent(jobId,'connect','PROCESS_EXIT_UNCONFIRMED',1792500000000,original).code,'SUPERVISION_LOST');
+  let reads=0;
+  const proxy=new Proxy(original,{get(){reads++;throw Error('private');}});
+  for(const forged of [{code:'FRAME_LIMIT'},new CodexClientError('FRAME_LIMIT','private',true),JSON.parse(JSON.stringify(original)),proxy]){
+    assert.equal(readNativeFrameEvidence(forged),null);annotateNativeConnectFrame(forged,'final-initialize');
+    assert.equal(codexActionFailureEvent(jobId,'connect','FRAME_LIMIT',1792500000000,forged).code,'HOST_FAILURE');
+  }
+  assert.equal(reads,0);assert.equal(assetFailureEvent(jobId,{code:'NATIVE_FRAME_LIMIT',message:'private'}).code,'INTERNAL_ERROR');
+  const c=channel(),reporter=createDiagnosticReporter(c.wire),pending=reporter.report(event);c.ack(true);assert.equal(await pending,event.eventId);reporter.close();
+  assert.doesNotMatch(JSON.stringify(event),/private|stdin|taskSupport|inputSchema|password|Bearer/i);
 });

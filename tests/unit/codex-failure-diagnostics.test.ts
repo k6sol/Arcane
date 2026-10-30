@@ -12,6 +12,8 @@ import type {FailureReporter} from '../../apps/daemon/src/diagnostic-reporter.js
 import {CodexClientError,type Snapshot} from '../../packages/codex-client/src/index.js';
 import {diagnosticEvent,type DiagnosticEvent} from '../../packages/diagnostics/src/report.js';
 import {createNativeAssetRegistry,type NativeAssetRegistry} from '../../apps/daemon/src/native-asset-authority.js';
+import {JsonlTransport,annotateNativeConnectFrame,readNativeFrameEvidence} from '../../packages/codex-client/src/transport.js';
+import {limits} from '../../packages/codex-client/src/validation.js';
 
 const PRIVATE='private prompt/source C:\\Users\\fixture\\scene.lua account@example.invalid token=synthetic';
 async function fixture(t:test.TestContext,options:{
@@ -135,4 +137,53 @@ test('terminal reporting retains canonical request correlation '+requestId,{time
   assert.equal(result.record.requestId,requestId);assert.equal(result.record.state,'rejected');assert.equal(f.record(requestId).state,'rejected');
   assert.equal(events.length,1);assert.deepEqual(events[0]!.context,{operationId:requestId.toLowerCase()});assert.deepEqual(diagnosticEvent(events[0]),events[0]);
   assert.equal((await f.service.action(input)).replayed,true);assert.equal(events.length,1);assert.equal(f.connects(),1);
+});
+
+
+// Actual controlled Node stdio initialization, not an installed CLI or provider.
+// The same owned error survives the connector cleanup and reaches the service.
+async function controlledFrameConnectFailure():Promise<CodexClientError>{
+  const transport=new JsonlTransport({command:process.execPath,cwd:process.cwd(),env:{},args:['-e',
+    "process.stdin.once('data',()=>process.stdout.write('x'.repeat(128)));process.stdin.resume();"]},
+    limits({maxFrameBytes:64,requestTimeoutMs:5000}),()=>{},()=>{});
+  let original:unknown;
+  try{await transport.request('initialize',{});}catch(error){original=error;}
+  finally{await transport.close();}
+  assert.ok(original instanceof CodexClientError);assert.equal(original.code,'FRAME_LIMIT');assert.equal(original.dispatched,true);
+  annotateNativeConnectFrame(original,'direct-initialize');assert.ok(readNativeFrameEvidence(original));
+  return original;
+}
+
+test('actual owned stdio frame failure reports only after its unchanged unknown SQLite receipt commits',async t=>{
+  const events:DiagnosticEvent[]=[],committed:string[]=[];let original:CodexClientError|undefined;
+  let read:(id:string)=>CodexActionRecord=()=>assert.fail('report before readiness');
+  const f=await fixture(t,{connect:async()=>{original=await controlledFrameConnectFailure();throw original;},
+    reportFailure:async event=>{committed.push(read(event.context!.operationId!).state);events.push(event);return event.eventId;}});read=f.record;
+  const input={requestId:randomUUID(),connectionId:null,action:'connect'} as const,outcome=await f.service.action(input);
+  assert.equal(outcome.record.state,'unknown');assert.equal(outcome.record.errorCode,'FRAME_LIMIT');
+  assert.equal(f.record(input.requestId).state,'unknown');assert.deepEqual(committed,['unknown']);assert.equal(events.length,1);
+  const event=events[0]!;assert.equal(event.code,'NATIVE_FRAME_LIMIT');assert.equal(event.stage,'authenticate');
+  assert.equal(event.context?.operationId,input.requestId);assert.equal(event.context?.nativeFramePhase,'direct-initialize');
+  assert.equal(event.context?.nativeFrameDirection,'inbound');assert.equal(event.context?.nativeFramePendingMask,1);
+  assert.equal(event.context?.nativeFramePendingCount,1);assert.deepEqual(diagnosticEvent(event),event);
+  assert.doesNotMatch(JSON.stringify(event),/private|source\.lua|account@|synthetic|args|stdout|token|thread|session/i);
+  assert.equal((await f.service.action(input)).replayed,true);f.service.state();
+  await f.service.close();const reopened=f.open();reopened.state();
+  assert.equal((await reopened.action(input)).replayed,true);assert.equal(f.connects(),1);assert.equal(events.length,1);
+  assert.ok(original&&readNativeFrameEvidence(original),'original owned evidence is data, not consumed replay authority');
+});
+
+test('frame diagnostics cannot replace terminal journal refusal or turn a copied error into owned evidence',async t=>{
+  const original=await controlledFrameConnectFailure(),events:DiagnosticEvent[]=[];
+  const f=await fixture(t,{connect:async()=>{throw original;},reportFailure:async event=>{events.push(event);return event.eventId;}});
+  const writer=new DatabaseSync(f.filename,{allowExtension:false});
+  writer.exec("CREATE TRIGGER refuse_frame_terminal BEFORE UPDATE ON actions BEGIN SELECT RAISE(ABORT,'controlled terminal refusal'); END;");
+  const input={requestId:randomUUID(),connectionId:null,action:'connect'} as const;
+  try{await assert.rejects(f.service.action(input),{code:'JOURNAL_FAILURE'});assert.equal(f.record(input.requestId).state,'pending');assert.deepEqual(events,[]);}
+  finally{writer.exec('DROP TRIGGER refuse_frame_terminal');writer.close();}
+  const copied=new CodexClientError(original.code,PRIVATE,original.dispatched),otherEvents:DiagnosticEvent[]=[];
+  const other=await fixture(t,{connect:async()=>{throw copied;},reportFailure:async event=>{otherEvents.push(event);return event.eventId;}});
+  const result=await other.service.action({requestId:randomUUID(),connectionId:null,action:'connect'});
+  assert.equal(result.record.state,'unknown');assert.equal(result.record.errorCode,'FRAME_LIMIT');
+  assert.equal(otherEvents.length,1);assert.equal(otherEvents[0]!.code,'HOST_FAILURE');assert.deepEqual(Object.keys(otherEvents[0]!.context!),['operationId']);
 });

@@ -3,6 +3,7 @@ import type {DiagnosticEvent} from '../../../packages/diagnostics/src/report.js'
 import {diagnosticEvent, diagnosticEventId, DiagnosticValidationError, DIAGNOSTIC_EXCEPTIONS, DIAGNOSTIC_REASONS, DIAGNOSTIC_STAGES} from '../../../packages/diagnostics/src/report.js';
 import type {AssetJobError} from '../../../packages/asset-pipeline/src/types.js';
 import {readStudioStagingDiagnostic, type StudioStagingDiagnostic} from '../../../packages/asset-pipeline/src/failure-diagnostics.js';
+import {readNativeFrameEvidence} from '../../../packages/codex-client/src/transport.js';
 
 export interface DiagnosticChannel {
   connected?: boolean;
@@ -16,7 +17,7 @@ export function assetFailureEvent(jobId: string, error: AssetJobError, occurredA
   const d = error.diagnostic, raw = d?.reasonCode ?? error.code;
   const code = error.code === 'DEADLINE' ? 'REQUEST_TIMEOUT' : error.code === 'CANCELLED' ? 'OPERATION_CANCELLED' :
     ['SUPERVISION_UNRESOLVED','SUPERVISION_LOST'].includes(error.code) ? 'SUPERVISION_LOST' :
-    raw !== 'STUDIO_STAGE_CONTINUITY' && Object.hasOwn(DIAGNOSTIC_REASONS, raw) ? raw as DiagnosticEvent['code'] : 'INTERNAL_ERROR';
+    raw !== 'STUDIO_STAGE_CONTINUITY' && raw !== 'NATIVE_FRAME_LIMIT' && Object.hasOwn(DIAGNOSTIC_REASONS, raw) ? raw as DiagnosticEvent['code'] : 'INTERNAL_ERROR';
   const stage = d?.stage && (DIAGNOSTIC_STAGES as readonly string[]).includes(d.stage) ? d.stage as DiagnosticEvent['stage'] : 'generate';
   const context: Record<string, unknown> = {jobId};
   if (d?.exceptionType && (DIAGNOSTIC_EXCEPTIONS as readonly string[]).includes(d.exceptionType)) context.exceptionType = d.exceptionType;
@@ -46,7 +47,12 @@ const CODEX_FAILURE_CODES = {
   JOURNAL_FAILURE:'STORAGE_UNAVAILABLE',JOURNAL_LIMIT:'STORAGE_UNAVAILABLE',NATIVE_ERROR:'INTERNAL_ERROR',
 } as const satisfies Record<string, DiagnosticEvent['code']>;
 /** Only the canonical request UUID and fixed host-owned classifications leave the native action journal. */
-export function codexActionFailureEvent(operationId:string,action:keyof typeof CODEX_FAILURE_STAGES,errorCode:string|null,occurredAt=Date.now()):DiagnosticEvent {
+export function codexActionFailureEvent(operationId:string,action:keyof typeof CODEX_FAILURE_STAGES,errorCode:string|null,occurredAt=Date.now(),frameError?:unknown):DiagnosticEvent {
+  const frame=action==='connect'&&errorCode==='FRAME_LIMIT'?readNativeFrameEvidence(frameError):null;
+  if(frame&&frame.connectPhase!=='not-connect')return diagnosticEvent({schemaVersion:1,eventId:randomUUID(),occurredAt,component:'chat',stage:'authenticate',code:'NATIVE_FRAME_LIMIT',
+    context:{operationId:operationId.toLowerCase(),nativeFrameDirection:frame.direction,nativeFramePhase:frame.connectPhase,
+      nativeFrameByteKind:frame.byteCountKind,nativeFrameBytes:frame.byteCount,nativeFrameLimit:frame.frameLimitBytes,
+      nativeFramePendingMask:frame.pendingMethodMask,nativeFramePendingCount:frame.pendingCount}});
   const code=errorCode!==null&&Object.hasOwn(CODEX_FAILURE_CODES,errorCode)
     ?CODEX_FAILURE_CODES[errorCode as keyof typeof CODEX_FAILURE_CODES]:'HOST_FAILURE';
   return diagnosticEvent({schemaVersion:1,eventId:randomUUID(),occurredAt,component:'chat',

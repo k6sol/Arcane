@@ -24,6 +24,7 @@ import { readTaskAcceptance, createTaskAcceptancePort } from './chat-task-accept
 import { SubmittedChatStore, type SubmittedChatTranscript } from '../../../packages/storage/src/submitted-chat-store.js';
 import { TASK_PLAN_REVIEW_TASK_STATES, type TaskPlanView, type TaskPlanReviewView, type TaskPlanReviewTaskState } from '../../../packages/protocol/src/chat-task-plan.js';
 import {codexActionFailureEvent,type FailureReporter} from './diagnostic-reporter.js';
+import {readNativeFrameEvidence} from '../../../packages/codex-client/src/transport.js';
 
 const uuid = z.string().uuid();
 const identifier = z.string().min(1).max(256).refine(value => !/[\x00-\x1f]/.test(value));
@@ -439,6 +440,7 @@ export function createCodexService(options: CodexServiceOptions) {
     let stagedHistory: CodexHistoryState | null = null;
     let ownsBusy = false,ownsTaskBinding=false; const existingOperations = new Set<string>();
     let actionClient: CodexHostClient | null = null;
+    let nativeFrameError: unknown;
     let grantAssetsAfterCommit: (() => void) | null = null;
     let taskAfterCommit: string | null = null;
     const operationMethod = ({ 'thread-start':'thread/start', 'thread-resume':'thread/resume', 'turn-start':'turn/start', 'turn-steer':'turn/steer', 'turn-interrupt':'turn/interrupt' } as Record<string,string>)[value.action] ?? null;
@@ -729,6 +731,7 @@ export function createCodexService(options: CodexServiceOptions) {
       }
       record.state = 'acknowledged';
     } catch (error) {
+      try { if (readNativeFrameEvidence(error)) nativeFrameError = error; } catch { /* Diagnostics never alter the action outcome. */ }
       const known = error instanceof CodexClientError;
       record.errorCode = known ? error.code : 'NATIVE_ERROR';
       const snapshot = actionClient?.snapshot();
@@ -784,7 +787,7 @@ export function createCodexService(options: CodexServiceOptions) {
         // Both the primary transition and any asset-grant conversion are durable before reporting.
         // Detached reporting never delays, retries or changes a native action or its receipt.
         try{
-          const event=codexActionFailureEvent(record.requestId,record.action,record.errorCode);
+          const event=codexActionFailureEvent(record.requestId,record.action,record.errorCode,Date.now(),nativeFrameError);
           void Promise.resolve().then(()=>reportFailure(event)).catch(()=>{});
         }catch{/* A diagnostic cannot change the recorded native outcome. */}
       }

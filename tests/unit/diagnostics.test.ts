@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {diagnosticEvent, diagnosticEventId, DiagnosticValidationError, DIAGNOSTIC_REASONS} from '../../packages/diagnostics/src/report.js';
 import {readStudioStagingDiagnostic} from '../../packages/asset-pipeline/src/failure-diagnostics.js';
+import {DIAGNOSTIC_MAX_BYTES} from '../../packages/diagnostics/src/report.js';
 
 const input = {schemaVersion: 1, eventId: '8e6bc8a1-a0ea-4823-8998-0f82d14469ba', occurredAt: 1792500000000,
   component: 'blender', stage: 'texture-authoring', code: 'MEMORY_LIMIT', context: {exceptionType: 'MemoryError', exitCode: 1, triangleBudget: 16000}};
@@ -86,4 +87,58 @@ test('staging fields are event-specific and refuse private identities, unknown p
   const symbol={...context,[Symbol('private')]:secret};
   for(const bad of [getter,hidden,symbol])assert.throws(()=>diagnosticEvent({...base,context:bad}),DiagnosticValidationError);
   assert.equal(called,0);
+});
+
+const nativeFrameContext={operationId:input.eventId,nativeFrameDirection:'inbound',nativeFramePhase:'discovery-initialize',
+  nativeFrameByteKind:'at-least',nativeFrameBytes:1048577,nativeFrameLimit:1048576,nativeFramePendingMask:10,nativeFramePendingCount:2};
+test('native frame evidence has a closed chat-only finite context within the unchanged event bound',()=>{
+  for(const nativeFramePhase of ['direct-initialize','discovery-initialize','discovery-inventory','discovery-close','final-initialize'])
+    for(const [nativeFrameDirection,nativeFrameByteKind]of [['inbound','at-least'],['outbound','exact'],['outbound','at-least']]){
+      const context={...nativeFrameContext,nativeFramePhase,nativeFrameDirection,nativeFrameByteKind};
+      const event=diagnosticEvent({...input,component:'chat',stage:'authenticate',code:'NATIVE_FRAME_LIMIT',context});
+      assert.deepEqual(event.context,context);assert.deepEqual(diagnosticEvent(JSON.parse(JSON.stringify(event))),event);
+      assert.equal(event.reason,DIAGNOSTIC_REASONS.NATIVE_FRAME_LIMIT);
+      assert.ok(Buffer.byteLength(JSON.stringify(event))<=DIAGNOSTIC_MAX_BYTES);
+    }
+  for(const values of [{nativeFramePendingMask:0,nativeFramePendingCount:0},{nativeFramePendingMask:1023,nativeFramePendingCount:16},
+    {nativeFrameBytes:268435456,nativeFrameLimit:1}])assert.doesNotThrow(()=>diagnosticEvent({...input,component:'chat',stage:'authenticate',code:'NATIVE_FRAME_LIMIT',context:{...nativeFrameContext,...values}}));
+});
+
+test('native frame contexts refuse mixed fields, malformed observations, coercion and unowned object behavior',()=>{
+  const base={...input,component:'chat',stage:'authenticate',code:'NATIVE_FRAME_LIMIT',context:nativeFrameContext};
+  const invalid:unknown[]=[{...base,context:undefined},{...base,component:'blender'},{...base,stage:'request-submit'},
+    {...base,code:'HOST_FAILURE'},{...base,context:{...nativeFrameContext,jobId:input.eventId}},
+    {...base,context:{...nativeFrameContext,stagingPhase:'admission'}},
+    ...Object.keys(nativeFrameContext).map(key=>({...base,context:Object.fromEntries(Object.entries(nativeFrameContext).filter(([k])=>k!==key))})),
+  ];
+  for(const [key,values]of Object.entries({nativeFrameDirection:['unknown',null,{}],nativeFramePhase:['not-connect','private',null],
+    nativeFrameByteKind:['unknown',null],nativeFrameBytes:[-1,268435457,0.5,NaN,Infinity,'1'],nativeFrameLimit:[0,1048577,0.5,'1'],
+    nativeFramePendingMask:[-1,1024,0.5,'1'],nativeFramePendingCount:[-1,17,0.5,'1']}))
+    for(const value of values)invalid.push({...base,context:{...nativeFrameContext,[key]:value}});
+  invalid.push({...base,context:{...nativeFrameContext,nativeFramePendingMask:3,nativeFramePendingCount:1}},
+    {...base,context:{...nativeFrameContext,nativeFramePendingCount:0}},
+    {...base,context:{...nativeFrameContext,nativeFrameByteKind:'exact'}});
+  let reads=0;
+  const getter=Object.defineProperty({...nativeFrameContext},'nativeFramePhase',{enumerable:true,get(){reads++;throw Error('private');}});
+  const hidden=Object.defineProperty({...nativeFrameContext},'private',{value:'private'});
+  const proxy=new Proxy(nativeFrameContext,{get(){reads++;throw Error('private');},getPrototypeOf(){reads++;throw Error('private');}});
+  invalid.push({...base,context:getter},{...base,context:hidden},{...base,context:{...nativeFrameContext,[Symbol('private')]:true}},
+    {...base,context:proxy},new Proxy(base,{get(){reads++;throw Error('private');}}),
+    {...base,context:{...nativeFrameContext,nativeFrameDirection:{toString(){reads++;throw Error('private');}}}});
+  for(const value of invalid)assert.throws(()=>diagnosticEvent(value),DiagnosticValidationError);
+  assert.equal(reads,0);
+});
+
+test('new native frame envelope snapshots exact own data before validation without accessor rereads',()=>{
+  const base={schemaVersion:1,eventId:input.eventId,occurredAt:1792500000000,component:'chat',stage:'authenticate',code:'NATIVE_FRAME_LIMIT',
+    context:nativeFrameContext,release:'a'.repeat(40),platform:'linux'};
+  let reads=0;
+  for(const key of ['schemaVersion','eventId','occurredAt','component','stage','code','context','release','platform','reason']){
+    const getter=Object.defineProperty({...base},key,{enumerable:true,get(){reads++;throw Error('private accessor');}});
+    assert.throws(()=>diagnosticEvent(getter),DiagnosticValidationError);
+  }
+  for(const value of [Object.defineProperty({...base},'private',{value:true}),{...base,[Symbol('private')]:true},
+    Object.create(base)])assert.throws(()=>diagnosticEvent(value),DiagnosticValidationError);
+  assert.equal(reads,0);
+  assert.deepEqual(diagnosticEvent(base),diagnosticEvent(JSON.parse(JSON.stringify(base))));
 });

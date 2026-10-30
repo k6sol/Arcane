@@ -8,7 +8,7 @@ import { exact, fail, limits, str } from './validation.js';
 import { validateNativeAssetHooks, type ConnectOptions, type Limits, type NativeAssetHooks } from './types.js';
 import type { InternalProcess } from './transport.js';
 import type { LocalUse, LimitOptions, Selection, Snapshot } from './types.js';
-import { nativeEnvironment } from './transport.js';
+import { nativeEnvironment, annotateNativeConnectFrame, type NativeConnectFramePhase } from './transport.js';
 import { collectProposalResult, PROPOSAL_DURATION_MS, type ProposalResult } from './proposal-result.js';
 export type {ProposalResult} from './proposal-result.js';
 export { CODEX_LIMITS, CodexClientError } from './types.js';
@@ -159,11 +159,13 @@ export async function connectCodexClient(options: ConnectOptions): Promise<Codex
   const discoverySpec = profile ? prepareCodexDiscoveryProcess(executable, workspace) : processSpec;
   let session = new CodexSession(discoverySpec, bounds, 'installed-cli', profile ? 'arcane-only' : 'native-config');
   let hooksAttached = false;
+  let framePhase: NativeConnectFramePhase = profile ? 'discovery-initialize' : 'direct-initialize';
   try {
     await session.initialize();
     if (profile) {
       // Discovery may inventory inherited servers, but never receives Arcane authority.
       // Isolate only the final child, leaving the user's native configuration untouched.
+      framePhase = 'discovery-inventory';
       const inventory = await session.inspectMcpServers({ initiatedBy: 'human' });
       const arcane = inventory.find(server => server.name === 'arcane');
       // Connection-level inventory has no thread runtime in the real CLI, so null
@@ -174,6 +176,7 @@ export async function connectCodexClient(options: ConnectOptions): Promise<Codex
         fail('MCP_ISOLATION', 'Secret-free discovery must expose no Arcane tools or plugin authority.');
       let overrides = arcaneIsolationOverrides(inventory, profile.nodeExecutable, profile.agentToken);
       const historySpec = { ...discoverySpec, args: [...discoverySpec.args, ...overrides], env: { ...discoverySpec.env } };
+      framePhase = 'discovery-close';
       await session.close();
       if (hooks) {
         const validatedSpec = processSpec;
@@ -199,9 +202,11 @@ export async function connectCodexClient(options: ConnectOptions): Promise<Codex
       processSpec.args.push(...overrides);
       session = new ArcaneCodexSession(processSpec, bounds, historySpec, hooks, projectInstructions);
       hooksAttached = true;
+      framePhase = 'final-initialize';
       await session.initialize();
     }
   } catch (error) {
+    annotateNativeConnectFrame(error, framePhase);
     if (hooks && !hooksAttached) { try { hooks.retired(); } catch { /* Preserve the original failure and close discovery. */ } }
     await session.close(); throw error;
   }

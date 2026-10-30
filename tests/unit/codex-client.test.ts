@@ -7,7 +7,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { connectCodexClient, CODEX_LIMITS, MCP_TOOL_SUMMARY_LIMITS, summarizeMcpToolCall } from '../../packages/codex-client/src/index.js';
 import { CodexSession } from '../../packages/codex-client/src/session.js';
 import { limits } from '../../packages/codex-client/src/validation.js';
-import { nativeEnvironment } from '../../packages/codex-client/src/transport.js';
+import { nativeEnvironment, JsonlTransport, readNativeFrameEvidence, annotateNativeConnectFrame } from '../../packages/codex-client/src/transport.js';
 import { prepareCodexProcess } from '../../packages/codex-client/src/mcp-profile.js';
 import { ARCANE_TOOL_NAMES, ARCANE_TASK_INSTRUCTIONS } from '../../packages/protocol/src/arcane-tools.js';
 import { PROJECT_MEMORY_GUIDANCE, projectMemorySection, readProjectMemory } from '../../packages/core/src/project-memory.js';
@@ -1385,4 +1385,57 @@ test('same-thread selection refuses an active resumed thread whose exact turn is
   assert.equal(session.snapshot().thread!.configured, true); assert.equal(session.snapshot().thread!.turnStatus, 'unknown');
   assert.throws(() => session.selectModel({ ...HUMAN, model: 'fixture-other', effort: 'low' }), code('STATE'));
   assert.deepEqual(session.snapshot().selection, PAIR);
+});
+
+
+test('actual fragmented inbound overflow preserves finite observations on each original pending rejection',async t=>{
+  const transport=new JsonlTransport({command:process.execPath,cwd:ROOT,env:nativeEnvironment(),args:['-e',
+    "let count=0;require('node:readline').createInterface({input:process.stdin}).on('line',()=>{if(++count===2){process.stdout.write('x'.repeat(48));setTimeout(()=>process.stdout.write('y'.repeat(96)),15);}});"]},
+    limits({maxFrameBytes:64,requestTimeoutMs:5000}),()=>assert.fail('oversized bytes must not be parsed'),()=>{});
+  t.after(()=>transport.close());
+  const results=await Promise.allSettled([transport.request('account/read',{}),transport.request('model/list',{})]);
+  const a=results[0],b=results[1];assert.ok(a&&b&&a.status==='rejected'&&b.status==='rejected');
+  assert.notEqual(a.reason,b.reason,'stop retains each pending request error object');
+  for(const result of [a,b]){
+    assert.equal(result.reason.code,'FRAME_LIMIT');assert.equal(result.reason.dispatched,true);
+    const evidence=readNativeFrameEvidence(result.reason);assert.ok(evidence&&Object.isFrozen(evidence));
+    assert.equal(evidence.schemaVersion,1);assert.equal(evidence.direction,'inbound');assert.equal(evidence.byteCountKind,'at-least');
+    assert.ok(evidence.byteCount>64&&evidence.byteCount<=144);assert.equal(evidence.frameLimitBytes,64);
+    assert.equal(evidence.pendingCount,2);assert.equal(evidence.pendingMethodMask,10);assert.equal(evidence.connectPhase,'not-connect');
+    assert.equal(transport.isOwnedCloseRequestError(result.reason),false,'frame failure is not an intentional-close marker');
+  }
+  assert.deepEqual(readNativeFrameEvidence(a.reason),readNativeFrameEvidence(b.reason));
+  annotateNativeConnectFrame(a.reason,'direct-initialize');
+  assert.equal(readNativeFrameEvidence(a.reason)?.connectPhase,'direct-initialize');
+  assert.equal(readNativeFrameEvidence(b.reason)?.connectPhase,'not-connect','annotation never retags another pending request');
+  await transport.close();
+});
+
+test('actual outbound frame refusal reports exact UTF8 plus LF before dispatch and leaves the original close path intact',async t=>{
+  const transport=new JsonlTransport({command:process.execPath,cwd:ROOT,env:nativeEnvironment(),args:['-e','process.stdin.resume();']},
+    limits({maxFrameBytes:64,requestTimeoutMs:5000}),()=>{},()=>{});
+  t.after(()=>transport.close());
+  const params={payload:String.fromCodePoint(233).repeat(100)};
+  const expectedBytes=Buffer.byteLength(JSON.stringify({id:1,method:'initialize',params})+'\n');
+  await assert.rejects(transport.request('initialize',params),error=>{
+    assert.ok(error!==null&&typeof error==='object'&&'code'in error&&'dispatched'in error);
+    assert.equal(error.code,'FRAME_LIMIT');assert.equal(error.dispatched,false);
+    assert.deepEqual(readNativeFrameEvidence(error),{schemaVersion:1,direction:'outbound',byteCountKind:'exact',
+      byteCount:expectedBytes,frameLimitBytes:64,pendingMethodMask:1,pendingCount:1,connectPhase:'not-connect'});
+    return true;
+  });
+  assert.equal(transport.connected,true,'diagnostics do not stop a prewrite-rejected transport');
+  await transport.close();assert.equal(transport.connected,false);
+});
+
+test('an actual oversized unsolicited line has no pending-method attribution', {timeout:CODEX_LIMITS.requestTimeoutMs},async t=>{
+  let finish!:(error:unknown)=>void;const disconnected=new Promise<unknown>(resolve=>{finish=resolve;});
+  const transport=new JsonlTransport({command:process.execPath,cwd:ROOT,env:nativeEnvironment(),args:['-e',
+    "process.stdout.write('z'.repeat(128));process.stdin.resume();"]},
+    limits({maxFrameBytes:64,requestTimeoutMs:5000}),()=>assert.fail('oversized data cannot become a message'),error=>finish(error));
+  t.after(()=>transport.close());
+  const evidence=readNativeFrameEvidence(await disconnected);assert.ok(evidence);
+  assert.equal(evidence.direction,'inbound');assert.equal(evidence.byteCountKind,'at-least');
+  assert.ok(evidence.byteCount>64&&evidence.byteCount<=128);assert.equal(evidence.pendingCount,0);assert.equal(evidence.pendingMethodMask,0);
+  await transport.close();
 });

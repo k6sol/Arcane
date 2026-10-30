@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { prepareCodexDiscoveryProcess, prepareCodexProcess } from '../../packages/codex-client/src/mcp-profile.js';
-import { nativeEnvironment } from '../../packages/codex-client/src/transport.js';
+import { nativeEnvironment, type NativeFrameEvidence } from '../../packages/codex-client/src/transport.js';
 import { ARCANE_TOOL_NAMES } from '../../packages/protocol/src/arcane-tools.js';
 import { proposalThreadIsIsolated } from '../../packages/codex-client/src/mcp-isolation.js';
 // Include the exact public factory in scoped compiler inputs; importing it never launches a child.
@@ -31,12 +31,14 @@ type HistoryAction = 'non-human' | 'foreign-thread' | 'foreign-session' | 'inval
 type HistoryResponse = 'wrong-thread' | 'wrong-session' | 'wrong-project';
 type ParentRetirement='before-launch'|'discovery-init'|'discovery-inventory'|'final-init'|'thread-inventory'|'turn-inventory'|'before-write'|'reentrant-abort'|'active'|'after-connect'|'mutated-owner'|'joined-close';
 interface FixtureOptions {
+  framePhase?: 'discovery-initialize' | 'discovery-inventory' | 'final-initialize';
   profile?: boolean; mode?: Mode; thread?: boolean; history?: boolean; invalidProfile?: boolean;
   historyAction?: HistoryAction; historyResponse?: HistoryResponse; repeatHistory?: boolean;
   proposal?: boolean; dispatch?: boolean; repeatProposal?: boolean;
   parentRetirement?:ParentRetirement;
 }
 interface Receipt {
+  frame?: Readonly<NativeFrameEvidence> | null; dispatched?: boolean;
   event: string; launch?: number; args?: string[]; envKeys?: string[]; tokenHash?: string | null;
   daemonUrl?: string | null; method?: string; params?: Record<string, unknown>; cwd?: string; envHasEntry?: boolean;
   code?: string; snapshot?: { ready: boolean; mcpIsolation: string; thread: { threadId: string; configured: boolean } | null };
@@ -69,6 +71,11 @@ createInterface({ input: process.stdin }).on('line', line => {
   const { id, method, params = {}, result: resultValue } = JSON.parse(line);
   record({ event: 'rpc', method, params, resultValue });
   if (method === 'initialized') return;
+  if (scenario.framePhase === 'discovery-initialize' && launch === 1 && method === 'initialize' ||
+      scenario.framePhase === 'discovery-inventory' && launch === 1 && method === 'mcpServerStatus/list' ||
+      scenario.framePhase === 'final-initialize' && launch === 2 && method === 'initialize') {
+    process.stdout.write('x'.repeat(4096)); return;
+  }
   if (method === 'initialize') {
     if (mode === 'discovery-init-failure' && launch === 1 || mode === 'final-init-failure' && launch === 2) return reject(id);
     return result(id, {});
@@ -165,6 +172,7 @@ process.env.CODEX_HOME = 'SYNTHETIC_PROVIDER_OVERRIDE';
 process.env.OPENAI_API_KEY = 'SYNTHETIC_PROVIDER_KEY';
 process.env.NODE_OPTIONS = '--require=SYNTHETIC_WRAPPER';
 const { connectCodexClient, connectCodexProposalWorker } = await import(library + 'index.js');
+const { readNativeFrameEvidence } = await import(library + 'transport.js');
 const controller=new AbortController();let parentActive=true,proposing=false,proposalChecks=0;
 globalThis.arcaneFixtureRetire=()=>{parentActive=false;controller.abort();record({event:'parent-retired'});};
 if(scenario.parentRetirement==='before-launch')globalThis.arcaneFixtureRetire();
@@ -183,7 +191,7 @@ try {
   if (scenario.invalidProfile) profile.daemonUrl = 'https://example.test';
   const options={
     command: join(root, process.platform === 'win32' ? 'codex.exe' : 'codex'), cwd: root,
-    use: 'personal-local', limits: { requestTimeoutMs: 5000 },
+    use: 'personal-local', limits: { requestTimeoutMs: 5000, ...(scenario.framePhase ? { maxFrameBytes: 2048 } : {}) },
   };
   client = scenario.proposal ? await connectCodexProposalWorker({...options,
     accountIdentity:(await import('node:crypto')).createHash('sha256').update('codex-reported-account\0synthetic@example.test').digest('hex'),
@@ -242,7 +250,10 @@ try {
     }
     record({ event: 'history-after', snapshot: client.snapshot() });
   }
-} catch (error) { record({ event: 'error', code: error.code }); }
+} catch (error) {
+  if (scenario.framePhase) record({ event: 'frame-error', frame: readNativeFrameEvidence(error), dispatched: error.dispatched });
+  record({ event: 'error', code: error.code });
+}
 finally { await client?.close(); }
 `;
 
@@ -641,4 +652,22 @@ for(const [parentRetirement,launches,turns] of [
   if(parentRetirement==='reentrant-abort')assert.equal(events(records,'error')[0]?.code,'DISCONNECTED');
   if(['before-launch','before-write','after-connect','mutated-owner','joined-close'].includes(parentRetirement))
     assert.equal(events(records,'error')[0]?.code,'PARENT_SCOPE');
+});
+
+
+for(const framePhase of ['discovery-initialize','discovery-inventory','final-initialize'] as const)
+test('actual original '+framePhase+' overflow retains finite phase evidence without another launch or turn',async t=>{
+  const {records}=await fixture(t,{framePhase});
+  assert.equal(events(records,'error')[0]?.code,'FRAME_LIMIT');
+  const row=events(records,'frame-error')[0],frame=row?.frame;assert.ok(row&&frame);
+  assert.equal(row.dispatched,true);assert.equal(frame.connectPhase,framePhase);
+  assert.equal(frame.direction,'inbound');assert.equal(frame.byteCountKind,'at-least');
+  assert.ok(frame.byteCount>2048&&frame.byteCount<=4096);assert.equal(frame.frameLimitBytes,2048);
+  assert.equal(frame.pendingCount,1);assert.equal(frame.pendingMethodMask,framePhase==='discovery-inventory'?512:1);
+  assert.equal(events(records,'spawn').length,framePhase==='final-initialize'?2:1);
+  assert.equal(events(records,'close').length,framePhase==='final-initialize'?2:1);
+  assert.equal(events(records,'connected').length,0);
+  for(const method of ['thread/start','thread/resume','turn/start','turn/steer'])assert.equal(calls(records,method).length,0);
+  assertSecretFree(events(records,'child')[0]!);
+  assert.deepEqual(Object.keys(frame).sort(),['schemaVersion','direction','byteCountKind','byteCount','frameLimitBytes','pendingMethodMask','pendingCount','connectPhase'].sort());
 });

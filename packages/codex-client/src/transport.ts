@@ -1,11 +1,40 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { isAbsolute } from 'node:path';
-import { CodexClientError, type Limits } from './types.js';
+import { CODEX_LIMITS, CodexClientError, type Limits } from './types.js';
 import { fail, object } from './validation.js';
 
 type Method = 'initialize' | 'account/read' | 'account/rateLimits/read' | 'model/list' | 'thread/start' | 'thread/resume' | 'turn/start' | 'turn/steer' | 'turn/interrupt' | 'mcpServerStatus/list';
 const METHODS = new Set<Method>(['initialize', 'account/read', 'account/rateLimits/read', 'model/list', 'thread/start', 'thread/resume', 'turn/start', 'turn/steer', 'turn/interrupt', 'mcpServerStatus/list']);
-interface Pending { resolve(value: unknown): void; reject(error: CodexClientError): void; timer: NodeJS.Timeout; dispatched: boolean }
+interface Pending { resolve(value: unknown): void; reject(error: CodexClientError): void; timer: NodeJS.Timeout; dispatched: boolean; method: Method }
+const FRAME_METHODS: readonly Method[] = ['initialize', 'account/read', 'account/rateLimits/read', 'model/list', 'thread/start', 'thread/resume', 'turn/start', 'turn/steer', 'turn/interrupt', 'mcpServerStatus/list'];
+const CONNECT_FRAME_PHASES = ['direct-initialize', 'discovery-initialize', 'discovery-inventory', 'discovery-close', 'final-initialize'] as const;
+export type NativeConnectFramePhase = typeof CONNECT_FRAME_PHASES[number];
+export interface NativeFrameEvidence {
+  readonly schemaVersion: 1;
+  readonly direction: 'inbound' | 'outbound';
+  readonly byteCountKind: 'exact' | 'at-least';
+  readonly byteCount: number;
+  readonly frameLimitBytes: number;
+  /** Outstanding requests only; never attribution of an unparsed inbound line. */
+  readonly pendingMethodMask: number;
+  readonly pendingCount: number;
+  readonly connectPhase: 'not-connect' | NativeConnectFramePhase;
+}
+// Only the two actual refusal sites below mint evidence. Error properties,
+// serialized objects and caller-supplied FRAME_LIMIT codes cannot mint it.
+const frameEvidence = new WeakMap<object, Readonly<NativeFrameEvidence>>();
+export function readNativeFrameEvidence(error: unknown): Readonly<NativeFrameEvidence> | null {
+  try { return error !== null && typeof error === 'object' ? frameEvidence.get(error) ?? null : null; }
+  catch { return null; }
+}
+/** Internal factory annotation only, and only on an already-owned error. */
+export function annotateNativeConnectFrame(error: unknown, phase: NativeConnectFramePhase): void {
+  try {
+    const original = readNativeFrameEvidence(error);
+    if (original && error !== null && typeof error === 'object' && (CONNECT_FRAME_PHASES as readonly unknown[]).includes(phase))
+      frameEvidence.set(error, Object.freeze({ ...original, connectPhase: phase }));
+  } catch { /* Diagnostic observation cannot replace an operational failure. */ }
+}
 export interface InternalProcess { command: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv }
 export function nativeEnvironment(): NodeJS.ProcessEnv {
   // No caller environment and no credentials, endpoint, auth-location or provider overrides.
@@ -76,7 +105,7 @@ export class JsonlTransport {
           reject(new CodexClientError('STEER_TIMEOUT', 'Steering acknowledgement did not arrive; inspect the retained request before continuing.', entry.dispatched));
         } else this.stop(new CodexClientError('TIMEOUT', 'Native request timed out.'));
       }, this.bounds.requestTimeoutMs);
-      const entry = { resolve, reject, timer, dispatched: false };
+      const entry = { resolve, reject, timer, dispatched: false, method };
       this.#pending.set(id, entry);
       try {
         onId?.(id);
@@ -101,7 +130,7 @@ export class JsonlTransport {
     if (!this.connected || this.#child.stdin.destroyed || this.#child.exitCode !== null || this.#child.signalCode !== null) fail('DISCONNECTED', 'Native CLI is disconnected.');
     const data = JSON.stringify(message) + '\n';
     const bytes = Buffer.byteLength(data);
-    if (bytes > this.bounds.maxFrameBytes) fail('FRAME_LIMIT', 'Outbound frame exceeded its bound.');
+    if (bytes > this.bounds.maxFrameBytes) throw this.#frameFailure('outbound', bytes);
     if (this.#child.stdin.writableLength + bytes > this.bounds.maxQueuedBytes) fail('QUEUE_LIMIT', 'Native input queue exceeded its bound.');
     this.#child.stdin.write(data);
   }
@@ -115,7 +144,7 @@ export class JsonlTransport {
         const newline = chunk.indexOf(10, offset);
         const end = newline < 0 ? chunk.length : newline;
         const part = chunk.subarray(offset, end);
-        if (this.#partBytes + part.length > this.bounds.maxFrameBytes) throw new CodexClientError('FRAME_LIMIT', 'Inbound frame exceeded its bound.');
+        if (this.#partBytes + part.length > this.bounds.maxFrameBytes) throw this.#frameFailure('inbound', this.#partBytes + part.length);
         // A fixed buffer also bounds allocation overhead for one-byte chunks.
         if (part.length) { part.copy(this.#frame, this.#partBytes); this.#partBytes += part.length; }
         offset = end + 1;
@@ -150,6 +179,22 @@ export class JsonlTransport {
   isOwnedCloseRequestError(error: unknown): boolean {
     return typeof error === 'object' && error !== null && this.#ownedCloseRequestErrors.has(error);
   }
+  #frameFailure(direction: 'inbound' | 'outbound', bytes: number): CodexClientError {
+    const error = new CodexClientError('FRAME_LIMIT', direction === 'inbound' ? 'Inbound frame exceeded its bound.' : 'Outbound frame exceeded its bound.');
+    try {
+      let mask = 0;
+      for (const pending of this.#pending.values()) mask |= 1 << FRAME_METHODS.indexOf(pending.method);
+      const count = this.#pending.size, limit = this.bounds.maxFrameBytes;
+      if (Number.isSafeInteger(bytes) && bytes >= 0 && Number.isSafeInteger(limit) && limit >= 1 && limit <= CODEX_LIMITS.maxFrameBytes &&
+          count <= CODEX_LIMITS.maxPendingRequests && mask >= 0 && mask <= 1023) {
+        frameEvidence.set(error, Object.freeze({ schemaVersion: 1, direction,
+          byteCountKind: direction === 'inbound' || bytes > CODEX_LIMITS.maxOutputBytes ? 'at-least' : 'exact',
+          byteCount: Math.min(bytes, CODEX_LIMITS.maxOutputBytes), frameLimitBytes: limit,
+          pendingMethodMask: mask, pendingCount: count, connectPhase: 'not-connect' }));
+      }
+    } catch { /* Keep the exact original refusal if diagnostic collection fails. */ }
+    return error;
+  }
   stop(reason = new CodexClientError('DISCONNECTED', 'Local client disconnected.')): void {
     this.#stop(reason, false);
   }
@@ -160,6 +205,8 @@ export class JsonlTransport {
     for (const pending of this.#pending.values()) {
       clearTimeout(pending.timer);
       const error = new CodexClientError(reason.code, reason.message, pending.dispatched, reason.remoteCode);
+      try { const evidence = readNativeFrameEvidence(reason); if (evidence) frameEvidence.set(error, evidence); }
+      catch { /* The original pending rejection and cleanup remain authoritative. */ }
       if (ownedClose) this.#ownedCloseRequestErrors.add(error);
       pending.reject(error);
     }

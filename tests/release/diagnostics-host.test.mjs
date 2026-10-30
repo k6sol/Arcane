@@ -82,3 +82,20 @@ test('actual child staging acknowledgements reflect successful versus rejected S
  const invalid={...event(),context:{stagingPhase:'packet-receipt',stagingReason:'proof-expired',packetOrdinal:512}};
  assert.deepEqual(await f.host.report(invalid),{stored:false,state:'unavailable'});assert.equal(f.host.list().events.length,1);assert.equal(f.calls.length,0);
 });
+
+
+test('closed native-frame evidence survives encrypted local reload without remote configuration or replay',async t=>{
+ const f=await fixture(t),context={operationId:randomUUID(),nativeFrameDirection:'inbound',nativeFramePhase:'discovery-inventory',
+  nativeFrameByteKind:'at-least',nativeFrameBytes:1048577,nativeFrameLimit:1048576,nativeFramePendingMask:512,nativeFramePendingCount:1};
+ const event={...input(),component:'chat',stage:'authenticate',code:'NATIVE_FRAME_LIMIT',context};
+ assert.deepEqual(await f.host.report(event),{stored:true,eventId:event.eventId,state:'local-only'});
+ const raw=JSON.stringify(f.db.prepare('SELECT * FROM diagnostic_outbox').all());
+ assert.ok(!raw.includes(context.operationId));assert.doesNotMatch(raw,/NATIVE_FRAME_LIMIT|discovery-inventory/);
+ assert.equal(await f.host.close(),true);const next=await createDiagnosticsHost(f.opts);t.after(()=>next.close());
+ const rows=next.list().events;assert.equal(rows.length,1);assert.equal(rows[0].event.code,'NATIVE_FRAME_LIMIT');assert.deepEqual(rows[0].event.context,context);
+ assert.equal((await next.flush()).state,'disabled');assert.equal(f.calls.length,0);
+ for(const bad of [{...event,component:'studio'},{...event,context:{...context,server:'private'}},
+  {...event,context:{...context,nativeFramePendingMask:1024}},{...event,context:{...context,nativeFrameByteKind:'exact'}}])
+  assert.deepEqual(await next.report({...bad,eventId:randomUUID()}),{stored:false,state:'unavailable'});
+ assert.equal(next.list().events.length,1);assert.equal(f.calls.length,0);
+});
