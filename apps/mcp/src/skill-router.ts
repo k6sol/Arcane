@@ -102,16 +102,23 @@ const GENRES: Record<string, string> = { platformer: 'obby', obstacle: 'obby', p
 const NPC_CONTEXT = tokens('npc npcs enemy enemies character characters mob mobs monster zombie guard villager shopkeeper creature');
 const SCRIPT_CONTEXT = tokens('script scripting luau module modulescript code');
 const DEBUG_CONTEXT = tokens(HINTS['arcane-debugging'] ?? '');
+const SHOP_FUNCTION_CONTEXT = tokens('work working functional functionality');
+const SHOP_UI_CONTEXT = tokens('ui gui hud menu screen screengui panel button layout interface');
 function rank(skill: Metadata, terms: Set<string>): number {
   const identity = tokens(skill.id.replace(/^arcane-/, '').replaceAll('-', ' '));
   const npcJob = [...terms].some(term => NPC_CONTEXT.has(term));
+  const functionalShop = terms.has('shop') && [...terms].some(term => SHOP_FUNCTION_CONTEXT.has(term)) &&
+    ![...terms].some(term => SHOP_UI_CONTEXT.has(term) || DEBUG_CONTEXT.has(term));
   const title = tokens(skill.title), description = tokens(skill.description), hints = tokens((HINTS[skill.id] ?? '') +
-    (skill.id === 'arcane-characters' && npcJob ? ' patrol chase' : ''));
+    (skill.id === 'arcane-characters' && npcJob ? ' patrol chase' : '') +
+    (skill.id === 'arcane-gameplay-systems' && functionalShop ? ' work working functional functionality' : ''));
   let score = 0;
   for (const term of terms) score += hints.has(term) ? 12 : identity.has(term) ? 8 : title.has(term) ? 4 : description.has(term) ? 1 : 0;
   // Script diagnosis needs verification guidance below the debug/Luau hints, even when QA metadata has no lexical match.
   if (score === 0 && skill.id === 'arcane-playtest-qa' && [...terms].some(term => SCRIPT_CONTEXT.has(term)) &&
       [...terms].some(term => DEBUG_CONTEXT.has(term))) return 6;
+  // A functional shop also needs a verification reader; explicit GUI/debug requests keep their ordinary routing.
+  if (score === 0 && skill.id === 'arcane-playtest-qa' && functionalShop) return 6;
   return score;
 }
 /** Lead a requested habitat, without treating a feature merely located there as a habitat build. */
