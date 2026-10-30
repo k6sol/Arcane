@@ -99,10 +99,15 @@ test('normal retirement joins an already admitted original steer ACK and its exa
 test('normal fencing observes original preflight refusal and retains that exact error without another turn',{timeout:10000},async t=>{
   const f=await fixture(t,{holdCheck:3}),chain=f.client.openIncorporationChain({continuation:f.started!.continuation,maxSteps:1});
   const pending=f.client.continueIncorporation({chain,permit:f.client.issueIncorporationPermit({chain}),text:'Held preflight'}).then(()=>null,error=>error as unknown);
-  await f.entered('mcpServerStatus/list',3);const joined=f.client.retireManagedTask(f.started!.continuation);void joined.catch(()=>{});
+  await f.entered('mcpServerStatus/list',3);assert.equal(f.retired(),0);assert.equal(f.client.snapshot().connected,true);assert.equal(f.client.snapshot().ready,true);
+  const joined=f.client.retireManagedTask(f.started!.continuation);void joined.catch(()=>{});
+  assert.equal(f.retired(),0);assert.equal(f.client.snapshot().connected,true);assert.equal(f.client.snapshot().ready,true);
   await f.release('preflight');const original=await pending;assert.ok(original&&typeof original==='object');
-  await assert.rejects(joined,error=>error===original);assert.equal(f.client.retireManagedTask(f.started!.continuation),joined);
-  assert.equal((await f.wire()).filter(row=>row.method==='turn/start').length,1);assert.equal(f.retired(),0);
+  assert.ok('code' in original);assert.equal(original.code,'GRANT_REVOKED');
+  await assert.rejects(joined,error=>error===original);assert.equal(f.retired(),1,'The original refused isolation preflight performs its existing generic retirement.');
+  assert.equal(f.client.snapshot().connected,false);assert.equal(f.client.snapshot().ready,false);
+  assert.equal(f.client.retireManagedTask(f.started!.continuation),joined);await assert.rejects(joined,error=>error===original);
+  assert.equal((await f.wire()).filter(row=>row.method==='turn/start').length,1);assert.equal(f.retired(),1,'Cached normal join cannot repeat the original refusal hook.');
 });
 
 test('foreign, copied and proxy continuation objects cannot fence an original live task',{timeout:10000},async t=>{
