@@ -12,6 +12,7 @@ on:
       - 'scripts/blender-test-runtime.py'
       - 'scripts/compile-product.mjs'
       - 'tests/native/**'
+      - 'tests/unit/asset-worker-identity-windows.test.ts'
       - 'package.json'
       - 'package-lock.json'
       - 'tsconfig.json'
@@ -26,6 +27,7 @@ on:
       - 'scripts/blender-test-runtime.py'
       - 'scripts/compile-product.mjs'
       - 'tests/native/**'
+      - 'tests/unit/asset-worker-identity-windows.test.ts'
       - 'package.json'
       - 'package-lock.json'
       - 'tsconfig.json'
@@ -62,6 +64,9 @@ jobs:
         run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Build the actual tested pipeline
         run: npm run build
+      - name: Verify the actual Windows process identity query
+        if: ${{ runner.os == 'Windows' }}
+        run: node --test --test-concurrency=1 dist/tests/unit/asset-worker-identity-windows.test.js
       - name: Verify bounded runtime archive handling
         env:
           PYTHONDONTWRITEBYTECODE: '1'
