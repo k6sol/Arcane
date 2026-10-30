@@ -24,7 +24,7 @@ import { nativeEnvironment } from '../../packages/codex-client/src/transport.js'
 import { limits } from '../../packages/codex-client/src/validation.js';
 import { ARCANE_NATIVE_TOOL_NAMES } from '../../packages/protocol/src/arcane-tools.js';
 import { READ_METHODS, WRITE_METHODS } from '../../packages/protocol/src/studio.js';
-import { digest, readTestLedger, reviewedTestTools } from '../../packages/studio-test-controller/src/index.js';
+import { codes as testCodes, digest, readTestLedger, reviewedTestTools, SCENARIO_LIMITS } from '../../packages/studio-test-controller/src/index.js';
 import { buildScenarioProgram } from '../../packages/studio-test-controller/src/scenario-runtime.js';
 import { fixtureScenario, runScenarioFixture } from '../../packages/studio-test-controller/testing/scenario-fixture.js';
 import { fixtureTempDirectory, makeFixtureDirectory } from './windows-fixture-paths.js';
@@ -91,6 +91,32 @@ async function fixture(t: TestContext, holdClose = false) {
   const grant = studio.createGrant({ allowedRoots: ['Workspace', 'ServerStorage'], allowWrites: true });
   const pair = store.pair({ code: grant.code, protocolVersion: 1, identity: { clientSessionId: 'joint-plugin-lifetime', placeId: 0, universeId: 0, name: NAME, pluginVersion: 'fixture' }, capabilities: [...READ_METHODS, ...WRITE_METHODS] });
   const state = { mode: 'Edit' as 'Edit' | 'Play', epoch: 10, immobile: true, source: 'print("original fixture")', inputCalls: 0, starts: 0, stops: 0, closes: 0, closeEntered: false };
+  const vm: { entered: number; returned: number; elapsedMs: number | null; code: string | null } = { entered: 0, returned: 0, elapsedMs: null, code: null };
+  const finite = (value: unknown, allowed: readonly string[]) => typeof value === 'string' && allowed.includes(value) ? value : 'other';
+  const count = (value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : 'other';
+  // Failure-only finite metadata: no IDs, source, program, logs, paths or error text.
+  const diagnostic = ({ review }: Pick<ReturnType<typeof playtestJob.parse>, 'review'>) => {
+    const scenario = review.scenario, steps = scenario?.steps.slice(0, SCENARIO_LIMITS.steps) ?? [];
+    return 'Joint scenario ' + JSON.stringify({
+      phase: finite(review.phase, ['idle', 'admitting', 'starting', 'observing', 'waiting', 'stopping', 'done']),
+      outcome: review.outcome === null ? null : finite(review.outcome, ['succeeded', 'failed', 'cancelled', 'timed_out', 'rejected']),
+      code: finite(review.code, testCodes), cleanup: finite(review.cleanup, ['not_started', 'running', 'complete', 'unknown']),
+      watchdog: { armed: review.watchdog.armed === true, fired: review.watchdog.fired === true,
+        reason: review.watchdog.reason === null ? null : finite(review.watchdog.reason, testCodes) },
+      observations: count(review.observations),
+      runBudgetMs: review.startedAt === null || review.deadline === null ? null : count(review.deadline - review.startedAt),
+      cleanupBudgetMs: review.deadline === null || review.cleanupDeadline === null ? null : count(review.cleanupDeadline - review.deadline),
+      scenario: scenario === undefined ? null : {
+        state: finite(scenario.state, ['not_started', 'running', 'passed', 'failed', 'unsupported', 'unknown']),
+        inputRelease: finite(scenario.inputRelease, ['not_started', 'observed_released', 'unknown']),
+        steps: steps.length, passed: steps.filter(step => step.outcome === 'passed').length,
+        failed: steps.filter(step => step.outcome === 'failed').length, notRun: steps.filter(step => step.outcome === 'not_run').length,
+      },
+      effects: { starts: count(state.starts), inputCalls: count(state.inputCalls), stops: count(state.stops), mode: finite(state.mode, ['Edit', 'Play']) },
+      vm: { entered: count(vm.entered), returned: count(vm.returned), elapsedMs: vm.elapsedMs === null ? null : count(vm.elapsedMs),
+        code: vm.code === null ? null : finite(vm.code, testCodes) },
+    });
+  };
   const plan = fixtureScenario(); plan.capture.required = false;
   const publish = () => { studio.authenticate(pair.sessionId, pair.token); return studio.poll(pair.sessionId, {
     sessionId: pair.sessionId, clientLifetimeId: 'joint-plugin-lifetime', pluginArtifactHash: artifact, markerName: 'ArcaneTestProof_joint_fixture',
@@ -125,7 +151,14 @@ async function fixture(t: TestContext, holdClose = false) {
       assert.equal(args.datamodel_type, 'Client');
       const rows = await readTestLedger(join(directory, 'playtests', 'ledger'), join(directory, 'playtests')), event = rows.at(-1)!.event;
       assert.equal(event.kind, 'scenario_intent'); assert.equal(args.code, buildScenarioProgram(plan, event.id, digest(plan)));
-      state.inputCalls++; return text(runScenarioFixture(plan, { immobile: state.immobile }, event.id, String(args.code)).report);
+      state.inputCalls++; const enteredAt = Date.now(); vm.entered++; vm.code = null;
+      try {
+        const report = runScenarioFixture(plan, { immobile: state.immobile }, event.id, String(args.code)).report;
+        vm.returned++; vm.code = finite(report.code, testCodes); return text(report);
+      } finally {
+        const elapsed = Date.now() - enteredAt;
+        vm.elapsedMs = Number.isSafeInteger(elapsed) && elapsed >= 0 ? elapsed : null;
+      }
     });
     await server.connect(right); await client.connect(left); let closed = false; const index = connections.length;
     const connection: NativeTestConnection = { client, evidence: 'fixture', async witness(id, marker, mode, signal) {
@@ -171,7 +204,7 @@ async function fixture(t: TestContext, holdClose = false) {
     const result = CallToolResultSchema.parse(await agent.callTool({ name: 'playtest_request', arguments: { sessionId: pair.sessionId, nativeStudioId: STUDIO, durationMs: 5000, observationIntervalMs: 250, failOnRuntimeError: true, scenario: plan } }));
     assert.notEqual(result.isError, true, JSON.stringify(result.structuredContent)); return playtestJob.parse((result.structuredContent as { job: unknown }).job);
   };
-  return { lab:ownedLab, state, providers, ready, prepare, status, task, action, releaseClose, approve: (job: Pick<StudioTestView,'id'|'displayDigest'>) => post('/v1/playtests/approve', { id: job.id, displayDigest: job.displayDigest }),
+  return { lab:ownedLab, state, providers, ready, prepare, status, task, action, releaseClose, diagnostic, approve: (job: Pick<StudioTestView,'id'|'displayDigest'>) => post('/v1/playtests/approve', { id: job.id, displayDigest: job.displayDigest }),
     finish: (turn: number) => writeFile(join(root, 'finished-' + turn), 'Synthetic terminal', { flag: 'wx' }),
     wire: async () => (await readFile(audit, 'utf8')).trim().split('\n').map(line => JSON.parse(line) as { method: string; params: Record<string, unknown> }) };
 }
@@ -179,8 +212,9 @@ async function fixture(t: TestContext, holdClose = false) {
 test('production lab routes measured scenario failure into one original-client repair and bounded reverify', { timeout: 30000 }, async t => {
   const f = await fixture(t); await f.ready(); const first = await f.prepare(); await f.approve(first);
   await until(async () => (await f.status(first.id)).review.phase === 'done'); const failed = await f.status(first.id);
-  assert.equal(failed.review.outcome, 'failed'); assert.equal(failed.review.code, 'ASSERTION_FAILED'); assert.equal(failed.review.cleanup, 'complete');
-  assert.equal(failed.review.scenario!.inputRelease, 'observed_released'); assert.equal((await f.task()).round, 0);
+  const failedDetails = f.diagnostic(failed);
+  assert.equal(failed.review.outcome, 'failed', failedDetails); assert.equal(failed.review.code, 'ASSERTION_FAILED', failedDetails); assert.equal(failed.review.cleanup, 'complete', failedDetails);
+  assert.equal(failed.review.scenario!.inputRelease, 'observed_released', failedDetails); assert.equal((await f.task()).round, 0, failedDetails);
   await until(async () => (await f.task()).reportDigest!==null);
   const failedDigest=(await f.task()).reportDigest; assert.ok(failedDigest);
   assert.equal((await f.wire()).filter(row => row.method === 'turn/start').length, 1);
@@ -189,7 +223,8 @@ test('production lab routes measured scenario failure into one original-client r
   const second = await f.prepare(); assert.notEqual(first.display.proposal.subjectDigest, second.display.proposal.subjectDigest);
   assert.deepEqual(first.display.proposal.scenario, second.display.proposal.scenario); await f.approve(second);
   await until(async () => (await f.status(second.id)).review.phase === 'done'); const passed = await f.status(second.id);
-  assert.equal(passed.review.outcome, 'succeeded'); assert.equal(passed.review.cleanup, 'complete'); assert.equal(passed.evidence, 'fixture'); assert.equal(passed.nativeAcceptance, false);
+  const passedDetails = f.diagnostic(passed);
+  assert.equal(passed.review.outcome, 'succeeded', passedDetails); assert.equal(passed.review.cleanup, 'complete', passedDetails); assert.equal(passed.evidence, 'fixture', passedDetails); assert.equal(passed.nativeAcceptance, false, passedDetails);
   await f.finish(2); await until(async () => (await f.task()).state === 'verified');
   assert.equal(f.state.inputCalls, 2); assert.equal(f.state.starts, 2); assert.equal(f.state.stops, 2); assert.equal(f.state.mode, 'Edit');
   const turns = (await f.wire()).filter(row => row.method === 'turn/start'); assert.equal(turns.length, 2);
