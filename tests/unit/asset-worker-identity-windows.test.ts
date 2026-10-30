@@ -20,13 +20,22 @@ function observeQueries(t: TestContext) {
   const report = (started: number, outcome: 'ok' | 'exit4' | 'timeout' | 'max-buffer' | 'failed' | 'threw', stdout: unknown, stderr: unknown) => {
     try {
       if (reports >= 6) return;
-      const stage = typeof stderr === 'string' ? /^ARCANE_WORKER_QUERY_STAGE:(0|[1-9]|10)$/.exec(stderr) : null;
-      const metadata = typeof stderr === 'string' ? /^ARCANE_WORKER_QUERY_STAGE:3:([1-9]|10|11):([0-5])$/.exec(stderr) : null;
+      const trace = typeof stderr === 'string' && Buffer.byteLength(stderr, 'utf8') <= 512 && !/[\r\n]/.test(stderr) ? stderr : null;
+      const progress = trace === null ? '' : /^(?:ARCANE_WORKER_QUERY_PROGRESS:(?:0|[1-9]|10);){0,11}/.exec(trace)?.[0] ?? '';
+      const failure = trace === null ? null : trace.slice(progress.length);
+      const stage = failure === null ? null : /^ARCANE_WORKER_QUERY_STAGE:(0|[1-9]|10)$/.exec(failure);
+      const metadata = failure === null ? null : /^ARCANE_WORKER_QUERY_STAGE:3:([1-9]|10|11):([0-5])$/.exec(failure);
       const validMetadata = metadata && (Number(metadata[1]) === 1 ? Number(metadata[2]) === 5 : Number(metadata[2]) < 5);
+      const closedTrace = trace !== null && (failure === '' || stage !== null || !!validMetadata);
+      let progressCount = 0, lastProgressStage = 'unavailable';
+      if (closedTrace) for (const item of progress.matchAll(/ARCANE_WORKER_QUERY_PROGRESS:(0|[1-9]|10);/g)) {
+        progressCount++; lastProgressStage = QUERY_STAGES[Number(item[1])] ?? 'unavailable';
+      }
       t.diagnostic(JSON.stringify({ schemaVersion: 1, kind: 'original-worker-query', sequence: ++reports, outcome,
-        stage: validMetadata ? 'type-readback' : stage ? QUERY_STAGES[Number(stage[1])] ?? 'unavailable' : 'unavailable',
-        metadataStage: metadata && validMetadata ? METADATA_STAGES[Number(metadata[1])] ?? 'unavailable' : 'unavailable',
-        importIndex: metadata && validMetadata ? Number(metadata[2]) : null,
+        stage: closedTrace && validMetadata ? 'type-readback' : closedTrace && stage ? QUERY_STAGES[Number(stage[1])] ?? 'unavailable' : 'unavailable',
+        metadataStage: closedTrace && metadata && validMetadata ? METADATA_STAGES[Number(metadata[1])] ?? 'unavailable' : 'unavailable',
+        importIndex: closedTrace && metadata && validMetadata ? Number(metadata[2]) : null,
+        progressCount, lastProgressStage,
         stdoutBytes: typeof stdout === 'string' ? Math.min(QUERY_MAX_OUTPUT_BYTES + 1, Buffer.byteLength(stdout, 'utf8')) : 0,
         stderrBytes: typeof stderr === 'string' ? Math.min(QUERY_MAX_OUTPUT_BYTES + 1, Buffer.byteLength(stderr, 'utf8')) : 0,
         elapsedMs: Math.max(0, Math.min(QUERY_WATCHDOG_MS * 2, Math.round(performance.now() - started))) }));
