@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { copyFile, lstat, realpath, rm } from 'node:fs/promises';
 import { isAbsolute, join, relative, sep, win32 } from 'node:path';
-import { captureWorkerIdentity, attestRecordedWorker, canonicalTimestamp, type WorkerIdentity } from '../../packages/asset-pipeline/src/worker-identity.js';
+import { captureWorkerIdentity, attestRecordedWorker, canonicalTimestamp, defaultProcessQueryHost, QUERY_MAX_OUTPUT_BYTES, QUERY_WATCHDOG_MS,
+  type ProcessQueryHost, type WorkerIdentity } from '../../packages/asset-pipeline/src/worker-identity.js';
 import { makeFixtureDirectory, fixtureTempDirectory } from './windows-fixture-paths.js';
 
 // Actual default Windows query against this test's original fixed Node child.
@@ -11,7 +12,38 @@ import { makeFixtureDirectory, fixtureTempDirectory } from './windows-fixture-pa
 const CHILD = "process.stdout.write('ready\\n');process.stdin.resume();process.stdin.once('end',()=>process.exit(0));";
 type Exit = { code: number | null; signal: NodeJS.Signals | null };
 
+// Observe only the original query callback; never publish process output or retry it.
+const QUERY_STAGES = ['setup', 'emit-imports', 'wrapper', 'type-readback', 'open', 'first-wait', 'times', 'path', 'final-wait', 'close', 'serialize'] as const;
+function observeQueries(t: TestContext) {
+  const original = defaultProcessQueryHost.execFile; let reports = 0;
+  const report = (started: number, outcome: 'ok' | 'exit4' | 'timeout' | 'max-buffer' | 'failed' | 'threw', stdout: unknown, stderr: unknown) => {
+    try {
+      if (reports >= 6) return;
+      const stage = typeof stderr === 'string' ? /^ARCANE_WORKER_QUERY_STAGE:(0|[1-9]|10)$/.exec(stderr) : null;
+      t.diagnostic(JSON.stringify({ schemaVersion: 1, kind: 'original-worker-query', sequence: ++reports, outcome,
+        stage: stage ? QUERY_STAGES[Number(stage[1])] ?? 'unavailable' : 'unavailable',
+        stdoutBytes: typeof stdout === 'string' ? Math.min(QUERY_MAX_OUTPUT_BYTES + 1, Buffer.byteLength(stdout, 'utf8')) : 0,
+        stderrBytes: typeof stderr === 'string' ? Math.min(QUERY_MAX_OUTPUT_BYTES + 1, Buffer.byteLength(stderr, 'utf8')) : 0,
+        elapsedMs: Math.max(0, Math.min(QUERY_WATCHDOG_MS * 2, Math.round(performance.now() - started))) }));
+    } catch { /* Diagnostic failure cannot change the original query outcome. */ }
+  };
+  const wrapped: ProcessQueryHost['execFile'] = function (this: ProcessQueryHost, file, args, options, callback) {
+    let started = 0; try { started = performance.now(); } catch { /* Observation only. */ }
+    const observed: Parameters<ProcessQueryHost['execFile']>[3] = function (this: unknown, error, stdout, stderr) {
+      let category: 'ok' | 'exit4' | 'timeout' | 'max-buffer' | 'failed' = 'failed';
+      try { category = error === null ? 'ok' : error.killed === true || error.signal === 'SIGTERM' ? 'timeout'
+        : error.code === 4 ? 'exit4' : error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' ? 'max-buffer' : 'failed'; } catch { /* Keep finite fallback. */ }
+      report(started, category, stdout, stderr);
+      return Reflect.apply(callback, this, [error, stdout, stderr]);
+    };
+    try { return Reflect.apply(original, this, [file, args, options, observed]); }
+    catch (error) { report(started, 'threw', undefined, undefined); throw error; }
+  };
+  t.mock.method(defaultProcessQueryHost, 'execFile', wrapped);
+}
+
 async function fixture(t: TestContext) {
+  observeQueries(t);
   const root = makeFixtureDirectory('arcane-worker-native-query-'), identity = await lstat(root);
   const owners: { close(): Promise<Exit>; observed(): boolean }[] = []; let unownedAttempt = false;
   t.after(async () => {
@@ -69,7 +101,7 @@ async function fixture(t: TestContext) {
 async function capture(t: TestContext, child: { pid: number; executable: string }): Promise<WorkerIdentity> {
   t.signal.throwIfAborted();
   const result = await captureWorkerIdentity({ pid: child.pid, role: 'generate', executable: child.executable });
-  assert.ok(result.status === 'captured', 'Actual bounded Windows query must capture the original held child.');
+  assert.ok(result.status === 'captured', 'Actual bounded Windows query must capture the original held child: ' + (result.status === 'uncertain' ? result.reason : 'captured'));
   assert.equal(result.identity.schemaVersion, 2); assert.ok(result.identity.pid === child.pid);
   assert.ok(canonicalTimestamp(result.identity.processCreatedAt));
   assert.ok(win32.normalize(result.identity.executable).toLowerCase() === win32.normalize(child.executable).toLowerCase());
