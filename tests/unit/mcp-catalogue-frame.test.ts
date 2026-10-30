@@ -41,10 +41,21 @@ function wireJson(value: unknown): JsonValue {
   assert.ok(isJsonValue(detached), 'catalogue metadata must be JSON-representable');
   return detached;
 }
+function isSupportedExecution(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const keys = Reflect.ownKeys(value);
+  if (keys.length !== 1 || keys[0] !== 'taskSupport') return false;
+  const field = Object.getOwnPropertyDescriptor(value, 'taskSupport');
+  return field?.enumerable === true && Object.hasOwn(field, 'value') && field.value === 'forbidden';
+}
 function pinnedTool(tool: SdkTool): Tool {
   // These are the exact fields of the committed .protocol/Tool type. Preserve
   // complete actual schemas/annotations; never replace schemas with tool names.
-  assert.ok(tool.execution === undefined, 'unrepresented SDK execution metadata requires an explicit pinned-protocol review');
+  // SDK registerTool adds this exact default. Codex's inspected ToolSerde
+  // projects only the pinned fields below; execution is not a native Tool field.
+  // Required/optional task execution and unfamiliar metadata are not inferred.
+  assert.ok(isSupportedExecution(tool.execution), 'unsupported SDK execution metadata requires an explicit pinned-protocol review');
   const value: Tool = { name: tool.name, inputSchema: wireJson(tool.inputSchema) };
   if (tool.title !== undefined) value.title = tool.title;
   if (tool.description !== undefined) value.description = tool.description;
@@ -58,6 +69,16 @@ function pinnedTool(tool: SdkTool): Tool {
 test('actual native managed MCP catalogue fits the unchanged Codex status-frame budget', { timeout: CODEX_LIMITS.requestTimeoutMs }, async t => {
   const network = t.mock.method(globalThis, 'fetch', async () => { throw new Error('Catalogue evidence must not contact a daemon or provider.'); });
   t.after(() => { assert.equal(network.mock.callCount(), 0); });
+  assert.ok(isSupportedExecution(undefined));
+  assert.ok(isSupportedExecution({ taskSupport: 'forbidden' }));
+  for (const execution of [{ taskSupport: 'required' }, { taskSupport: 'optional' },
+    { taskSupport: 'forbidden', extra: true }, {}, null, ['forbidden']])
+    assert.equal(isSupportedExecution(execution), false);
+  let executionReads = 0;
+  assert.equal(isSupportedExecution({ get taskSupport() { executionReads++; return 'forbidden'; } }), false);
+  assert.equal(executionReads, 0);
+  assert.equal(isSupportedExecution(Object.defineProperty({}, 'taskSupport', { value: 'forbidden' })), false);
+  assert.equal(isSupportedExecution({ taskSupport: 'forbidden', [Symbol('extra')]: true }), false);
   const pinnedRoot = resolve(process.cwd(), 'packages/codex-client/.protocol');
   const [toolType, statusType, responseType] = await Promise.all([
     readFile(resolve(pinnedRoot, 'Tool.ts'), 'utf8'), readFile(resolve(pinnedRoot, 'v2/McpServerStatus.ts'), 'utf8'),
