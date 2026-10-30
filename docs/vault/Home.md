@@ -15,7 +15,7 @@ tags: [arcane, dashboard]
 
 The [[Delivery/Goal Board|ten urgent goals]] track the path to a dependable customer release. Open a goal for its outcome, dependencies and acceptance criteria. Check it off only after recording evidence.
 
-Current priority: establish the exact release baseline, then fix the first reproducible customer blocker. Latest recorded main: `7e52f67546fb5409c41dd9f2bc9376fc33c15e9c`; seven hosted checks passed. Installed-app and native customer acceptance remain unverified.
+Current priority: deliver the verified desktop update and finish task retirement and original asset quality. Main `9a69619` passed all seven hosted checks; the real portable download and every payload hash were independently verified. The installed app remains unchanged. [[Sessions/2026-10-30 Verified Desktop Delivery|Latest milestone]] records completed substeps and remaining acceptance.
 
 ## Build with knowledge
 

@@ -17,15 +17,15 @@ Depends on: 2–8; 9 for public commercial release. Owner: release integration.
 
 - [ ] Required behavior implemented against current source.
 - [ ] Each outcome above verified at its stated scope.
-- [ ] Evidence and remaining limitations recorded below.
-- [ ] Relevant regression checks passed for the published revision.
+- [x] Evidence and remaining limitations recorded below.
+- [x] Relevant regression checks passed for the published revision.
 
 ## Evidence
 
-[[Bugs/Development Vault Packaging]] fixes a source-release blocker without loosening path policy. [[Bugs/Portable Desktop Delivery]] adds retention of the exact component-tested app directory and same-run provenance. Hosted artifact and installation acceptance remain pending; the active local bundle is still the 20 October build.
+Actual Windows packaged startup/shutdown and portable export passed. The independently downloaded artifact passed every payload hash, closed inventory, source fingerprint and same-run receipt check. The active local bundle is unchanged; signed distribution, customer update/reopen and native acceptance remain incomplete. See [[Sessions/2026-10-30 Verified Desktop Delivery]] and [[Operations/Evidence Ledger]].
 
 ## Next action
 
-Verify the corrected package and portable artifact from one exact revision, then exercise the supported installation/update path in an authorized environment while preserving the user's current app and state. Native/customer acceptance remains separate.
+Use the independently verified portable build through the supported installation path after resource/ownership checks. Demonstrate user-state preservation and customer reopen separately; do not operate Studio.
 
 [[Delivery/Goal Board]] · [[Operations/Evidence Ledger]]

@@ -5,7 +5,7 @@ tags: [arcane, desktop, release]
 ---
 # Portable desktop delivery
 
-Status: source-reviewed implementation prepared; actual hosted artifact acceptance pending.
+Status: hosted export, actual portable download and full payload/provenance inspection passed; installation pending.
 Related goals: [[Delivery/G03 Persistent Sessions]], [[Delivery/G10 Customer Release]].
 
 ## Gap
@@ -22,8 +22,10 @@ The portable artifact contains `windows/<actual bundle>/...` and `ci-desktop-dis
 
 - [x] Original packaging, verification, artifact and installation paths traced.
 - [x] Success-only export/workflow implementation and bounded integrity regressions authored.
-- [ ] Hosted release tests and exact executable/package checks pass.
-- [ ] Downloaded artifact inventory, digest, provenance and archive layout verified.
+- [x] Hosted release tests and exact executable/package checks pass.
+- [x] Downloaded artifact inventory, digest, provenance and archive layout verified.
 - [ ] Separately authorized installation/update/reopen demonstrates retained user state.
 
 A downloadable artifact does not itself install anything or display the banner. Use the existing supported installation engine only after independent publisher/payload verification. It activates an immutable local release; the user controls restart through the existing draft-safe flow. No remote updater, installer signing, silent restart, provider inference or Studio/customer acceptance is claimed by this slice.
+
+Verified 30 October on `9a69619` in [run 40988115669](https://github.com/k6sol/Arcane/actions/runs/40988115669). See [[Sessions/2026-10-30 Verified Desktop Delivery]] and [[Operations/Evidence Ledger]] for scope and remaining acceptance.

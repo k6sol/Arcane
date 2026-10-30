@@ -17,15 +17,15 @@ Depends on: 1. Owner: task/runtime integration.
 
 - [ ] Required behavior implemented against current source.
 - [ ] Each outcome above verified at its stated scope.
-- [ ] Evidence and remaining limitations recorded below.
-- [ ] Relevant regression checks passed for the published revision.
+- [x] Evidence and remaining limitations recorded below.
+- [x] Relevant regression checks passed for the published revision.
 
 ## Evidence
 
-30 October: [[Bugs/Adoption Work Lifetime]] is on the validation branch with held file-read, publication, persistence and Stop-after-registry-close cases. [[Bugs/Cancellation Request Provenance]] now has the connected exact-error implementation and fourteen authored regressions prepared for the same branch. Hosted acceptance remains pending; no whole-goal or native acceptance claim yet.
+Adoption work registration, deliberate-close request provenance and captured final-save joins passed controlled regressions on both platforms in the exact seven-job baseline. Normal non-cancelling retirement, full settlement/human acceptance and bounded archival remain incomplete. See [[Sessions/2026-10-30 Verified Desktop Delivery]] and [[Operations/Evidence Ledger]].
 
 ## Next action
 
-Verify adoption, cancellation provenance and [[Bugs/Final Asset Save]] on their exact published revision. Then connect normal retirement and preserve independent later human review/import paths. Full task settlement, human acceptance and bounded archival remain required.
+Connect normal retirement and correct later human review/fresh-Send handoff while retaining original work identity, unknown outcomes and no-replay guarantees.
 
 [[Delivery/Goal Board]] · [[Operations/Evidence Ledger]]

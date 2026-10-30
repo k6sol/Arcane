@@ -5,7 +5,7 @@ tags: [arcane, assets, persistence]
 ---
 # Final asset save
 
-Status: implementation prepared for hosted validation.
+Status: controlled regressions passed on Windows and Linux; packaged baseline verified.
 Related goal: [[Delivery/G04 Task Lifetimes]].
 
 Generation and conversion supervisors previously scheduled their final advisory-index save without joining it. The original task work could finish while that write was still active.
@@ -18,7 +18,9 @@ Completion of a save tail is not necessarily successful persistence. Successful 
 
 - [x] Exact final-tail capture and generation/conversion joins implemented.
 - [x] Thirteen controlled cases authored for FIFO, original errors, held commits, unrelated later writes and sticky failures.
-- [ ] Hosted compilation and both platform suites pass.
-- [ ] Original leases stay held through writes and retain genuine failures without false closure.
+- [x] Hosted compilation and both platform suites pass.
+- [x] Original leases stay held through writes and retain genuine failures without false closure.
 
 Actual atomic-file tests retain the existing `AtomicJsonFailure` wrapper; direct internal-helper tests separately cover falsy callback failures. No native Blender, provider or Studio success is claimed.
+
+Verified 30 October on `9a69619` in [run 40988115669](https://github.com/k6sol/Arcane/actions/runs/40988115669). See [[Sessions/2026-10-30 Verified Desktop Delivery]] and [[Operations/Evidence Ledger]] for scope and remaining acceptance.

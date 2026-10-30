@@ -5,6 +5,10 @@ tags: [arcane]
 ---
 # Session log
 
+## 2026-10-30 · Verified delivery milestone
+
+All seven jobs passed on `9a69619`; promoted the signed revision to main. Downloaded the actual portable build and independently verified the authenticated archive checksum, all 4,657 file hashes, closed inventory, source fingerprints and same-run smoke receipts. Checked off the demonstrated bug criteria and updated current/next-state notes. Installation, authenticated customer and native acceptance remain outstanding. See [[Sessions/2026-10-30 Verified Desktop Delivery]].
+
 ## 2026-10-30 · Release baseline and lifetime fixes
 
 Used the vault's delivery/release skills to resume G01. Confirmed the previous product baseline is green, while the latest documentation commit's run cancelled one Windows converted-import fixture after its 30-second outer deadline. Reviewed the actual staging guards; prepared a targeted outer-budget correction with stage diagnostics and an added assertion that the held observation really occurred. Production operation deadlines and refusal assertions remain intact; hosted verification is pending.

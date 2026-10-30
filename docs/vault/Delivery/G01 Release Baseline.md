@@ -19,14 +19,14 @@ Depends on: none. Owner: release integration.
 - [x] Identify active installation metadata and installed plugin file fingerprint.
 - [ ] Attribute the installed source to its exact release revision or documented equivalent file inventory.
 - [ ] Reproduce the shortest failing customer path and retain its evidence without assuming a source-only fix is installed.
-- [ ] Validate the corrected published revision and record remaining release blockers.
+- [x] Validate the corrected published revision and record remaining release blockers.
 
 ## Evidence
 
-30 October: main `ee7534c`; previous green product baseline `7e52f67`. Run 40975403615 has one Windows fixture cancellation, detailed in [[Bugs/Converted Import Timeout]]. Active desktop installed 20 October; its manifest and plugin fingerprint are recorded in [[Operations/Current State]]. No app launch, plugin operation or native Studio acceptance performed. G01 remains in progress.
+Main `9a69619` passed all seven jobs and its real portable archive passed independent checksum, closed-inventory, payload-hash and provenance checks. Active installation and plugin fingerprints are recorded, but the installed app is still the 20 October build. No customer failure reproduction or native Studio acceptance is claimed. G01 remains in progress. See [[Sessions/2026-10-30 Verified Desktop Delivery]] and [[Operations/Evidence Ledger]].
 
 ## Next action
 
-Verify the targeted CI correction, then compare the active source inventory and complete original lifetime fixes before a separately verified desktop release.
+Verify supported installation identity and the shortest customer update/reopen path while preserving user state and the running app.
 
 [[Delivery/Goal Board]] · [[Operations/Evidence Ledger]]

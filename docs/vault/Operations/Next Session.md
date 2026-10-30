@@ -5,23 +5,19 @@ tags: [arcane]
 ---
 # Next session
 
-## Read first
+Read [[Home]], [[Operations/Current State]], [[Delivery/Goal Board]] and the relevant development skill before editing. Git and actual runtime evidence override these notes.
 
-1. [[Home]] and [[Operations/Current State]].
-2. [[Delivery/Goal Board]] and the single active goal.
-3. Relevant [[Skills/Development Skills]] and architecture notes.
+## Resume the work
 
-## Resume the actual work
+1. Re-read main and the existing validation ref. `9a69619` passed all seven jobs in run 40988115669 and was promoted to main. Do not rerun old known failures or use the obsolete observer pinned to `2531c06`.
+2. Preserve the shared checkout's unrelated modifications and empty index. Publish focused signed changes from an exact source snapshot.
+3. Continue the supported desktop installation path from the independently verified portable artifact. All payload hashes and same-run receipt/source fingerprints passed; no downloaded code has run and the installed app remains unchanged. Check current resource/ownership gates and preserve the running app and user state. A source push or artifact alone cannot display the local update banner.
+4. Finish original Blender-authoring routing only for real advertised native filesystem/process capabilities and workspace permissions. Preserve honest capability limits for MCP-only providers, original asset intent, explicit experimental skill opt-in, closed conversion scope and separate human import review. Verify actual geometry/material quality separately.
+5. Continue normal non-cancelling task retirement, correct later human-review/fresh-Send handoff, full settlement/acceptance records and bounded archival. Completed adoption/cancellation/save regressions do not finish these contracts.
+6. Record each verified milestone and remaining limits; check only demonstrated acceptance items. Sync an explicit committed revision with conflict protection.
 
-- Re-read main and the existing validation ref. Main `98ae294` passed the corrected Windows observation case but its full run cancelled a different task test. Adoption `6bab6cc` and cancellation `7ecbdc2` are newer validation candidates. Inspect their actual runs before promotion. See [[Bugs/Converted Import Timeout]]. The old observer pinned to `2531c06` is obsolete.
-- Preserve the shared checkout's existing modifications. Use the current authoritative source and a narrow change, with isolated Git plumbing/checkouts if necessary.
-- Adoption and deliberate-close provenance implementations are now connected and published for validation. [[Bugs/Final Asset Save]] adds exact final-save joins next. Review actual hosted outcomes, correct concrete failures and promote only the tested revision.
-- Verify the implemented [[Bugs/Portable Desktop Delivery]] flow on its exact hosted revision. Inspect the actual artifact inventory, digest, sidecar and archive layout before installation. The watcher sees local installation changes only; source pushes and metadata artifacts do not update the app or display a banner by themselves. No remote updater or silent restart is implemented by artifact retention.
-- The active desktop directory was installed 20 October (Electron 44.7.0); metadata has no Git revision. Identify release/source fingerprints before any installation. The installed plugin file was inspected, not loaded or exercised.
-- Update the goal's acceptance checklist and evidence, then publish a concise SSH-signed commit.
+## Acceptance boundaries
 
-## Keep context small
+The latest package is an unsigned portable directory. Authenticated customer send/reopen/update, native rendering/upload/placement/gameplay, configured commercial services and signed distribution remain outstanding. No Studio operations are authorized. Do not work on ArchLiquid or close/restart the user's app without an applicable instruction.
 
-Record the exact revision, changed behavior, verification scope, unresolved failure and next action. Store large logs and machine-private receipts outside the shared vault; reference a public run or safe summary here. Read references only when relevant.
-
-Current user constraints: Arcane only. Do not work on ArchLiquid. Do not operate Roblox Studio. Do not close/restart the user's running app to install an update without an applicable instruction.
+[[Sessions/2026-10-30 Verified Desktop Delivery]] contains the current bounded evidence. Keep large logs, credentials, downloaded builds and device-private receipts outside shared notes.

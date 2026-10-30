@@ -5,7 +5,7 @@ tags: [arcane, playtest, verification]
 ---
 # Cleanup observation window
 
-Status: targeted fixture correction prepared.
+Status: corrected heartbeat cases and the complete seven-job baseline passed.
 Related goals: [[Delivery/G01 Release Baseline]], [[Delivery/G07 Test and Repair]].
 
 [Run 40985175867](https://github.com/k6sol/Arcane/actions/runs/40985175867/job/123834411279) failed the refreshed-heartbeat case in `studio-test-service.test.ts`: its eight-second observation helper expired before the controller reached done and closed its SDK client. This is an assertion failure, distinct from the earlier outer test cancellations.
@@ -16,7 +16,9 @@ The correction observes the existing five-plus-fifteen-second window and records
 
 - [x] Exact failed wait and original lifecycle limits inspected.
 - [x] Targeted observation budget and diagnostic snapshot authored.
-- [ ] Both heartbeat cases pass on Windows and Linux for the corrected revision.
-- [ ] Current candidate's complete inventory and package acceptance pass.
+- [x] Both heartbeat cases pass on Windows and Linux for the corrected revision.
+- [x] Current candidate's complete inventory and package acceptance pass.
 
 This is controlled SDK/store/ledger evidence, not native Studio acceptance. Do not rerun or enlarge the budget automatically if the new diagnostic reveals a real lifecycle failure.
+
+Verified 30 October on `9a69619` in [run 40988115669](https://github.com/k6sol/Arcane/actions/runs/40988115669). See [[Sessions/2026-10-30 Verified Desktop Delivery]] and [[Operations/Evidence Ledger]] for scope and remaining acceptance.

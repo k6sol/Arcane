@@ -5,7 +5,7 @@ tags: [arcane, assets, lifetimes]
 ---
 # Adoption work lifetime
 
-Status: implementation prepared for validation; customer/native acceptance unverified.
+Status: controlled regressions passed; customer/native acceptance unverified.
 Related goals: [[Delivery/G04 Task Lifetimes]], [[Delivery/G06 Connected Import]].
 
 ## Problem
@@ -22,8 +22,10 @@ A failed copy with exact attribution and successfully persisted failure records 
 
 - [x] Original host/service lease registration and identity checks implemented.
 - [x] Existing test declarations retained; focused held-I/O and error scenarios authored.
-- [ ] Hosted type checking and actual controlled fixtures pass.
-- [ ] Review Stop after registry shutdown, lost publication ACK and sticky persistence failure results.
+- [x] Hosted type checking and actual controlled fixtures pass.
+- [x] Review Stop after registry shutdown, lost publication ACK and sticky persistence failure results.
 - [ ] Trace a packaged customer import separately from controlled file/SQLite fixtures.
 
 No worker is invented for file adoption; no native Blender, provider or Studio acceptance is implied. Normal task retirement and archival completion remain separate work.
+
+Verified 30 October on `9a69619` in [run 40988115669](https://github.com/k6sol/Arcane/actions/runs/40988115669). See [[Sessions/2026-10-30 Verified Desktop Delivery]] and [[Operations/Evidence Ledger]] for scope and remaining acceptance.
