@@ -116,8 +116,9 @@ def request(params, budget=20000, seed=7):
     return {"procedural": params, "seed": seed, "triangleBudget": budget, "name": "fixture", "color": [0.3, 0.2, 0.1]}
 
 
-# Natural broadleaf (bark, leaves) triangle counts at 16000, seed 7, height 9, three levels.
-BASELINE = {("oak", 0.7): (9514, 3864), ("oak", 0.0): (10934,), ("birch", 0.7): (9952, 3528), ("birch", 0.0): (12362,)}
+# Natural broadleaf at 16000/seed7/height9/three levels. Positive-density wood
+# reallocates actual station detail for chord fidelity; bare-route counts stay fixed.
+BASELINE = {("oak", 0.7): (9512, 3864), ("oak", 0.0): (10934,), ("birch", 0.7): (9946, 3528), ("birch", 0.0): (12362,)}
 
 
 class GeneratorContract(unittest.TestCase):

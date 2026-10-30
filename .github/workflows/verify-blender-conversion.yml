@@ -13,6 +13,9 @@ on:
       - 'scripts/compile-product.mjs'
       - 'tests/native/**'
       - 'tests/unit/tree_structure_review_test.py'
+      - 'tests/unit/tree_station_fidelity_test.py'
+      - 'tests/unit/tree_budget_allocation_test.py'
+      - 'tests/unit/procedural_generator_test.py'
       - 'tests/unit/asset-worker-identity-windows.test.ts'
       - 'package.json'
       - 'package-lock.json'
@@ -29,6 +32,9 @@ on:
       - 'scripts/compile-product.mjs'
       - 'tests/native/**'
       - 'tests/unit/tree_structure_review_test.py'
+      - 'tests/unit/tree_station_fidelity_test.py'
+      - 'tests/unit/tree_budget_allocation_test.py'
+      - 'tests/unit/procedural_generator_test.py'
       - 'tests/unit/asset-worker-identity-windows.test.ts'
       - 'package.json'
       - 'package-lock.json'
@@ -106,6 +112,19 @@ jobs:
           PYTHONDONTWRITEBYTECODE: '1'
           PYTHONUTF8: '1'
         run: python tests/unit/asset_worker_failure_test.py
+      - name: Verify costed branch station fidelity
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+          PYTHONUTF8: '1'
+        run: python tests/unit/tree_station_fidelity_test.py
+      - name: Verify deterministic wood allocation and bark cap UV winding
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+          PYTHONUTF8: '1'
+        run: >-
+          python tests/unit/procedural_generator_test.py
+          GeneratorContract.test_natural_broadleaf_is_deterministic_with_baselined_counts
+          GeneratorContract.test_natural_wood_cap_uv_winding_preserves_geometry_and_other_authored_uvs
       - name: Acquire and verify the pinned official Blender runtime
         env:
           PYTHONDONTWRITEBYTECODE: '1'

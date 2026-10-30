@@ -593,6 +593,7 @@ WHIP_SLOPE = .016
 TIP_TAPER = .22
 # (trunk sides, side scale, station step scale), richest first.
 WOOD_PRESETS = ((40, 1.0, 1.0), (32, 1.0, 1.2), (28, .86, 1.4), (24, .75, 1.7), (24, .64, 2.1), (24, .64, 2.6), (16, .6, 3.2), (12, .6, 4.0))
+WOOD_CHORD_RATIO = .5
 
 BROADLEAF = {
     # Lengths in metres for a 7.5 m tree. Spawn rows: (parent order, order, spacing, first, last,
@@ -992,7 +993,33 @@ def pine_bark_strips(result, order, spine, rng, dead=False):
     return result
 
 
-def wood_stations(axis, parent, step_scale, trunk):
+def _wood_chord_samples(points, radii, cumulative, stations):
+    """Dense-axis error against its corresponding station chord, in local radius units."""
+    segment = 0
+    for i in range(1, len(points) - 1):
+        s = cumulative[i]
+        while segment + 1 < len(stations) - 1 and stations[segment + 1][0] < s:
+            segment += 1
+        a, b = stations[segment][1], stations[segment + 1][1]
+        d = sub(b, a)
+        length2 = dot(d, d)
+        t = min(1.0, max(0.0, dot(sub(points[i], a), d) / max(length2, 1e-24)))
+        radius = radii[i]
+        if not math.isfinite(radius) or radius <= 0:
+            raise ValueError("Natural wood has an invalid pipe radius")
+        yield math.dist(points[i], add(a, mul(d, t))) / radius, s, segment
+
+
+def wood_chord_error(axis, stations):
+    """Maximum for the dense source polyline, not the final unioned bark surface."""
+    points = axis["points"][:axis["woodCount"]]
+    cumulative = [0.0]
+    for a, b in zip(points, points[1:]):
+        cumulative.append(cumulative[-1] + math.dist(a, b))
+    return max((ratio for ratio, _, _ in _wood_chord_samples(points, axis["radii"], cumulative, stations)), default=0.0)
+
+
+def wood_stations(axis, parent, step_scale, trunk, *, chord_ratio=None):
     """Adaptive stations (arc length) by distance, turn and radius change, plus forced flare/collar/tip rings."""
     points, radii = axis["points"][:axis["woodCount"]], axis["radii"][:axis["woodCount"]]
     cum = [0.0]
@@ -1040,6 +1067,21 @@ def wood_stations(axis, parent, step_scale, trunk):
                 t = (s - cum[i - 1]) / max(cum[i] - cum[i - 1], 1e-12)
                 return add(points[i - 1], mul(sub(points[i], points[i - 1]), t)), radii[i - 1] + (radii[i] - radii[i - 1]) * t
         return points[-1], radii[-1]
+    if chord_ratio is not None:
+        # Only insert original dense-axis stations: no axis/radius deformation or
+        # removal of semantic socket/taper rings. Keep the existing minimum ring
+        # spacing and terminal clearance. A budget/spacing fallback is permitted;
+        # its actual remaining error is measured, never advertised as a bound.
+        for _ in range(len(points)):
+            current = [(s,) + at(s) for s in merged]
+            candidates = [(ratio, s) for ratio, s, segment in _wood_chord_samples(points, radii, cum, current)
+                          if ratio > chord_ratio and s - merged[segment] > .012
+                          and merged[segment + 1] - s > .012 and total - s >= .03]
+            if not candidates:
+                break
+            _, s = max(candidates, key=lambda item: (item[0], -item[1]))
+            merged.append(s)
+            merged.sort()
     return [(s,) + at(s) + (norm(sub(at(s + .04)[0], at(s - .04)[0])),) for s in merged]
 
 
@@ -1111,8 +1153,23 @@ def plan_broadleaf(params, seed, budget_total):
     share = profile.get("woodShare", .45) if density > 0 else .9
     limit = int(budget_total * share / UNION_RESERVE)
 
-    def cost(axis, preset):
-        stations = wood_stations(axis, axis.get("joint"), preset[2], axis["order"] == 0)
+    station_cache, axis_fidelity = None, {}
+    def chord_target(axis, preset, refined=None):
+        refined = axis_fidelity.get(axis["id"], False) if refined is None else refined
+        return WOOD_CHORD_RATIO if not conifer and density > 0 and axis["order"] >= 2 and (refined or preset[2] < WOOD_PRESETS[-1][2]) else None
+
+    def selected_stations(axis, preset, refined=None):
+        target = chord_target(axis, preset, refined)
+        key = axis["id"], preset, target
+        if station_cache is not None and key in station_cache:
+            return station_cache[key]
+        result = wood_stations(axis, axis.get("joint"), preset[2], axis["order"] == 0, chord_ratio=target)
+        if station_cache is not None:
+            station_cache[key] = result
+        return result
+
+    def cost(axis, preset, refined=None):
+        stations = selected_stations(axis, preset, refined)
         n = wood_sides(axis["radii"][0], axis["order"], preset[0], preset[1])
         return 2 * n * (len(stations) - 1) + n + (n - 2)
 
@@ -1175,15 +1232,53 @@ def plan_broadleaf(params, seed, budget_total):
             sockets()
         if total_cost() > limit:
             raise ValueError("Procedural mesh exceeded its triangle budget or is empty")
+        # Pruning above uses the unchanged coarsest branch rule. Only after the
+        # kept hierarchy/sockets are fixed may cached, costed fidelity upgrades
+        # compete for spare wood budget. Never drop another axis to refine one.
+        station_cache = {}
+        errors = {}
+        def error(axis, index, refined=None):
+            key = axis["id"], index, chord_target(axis, WOOD_PRESETS[index], refined)
+            if key not in errors:
+                errors[key] = wood_chord_error(axis, selected_stations(axis, WOOD_PRESETS[index], refined))
+            return errors[key]
+        total = total_cost()
+        while True:
+            candidates = []
+            for a in kept:
+                if not a["kept"] or a["order"] < 2:
+                    continue
+                old_index = axis_presets[a["id"]]
+                old_error = error(a, old_index)
+                if old_error <= WOOD_CHORD_RATIO:
+                    continue
+                old_cost = cost(a, WOOD_PRESETS[old_index])
+                options = [(index, False) for index in range(old_index)]
+                if old_index == len(WOOD_PRESETS) - 1 and not axis_fidelity.get(a["id"], False):
+                    # A narrow branch can buy longitudinal fidelity alone,
+                    # retaining its existing radial detail and fallback preset.
+                    options.append((old_index, True))
+                for index, refined in options:
+                    new_cost = cost(a, WOOD_PRESETS[index], refined)
+                    gain = old_error - error(a, index, refined)
+                    extra = new_cost - old_cost
+                    if gain > 1e-12 and total + extra <= limit:
+                        candidates.append((-gain / max(1, extra), -gain, a["id"], index, refined, extra))
+            if not candidates:
+                break
+            _, _, axis_id, index, refined, extra = min(candidates)
+            axis_presets[axis_id] = index
+            axis_fidelity[axis_id] = refined
+            total += extra
         # Spend remaining wood room on useful local detail, rather than applying
         # the coarsest global preset to the whole tree. Socket rings are already
         # fixed from the retained hierarchy, so each cost is the emitted cost.
-        total = total_cost()
         for a in sorted((a for a in kept if a["kept"]), key=lambda a: (a["order"], -a["radii"][0], a["id"])):
             old = cost(a, WOOD_PRESETS[axis_presets[a["id"]]])
             for index in range(axis_presets[a["id"]] + 1):
                 new = cost(a, WOOD_PRESETS[index])
-                if total - old + new <= limit:
+                no_worse = a["order"] < 2 or error(a, index) <= error(a, axis_presets[a["id"]]) + 1e-12
+                if no_worse and total - old + new <= limit:
                     axis_presets[a["id"]] = index
                     total += new - old
                     break
@@ -1215,7 +1310,7 @@ def plan_broadleaf(params, seed, budget_total):
         if not a["kept"]:
             continue
         detail = WOOD_PRESETS[axis_presets[a["id"]]] if axis_presets is not None else chosen
-        stations = wood_stations(a, a.get("joint"), detail[2], a["order"] == 0)
+        stations = selected_stations(a, detail)
         n = wood_sides(a["radii"][0], a["order"], detail[0], detail[1])
         spine = [mul(c, scale) for _, c, _, _ in stations]
         radii = [r * scale for _, _, r, _ in stations]
@@ -1229,7 +1324,8 @@ def plan_broadleaf(params, seed, budget_total):
         uv = bark_tile(params["species"], a["order"], spine, radii[0], n, bark_rng, a.get("kind") == "dead")
         first = len(bark.vertices)
         bark.tube(spine, radii, n, tip=True, flare=flare, collar=collar, blunt=True, tangents=[t for _, _, _, t in stations], wood_uv=uv)
-        axis_details.append({"id": a["id"], "order": a["order"], "sides": n, "stations": len(stations), "preset": list(detail)})
+        axis_details.append({"id": a["id"], "order": a["order"], "sides": n, "stations": len(stations), "preset": list(detail),
+                             "chordTargetRatio": chord_target(a, detail), "maxChordErrorRatio": wood_chord_error(a, stations)})
         if axis_presets is not None and a["order"] > 0:
             # Only real outer branch rings can carry foliage. Pruned chains remain
             # shape guides; they never become attachment points or invented rods.
