@@ -23,6 +23,8 @@ All six adoption component lanes passed; its actual packaged startup is running.
 
 The adoption package job subsequently failed before executable verification. Retained its bounded failure artifact and traced the deterministic source path conflict introduced by developer vault filenames. [[Bugs/Development Vault Packaging]] keeps the vault in Git/Obsidian but outside the desktop release closure, preserving strict package/install path rules and ordinary product docs/skills. Authored a real collection/verification regression; hosted and packaged acceptance remain pending.
 
+Finished source review of [[Bugs/Portable Desktop Delivery]] and its five connected paths. The workflow retains the exact verified app directory and a bounded provenance sidecar after success, with hidden payload files preserved and the original diagnostic artifact unchanged. Eleven new top-level fixture declarations cover closed inventory and same-run evidence, including explicit refusal of developer-vault/spaced payload paths. Actual hosted artifact and installation are still unverified; G10 is in progress, not complete.
+
 ## 2026-10-29 · Working knowledge foundation
 
 Located the user's new Arcane Obsidian vault. Established versioned knowledge notes, ten linked delivery goals, original developer skills, a catalog of the existing product skills, templates and a Canvas map. Added a conflict-protecting committed-source sync and repository startup guidance.

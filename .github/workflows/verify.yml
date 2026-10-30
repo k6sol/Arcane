@@ -162,6 +162,20 @@ jobs:
       - name: Verify isolated packaged desktop startup and shutdown
         id: native-smoke
         run: node scripts/check-packaged-component-ci.mjs
+      - name: Seal the verified portable desktop distribution
+        id: distribution
+        run: node scripts/export-packaged-desktop.mjs
+      - name: Retain the verified portable desktop
+        if: ${{ success() && steps.distribution.outcome == 'success' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: arcane-windows-portable-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.distribution.outputs.bundle }}
+            ${{ steps.distribution.outputs.sidecar }}
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
       - name: Retain bounded packaged desktop evidence
         if: ${{ always() && steps.native-smoke.outcome != 'skipped' && steps.native-smoke.outcome != '' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

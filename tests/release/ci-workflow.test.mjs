@@ -138,10 +138,11 @@ function packagedContract(document) {
   assert.deepEqual([...packaged.matchAll(/^    timeout-minutes: (\d+)$/gm)].map(match=>Number(match[1])),[25]);
   const names=['Check out tested source without persistent Git credentials','Install Node 24',
     'Install pinned dependencies without lifecycle scripts','Build tested product','Build modular Studio plugin artifacts',
-    'Verify isolated packaged desktop startup and shutdown','Retain bounded packaged desktop evidence'];
+    'Verify isolated packaged desktop startup and shutdown','Seal the verified portable desktop distribution',
+    'Retain the verified portable desktop','Retain bounded packaged desktop evidence'];
   assert.deepEqual([...packaged.matchAll(/^      - name: ([^\n]+)$/gm)].map(match=>match[1]),names,'Tooling, fresh builds, one smoke and bounded evidence must stay in order.');
   assert.equal([...packaged.matchAll(/^      - /gm)].length,names.length,'No unnamed or replay steps.');
-  for(const name of names.slice(0,-1))assert.doesNotMatch(step(name,packaged),/^        if:/m,'Mandatory packaged prerequisite: '+name);
+  for(const name of names.slice(0,7))assert.doesNotMatch(step(name,packaged),/^        if:/m,'Mandatory packaged prerequisite: '+name);
   const checkout=step(names[0],packaged),node=step(names[1],packaged);
   for(const [body,original,pin]of [
     [checkout,step('Check out source without persistent Git credentials',matrix),'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'],
@@ -159,10 +160,10 @@ function packagedContract(document) {
   assert.equal([...packaged.matchAll(/^        run: npm run build:plugin$/gm)].length,1);
   assert.equal([...document.matchAll(/^        run: node scripts\/check-packaged-component-ci\.mjs$/gm)].length,1,'The actual native driver is invoked once, after the full matrix.');
   assert.match(step(names[5],packaged),/^        id: native-smoke$/m);
-  const upload=step(names[6],packaged);
+  const upload=step(names[8],packaged);
   assert.ok(upload.includes("        if: ${{ always() && steps.native-smoke.outcome != 'skipped' && steps.native-smoke.outcome != '' }}\n"));
   assert.match(upload,/^        uses: actions\/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7\.0\.2$/m);
-  assert.equal([...packaged.matchAll(/^        uses: actions\/upload-artifact@/gm)].length,1);
+  assert.equal([...packaged.matchAll(/^        uses: actions\/upload-artifact@/gm)].length,2);
   assert.ok(upload.includes('          name: arcane-windows-component-${{ github.sha }}-${{ github.run_attempt }}\n'));
   assert.equal([...upload.matchAll(/^          path:/gm)].length,1);
   const paths=upload.match(/^          path: \|\n((?:            [^\n]+\n)+)/m)?.[1];assert.ok(paths,'An explicit artifact path block is required.');
@@ -172,6 +173,18 @@ function packagedContract(document) {
   ].map(name=>'runtime/ci-desktop-smoke-artifacts/'+name));
   assert.doesNotMatch(paths,/\*|\.\.|profile|\.zip|\.exe/);
   assert.match(upload,/^          if-no-files-found: error$/m);assert.match(upload,/^          retention-days: 7$/m);
+  const seal=step(names[6],packaged),portable=step(names[7],packaged);
+  assert.match(seal,/^        id: distribution$/m);
+  assert.deepEqual([...seal.matchAll(/^        run: (.+)$/gm)].map(match=>match[1]),['node scripts/export-packaged-desktop.mjs']);
+  assert.ok(portable.includes("        if: ${{ success() && steps.distribution.outcome == 'success' }}\n"));
+  assert.match(portable,/^        uses: actions\/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7\.0\.2$/m);
+  assert.ok(portable.includes('          name: arcane-windows-portable-${{ github.sha }}-${{ github.run_attempt }}\n'));
+  const portablePaths=portable.match(/^          path: \|\n((?:            [^\n]+\n)+)/m)?.[1];
+  assert.ok(portablePaths);
+  assert.deepEqual(portablePaths.trimEnd().split('\n').map(line=>line.slice(12)),[
+    '${{ steps.distribution.outputs.bundle }}','${{ steps.distribution.outputs.sidecar }}']);
+  assert.match(portable,/^          include-hidden-files: true$/m,'Reviewed .github payload bytes must survive the upload.');
+  assert.match(portable,/^          if-no-files-found: error$/m);assert.match(portable,/^          retention-days: 7$/m);
 }
 
 test('packaged desktop observes the tested revision only after the full matrix, with bounded fixed evidence',()=>{
@@ -192,6 +205,11 @@ test('packaged workflow contract rejects prerequisite bypass, replay, reordered 
     ["if: ${{ always() && steps.native-smoke.outcome != 'skipped' && steps.native-smoke.outcome != '' }}",'if: ${{ always() }}'],
     ['uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9','uses: actions/upload-artifact@v7'],
     ['          retention-days: 7\n','          retention-days: 30\n'],
+    ['        id: distribution\n','        id: distribution\n        if: false\n'],
+    ['        run: node scripts/export-packaged-desktop.mjs\n','        run: node scripts/package-windows.mjs\n'],
+    ['          include-hidden-files: true\n','          include-hidden-files: false\n'],
+    ["if: ${{ success() && steps.distribution.outcome == 'success' }}",'if: ${{ always() }}'],
+    ['${{ steps.distribution.outputs.bundle }}','runtime/**'],
   ];
   const packaged=job('packaged-desktop');
   for(const [before,after]of alterations){assert.ok(packaged.includes(before),'Mutation must target actual packaged workflow bytes.');

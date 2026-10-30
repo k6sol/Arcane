@@ -5,7 +5,7 @@ tags: [arcane]
 ---
 # Ship and prove the customer release
 
-Status: **Queued**. Priority and original scope: Ship and prove the customer release — P0 release gate, queued.
+Status: **In progress**. Priority: P0 release gate.
 
 Deliver: attributable Windows desktop/plugin package, supported desktop shortcut/update flow, distributable signing and installer requirements, version compatibility, rollback/recovery, and retained acceptance evidence from the same revision shipped.
 
@@ -22,10 +22,10 @@ Depends on: 2–8; 9 for public commercial release. Owner: release integration.
 
 ## Evidence
 
-No whole-goal completion evidence recorded yet. Add actual revision/run/artifact links and distinguish controlled tests from customer/native proof.
+[[Bugs/Development Vault Packaging]] fixes a source-release blocker without loosening path policy. [[Bugs/Portable Desktop Delivery]] adds retention of the exact component-tested app directory and same-run provenance. Hosted artifact and installation acceptance remain pending; the active local bundle is still the 20 October build.
 
 ## Next action
 
-Resolve listed dependencies, then reproduce the missing outcome before editing.
+Verify the corrected package and portable artifact from one exact revision, then exercise the supported installation/update path in an authorized environment while preserving the user's current app and state. Native/customer acceptance remains separate.
 
 [[Delivery/Goal Board]] · [[Operations/Evidence Ledger]]

@@ -1,5 +1,38 @@
 # Windows installation engine
 
+## Download the verified portable component
+
+The `packaged-desktop` job in `.github/workflows/verify.yml` runs after all six component contract lanes. After its single package/startup/shutdown check succeeds, `scripts/export-packaged-desktop.mjs` rechecks that same directory and correlates its manifest with the original same-run source, toolchain and smoke receipts. It does not rebuild or launch another copy. Only then can the job upload `arcane-windows-portable-<40-character commit>-<run attempt>`, retained for seven days. The separate `arcane-windows-component-...` diagnostic artifact remains available even when the check or export fails.
+
+Download from the exact trusted repository workflow run and verify its commit, run ID, attempt and GitHub artifact digest. A sidecar hash beside a download is not independent publisher authentication. The application is unsigned, and the component check records `fullProductVerified: false`; it does not establish provider inference, Studio operations, installation or complete customer acceptance. A pull-request artifact or an artifact selected merely because it is newest is not an approved release.
+
+Extract the artifact without flattening or omitting hidden files. Its layout is:
+
+```text
+ci-desktop-distribution/distribution.json
+windows/arcane-win32-x64-<six-character suffix>/windows-manifest.json
+windows/arcane-win32-x64-<six-character suffix>/Arcane.exe
+windows/arcane-win32-x64-<six-character suffix>/resources/...
+```
+
+The two upload paths have `runtime` as their least common ancestor, which the pinned [artifact action](https://github.com/actions/upload-artifact/blob/cf430e030ddbb5b0abf93d22962f4752f3646cd9/README.md#upload-using-multiple-paths-and-exclusions) uses as the archive root. `distribution.json.bundleRelativePath` binds the actual `windows/...` directory below that root. `include-hidden-files: true` preserves reviewed payloads such as `resources/product/.github`; it is enabled only for the exact directory whose complete inventory has just been checked. The exporter refuses extra or changed files, profiles, credentials, workspace state, links and redirected paths. It uploads neither the smoke profile nor the rest of `runtime`. Development notes under `docs/vault` remain in Git/Obsidian and are excluded from the desktop release. The exporter retains the existing package path grammar; names with spaces are refused rather than normalized.
+
+The inventory retains the installation engine's limits: 32,768 payload files, 512 MiB per payload file, 2 GiB total payload, an 8 MiB manifest, relative paths at most 1,024 characters and 32 segments. The sidecar is at most 16 KiB. The archive therefore contains at most 32,770 files and at most 2 GiB + 8 MiB + 16 KiB of file contents; ZIP transport metadata is additional. The sidecar records the exact manifest, deployed/original source-manifest and lock hashes, observed Node/Electron versions, source commit and run identity, plus hashes of the original fixed evidence files. The bundle's own manifest and payload bytes remain unchanged after the smoke check. These are cooperative filesystem checks; they do not provide isolation from another writer running as the same user between checking and upload.
+
+Installation is a separate, explicit host action. After authenticating the artifact and verifying the complete extracted bundle with trusted tools, use the existing installation CLI with an already trusted Node 24 runtime and the matching trusted source checkout:
+
+```powershell
+& 'C:\Trusted\Node24\node.exe' 'C:\Trusted\Arcane\scripts\windows-install-cli.mjs' `
+  --bundle 'C:\Downloads\Arcane\windows\arcane-win32-x64-ABC123' `
+  --install-root "$env:LOCALAPPDATA\Arcane\Desktop"
+```
+
+The bundle also contains `resources/node/node.exe` and `resources/product/scripts/windows-install-cli.mjs`; use them only after their artifact identity and full inventory have been verified, rather than executing an unverified download to establish its own trust. Select the actual existing owned installation root. The CLI verifies source and copy, retains previous releases and profiles, publishes the active-release record once, and neither builds nor launches the app. It does not create a first-install stable launcher or shortcuts. The separate `install-desktop.mjs` convenience flow can build that launcher and is not a no-build first-install route.
+
+This artifact does not download or install itself and does not update an open window. The current desktop update watcher reads only a local installation record at `%LOCALAPPDATA%\Arcane\Desktop`; setup has a separate `%LOCALAPPDATA%\Programs\Arcane` target. A banner requires a separately authorized activation into the actual watched root. Restart remains an explicit human action after workspace state is saved. No remote updater, root migration or automatic restart is introduced by retaining the portable payload.
+
+## Existing installation and setup evidence
+
 The current matching application and setup acceptance uses SSH-signed source `77a570daea41a0bd138a1f2393622ac672cfbe24`. The application contains 4,205 files and 515,617,940 bytes, with manifest SHA-256 `0f7bfda0071d3880e652a989409d8797bf6037997dcc6c4c1d91219c2dee7cc8`. The 517,873,408-byte setup embeds a 36,352-byte launcher and 101,376-byte uninstaller. Its compiler and all 34 recorded source hashes matched before and after acceptance; application and setup source archives were identical. Twenty-four critical runtime files match the isolated build. Portable and repaired installed applications each passed all 32 executable checks; their screenshots were byte-identical and reviewed.
 
 Actual native components loaded the setup image's compiled pins, extracted all 4,212 files, verified the kit, and installed through shipped Node, the unmodified CLI and the production verifier and engine. Both root executables and an actual COM shortcut were placed and journaled under released operation leases. The shortcut used an owned temporary Programs directory; its bytes, single-link status, file identity and directory identity matched the v2 journal.
