@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { assertTextOnlyChatSource } from './chat-source-contract.js';
 import { readFile } from 'node:fs/promises';
 import { boundedText, notificationBody, notificationsEnabled, NOTIFY_SETTING_KEY } from '../../apps/desktop/src/notifications.js';
 import { readDesktopCheckout } from '../../apps/desktop/src/plans.js';
@@ -33,5 +34,5 @@ test('desktop checkout replies map to fixed states; plans routes desktop buys th
   const notifications = await readFile('apps/desktop/src/notifications.ts', 'utf8');
   assert.doesNotMatch(notifications, /\.innerHTML|\.outerHTML/);
   const codex = await readFile('apps/desktop/src/codex-chat.ts', 'utf8');
-  assert.doesNotMatch(codex, /localStorage|sessionStorage|\.innerHTML|\.outerHTML|\/v1\/assets|assets_start|assets_cancel|initiatedBy:/);
+  assertTextOnlyChatSource(codex);
 });

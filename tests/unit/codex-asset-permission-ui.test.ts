@@ -1,6 +1,7 @@
 /// <reference lib="dom" />
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { assertTextOnlyChatSource } from './chat-source-contract.js';
 import { randomUUID } from 'node:crypto';
 import { mkdtemp, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -464,7 +465,7 @@ test('settings markup is an accessible compact group and permission source expos
   assert.ok(html.indexOf(group) > html.indexOf('id="native-conversation-settings"'));
   assert.ok(html.indexOf(group) < html.indexOf('id="codex-profile"'));
   assert.match(css, /\.codex-asset-permission button\{[^}]*min-height:44px/);
-  assert.doesNotMatch(source, /\/v1\/assets|assets_start|assets_cancel|localStorage|sessionStorage|\.innerHTML|\.outerHTML|initiatedBy\s*:/);
+  assertTextOnlyChatSource(source);
 });
 
 test('owned Edge fixture: real trusted click/keyboard, inert scripted click, draft and responsive group', {

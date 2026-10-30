@@ -112,7 +112,11 @@ test('live transcript lines use the same friendly mapping as the Claude chat, wi
     { tool: 'Running a step…', state: 'started' }, { tool: 'Running a step…', state: 'started' }]);
   for (const [tool, expected] of [['assets_procedural', 'Modelling a procedural mesh…'], ['assets_preview', 'Previewing a mesh…'], ['assets_place_studio_import', 'Placing a mesh in Studio…']] as const)
     assert.equal(describeToolActivity(tool, null, null, 'started').text, expected);
-  assert.deepEqual(describeToolActivity('assets_procedural', null, null, 'started').group?.noun, ['mesh', 'meshes']);
+  assert.deepEqual(describeToolActivity('assets_procedural', null, null, 'started').group?.noun, ['Blender job', 'Blender jobs']);
+  for (const tool of ['assets_start', 'assets_procedural']) {
+    const acknowledged = describeToolActivity(tool, null, null, 'finished');
+    assert.equal(acknowledged.text, 'Blender job started'); assert.equal(acknowledged.change, null, 'job acknowledgement is not a completed model or Studio change');
+  }
   assert.equal(transcript.messages.find(message => message.key.endsWith('\0t2'))?.toolCall?.name, 'scene_create', 'a completion without identity keeps the started call');
 });
 

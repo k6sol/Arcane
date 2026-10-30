@@ -1,6 +1,7 @@
 /// <reference lib="dom" />
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { assertTextOnlyChatSource } from './chat-source-contract.js';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { MARKDOWN_LIMITS, parseInline, renderMessageText } from '../../apps/desktop/src/codex-chat.js';
@@ -125,7 +126,7 @@ test('streaming: unfinished spans and tables stay literal until they close, fini
 
 test('codex-chat stays text-only and the markdown styles are static, themed and forced-colors aware', async () => {
   const source = await readFile(resolve('apps/desktop/src/codex-chat.ts'), 'utf8');
-  assert.doesNotMatch(source, /localStorage|sessionStorage|\.innerHTML|\.outerHTML|\/v1\/assets|assets_start|assets_cancel|initiatedBy:/);
+  assertTextOnlyChatSource(source);
   assert.doesNotMatch(source, /createElement\('a'\)|\.href\s*=|insertAdjacentHTML|DOMParser/);
   const css = await readFile(resolve('apps/desktop/public/studio.css'), 'utf8');
   const start = css.indexOf('/* ---- Chat markdown:'), end = css.indexOf('/* ---- End chat markdown ---- */');
@@ -133,4 +134,17 @@ test('codex-chat stays text-only and the markdown styles are static, themed and 
   assert.doesNotMatch(block, /transition\s*:|animation\s*:|#[0-9a-f]{3,8}\b/i, 'no motion and no raw colours: shared tokens only');
   assert.match(block, /forced-colors:active/);
   assert.ok(end < css.lastIndexOf('@media(prefers-reduced-motion:reduce)'), 'block stays before the final reset');
+});
+
+test('text-only contract permits reviewed display labels but refuses asset calls, aliases and sinks', () => {
+  const display = "    case 'assets_start':case 'assets_procedural':return make(['Starting','Started'],['Blender job','Blender jobs'],null);";
+  assert.doesNotThrow(() => assertTextOnlyChatSource(display));
+  for (const mutation of [
+    "assets_start({name:'tree'});", "api.assetsStart({name:'tree'});", "api.assetsCancel?.(id);",
+    "const start = api.assetsStart;", "const start = assets_start;", "const method = 'assets_procedural'; api[method]({});",
+    "api['assets_start']({});", "api['assets_prepare_studio_import']({});", "const start = api.assets_prepare_studio_import;",
+    "assets_adopt_glb({});", "fetch('/v1/assets/start', {method:'POST'});",
+    "localStorage.setItem('x','y');", "sessionStorage.getItem('x');", "node.innerHTML = input;", "node.outerHTML = input;", "const body = { initiatedBy : 'human' };",
+    display.replace("return make", "api.assetsStart({});return make"),
+  ]) assert.throws(() => assertTextOnlyChatSource(mutation), { code: 'ERR_ASSERTION' }, mutation);
 });

@@ -1,6 +1,7 @@
 /// <reference lib="dom" />
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { assertTextOnlyChatSource } from './chat-source-contract.js';
 import { createServer } from 'node:http';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
@@ -166,7 +167,7 @@ test('script change API: human bearer GET of one exact receipt, strict envelope 
 test('codex-chat and script-diff stay text-only and storage-free', async () => {
   for (const name of ['codex-chat', 'script-diff']) {
     const source = await readFile(resolve('apps/desktop/src/' + name + '.ts'), 'utf8');
-    assert.doesNotMatch(source, /localStorage|sessionStorage|\.innerHTML|\.outerHTML|\/v1\/assets|assets_start|assets_cancel|initiatedBy:/, name);
+    assertTextOnlyChatSource(source, name);
   }
   const css = await readFile(resolve('apps/desktop/public/studio.css'), 'utf8');
   const block = css.slice(css.indexOf('/* ---- Script diff:'), css.indexOf('/* ---- End script diff ---- */'));
