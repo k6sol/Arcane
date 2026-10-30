@@ -2702,12 +2702,15 @@ export interface ChatStateView {
 export class CodexChat {
   private state:ChatState|null=null;
   private fresh=false; private stopped=false; private generation=0; private readVersion=0;
+  private appliedReadVersion=0;
   private timer:ReturnType<typeof setTimeout>|undefined;
   private readController:AbortController|undefined;
   private usageController:AbortController|undefined;
   private usageNotice='';
   private readonly pending=new Map<string,ChatAction>();
   private readonly uncertain=new Map<string,Uncertain>();
+  private restoredRequestProject:string|null=null;
+  private readonly restoredRequests=new Set<string>();
   private readonly transcript=new CodexTranscript();
   private confirmation:Confirmation|null=null;
   private approvalSignature=''; private modelSignature=''; private messageSignature='';
@@ -3027,26 +3030,48 @@ export class CodexChat {
   async readyForRuntimeRecovery():Promise<void> { await this.queueJournal.ready();if((this.queue.length||this.queueEmptyCheckpoint)&&!this.queueJournal.available(this.queueProject()))throw new Error('Saved queued messages could not be read.');if(this.tabs?.persistenceStatus()==='native-error')throw new Error('Saved chat drafts could not be read.'); }
   async prepareForRuntimeRecovery():Promise<void> { await this.checkpointDrafts(false); }
   async prepareForRestart():Promise<void> { await this.checkpointDrafts(true); }
+  private finishedUnknownConnect(record:ChatActionRecord):boolean {
+    return record.action==='connect'&&record.state==='unknown'&&record.finishedAt!==null&&record.errorCode!==null&&record.connectionId===null&&record.threadId===null&&record.turnId===null&&record.model===null&&record.effort===null;
+  }
+  private restartableConnectUncertainty():boolean {
+    if(!this.fresh||this.stopped||!this.state||this.state.displayLimited||this.snapshot()||!this.uncertain.size||
+      this.state.chatTasks?.some(task=>task.retained||['working','awaiting_verification','repair_queued','repairing','unknown'].includes(task.state)))return false;
+    return [...this.uncertain.values()].every(item=>item.read&&item.input.action==='connect'&&item.input.connectionId===null&&
+      this.state!.actions.some(record=>record.requestId===item.input.requestId&&this.finishedUnknownConnect(record)));
+  }
   private async checkpointDrafts(checkActivity:boolean):Promise<void> {
+    const restartProject=this.state?.projectPath,connectRequests=checkActivity?[...this.uncertain.keys()]:[],connectCheckpoint=connectRequests.length>0;
     const idle=()=>{const thread=this.snapshot()?.thread;
-      if(checkActivity&&(this.pending.size||this.uncertain.size||this.state?.busy||this.state?.connecting||this.state?.closing||thread&&!IDLE.includes(thread.turnStatus)))throw new Error('Finish or stop the current chat before restarting.');
+      if(connectCheckpoint&&this.state?.projectPath!==restartProject)throw new Error('The workspace changed. Review your draft before restarting.');
+      if(connectCheckpoint&&(this.uncertain.size!==connectRequests.length||connectRequests.some(id=>!this.uncertain.has(id))))throw new Error('The recorded connection changed. Review it before restarting.');
+      if(checkActivity&&(this.pending.size||this.uncertain.size&&(!connectCheckpoint||!this.restartableConnectUncertainty())||this.state?.busy||this.state?.connecting||this.state?.closing||thread&&!IDLE.includes(thread.turnStatus)))throw new Error('Finish or stop the current chat before restarting.');
       if(!this.surfaceYielded&&this.attachments&&(this.attachments.prepareReferences().length||this.attachments.prepareText('')))throw new Error('Send or remove your attachments before restarting.');
     };
-    idle();this.pauseQueue('Paused for restart. Choose Send next after reopening.');await this.queueJournal.ready();if((this.queue.length||this.queueEmptyCheckpoint)&&(!await this.queueSave(true)||this.queueEmptyCheckpoint))throw new Error('Queued messages could not be saved. Keep this window open.');this.flushDraft();this.tabs?.updatePresentation({});
+    const checked=async()=>{
+      if(connectCheckpoint){
+        const generation=this.generation,version=this.readVersion+1;
+        await this.refresh();
+        if(this.stopped||this.generation!==generation||this.readVersion!==version||this.appliedReadVersion!==version||!this.fresh)throw new Error('Check current native state before restarting. Your draft is retained.');
+        if(!restartProject||this.state?.projectPath!==restartProject)throw new Error('The workspace changed. Review your draft before restarting.');
+      }
+      idle();
+    };
+    await checked();this.pauseQueue('Paused for restart. Choose Send next after reopening.');await this.queueJournal.ready();if((this.queue.length||this.queueEmptyCheckpoint)&&(!await this.queueSave(true)||this.queueEmptyCheckpoint))throw new Error('Queued messages could not be saved. Keep this window open.');idle();this.flushDraft();this.tabs?.updatePresentation({});
     // A settings acknowledgement must not trap an idle workspace with no unsent text.
     const hasDraft=()=>!this.surfaceYielded&&this.value('codex-composer').length>0||this.tabs?.views().some(tab=>tab.draft.length>0);
-    if(!this.tabs?.active()||!hasDraft())return;
+    if(!this.tabs?.active()||!hasDraft()){await checked();return;}
     const project=this.state?.projectPath,key=this.tabs.active()?.key,deadline=Date.now()+10000;
     let retryAt=Date.now()+500;
     while(!this.tabs.preferencesSaved()){
-      if(!hasDraft())return;
+      if(!hasDraft()){await checked();return;}
       if(Date.now()>=deadline)throw new Error('Your chat draft could not be saved. Keep this window open and try again.');
       if(Date.now()>=retryAt){this.tabs.flushPreferences();retryAt=Date.now()+500;}
       await new Promise<void>(resolve=>setTimeout(resolve,25));
       if(project!==this.state?.projectPath||key!==this.tabs.active()?.key)throw new Error('The workspace changed. Review your draft before restarting.');
       idle();this.flushDraft();
     }
-    idle();
+    await checked();
+    if(connectCheckpoint&&hasDraft()&&!this.tabs?.preferencesSaved())throw new Error('Your chat draft could not be saved. Keep this window open and try again.');
   }
   currentStateView(): ChatStateView {
     const state=this.state?readCodexState(structuredClone(this.state)):null;
@@ -4094,7 +4119,7 @@ export class CodexChat {
     try {
       const state=await this.api.state(controller.signal);
       if(this.stopped||epoch!==this.generation||version!==this.readVersion)return;
-      this.applyState(state);for(const u of this.uncertain.values())u.read=true;this.fresh=true;
+      this.applyState(state);for(const u of this.uncertain.values())u.read=true;this.fresh=true;this.appliedReadVersion=version;
     } catch(error) {
       if(controller.signal.aborted||this.stopped||epoch!==this.generation||version!==this.readVersion)return;
       this.fresh=false;this.text('codex-notice',error instanceof Error?error.message:'Native state unavailable.');
@@ -4138,8 +4163,14 @@ export class CodexChat {
     // The chat state now reads another project than the held one: show that project's own tab draft.
     if(this.foreignDraft&&state.projectPath!==this.foreignDraft.project)this.releaseForeignDraft();
     // Recover unresolved IDs from the service journal after reload, without new browser storage.
-    for(const r of state.actions) if(['pending','unknown'].includes(r.state)&&!this.pending.has(r.requestId)&&!this.uncertain.has(r.requestId)&&(r.connectionId===state.snapshot?.connectionId||r.nextConnectionId===state.snapshot?.connectionId||r.action==='connect'&&state.connecting)) {
-      this.uncertain.set(r.requestId,{input:{requestId:r.requestId,connectionId:r.action==='connect'?null:r.connectionId,action:r.action} as ChatAction,read:true});
+    if(this.restoredRequestProject!==state.projectPath){this.restoredRequestProject=state.projectPath;this.restoredRequests.clear();}
+    for(const record of state.actions)if(['pending','unknown'].includes(record.state)&&!this.restoredRequests.has(record.requestId)&&
+      (!state.snapshot||record.connectionId===state.snapshot.connectionId||record.nextConnectionId===state.snapshot.connectionId||record.action==='connect'&&state.connecting)){
+      // A missing snapshot restores project-journal uncertainty explicitly; two
+      // absent connection IDs are never treated as an identity match. Restore
+      // once per receipt/window so an explicit review survives the next GET.
+      this.restoredRequests.add(record.requestId);
+      if(!this.pending.has(record.requestId)&&!this.uncertain.has(record.requestId))this.uncertain.set(record.requestId,{input:{requestId:record.requestId,connectionId:record.action==='connect'?null:record.connectionId,action:record.action} as ChatAction,read:true});
     }
     this.publishProviderState();
     this.publishState();

@@ -15,6 +15,7 @@ import { CodexClientError, type Approval, type Snapshot, type ThreadState } from
 import { limits } from '../../packages/codex-client/src/validation.js';
 import { nativeEnvironment } from '../../packages/codex-client/src/transport.js';
 import { CodexChat, CodexChatApi, CodexHttpError, CodexTranscript, CODEX_STATE_BYTES, prepareCodexAction, readCodexState, approvalEligible, approvalFingerprint, autoApprovalVerdict, codexFeedbackTools, type ChatMessage, type ChatState, type ChatSnapshot } from '../../apps/desktop/src/codex-chat.js';
+import { SIGN_IN_PAGE_KEY, readSignInPage } from '../../apps/desktop/src/provider-setup.js';
 
 const HUMAN='a'.repeat(64), AGENT='b'.repeat(64), PROJECT=resolve('.');
 function snapshot():Snapshot {
@@ -211,7 +212,8 @@ async function browser(t:test.TestContext,origin:string) {
   const page=await instance.newPage({viewport:{width:1440,height:1100}}),errors:string[]=[],posts:any[]=[];
   page.on('pageerror',(e:Error)=>errors.push(e.message));page.on('request',(r:any)=>{if(r.url().endsWith('/v1/codex/action'))posts.push(r.postDataJSON());});
   const text=async(id:string,part:string)=>{await page.waitForFunction(({id,part}:{id:string;part:string})=>document.getElementById(id)?.textContent?.includes(part),{id,part},{timeout:8000});};
-  const ready=async(id:string)=>{await page.waitForFunction((id:string)=>!(document.getElementById(id) as HTMLButtonElement).disabled,id,{timeout:8000});};
+  // Static HTML enables Refresh before module boot; wait for the real mount marker too.
+  const ready=async(id:string)=>{await page.waitForFunction((id:string)=>document.documentElement.getAttribute('data-provider-ready')==='true' && !!document.getElementById(id) && !(document.getElementById(id) as HTMLButtonElement).disabled,id,{timeout:8000});};
   const refresh=async()=>{await openAdvancedSettings(page);await (await visibleControl(page,'#codex-refresh')).click();await page.waitForTimeout(60);};
   const open=async(token=HUMAN)=>{try{await page.goto(origin+'/studio#'+token);await page.reload();await ready('codex-refresh');await openAdvancedSettings(page);await (await visibleControl(page,'#auto-refresh')).uncheck();}catch(error){t.diagnostic('Browser mount diagnostic '+JSON.stringify(await page.evaluate(()=>({title:document.title,refresh:document.getElementById('codex-refresh')?.outerHTML,notice:document.getElementById('codex-notice')?.textContent,main:document.getElementById('notice')?.textContent})))+' errors '+errors.join(';'));throw error;}};
   const connect=async()=>{await openAdvancedSettings(page);await ready('codex-connect');await (await visibleControl(page,'#codex-connect')).click();await text('codex-status','Test connection');await ready('codex-disconnect');};
@@ -380,8 +382,31 @@ test('real Edge + service fixtures: explicit setup, scopes, public text, XSS, ap
   // Old HTTP snapshots cannot reconnect the UI after an explicit disconnect.
   let releaseReply:()=>void=()=>{},replyReady:()=>void=()=>{};
   const heldReply=new Promise<void>(r=>{releaseReply=r;}),acceptedReply=new Promise<void>(r=>{replyReady=r;});
-  await page.route('**/v1/codex/action',async(route:any)=>{const response=await route.fetch();replyReady();await heldReply;await route.fulfill({response});},{times:1});
-  await (await visibleControl(page,'#codex-composer')).fill('Fixture old connection response');await b.ready('codex-submit');await (await visibleControl(page,'#codex-submit')).click();await acceptedReply;await b.ready('codex-disconnect');await (await visibleControl(page,'#codex-disconnect')).click();await b.text('codex-status','Not connected');const oldResponse=page.waitForResponse('**/v1/codex/action');releaseReply();await oldResponse;await b.ready('codex-connect');assert.equal(await page.locator('#codex-messages').textContent().then((v:string)=>v.includes('Fixture old connection response')),false);
+  const oldPrompt='Fixture old connection response',lateAssistant='Fixture delayed assistant-only response';
+  const turnStartsBefore=c.calls.filter(call=>call.method==='turn-start').length;
+  await page.route('**/v1/codex/action',async(route:any)=>{
+    const response=await route.fetch();assert.equal(response.status(),200);
+    const outcome=await response.json(),snapshot=outcome.state.snapshot;
+    assert.equal(outcome.record.action,'turn-start');assert.equal(outcome.record.state,'acknowledged');
+    assert.equal(snapshot.connectionId,connectionId);assert.equal(snapshot.thread.threadId,c.s.thread!.threadId);assert.equal(snapshot.thread.turnId,c.s.thread!.turnId);
+    // This unique valid delta exists only in the held old response, never in live service state.
+    snapshot.events.push({seq:++snapshot.lastEventSeq,type:'delta',threadId:snapshot.thread.threadId,turnId:snapshot.thread.turnId,itemId:'late-disconnect-only',text:lateAssistant});
+    readCodexState(outcome.state);
+    replyReady();await heldReply;await route.fulfill({response,json:outcome});
+  },{times:1});
+  await (await visibleControl(page,'#codex-composer')).fill(oldPrompt);await b.ready('codex-submit');await (await visibleControl(page,'#codex-submit')).click();await acceptedReply;
+  assert.equal(c.calls.filter(call=>call.method==='turn-start').length,turnStartsBefore+1);
+  await b.ready('codex-disconnect');await (await visibleControl(page,'#codex-disconnect')).click();await b.text('codex-status','Not connected');
+  const userRows=()=>page.locator('#codex-messages [data-role="user"] .message-text').allTextContents();
+  assert.equal((await userRows()).filter((text:string)=>text===oldPrompt).length,1,'Disconnect preserves the accepted user prompt exactly once');
+  const assistantRows=page.locator('#codex-messages [data-role="assistant"] .message-text'),beforeLateReply=await assistantRows.allTextContents();
+  assert.equal(beforeLateReply.some((text:string)=>text.includes(lateAssistant)),false);
+  const oldResponse=page.waitForResponse('**/v1/codex/action');releaseReply();await (await oldResponse).finished();await b.ready('codex-connect');
+  assert.equal((await userRows()).filter((text:string)=>text===oldPrompt).length,1,'A late response does not remove or duplicate the accepted prompt');
+  assert.deepEqual(await assistantRows.allTextContents(),beforeLateReply,'A late old response cannot add assistant content');
+  assert.equal((await assistantRows.allTextContents()).some((text:string)=>text.includes(lateAssistant)),false);
+  assert.match((await page.locator('#codex-status').textContent())!,/Not connected/);
+  assert.equal(c.calls.filter(call=>call.method==='turn-start').length,turnStartsBefore+1);
   assert.equal(h.service.state().snapshot,null);
   // Signed-out presentation hides unavailable chat controls. Explicit metadata
   // reconnect restores the header. The main conversation has no collapse affordance (it stays open and keeps reading).
@@ -404,8 +429,10 @@ test('real Edge + service fixtures: explicit setup, scopes, public text, XSS, ap
   assert.deepEqual(await page.evaluate(()=>Object.keys(sessionStorage)),['arcane-lab-session']);
   const presentation=await page.evaluate(()=>Object.fromEntries(Object.entries(localStorage)));
   const chatKey='arcane.chat-tabs.v1:'+encodeURIComponent(h.projectPath);
-  assert.deepEqual(Object.keys(presentation).sort(),[chatKey,'arcane.provider-presentation.v1'].sort());
+  assert.deepEqual(Object.keys(presentation).sort(),[chatKey,'arcane.provider-presentation.v1',SIGN_IN_PAGE_KEY].sort());
   assert.deepEqual(JSON.parse(presentation['arcane.provider-presentation.v1']!),{version:1,provider:'codex'});
+  assert.deepEqual(JSON.parse(presentation[SIGN_IN_PAGE_KEY]!),{version:1,state:'signed-in'});
+  assert.equal(readSignInPage(presentation[SIGN_IN_PAGE_KEY]),'signed-in');
   const preferences=JSON.parse(presentation[chatKey]!);
   assert.deepEqual(Object.keys(preferences).sort(),['activeKey','projectPath','provider','tabs','version']);
   assert.equal(preferences.version,1);assert.equal(preferences.projectPath,h.projectPath);assert.equal(preferences.provider,'codex');
@@ -515,8 +542,18 @@ async function productDesktopModules(build: string): Promise<[string, string][]>
   const source = await readFile(resolve('apps/daemon/src/lab-server.ts'), 'utf8');
   const modules = [...source.matchAll(/\['(\/[a-z0-9-]+\.js)',\s*\[join\(options\.cwd,\s*'dist\/apps\/desktop\/src\/([a-z0-9-]+\.js)'\)/g)]
     .map(match => [match[1]!, resolve(build, 'apps/desktop/src', match[2]!)] as [string, string]);
+  // These exact public package routes are also part of the studio module graph.
+  // Read only literal daemon entries; request paths never select filesystem paths.
+  const packages = [...source.matchAll(/\['(\/packages\/(?:protocol|asset-pipeline)\/src\/[a-z0-9-]+\.js)',\s*\[join\(options\.cwd,\s*'dist\/(packages\/(?:protocol|asset-pipeline)\/src\/[a-z0-9-]+\.js)'\)/g)]
+    .map(match => {
+      assert.equal(match[1], '/' + match[2], 'public package route matches its compiled path');
+      return [match[1]!, resolve(build, match[2]!)] as [string, string];
+    });
   assert.ok(modules.some(([path]) => path === '/studio.js') && modules.length > 20, 'lab-server desktop module list');
-  return modules;
+  for (const route of ['/packages/protocol/src/chat-queue.js', '/packages/asset-pipeline/src/failure-diagnostics.js', '/packages/asset-pipeline/src/types.js', '/packages/asset-pipeline/src/probe-diagnostics.js']) {
+    assert.ok(packages.some(([path]) => path === route), 'lab-server static package dependency: ' + route);
+  }
+  return [...modules, ...packages];
 }
 
 async function openAdvancedSettings(page:any, target='native-conversation-heading') {

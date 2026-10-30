@@ -1,10 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
-import { resolve } from 'node:path';
+import { createHash, randomUUID } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
+import { join, resolve } from 'node:path';
+import { mkdtemp, realpath, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { ChatTabs, type ChatTabPreferences } from '../../apps/desktop/src/chat-tabs.js';
-import { CodexChat, CodexChatApi, type ChatState } from '../../apps/desktop/src/codex-chat.js';
-import type { Snapshot } from '../../packages/codex-client/src/types.js';
+import { CodexChat, CodexChatApi, type ChatState, type ChatActionRecord } from '../../apps/desktop/src/codex-chat.js';
+import { createCodexService } from '../../apps/daemon/src/codex-service.js';
+import { CodexClientError, type Snapshot } from '../../packages/codex-client/src/types.js';
+import type { ChatQueueSnapshot, StoredChatQueueRow } from '../../packages/protocol/src/chat-queue.js';
+import { sqliteTransportPath } from '../../packages/storage/src/sqlite-path.js';
 
 // Document/transport fixtures only. No CLI, provider, Studio or UI.
 const TOKEN='b'.repeat(64), PROJECT=resolve('.');
@@ -224,4 +230,228 @@ test('runtime recovery saves drafts while stale native activity still blocks an 
  observed.busy=true;observed.connecting=true;await chat.refresh();const input=doc.getElementById('codex-composer');input.value='  Draft retained after service loss\n\n';input.dispatchEvent(new Event('input'));
  await assert.rejects(chat.prepareForRestart(),/Finish or stop/);await chat.prepareForRuntimeRecovery();
  assert.equal(writes.at(-1)?.tabs[0]?.draft,input.value);assert.equal(chat.currentStateView().preferencesSaved,true);assert.equal(requests.some(url=>/turn|send|resume/.test(url)),false);
+});
+
+function unknownConnectRecord():ChatActionRecord{return {requestId:randomUUID(),action:'connect',connectionId:null,state:'unknown',errorCode:'FRAME_LIMIT',
+  threadId:null,turnId:null,model:null,effort:null,createdAt:'2026-10-30T12:00:00.000Z',finishedAt:'2026-10-30T12:00:01.000Z'};}
+function deferred(){let resolve!:()=>void;const promise=new Promise<void>(done=>{resolve=done;});return {promise,resolve};}
+
+test('finished unknown connect survives actual journal reopen and restart checkpoints without acknowledgement or reconnect',async t=>{
+  // Actual SQLite action persistence and document/ACK fixtures. No provider or physical child is started.
+  const root=await realpath(await mkdtemp(join(tmpdir(),'arcane-restart-connect-')));
+  let factoryCalls=0;const requestId=randomUUID(),original=new CodexClientError('FRAME_LIMIT','Controlled discovery frame refusal.',true);
+  const first=createCodexService({directory:join(root,'journal'),projectPath:root,connect:async()=>{factoryCalls++;throw original;}});
+  let reopened:ReturnType<typeof createCodexService>|null=null;const chats:CodexChat[]=[];
+  const queueRelease=deferred(),draftRelease=deferred();
+  t.after(async()=>{queueRelease.resolve();draftRelease.resolve();for(const chat of chats)chat.stop();try{await reopened?.close();}finally{try{await first.close();}finally{await rm(root,{recursive:true,force:true});}}});
+  const outcome=await first.action({requestId,action:'connect',connectionId:null});
+  assert.equal(outcome.record.state,'unknown');assert.equal(outcome.record.errorCode,'FRAME_LIMIT');await first.close();
+  reopened=createCodexService({directory:join(root,'journal'),projectPath:root,connect:async()=>{factoryCalls++;assert.fail('Restart checkpoint must never connect.');}});
+  const service=reopened,retained=structuredClone(service.state().actions[0]!);assert.equal(retained.requestId,requestId);
+  const doc=new DocumentFixture(),posts:string[]=[];let reads=0;
+  const api=new CodexChatApi(TOKEN,async(_input,init)=>{if(init?.method==='POST'){posts.push(String(init.body));assert.fail('No acknowledgement, connect or turn is sent.');}reads++;return Response.json({state:service.state()});});
+  const chat=new CodexChat(doc.asDocument(),api);chats.push(chat);await chat.start();
+  const preferences=plainRow('Earlier acknowledged draft').preferences;preferences.projectPath=root;
+  const writes:ChatTabPreferences[]=[],queueWrites:ChatQueueSnapshot[]=[],queueEntered=deferred(),draftEntered=deferred();
+  let holdDraft=false;
+  await chat.enableChatTabs({preferences:{read:async()=>preferences,save:async value=>{if(holdDraft){draftEntered.resolve();await draftRelease.promise;}writes.push(structuredClone(value));}}});await settle();
+  const queued:StoredChatQueueRow={id:1,localId:'retained-queue',conversationId:null,sessionId:null,text:'Queued text stays unsent',modelId:null,effort:null,connectionId:null,requestId:randomUUID(),
+    createdAt:'2026-10-30T12:00:00.000Z',state:'unknown',attachmentState:'none'};
+  await chat.setQueuePersistence({version:1,read:async()=>({available:true,projectPath:root,rows:[queued]}),save:async()=>assert.fail('Hydration does not rewrite an unchanged saved queue.')});
+  // Reattaching a native bridge preserves the original local rows over its empty
+  // snapshot, so this checkpoint genuinely has an unacknowledged queue write.
+  await chat.setQueuePersistence({version:1,read:async()=>({available:true,projectPath:root,rows:[]}),save:async value=>{queueEntered.resolve();await queueRelease.promise;queueWrites.push(structuredClone(value));return {saved:true};}});
+  assert.equal(doc.getElementById('codex-unknown').hidden,false);assert.match(doc.getElementById('codex-unknown-requests').textContent,new RegExp(requestId));
+  await chat.connectForSavedLogin();assert.equal(posts.length,0,'Saved-login metadata must not retry the retained connect.');
+  holdDraft=true;const input=doc.getElementById('codex-composer');input.value='  Exact newest draft\n\n';input.dispatchEvent(new Event('input'));
+  const readsBefore=reads;let finished=false;const checkpoint=chat.prepareForRestart().then(()=>{finished=true;});
+  await Promise.race([queueEntered.promise,checkpoint.then(()=>assert.fail('Checkpoint ended before the held queue ACK.'))]);assert.equal(finished,false,'The encrypted queue ACK remains required.');queueRelease.resolve();
+  await Promise.race([draftEntered.promise,checkpoint.then(()=>assert.fail('Checkpoint ended before the held draft ACK.'))]);assert.equal(finished,false,'The newest native draft ACK remains required.');draftRelease.resolve();await checkpoint;
+  assert.ok(reads>=readsBefore+2,'Fresh state is checked before and after awaited persistence.');
+  assert.equal(writes.at(-1)!.tabs[0]!.draft,input.value);assert.deepEqual(queueWrites.at(-1)!.rows,[queued]);
+  assert.equal(chat.currentStateView().preferencesSaved,true);assert.equal(doc.getElementById('codex-unknown').hidden,false);
+  assert.deepEqual(service.state().actions[0],retained,'Saving drafts never changes the unknown action receipt.');
+  const restoredDoc=new DocumentFixture(),restored=new CodexChat(restoredDoc.asDocument(),api);chats.push(restored);
+  await restored.start();await restored.enableChatTabs({preferences:{read:async()=>writes.at(-1)!,save:async()=>{}}});
+  assert.equal(restoredDoc.getElementById('codex-composer').value,input.value);assert.equal(restoredDoc.getElementById('codex-unknown').hidden,false);
+  assert.match(restoredDoc.getElementById('codex-unknown-requests').textContent,new RegExp(requestId));await restored.connectForSavedLogin();
+  assert.equal(posts.length,0);assert.equal(factoryCalls,1,'Only the original controlled connection attempt existed.');
+});
+
+test('unknown-connect checkpoint refuses stale, incomplete, mismatched and active state from the fresh read',async t=>{
+  const activeTask=(state:ChatState,kind='working',retained=false)=>{state.chatTasks=[{taskId:randomUUID(),threadId:'owned-thread',sessionId:null,connectionId:randomUUID(),state:kind,round:0,reason:null,reportDigest:null,retained}];};
+  const cases:[string,(state:ChatState)=>void][]=[
+    ['busy',value=>{value.busy=true;}],['connecting',value=>{value.connecting=true;}],['closing',value=>{value.closing=true;}],
+    ['current idle session',value=>{value.snapshot=snapshot();}],
+    ['live turn',value=>{value.snapshot=state(true).snapshot;value.snapshot!.thread!.turnStatus='inProgress';value.snapshot!.thread!.turnId='owned-turn';}],
+    ['active task',value=>activeTask(value)],['unknown task',value=>activeTask(value,'unknown')],['retained normal owner',value=>activeTask(value,'verified',true)],
+    ['missing receipt',value=>{value.actions=[];}],['unfinished receipt',value=>{value.actions[0]!.finishedAt=null;}],
+    ['still pending',value=>{value.actions[0]!.state='pending';}],['different disposition',value=>{value.actions[0]!.state='rejected';}],
+    ['different request',value=>{value.actions[0]!.requestId=randomUUID();}],['different action',value=>{value.actions[0]!.action='history-load';}],
+    ['bound connection',value=>{value.actions[0]!.connectionId=randomUUID();}],['bound thread',value=>{value.actions[0]!.threadId='different-thread';}],
+    ['bound turn',value=>{value.actions[0]!.turnId='different-turn';}],['selected model',value=>{value.actions[0]!.model='different-model';}],
+    ['missing failure',value=>{value.actions[0]!.errorCode=null;}],['limited display',value=>{value.displayLimited=true;}],
+    ['different project',value=>{value.projectPath=PROJECT+'-different';}],
+  ];
+  for(const [name,change] of cases)await t.test(name,async t=>{
+    const doc=new DocumentFixture(),observed=state();observed.actions=[unknownConnectRecord()];let posts=0;
+    const chat=new CodexChat(doc.asDocument(),new CodexChatApi(TOKEN,async(_input,init)=>{if(init?.method==='POST')posts++;return Response.json({state:observed});}));t.after(()=>chat.stop());
+    await chat.start();change(observed);await assert.rejects(chat.prepareForRestart(),/Finish or stop|workspace changed|recorded connection changed|Check current native state/);
+    assert.equal(posts,0);assert.equal(doc.getElementById('codex-unknown').hidden,false);
+  });
+  await t.test('failed state read',async t=>{
+    const doc=new DocumentFixture(),observed=state();observed.actions=[unknownConnectRecord()];let refuse=false;
+    const chat=new CodexChat(doc.asDocument(),new CodexChatApi(TOKEN,async()=>{if(refuse)throw Error('Controlled state read failure.');return Response.json({state:observed});}));t.after(()=>chat.stop());
+    await chat.start();refuse=true;await assert.rejects(chat.prepareForRestart(),/Check current native state/);assert.equal(chat.currentStateView().fresh,false);
+  });
+});
+
+test('unknown turns, history and grants remain blocked after their connection disappears',async t=>{
+  for(const action of ['turn-start','history-load','grant-writes','grant-assets'] as const)await t.test(action,async t=>{
+    const doc=new DocumentFixture(),observed=state(true),record=unknownConnectRecord();record.action=action;record.connectionId=observed.snapshot!.connectionId;record.threadId=observed.snapshot!.thread!.threadId;
+    observed.actions=[record];let posts=0;const chat=new CodexChat(doc.asDocument(),new CodexChatApi(TOKEN,async(_input,init)=>{if(init?.method==='POST')posts++;return Response.json({state:observed});}));t.after(()=>chat.stop());
+    await chat.start();assert.equal(doc.getElementById('codex-unknown').hidden,false);observed.snapshot=null;
+    await assert.rejects(chat.prepareForRestart(),{message:'Check current native state before restarting. Your draft is retained.'});
+    assert.equal(chat.currentStateView().state!.snapshot,null,'The original GET applied the disconnection and retired its prior generation.');
+    assert.equal(chat.currentStateView().fresh,true);
+    await assert.rejects(chat.prepareForRestart(),/Finish or stop/);assert.equal(posts,0);assert.equal(doc.getElementById('codex-unknown').hidden,false);
+  });
+});
+
+test('a local pending connect still blocks restart when an unrelated finished connect is recorded',async t=>{
+  const doc=new DocumentFixture(),observed=state(),entered=deferred(),release=deferred();let posts=0;
+  const record=unknownConnectRecord();const chat=new CodexChat(doc.asDocument(),new CodexChatApi(TOKEN,async(_input,init)=>{
+    if(init?.method==='POST'){posts++;entered.resolve();await release.promise;return Response.json({record:{...record,requestId:JSON.parse(String(init.body)).requestId},replayed:false,state:observed});}
+    return Response.json({state:observed});
+  }));t.after(()=>{release.resolve();chat.stop();});await chat.start();
+  doc.getElementById('codex-connect').dispatchEvent(new Event('click'));await entered.promise;
+  observed.actions=[record];await assert.rejects(chat.prepareForRestart(),/Finish or stop/);assert.equal(posts,1,'No second request is made while the original POST is held.');release.resolve();
+});
+
+test('connect checkpoint rechecks activity and project after held native draft persistence',async t=>{
+  for(const change of ['busy','project','live-session'] as const)await t.test(change,async t=>{
+    const doc=new DocumentFixture(),observed=state();observed.actions=[unknownConnectRecord()];const entered=deferred(),release=deferred();let hold=false,posts=0;
+    const chat=new CodexChat(doc.asDocument(),new CodexChatApi(TOKEN,async(_input,init)=>{if(init?.method==='POST')posts++;return Response.json({state:observed});}));t.after(()=>{release.resolve();chat.stop();});
+    await chat.start();await chat.enableChatTabs({preferences:{read:async()=>plainRow('Saved draft').preferences,save:async()=>{if(hold){entered.resolve();await release.promise;}}}});await settle();
+    hold=true;doc.getElementById('codex-composer').value='Keep the exact held draft';doc.getElementById('codex-composer').dispatchEvent(new Event('input'));
+    const checkpoint=chat.prepareForRestart();const refused=assert.rejects(checkpoint,/Finish or stop|workspace changed|Check current native state/);await Promise.race([entered.promise,checkpoint.then(()=>assert.fail('Checkpoint ended before the held draft ACK.'))]);
+    if(change==='busy')observed.busy=true;else if(change==='project')observed.projectPath=PROJECT+'-changed';else observed.snapshot=snapshot();
+    release.resolve();await refused;assert.equal(posts,0);assert.equal(doc.getElementById('codex-unknown').hidden,false);
+  });
+});
+
+test('connect checkpoint preserves failed queue and draft ACK refusals and original unreviewed receipt',async t=>{
+  await t.test('queue save',async t=>{
+    const doc=new DocumentFixture(),observed=state();observed.actions=[unknownConnectRecord()];let saves=0;
+    const chat=new CodexChat(doc.asDocument(),new CodexChatApi(TOKEN,async()=>Response.json({state:observed})));t.after(()=>chat.stop());await chat.start();
+    await chat.setQueuePersistence({version:1,read:async()=>({available:true,projectPath:PROJECT,rows:[{id:1,localId:'unsent',conversationId:null,sessionId:null,text:'Unsent queue text',modelId:null,effort:null,connectionId:null,requestId:null,createdAt:'2026-10-30T12:00:00.000Z',state:'pending',attachmentState:'none'}]}),save:async()=>assert.fail('Unchanged hydration does not need a save.')});
+    await chat.setQueuePersistence({version:1,read:async()=>({available:true,projectPath:PROJECT,rows:[]}),save:async()=>{saves++;throw Error('Controlled queue save failure.');}});
+    await assert.rejects(chat.prepareForRestart(),/Queued messages could not be saved/);assert.ok(saves>0);assert.equal(doc.getElementById('codex-unknown').hidden,false);
+  });
+  await t.test('draft save',async t=>{
+    const doc=new DocumentFixture(),observed=state();observed.actions=[unknownConnectRecord()];let fail=false,clock=1000;
+    const chat=new CodexChat(doc.asDocument(),new CodexChatApi(TOKEN,async()=>Response.json({state:observed})));t.after(()=>chat.stop());await chat.start();
+    await chat.enableChatTabs({preferences:{read:async()=>plainRow('Saved draft').preferences,save:async()=>{if(fail)throw Error('Controlled draft save failure.');}}});await settle();
+    fail=true;const input=doc.getElementById('codex-composer');input.value='Do not lose this draft';input.dispatchEvent(new Event('input'));t.mock.method(Date,'now',()=>clock);
+    const checkpoint=chat.prepareForRestart(),refused=assert.rejects(checkpoint,/draft could not be saved/);await settle();clock+=10001;await refused;
+    assert.equal(input.value,'Do not lose this draft');assert.equal(chat.currentStateView().preferencesSaved,false);assert.equal(doc.getElementById('codex-unknown').hidden,false);
+  });
+});
+
+test('only explicit review clears the restored connect card and refresh does not immediately recreate it',async t=>{
+  const doc=new DocumentFixture(),observed=state();observed.actions=[unknownConnectRecord()];let posts=0;
+  const chat=new CodexChat(doc.asDocument(),new CodexChatApi(TOKEN,async(_input,init)=>{if(init?.method==='POST')posts++;return Response.json({state:observed});}));t.after(()=>chat.stop());await chat.start();
+  const retained=structuredClone(observed.actions[0]);await chat.prepareForRestart();assert.equal(doc.getElementById('codex-unknown').hidden,false);
+  assert.equal(doc.getElementById('codex-acknowledge').disabled,false);doc.getElementById('codex-acknowledge').dispatchEvent(new Event('click'));
+  assert.equal(doc.getElementById('codex-unknown').hidden,true,'The real review handler dismisses the card before the next GET.');await chat.refresh();
+  assert.equal(doc.getElementById('codex-unknown').hidden,true);assert.deepEqual(observed.actions[0],retained);assert.equal(posts,0);
+});
+
+test('restart requires its own applied GET at both checkpoints even when another poll reads idle state',async t=>{
+  for(const phase of ['initial','final'] as const)for(const replacement of ['held','complete'] as const)await t.test(phase+' / '+replacement,async t=>{
+    const doc=new DocumentFixture(),observed=state();observed.actions=[unknownConnectRecord()];
+    const entered=deferred(),release=deferred(),pollEntered=deferred(),pollRelease=deferred();let reads=0,posts=0,target=Infinity;
+    const chat=new CodexChat(doc.asDocument(),new CodexChatApi(TOKEN,async(_input,init)=>{
+      if(init?.method==='POST'){posts++;assert.fail('Superseded reads cannot dispatch anything.');}
+      const ordinal=++reads;
+      if(ordinal===target){
+        const signal=init?.signal;assert.ok(signal);entered.resolve();
+        await Promise.race([release.promise,new Promise<never>((_resolve,reject)=>signal.addEventListener('abort',()=>reject(new DOMException('Controlled superseded GET.','AbortError')),{once:true}))]);
+      }else if(ordinal===target+1){pollEntered.resolve();if(replacement==='held')await pollRelease.promise;}
+      return Response.json({state:observed});
+    }));t.after(()=>{release.resolve();pollRelease.resolve();chat.stop();});
+    await chat.start();const retained=structuredClone(observed.actions[0]);target=reads+(phase==='initial'?1:2);
+    const checkpoint=chat.prepareForRestart(),refused=assert.rejects(checkpoint,/Check current native state/);
+    await Promise.race([entered.promise,checkpoint.then(()=>assert.fail('The checkpoint did not perform its own expected GET.'))]);
+    const poll=chat.refresh();await pollEntered.promise;
+    await refused;assert.equal(posts,0);assert.equal(doc.getElementById('codex-unknown').hidden,false);
+    assert.deepEqual(observed.actions[0],retained,'A poll cannot acknowledge or replace the original unknown receipt.');
+    pollRelease.resolve();release.resolve();await poll;
+    assert.equal(chat.currentStateView().fresh,true,'Even another successful idle GET cannot satisfy the superseded checkpoint.');
+  });
+});
+
+test('stopped or retired read owners cannot certify a restart checkpoint',async t=>{
+  for(const duringRead of [false,true])await t.test(duringRead?'stop during GET':'refresh returns while stopped',async t=>{
+    const doc=new DocumentFixture(),observed=state();observed.actions=[unknownConnectRecord()];const entered=deferred(),release=deferred();let hold=false,posts=0;
+    const chat=new CodexChat(doc.asDocument(),new CodexChatApi(TOKEN,async(_input,init)=>{
+      if(init?.method==='POST'){posts++;assert.fail('Retired reads do not dispatch.');}
+      if(hold){const signal=init?.signal;assert.ok(signal);entered.resolve();await Promise.race([release.promise,new Promise<never>((_resolve,reject)=>signal.addEventListener('abort',()=>reject(new DOMException('Controlled retired GET.','AbortError')),{once:true}))]);}
+      return Response.json({state:observed});
+    }));t.after(()=>{release.resolve();chat.stop();});await chat.start();
+    if(!duringRead)chat.stop();else hold=true;
+    const checkpoint=chat.prepareForRestart(),refused=assert.rejects(checkpoint,/Check current native state/);
+    if(duringRead){await Promise.race([entered.promise,checkpoint.then(()=>assert.fail('Expected the original held GET.'))]);chat.stop();}
+    await refused;release.resolve();assert.equal(posts,0);assert.equal(chat.currentStateView().fresh,false);assert.equal(observed.actions[0]!.state,'unknown');
+  });
+});
+
+test('a new uncertain connect arriving during an ordinary held draft save cannot borrow the restart exception',async t=>{
+  const doc=new DocumentFixture(),observed=state(),entered=deferred(),release=deferred();let hold=false,posts=0;
+  const writes:ChatTabPreferences[]=[];
+  const chat=new CodexChat(doc.asDocument(),new CodexChatApi(TOKEN,async(_input,init)=>{if(init?.method==='POST')posts++;return Response.json({state:observed});}));
+  t.after(()=>{release.resolve();chat.stop();});await chat.start();
+  await chat.enableChatTabs({preferences:{read:async()=>plainRow('Saved draft').preferences,save:async value=>{if(hold){entered.resolve();await release.promise;}writes.push(structuredClone(value));}}});await settle();
+  hold=true;const input=doc.getElementById('codex-composer');input.value='Keep the draft through new uncertainty';input.dispatchEvent(new Event('input'));
+  const checkpoint=chat.prepareForRestart(),refused=assert.rejects(checkpoint,/Finish or stop/);
+  await Promise.race([entered.promise,checkpoint.then(()=>assert.fail('Checkpoint ended before the held draft save.'))]);
+  const record=unknownConnectRecord();observed.actions=[record];await chat.refresh();
+  assert.equal(chat.currentStateView().fresh,true);assert.equal(chat.currentStateView().state!.snapshot,null);
+  assert.equal(doc.getElementById('codex-unknown').hidden,false);release.resolve();await refused;
+  await settle();assert.equal(input.value,'Keep the draft through new uncertainty');assert.equal(writes.at(-1)!.tabs[0]!.draft,input.value);
+  assert.deepEqual(observed.actions,[record]);assert.equal(posts,0);
+});
+
+test('real journal reopen restores nonconnect uncertainty once and never retries a recovered pending turn',async t=>{
+  // Constructed action metadata in the actual journal, not native/provider evidence.
+  const root=await realpath(await mkdtemp(join(tmpdir(),'arcane-unconfirmed-journal-'))),directory=join(root,'journal');
+  let opened:ReturnType<typeof createCodexService>|null=null;const chats:CodexChat[]=[];let connections=0;
+  const initial=createCodexService({directory,projectPath:root,connect:async()=>{connections++;assert.fail('History recovery cannot connect.');}});
+  t.after(async()=>{for(const chat of chats)chat.stop();try{await opened?.close();}finally{try{await initial.close();}finally{await rm(root,{recursive:true,force:true});}}});
+  await initial.close();const connectionId=randomUUID(),threadId='original-unconfirmed-thread';
+  const records:ChatActionRecord[]=(['turn-start','history-load','grant-writes','grant-assets'] as const).map(action=>({...unknownConnectRecord(),action,connectionId,threadId,turnId:action==='turn-start'?'original-unconfirmed-turn':null}));
+  const pending:ChatActionRecord={...unknownConnectRecord(),action:'turn-start',connectionId,threadId,turnId:'original-pending-turn',state:'pending',errorCode:null,finishedAt:null};records.push(pending);
+  const db=new DatabaseSync(sqliteTransportPath(join(directory,'codex-actions.sqlite')),{allowExtension:false});
+  try{
+    db.exec('PRAGMA synchronous=FULL; BEGIN IMMEDIATE');
+    for(const record of records){
+      const input={requestId:record.requestId,action:record.action,connectionId,threadId,...(record.action==='turn-start'?{text:'Controlled recorded request'}:{})};
+      db.prepare('INSERT INTO actions(id,hash,payload) VALUES(?,?,?)').run(record.requestId,createHash('sha256').update(JSON.stringify(input)).digest('hex'),JSON.stringify(record));
+    }
+    db.exec('COMMIT');
+  }finally{db.close();}
+  opened=createCodexService({directory,projectPath:root,connect:async()=>{connections++;assert.fail('Reopen cannot retry an unconfirmed request.');}});
+  const service=opened,expected=structuredClone(service.state().actions),recovered=expected.find(record=>record.requestId===pending.requestId)!;
+  assert.equal(recovered.state,'unknown');assert.equal(recovered.errorCode,'DAEMON_RESTART');assert.notEqual(recovered.finishedAt,null);
+  for(const record of records.filter(record=>record!==pending))assert.deepEqual(expected.find(row=>row.requestId===record.requestId),record);
+  let posts=0;const api=new CodexChatApi(TOKEN,async(_input,init)=>{if(init?.method==='POST'){posts++;assert.fail('Hydrated uncertainty cannot be acknowledged or replayed automatically.');}return Response.json({state:service.state()});});
+  const doc=new DocumentFixture(),chat=new CodexChat(doc.asDocument(),api);chats.push(chat);await chat.start();
+  assert.equal(chat.currentStateView().state!.snapshot,null);for(const record of records)assert.match(doc.getElementById('codex-unknown-requests').textContent,new RegExp(record.requestId));
+  await chat.connectForSavedLogin();await assert.rejects(chat.prepareForRestart(),/Finish or stop/);assert.equal(posts,0);assert.equal(connections,0);
+  assert.equal(doc.getElementById('codex-acknowledge').disabled,false);doc.getElementById('codex-acknowledge').dispatchEvent(new Event('click'));
+  assert.equal(doc.getElementById('codex-unknown').hidden,true);await chat.refresh();assert.equal(doc.getElementById('codex-unknown').hidden,true,'Explicitly reviewed rows do not return on the next GET.');
+  const nextDoc=new DocumentFixture(),next=new CodexChat(nextDoc.asDocument(),api);chats.push(next);await next.start();await next.connectForSavedLogin();
+  assert.equal(nextDoc.getElementById('codex-unknown').hidden,false,'A new window still sees original durable unknown receipts.');
+  for(const record of records)assert.match(nextDoc.getElementById('codex-unknown-requests').textContent,new RegExp(record.requestId));
+  assert.equal(posts,0);assert.equal(connections,0);assert.deepEqual(service.state().actions,expected,'Review is local presentation and never rewrites the journal.');
 });

@@ -113,13 +113,13 @@ export class SharedConversations {
     if(from==='arcane'||to==='arcane')return true;
     await this.reading;if(!this.ready||!this.library)return !this.bridge;
     if(this.stopped||this.suspended||from!==this.options.provider())return false;
-    this.observe();if(!this.library.active())this.library.newConversation();
-    const activeId=this.library.active()!.id,peer=this.peer(to);if(!peer)return false;
-    const binding=this.library.active()!.bindings.find(b=>b.provider===to);
+    this.observe();
+    const active=this.library.active(),activeId=active?.id??null,peer=this.peer(to);if(!peer)return false;
+    const binding=active?.bindings.find(b=>b.provider===to);
     this.suspended++;
     try{
       const ok=binding?(peer.recordedTranscript().conversationId===binding.conversationId||await peer.open(binding.conversationId)):await peer.newChat();
-      if(!ok||this.library.active()?.id!==activeId||this.stopped)return false;
+      if(!ok||(this.library.active()?.id??null)!==activeId||this.stopped)return false;
       this.pendingAttach=to;this.persist();return true;
     }catch{return false;}finally{this.suspended--;}
   }
@@ -136,6 +136,16 @@ export class SharedConversations {
       this.pendingAttach=null;this.persist();
     }catch{if(previous)this.library.select(previous);this.notice('This saved conversation could not be opened. Try again after checking the provider connection.');}
     finally{this.suspended--;this.render();}
+  }
+  private dismissEmpty(id:string):void{
+    if(!this.library||this.suspended||this.stopped)return;
+    const active=this.library.active()?.id===id;
+    if(!this.library.dismissEmpty(id))return;
+    if(active)this.pendingAttach=null;
+    this.persist();this.flush();this.render();
+    const mount=this.doc.getElementById('conversation-library');
+    const next=mount?.querySelector<HTMLButtonElement>('.library-chat')??mount?.querySelector<HTMLElement>('.library-new-folder');
+    next?.focus({preventScroll:true});
   }
   private edit(action:()=>void):void{if(!this.library||this.suspended)return;try{action();this.persist();this.flush();this.render();}catch(error){this.notice(error instanceof Error?error.message:'Chat organisation could not be saved.');}}
   private node<K extends keyof HTMLElementTagNameMap>(tag:K,text?:string):HTMLElementTagNameMap[K]{const node=this.doc.createElement(tag);if(text!==undefined)node.textContent=text;return node;}
@@ -320,7 +330,7 @@ export class SharedConversations {
     const target=Array.from(mount.querySelectorAll<HTMLElement>('[data-library-focus]')).find(n=>n.dataset.libraryFocus===key);if(!target)return;
     target.focus({preventScroll:true});if(target instanceof HTMLInputElement){const end=target.value.length;target.setSelectionRange(end,end);}
   }
-  private chatRow(c:LibraryConversation,active:string|null,mark:boolean):HTMLButtonElement{
+  private chatRow(c:LibraryConversation,active:string|null,mark:boolean):HTMLElement{
     const b=this.button('',()=>{void this.open(c.id);}),title=this.node('span',c.title);
     b.className='library-chat';b.dataset.libraryFocus=c.id;b.setAttribute('aria-current',String(c.id===active));title.className='library-chat-title';
     const providers=c.bindings.map(x=>PROVIDER_NAMES[x.provider]);b.title=c.title+(providers.length?' · '+providers.join(' · '):'');
@@ -328,7 +338,10 @@ export class SharedConversations {
     if(mark){const icon=provider?this.svg([PROVIDER_PATHS[provider]],'library-provider provider-logo',true):this.svg(['M20 12a8 8 0 0 1-11.6 7.1L4 20l1-4.2A8 8 0 1 1 20 12Z'],'library-provider');if(provider)icon.setAttribute('data-provider',provider);b.append(icon);}
     b.append(title);
     const at=lastMessage(c);if(at!==null){const age=this.node('span',formatAge(Date.now()-at));age.className='library-chat-age';age.setAttribute('aria-hidden','true');b.append(age);}
-    return b;
+    if(c.bindings.length||c.messages.length)return b;
+    const row=this.node('div');row.className='library-chat-row';
+    const close=this.button('×',()=>this.dismissEmpty(c.id));close.className='library-chat-close';close.title='Close empty chat';close.setAttribute('aria-label','Close empty chat: '+c.title);close.dataset.libraryFocus='close-empty:'+c.id;
+    row.append(b,close);return row;
   }
   private renderHistory():void{
     const history=this.doc.getElementById('shared-conversation-history');if(!history)return;

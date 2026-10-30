@@ -59,3 +59,33 @@ test('open sidebar folders persist with the library, follow removal and reject u
   const snapshot=library.snapshot();
   for(const open of [['missing-folder'],[forest,forest],[],[7]])assert.throws(()=>readConversationLibrary({...snapshot,expandedFolderIds:open},project));
 });
+
+test('empty sidebar dismissal removes only the exact row and preserves the active record and folders',()=>{
+  const library=fixture();library.observe(transcript('codex','thread-1','Keep this history'));
+  const recorded=library.active()!,folder=library.createFolder('Saved');library.move(recorded.id,folder);
+  const dismissed=library.newConversation(),active=library.newConversation();
+  const before=library.snapshot();
+  for(const id of ['', 'missing',dismissed.toUpperCase(),recorded.id])assert.equal(library.dismissEmpty(id),false);
+  assert.deepEqual(library.snapshot(),before);
+  assert.equal(library.dismissEmpty(dismissed),true);assert.equal(library.dismissEmpty(dismissed),false);
+  assert.equal(library.active()!.id,active);assert.deepEqual(library.snapshot().conversations.find(c=>c.id===recorded.id),{...recorded,folderId:folder});
+  assert.deepEqual(library.snapshot().folders,before.folders);
+  const reopened=new ConversationLibrary(project,library.snapshot());assert.deepEqual(reopened.snapshot(),library.snapshot());
+});
+test('dismissing the active empty row leaves no selected history or inherited context',()=>{
+  const library=fixture();library.observe(transcript('claude','recorded-claude','Other conversation context'));
+  const recorded=library.active()!,empty=library.newConversation();
+  assert.equal(library.dismissEmpty(empty),true);assert.equal(library.active(),null);
+  assert.deepEqual(library.snapshot().conversations,[recorded]);
+  assert.equal(library.contextFor('codex','Keep this unsent text'),'Keep this unsent text');
+  const reopened=new ConversationLibrary(project,library.snapshot());assert.equal(reopened.active(),null);
+  assert.equal(reopened.observe({provider:'codex',projectPath:project,conversationId:null,sessionId:null,messages:[]}),false);
+  assert.deepEqual(reopened.snapshot(),library.snapshot());
+});
+test('a real native binding remains protected even when it has no messages and is still titled New chat',()=>{
+  const library=fixture();library.observe({...transcript('codex','empty-native',''),messages:[]});
+  const bound=library.active()!,before=library.snapshot();assert.equal(bound.title,'New chat');
+  assert.equal(library.dismissEmpty(bound.id),false);assert.deepEqual(library.snapshot(),before);
+  library.observe(transcript('codex','empty-native','Now recorded'));const recorded=library.snapshot();
+  assert.equal(library.dismissEmpty(bound.id),false);assert.deepEqual(library.snapshot(),recorded);
+});

@@ -15,7 +15,7 @@ tags: [arcane, dashboard]
 
 The [[Delivery/Goal Board|ten urgent goals]] track the path to a dependable customer release. Open a goal for its outcome, dependencies and acceptance criteria. Check it off only after recording evidence.
 
-Current priority: complete the Blender forest workflow, improve original asset quality and deliver the supplied interface reference. [[Operations/Requirements Ledger|All requirements]] · [[Design/Interface Reference|Design reference]] · [[Bugs/Forest Blender Workflow|Forest regression]]. Main and selected installed source `5b84a41` passed all nine required jobs; the running older window offers Restart to update. Newer material diagnostics and oak layout changes require corrected exact-source hosted verification. Customer restart and Studio acceptance remain separate.
+Current priority: unblock safe updates and close empty chats through [[Bugs/Restart and Empty Chats]], then resume the Blender forest workflow, original asset quality and supplied interface reference. [[Operations/Requirements Ledger|All requirements]] · [[Design/Interface Reference|Design reference]] · [[Bugs/Forest Blender Workflow|Forest regression]]. Main `4f3da0a` passed its seven component/package jobs and retains unchanged inputs against both passing669 native jobs. Selected installed source is still `5b84a41`; the older running window has a blocked update. The focused restart fix requires its own hosted checks. Customer restart and Studio acceptance remain separate.
 
 ## Build with knowledge
 

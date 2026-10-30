@@ -2480,6 +2480,9 @@ body.arcane-app{background:var(--vignette),var(--canvas);background-color:var(--
 .arcane-app .conversation-library .library-folder-name::after{content:attr(data-count);margin-left:auto;color:var(--muted);font-weight:500}
 .arcane-app .conversation-library .library-chat{min-height:32px;padding:6px var(--s-1);border-radius:var(--r-row);color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .arcane-app .conversation-library .library-chat[aria-current=true]{background:var(--hover);border-color:var(--glass-line);color:var(--text);font-weight:550}
+.arcane-app .conversation-library .library-chat-row{display:flex;align-items:center;gap:4px;min-width:0}
+.arcane-app .conversation-library .library-chat-row>.library-chat{flex:1;min-width:0}
+.arcane-app .conversation-library .library-chat-close{flex:0 0 32px;min-height:32px;padding:4px;border-radius:var(--r-row);color:var(--text-secondary)}
 .arcane-app .conversation-library .library-action{display:inline-flex;align-items:center;min-height:28px;padding:0 var(--s-1);color:var(--text-secondary);font-size:12px}
 .arcane-app .conversation-library .library-action-danger{color:var(--danger)}
 .arcane-app .conversation-library .library-input{min-height:32px;margin:var(--s-0) 0;padding:6px var(--s-1);border-radius:var(--r-control);font-size:13px}

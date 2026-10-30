@@ -39,6 +39,13 @@ export class ConversationLibrary {
   active():LibraryConversation|null{return structuredClone(this.value.conversations.find(c=>c.id===this.value.activeId)??null);}
   private change(edit:(next:ConversationLibrarySnapshot)=>void):void{const next=this.snapshot();edit(next);this.value=readConversationLibrary(next,this.value.projectPath);}
   newConversation():string{const id=this.makeId();this.change(s=>{s.conversations.push({id,title:'New chat',folderId:null,bindings:[],messages:[]});s.activeId=id;});return id;}
+  /** Dismiss a presentation-only empty row; native history and provider drafts are never removed. */
+  dismissEmpty(id:string):boolean{
+    const row=this.value.conversations.find(c=>c.id===id);
+    if(!row||row.bindings.length||row.messages.length)return false;
+    this.change(s=>{s.conversations=s.conversations.filter(c=>c.id!==id);if(s.activeId===id)s.activeId=null;});
+    return true;
+  }
   select(id:string):void{this.change(s=>{if(!s.conversations.some(c=>c.id===id))throw Error('This conversation is unavailable.');s.activeId=id;});}
   createFolder(name:string):string{const id=this.makeId();this.change(s=>s.folders.push({id,name:name.trim()}));return id;}
   renameFolder(id:string,name:string):void{this.change(s=>{const f=s.folders.find(f=>f.id===id);if(!f)throw Error('This folder is unavailable.');f.name=name.trim();});}

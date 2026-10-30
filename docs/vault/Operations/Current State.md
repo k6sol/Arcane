@@ -5,17 +5,17 @@ tags: [arcane]
 ---
 # Current state
 
-Recorded 30 October 2026. Main and selected installed source are SSH-verified `5b84a41be92c60cc35fb4c37ab0a989565d4776d`, with all nine required hosted jobs passing. Installation completed with observed exit zero and both pipes closed; the older running window visibly offers Restart to update. It was not restarted. Newer model/diagnostics source `669adff` now passes both pinned native platforms, with component/package checks still active. Routing follow-up `da17890` passes local SDK tests and awaits fresh component acceptance; native workflow inputs are unchanged.
+Recorded 30 October 2026. Main is SSH-verified `4f3da0a`, with seven component/package jobs passing in run41097527702 and unchanged native workflow inputs against the two passing669 jobs in run41094897137. Selected installed desktop remains `5b84a41`. The user has closed the older window and authorized opening the verified update when ready. Restart blockage and missing empty-chat close controls now take priority: see [[Bugs/Restart and Empty Chats]]. Unfinished height-aware foliage work is preserved separately and excluded from this focused hotfix.
 
 ## Source, delivery and live checks
 
 | Item | Authoritative evidence | Boundary |
 |---|---|---|
-| Main | `5b84a41` passed seven component/package jobs in [41087633471](https://github.com/k6sol/Arcane/actions/runs/41087633471) and both pinned native jobs in [41087633487](https://github.com/k6sol/Arcane/actions/runs/41087633487), ordinary fast-forward | No updated customer journey follows from green checks |
-| New verification work | Corrected `669adff` passes both native jobs in [41094897137](https://github.com/k6sol/Arcane/actions/runs/41094897137); all six authenticated Windows/Linux tree images inspected | Component run41094897923 remains active. Routing follow-up needs its own component gates; unchanged native inputs permit scoped source equivalence |
+| Main | `4f3da0a` passed seven component/package jobs in [41097527702](https://github.com/k6sol/Arcane/actions/runs/41097527702), then ordinary fast-forward | Native workflow inputs match passing669; no updated customer journey follows from green checks |
+| Native verification | Corrected `669adff` passes both native jobs in [41094897137](https://github.com/k6sol/Arcane/actions/runs/41094897137) and seven component jobs in41094897923; all six authenticated Windows/Linux tree images inspected | Native evidence is reused only after comparing the complete unchanged workflow inputs |
 | Desktop | `5b84a41` archive, closed payload, source and startup receipts authenticated; immutable installation selected with original exit zero and both pipes closed | Actual old window shows update banner after selection. No restart, draft replay or updated customer chat acceptance |
 | Plugin | Canonical `5b84a41` archive, manifest and all three source-generated files verified; modular identity unchanged | No plugin installation or Studio operation in this delivery |
-| Vault | Committed669 projection synced:174 managed files, no conflicts; this routing checkpoint awaits its explicit committed revision sync | Personal notes/settings preserved; source notes remain authoritative |
+| Vault | Committed4f3 projection synced:174 managed files, no conflicts; this focused hotfix awaits its explicit committed revision sync | Personal notes/settings preserved; source notes remain authoritative |
 
 ## Verified functionality
 
