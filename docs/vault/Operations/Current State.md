@@ -26,3 +26,5 @@ Next: [[Operations/Next Session]]. Evidence: [[Operations/Evidence Ledger]] and 
 [[Bugs/Foliage Card Attachment]] passed all 39 native representation cases on both platforms; artifact measurements and Windows component-contact views were inspected. Full-tree attachment/appearance remains outstanding. [[Delivery/Supported Desktop Activation]] records launcher compatibility, verified extraction and the failed available-commit preflight; installation remains unperformed.
 
 New verification work: [[Bugs/Normal Task Handoff]] is implemented and independently source-reviewed for exact hosted validation. [[Bugs/PBR Staging Boundary]] records a distinct full-resolution receipt-loop continuity failure; no deadline or byte budget is relaxed.
+
+Task-handoff strict compilation/build passed in all six lanes on `6baf19c`. Its first runtime findings require three precise fixture corrections described in [[Bugs/Normal Task Handoff]]; complete acceptance remains pending. The full-map [[Bugs/PBR Staging Boundary]] fixture now has reviewed pump-readiness/phase evidence and an actual expired-proof countercase prepared for hosted execution.

@@ -23,3 +23,5 @@ The latest package is an unsigned portable directory. Authenticated customer sen
 [[Sessions/2026-10-30 Verified Desktop Delivery]] contains the current bounded evidence. Keep large logs, credentials, downloaded builds and device-private receipts outside shared notes.
 
 Inspect [[Bugs/PBR Staging Boundary]] independently: historical failure is inside the actual packet receipt loop. Pump readiness improves fixture ordering but phase evidence is required to distinguish later synchronous work or pump faults. Keep full maps and all original continuity/byte/time limits.
+
+Verify the current three task-fixture corrections and one full-map readiness/diagnostic fixture together. Keep the actual guarded payload review path and original native-task authorization window. Preserve real expiry refusals; do not infer a historical PBR cause from one passing run or alter production limits.

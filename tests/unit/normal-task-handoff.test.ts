@@ -109,7 +109,12 @@ async function fixture(t:test.TestContext,options:{planning?:boolean;closeFailur
   const wire=async():Promise<Wire[]>=>{const text=await readFile(audit,'utf8'),end=text.lastIndexOf('\n');return end<0?[]:text.slice(0,end).split('\n').map(line=>JSON.parse(line)as Wire);};
   const actor=(index:number)=>registry.capture(tokens[index]!,'mutate');
   const currentTask=()=>service.state().chatTasks!.at(-1)!;
-  const waitNormal=async(index:number)=>{await normalEntered[index]!.promise;await normalJoined[index];};
+  const waitNormal=async(index:number)=>{
+    await normalEntered[index]!.promise;await normalJoined[index];
+    // The session join precedes the host's asset join and cached normal state.
+    // Observe that complete original host handoff rather than one producer tail.
+    await until(()=>!registry.recognizes(tokens[index]!)&&service.state().chatTasks!.some(row=>row.connectionId===clients[index]!.snapshot().connectionId&&row.retained===true));
+  };
   const finish=(index:number)=>writeFile(join(root,'finish-'+index),'complete',{flag:'wx'});
   const plan=(taskId:string)=>service.taskPlan({connectionId:service.state().snapshot!.connectionId,threadId:THREAD,taskId});
   const until=async(check:()=>boolean|Promise<boolean>)=>{const deadline=Date.now()+6000;while(!await check()){assert.ok(Date.now()<deadline,'Actual handoff fixture event missing.');assert.deepEqual(errors,[]);await delay(5);}};
@@ -137,9 +142,11 @@ test('normal plan/asset handoff retains human review and fresh same-chat Send wi
   const prior=await f.plan(a);assert.equal(prior.plan!.state,'awaiting_review');assert.equal(prior.plan!.review!.state,'pending_submission');
   await f.approveWork(prior.plan!.review!.runId!);assert.equal((await f.plan(a)).plan!.review!.state,'accepted');
   const stillPending=await f.readReview();assert.equal(stillPending.review!.status,'pending','Work approval cannot approve a model.');
-  await assert.rejects(f.assets.prepareStudioImport(JOB,f.actor(1)),{code:'ASSET_REVIEW_REQUIRED'});
-  await f.approveModel();const prepared=await f.assets.prepareStudioImport(JOB,f.actor(1));assert.equal(prepared.status,'prepared');assert.equal(prepared.manifest.revisionId,JOB);
-  await assert.rejects(f.assets.prepareStudioImport(JOB,old),{code:'NATIVE_ASSET_AUTHORITY'});
+  const metadata=await f.assets.prepareStudioImport(JOB,f.actor(1));assert.equal(metadata.status,'prepared');
+  assert.equal((await f.readReview()).review!.status,'pending','Metadata preparation cannot approve a model or authorize native payload staging.');
+  await assert.rejects(f.assets.prepareStudioImportPayload(JOB,f.actor(1)),{code:'ASSET_REVIEW_REQUIRED'});
+  await f.approveModel();const {prepared}=await f.assets.prepareStudioImportPayload(JOB,f.actor(1));assert.equal(prepared.status,'prepared');assert.equal(prepared.manifest.revisionId,JOB);
+  await assert.rejects(f.assets.prepareStudioImportPayload(JOB,old),{code:'NATIVE_ASSET_AUTHORITY'});
   await writeFile(join(f.project,'evidence-implementation.txt'),'changed after human review');assert.equal((await f.plan(a)).plan!.review!.state,'unavailable');
   const bId=f.currentTask().taskId;await f.finish(1);await f.waitNormal(1);assert.equal((await f.send('Third task')).record.state,'acknowledged');
   assert.equal((await f.plan(a)).plan!.state,'awaiting_review');assert.equal((await f.plan(bId)).plan!.state,'awaiting_review');

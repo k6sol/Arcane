@@ -225,9 +225,9 @@ test('a Studio metadata lab initializes its owned services without a managed ass
 });
 
 test('lab shutdown fences task admission before owned playtest teardown can request a repair', { timeout: 20000 }, async t => {
-  const f = await fixture(t, true); await f.ready(); await f.finish(1);
+  const f = await fixture(t, true); await f.ready(); const pending = await f.prepare(); await f.finish(1);
   await until(() => f.providers[0]!.snapshot().thread!.turnStatus === 'completed');
-  const pending = await f.prepare(); await f.approve(pending); await until(() => f.state.closeEntered);
+  await f.approve(pending); await until(() => f.state.closeEntered);
   const measured = await f.status(pending.id); assert.equal(measured.review.outcome, 'failed'); assert.equal(measured.review.cleanup, 'complete');
   const before = await f.wire(), closing = f.lab.close(); await delay(20); f.releaseClose(); await closing;
   assert.equal(f.providers[0]!.snapshot().connected, false); assert.equal(f.state.starts, 1); assert.equal(f.state.stops, 1); assert.equal(f.state.inputCalls, 1);

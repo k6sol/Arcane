@@ -5,6 +5,12 @@ tags: [arcane]
 ---
 # Session log
 
+## 2026-10-30 · Runtime-bound fixture corrections
+
+All six strict compiler/build lanes passed on the connected handoff. Retained actual Linux failures and corrected three fixture files at their original producer, complete-host readiness, payload-review and shutdown authorization boundaries. No production guard or deadline changed.
+
+Independently reviewed the full-resolution PBR fixture correction: real first-pump readiness, bounded actual method timings and a real six-second held-proof refusal case with zero effects/claims. Existing maps and budget checks remain intact; later-loop historical expiry still needs actual phase evidence. Exact hosted outcomes remain pending, and the full production goal remains active.
+
 ## 2026-10-30 · Native geometry proof and connected handoff
 
 Verified the actual foliage artifacts after both native Blender lanes passed all 39 cases. Rechecked authenticated digests, exact source forms, measured root/contact error, save/reopen and observed owned closure; inspected Windows front/side neutral contact renders. Checked off only these component criteria; full-tree and atlas-visible attachment remain open.

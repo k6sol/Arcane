@@ -14,7 +14,7 @@ import {ARCANE_NATIVE_TOOL_NAMES} from '../../packages/protocol/src/arcane-tools
 // native asset worker, Studio or customer acceptance fixture.
 const PEER=String.raw`
 const {createInterface}=require('node:readline'),{appendFileSync,existsSync}=require('node:fs');
-const [encoded,audit]=process.argv.slice(1),s=JSON.parse(encoded);let turns=0,checks=0,models=0;
+const [encoded,audit]=process.argv.slice(1),s=JSON.parse(encoded),modes=s.turns??[];let turns=0,checks=0,models=0;
 const send=v=>process.stdout.write(JSON.stringify(v)+'\n'),reply=(id,result)=>send({id,result});
 const wait=(name,run)=>{const timer=setInterval(()=>{if(existsSync(s.gate+'-'+name)){clearInterval(timer);run();}},5);};
 createInterface({input:process.stdin}).on('line',line=>{
@@ -27,7 +27,7 @@ createInterface({input:process.stdin}).on('line',line=>{
  if(method==='thread/start')return reply(id,{thread:{id:'retirement.thread',sessionId:'retirement.session',turns:[],status:{type:'idle'}},model:params.model,modelProvider:'openai',cwd:process.cwd(),approvalPolicy:'on-request',approvalsReviewer:'user',sandbox:{type:'readOnly',networkAccess:false}});
  if(method==='mcpServerStatus/list'){checks++;const value={data:[{name:'arcane',runtimeStatus:'connected',toolsError:null,pluginId:null,tools:Object.fromEntries(s.tools.map(n=>[n,{}]))}],nextCursor:null};
   if(s.holdCheck===checks)return wait('preflight',()=>reply(id,value));return reply(id,value);}
- if(method==='turn/start'){turns++;const mode=s.turns[turns-1]??'complete',turn={id:'retirement.turn:'+turns,status:mode==='complete'?'completed':mode==='failed'?'failed':'inProgress'};
+ if(method==='turn/start'){turns++;const mode=modes[turns-1]??'complete',turn={id:'retirement.turn:'+turns,status:mode==='complete'?'completed':mode==='failed'?'failed':'inProgress'};
   if(mode==='reject')return send({id,error:{code:-32000,message:'controlled rejection'}});
   if(mode==='unknown')return reply(id,{});
   if(mode==='terminal-before-ack'){send({method:'turn/completed',params:{threadId:'retirement.thread',turn:{...turn,status:'completed'}}});return wait('ack',()=>reply(id,{turn}));}

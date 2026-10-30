@@ -5,6 +5,8 @@ import {deflateSync} from 'node:zlib';
 import {mkdtemp,mkdir,realpath,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join,relative,isAbsolute} from 'node:path';
+import {performance} from 'node:perf_hooks';
+import {setTimeout as delay} from 'node:timers/promises';
 import {STUDIO_ASSET_TRANSFER_LIMITS as LIMITS,type StudioAssetStageArgs,type StudioCommand,type Json} from '../../packages/protocol/src/studio.js';
 import {StudioStore,type StageRunIntent} from '../../packages/storage/src/studio-store.js';
 import {ConversationWorkStore} from '../../packages/storage/src/conversation-work-store.js';
@@ -46,36 +48,126 @@ function generated(projectId:string,target:HostGeneratedStudioImport['target']):
   bytes.writeUInt32LE(0x46546c67);bytes.writeUInt32LE(2,4);bytes.writeUInt32LE(bytes.length,8);bytes.writeUInt32LE(size,12);bytes.writeUInt32LE(0x4e4f534a,16);bytes.fill(32,20,20+size);text.copy(bytes,20);bytes.writeUInt32LE(n,20+size);bytes.writeUInt32LE(0x004e4942,24+size);bin.copy(bytes,28+size);
   return {schemaVersion:1,projectId,assetId:'arcane_'+hash('large-budget'),revisionId:JOB,sourceSha256:hash(bytes),producer:{blenderVersion:'4.5.3 LTS',exporterVersion:'Khronos glTF Blender IO v4.5.48'},target,placement:{mode:'bottom-centre'},studsPerMeter:1/.28,files:[{fileId:'export',contentType:'model/gltf-binary',sha256:hash(bytes),bytes}],models:[{fileId:'export',resources:[],objects}],anchors:[],baseline:null};
 }
+function diagnosticCode(error:unknown):string {
+  try {
+    const code=error&&typeof error==='object'?Object.getOwnPropertyDescriptor(error,'code')?.value:undefined;
+    return typeof code==='string'&&['STUDIO_STAGE_CONTINUITY','STUDIO_STAGE_SCOPE','STUDIO_STAGE_TIMEOUT','STUDIO_STAGE_RECEIPT','STUDIO_STAGE_CONFLICT',
+      'STUDIO_STAGE_GUARD','STUDIO_STAGE_CLOSED','ASSET_REVIEW_REQUIRED','ERR_ASSERTION','ERR_SQLITE_ERROR'].includes(code)?code:'OTHER_ERROR';
+  } catch {return 'OTHER_ERROR';}
+}
 async function fixture(t:test.TestContext,options:{wrongAck?:boolean;chunkBytes?:number}={}){
   const base=await realpath(tmpdir()),root=await mkdtemp(join(base,'arcane-pbr-budget-')),projectPath=await realpath(root),work=new ConversationWorkStore({directory:join(root,'work'),projectPath});
   const conversation={provider:'codex' as const,threadId:'pbr-budget',sessionId:null};work.bind({conversation,kind:'asset-job',id:JOB});
   const registry=createNativeAssetRegistry({projectPath}),incarnation=registry.issue(),binding={connectionId:'pbr-budget-connection',threadId:conversation.threadId};incarnation.seal({...binding,...conversation});incarnation.grant(binding);incarnation.dispatched({...binding,operationId:'pbr-stage'});let actor=registry.capture(incarnation.credential(),'mutate');
   let store=new StudioStore({directory:join(root,'studio')});const grant=store.createGrant({allowedRoots:['Workspace','ServerStorage'],allowWrites:true}),pair=store.pair({code:grant.code,protocolVersion:1,capabilities:['asset.stage_packet','asset.reconstruct','scene.import_context'],identity:{clientSessionId:'pbr-plugin',pluginVersion:'0.1.9',name:'PBR budget fixture',placeId:12,universeId:34}});
-  const proof=()=>({sessionId:pair.sessionId,clientLifetimeId:'pbr-plugin',pluginArtifactHash:PLUGIN,markerName:'ArcaneTestProof_pbr',placeId:12,universeId:34,placeName:'PBR budget fixture',mode:'Edit',playEpoch:0,continuitySupported:true,connected:true});store.poll(pair.sessionId,proof());
+  const proof=()=>({sessionId:pair.sessionId,clientLifetimeId:'pbr-plugin',pluginArtifactHash:PLUGIN,markerName:'ArcaneTestProof_pbr',placeId:12,universeId:34,placeName:'PBR budget fixture',mode:'Edit',playEpoch:0,continuitySupported:true,connected:true});
   const target={sessionId:pair.sessionId,placeId:12,universeId:34,root:'Workspace' as const,parentRef:'pbr-parent',creator:{kind:'group' as const,id:'56'}},g=generated(work.projectId,target),authority=createStudioImportManifestAuthority({loadGeneratedFiles:async()=>g}),prepared=authority.prepare(await authority.admit(JOB));authority.close();
   const payload=decodeStudioImportPayload(prepared,new Map(g.files.map(f=>[f.fileId,f.bytes])),options.chunkBytes?{chunkBytes:options.chunkBytes}:{}),transfer=createStudioImportTransfer(prepared,payload),reference={reviewId:'99999999-9999-4999-8999-999999999999',subjectDigest:hash('reviewed-exact-source'),revision:1};let approved=true,sourceCurrent=true,reviewChecks=0,selected=0,released=0;
+  // All clocks remain real. Readiness comes only from the owned timer's actual
+  // paired poll after preparation, never from an inspect/target guard callback.
+  const preparedAt=Date.now(),observationStarted=performance.now();
+  type Phase='enqueue'|'poll'|'result'|'continuity-read';
+  type PhaseSample={calls:number;lastMs:number;maxMs:number;failures:number;lastFailure:string|null};
+  const phases=Object.fromEntries(['enqueue','poll','result','continuity-read'].map(phase=>[
+    phase,{calls:0,lastMs:0,maxMs:0,failures:0,lastFailure:null}])) as Record<Phase,PhaseSample>;
+  const boundedMs=(value:number)=>Math.max(-STUDIO_STAGING_LIMITS.totalDeadlineMs,Math.min(STUDIO_STAGING_LIMITS.totalDeadlineMs,Math.round(value)));
+  const increment=(value:number)=>Math.min(1_000_000,value+1);
+  let firstObservedAt:number|null=null,readySuccessful=false,successfulPolls=0,lastPollCommittedMs:number|null=null,maxPollGapMs=0,lastQueuedOrdinal:number|null=null;
+  let lastProofRemainingMs:number|null=null,maxProofAgeMs=0,pumpFailures=0,firstPumpFailure:string|null=null,lastPumpFailure:string|null=null,pumpHeld=false;
+  const measure=<T>(phase:Phase,operation:()=>T):T=>{
+    const sample=phases[phase],started=performance.now();sample.calls=increment(sample.calls);
+    try{return operation();}catch(error){sample.failures=increment(sample.failures);sample.lastFailure=diagnosticCode(error);throw error;}
+    finally{sample.lastMs=boundedMs(performance.now()-started);sample.maxMs=Math.max(sample.maxMs,sample.lastMs);}
+  };
+  const observeStore=(actual:StudioStore)=>{
+    // Delegate unchanged arguments/results to actual methods. The session timing
+    // covers a real proof read, not the controller's entire continuity guard.
+    const enqueue=actual.enqueueStagePacket.bind(actual),poll=actual.poll.bind(actual),result=actual.result.bind(actual),session=actual.session.bind(actual);
+    t.mock.method(actual,'enqueueStagePacket',(...args:Parameters<StudioStore['enqueueStagePacket']>)=>measure('enqueue',()=>{
+      const command=enqueue(...args);lastQueuedOrdinal=args[1];return command;
+    }));
+    t.mock.method(actual,'poll',(...args:Parameters<StudioStore['poll']>)=>measure('poll',()=>poll(...args)));
+    t.mock.method(actual,'result',(...args:Parameters<StudioStore['result']>)=>measure('result',()=>result(...args)));
+    t.mock.method(actual,'session',(...args:Parameters<StudioStore['session']>)=>measure('continuity-read',()=>{
+      const value=session(...args);
+      if(value.id===pair.sessionId&&value.proof){
+        const time=Date.now();lastProofRemainingMs=boundedMs(Date.parse(value.proof.expiresAt)-time);
+        maxProofAgeMs=Math.max(maxProofAgeMs,boundedMs(time-Date.parse(value.proof.observedAt)));
+      }
+      return value;
+    }));
+  };
+  observeStore(store);
+  const observation=()=>({schemaVersion:1,scope:'paired-fixture-only',ready:readySuccessful,
+    firstObservationAfterPreparation:readySuccessful&&firstObservedAt!==null&&firstObservedAt>=preparedAt,elapsedMs:boundedMs(performance.now()-observationStarted),
+    successfulPolls,lastPollCommittedMs:lastPollCommittedMs===null?null:boundedMs(lastPollCommittedMs),
+    currentPollSilenceMs:lastPollCommittedMs===null?null:boundedMs(performance.now()-observationStarted-lastPollCommittedMs),
+    maxPollGapMs,lastQueuedOrdinal,lastProofRemainingMs,maxProofAgeMs,pumpHeld,pumpFailures,firstPumpFailure,lastPumpFailure,
+    phases:Object.fromEntries(Object.entries(phases).map(([phase,value])=>[phase,{...value}]))});
+  const diagnose=(operation:string,error?:unknown)=>{
+    try{t.diagnostic('PBR staging observation: '+JSON.stringify({operation,...(error===undefined?{}:{failure:diagnosticCode(error)}),...observation()}));}
+    catch{/* A diagnostic cannot replace the original production or fixture failure. */}
+  };
+  const observed=async<T>(operation:'stage'|'reconstruct',start:()=>Promise<T>):Promise<T>=>{
+    try{return await start();}catch(error){diagnose(operation,error);throw error;}
+  };
   const check=()=>{reviewChecks++;assertNativeAssetActor(actor,'mutate');if(!approved||!sourceCurrent)throw Object.assign(Error('Reviewed source unavailable'),{code:'ASSET_REVIEW_REQUIRED'});};
   const review={reference,assertCurrent:check},assets={async prepareStudioImportPayload(){check();return {prepared,payload,transfer,review};},async reviewImport(){check();return review;}} as unknown as Pick<AssetService,'prepareStudioImportPayload'|'reviewImport'>;
   const host:StudioImportHostOptions={workAssociations:work,beginPreparationAttempt(_scope,_job,_actor,guard){guard();return Object.freeze({kind:'studio-import-preparation-attempt',id:randomUUID()});},selectTarget(_scope,_job,_actor,guard){guard();selected++;return {target,placement:{mode:'bottom-centre'},studsPerMeter:1/.28};},validateTarget(){assert.deepEqual(prepared.manifest.target,target);},releaseTarget(){released++;}};
   const bind=()=>store.bindAssetModelReview(intent=>{assert.deepEqual(intent.modelReview,reference);check();});let release=bind(),controller=createStudioImportStagingController({projectPath,workAssociations:work,studio:store,assets,host,pluginArtifactHash:PLUGIN});
   let bytes=0,envelopes=0,count=0,wrongAck=0;const failures:unknown[]=[],delivered:StudioCommand[]=[];
-  const pump=setInterval(()=>{try{for(const c of store.poll(pair.sessionId,proof())){delivered.push(c);if(c.method==='asset.stage_packet'){const packet=JSON.parse(c.args.packet as string);assert.equal(packet.ordinal,count);bytes+=Buffer.byteLength(c.args.packet as string);envelopes+=Buffer.byteLength(JSON.stringify(c.args));count++;const receipt={transferDigest:transfer.digest,packetCount:count,byteLength:bytes,state:packet.kind==='seal'?'sealed':'receiving',engineVerification:'pending'};
+  let readySettled=false,resolveReady!:()=>void,rejectReady!:(error:unknown)=>void;
+  const ready=new Promise<void>((resolve,reject)=>{resolveReady=()=>resolve();rejectReady=reject;});
+  const pump=setInterval(()=>{if(pumpHeld)return;try{
+    const commands=store.poll(pair.sessionId,proof()),committed=performance.now()-observationStarted;
+    if(lastPollCommittedMs!==null)maxPollGapMs=Math.max(maxPollGapMs,boundedMs(committed-lastPollCommittedMs));
+    lastPollCommittedMs=committed;successfulPolls=increment(successfulPolls);
+    if(!readySettled){
+      const actual=store.session(pair.sessionId).proof;assert.ok(actual);assert.equal(commands.length,0);
+      firstObservedAt=Date.parse(actual.observedAt);assert.ok(firstObservedAt>=preparedAt);
+      assert.equal(Date.parse(actual.expiresAt)-firstObservedAt,6000);assert.ok(Date.parse(actual.expiresAt)>Date.now());
+      readySuccessful=true;readySettled=true;resolveReady();
+    }
+    for(const c of commands){delivered.push(c);if(c.method==='asset.stage_packet'){const packet=JSON.parse(c.args.packet as string);assert.equal(packet.ordinal,count);bytes+=Buffer.byteLength(c.args.packet as string);envelopes+=Buffer.byteLength(JSON.stringify(c.args));count++;const receipt={transferDigest:transfer.digest,packetCount:count,byteLength:bytes,state:packet.kind==='seal'?'sealed':'receiving',engineVerification:'pending'};
     if(options.wrongAck&&!wrongAck){wrongAck++;store.result({sessionId:pair.sessionId,commandId:c.id,state:'succeeded',result:{...receipt,byteLength:envelopes}});}else store.result({sessionId:pair.sessionId,commandId:c.id,state:'succeeded',result:receipt});
   }else if(c.method==='scene.import_context'){store.result({sessionId:pair.sessionId,commandId:c.id,state:'succeeded',result:{sessionId:pair.sessionId,root:'Workspace',parentRef:{instanceId:'pbr-parent',sessionId:pair.sessionId,root:'Workspace',pathSegments:[],className:'Workspace'},placeId:12,universeId:34,mode:'Edit',modeProvenance:'StudioTestService.EditModeActive',creator:{status:'available',kind:'group',id:56,provenance:'game.CreatorType/CreatorId'},studioUser:{status:'not_applicable',id:null,provenance:'StudioService:GetUserId'}}});}
-    else{assert.equal(c.method,'asset.reconstruct');store.result({sessionId:pair.sessionId,commandId:c.id,state:'succeeded',result:{runId:c.args.runId,transferDigest:transfer.digest,state:'reconstructed',objects:c.args.objects,imported:false,engineVerification:'pending'}});}}}catch(error){failures.push(error);}},10);
+    else{assert.equal(c.method,'asset.reconstruct');store.result({sessionId:pair.sessionId,commandId:c.id,state:'succeeded',result:{runId:c.args.runId,transferDigest:transfer.digest,state:'reconstructed',objects:c.args.objects,imported:false,engineVerification:'pending'}});}}}catch(error){
+      failures.push(error);pumpFailures=increment(pumpFailures);lastPumpFailure=diagnosticCode(error);firstPumpFailure??=lastPumpFailure;
+      if(!readySettled){readySettled=true;rejectReady(error);}
+    }},10);
   t.after(()=>{clearInterval(pump);controller.close();release();store.close();registry.close();work.close();assert.ok(!isAbsolute(relative(base,root))&&relative(base,root).startsWith('arcane-pbr-budget-'));return rm(root,{recursive:true,force:true}).then(()=>assert.deepEqual(failures,[]));});
-  return {root,pair,proof,prepared,payload,transfer,work,reference,target,conversation,failures,delivered,get store(){return store;},get actor(){return actor;},get controller(){return controller;},get checks(){return {reviewChecks,selected,released,bytes,envelopes,count,wrongAck};},reject(){approved=false;},changeSource(){sourceCurrent=false;},newActor(){incarnation.ended('pbr-stage');incarnation.dispatched({...binding,operationId:'pbr-reconstruct'});actor=registry.capture(incarnation.credential(),'mutate');},restart(){controller.close();release();store.close();store=new StudioStore({directory:join(root,'studio')});release=bind();controller=createStudioImportStagingController({projectPath,workAssociations:work,studio:store,assets,host,pluginArtifactHash:PLUGIN});}};
+  let readinessTimer:ReturnType<typeof setTimeout>|undefined;
+  try{await Promise.race([ready,new Promise<never>((_resolve,reject)=>{
+    readinessTimer=setTimeout(()=>reject(Error('Owned PBR fixture poll did not become ready within the existing packet deadline.')),STUDIO_STAGING_LIMITS.packetDeadlineMs);
+  })]);}catch(error){diagnose('readiness',error);throw error;}finally{if(readinessTimer!==undefined)clearTimeout(readinessTimer);}
+  return {root,pair,proof,prepared,payload,transfer,work,reference,target,conversation,failures,delivered,observation,observed,
+    holdPump(){pumpHeld=true;},get store(){return store;},get actor(){return actor;},get controller(){return controller;},get checks(){return {reviewChecks,selected,released,bytes,envelopes,count,wrongAck};},reject(){approved=false;},changeSource(){sourceCurrent=false;},newActor(){incarnation.ended('pbr-stage');incarnation.dispatched({...binding,operationId:'pbr-reconstruct'});actor=registry.capture(incarnation.credential(),'mutate');},restart(){controller.close();release();store.close();store=new StudioStore({directory:join(root,'studio')});observeStore(store);release=bind();controller=createStudioImportStagingController({projectPath,workAssociations:work,studio:store,assets,host,pluginArtifactHash:PLUGIN});}};
 }
 
 test('full-resolution 20 MiB PBR maps stage, seal, reconstruct and recover through actual production boundaries',{timeout:120000},async t=>{
   const f=await fixture(t),started=Date.now();assert.equal(f.payload.textures!.reduce((n,x)=>n+x.bytes.byteLength,0),20*1024*1024);assert.equal(f.payload.textures!.length,8);assert.ok(f.transfer.byteLength>8*1024*1024);assert.ok(f.transfer.byteLength<=LIMITS.rawBytes);
-  const staged=await f.controller.stage(JOB,f.actor);assert.deepEqual(f.failures,[]);assert.equal(staged.byteLength,f.transfer.byteLength);assert.equal(staged.packetCount,f.transfer.packets.length);assert.equal(staged.imported,false);assert.equal(staged.state,'sealed');
+  assert.equal(f.observation().firstObservationAfterPreparation,true);assert.ok(f.observation().successfulPolls>=1);
+  const staged=await f.observed('stage',()=>f.controller.stage(JOB,f.actor));assert.deepEqual(f.failures,[]);assert.equal(staged.byteLength,f.transfer.byteLength);assert.equal(staged.packetCount,f.transfer.packets.length);assert.equal(staged.imported,false);assert.equal(staged.state,'sealed');
   assert.ok(f.checks.envelopes>8*1024*1024&&f.checks.envelopes<=LIMITS.envelopeBytes);assert.ok(f.checks.envelopes>staged.byteLength);assert.equal(f.checks.wrongAck,0);assert.ok(f.checks.reviewChecks>staged.packetCount);assert.equal(f.checks.selected,1);assert.equal(f.checks.released,1);
   assert.deepEqual(parseNativeStudioStagingResponse({jobId:JOB,projectId:f.work.projectId,staged},JOB,f.work.projectId).staged,staged);
   const run=f.store.readStageRun(f.work.projectId,JOB)!;assert.deepEqual(run.intent.modelReview,f.reference);assert.equal(run.intent.transferDigest,f.transfer.digest);assert.equal(run.intent.payloadDigest,f.payload.digest);
-  assert.ok(f.delivered.some(c=>c.method==='asset.stage_packet'&&JSON.parse(c.args.packet as string).kind==='texture'));f.newActor();const reconstructed=await f.controller.reconstruct(JOB,f.actor);assert.equal(reconstructed.objects.length,3);assert.equal(reconstructed.imported,false);
-  const elapsedMs=Date.now()-started;assert.ok(elapsedMs<STUDIO_STAGING_LIMITS.totalDeadlineMs);t.diagnostic(JSON.stringify({rawRgbaBytes:20*1024*1024,packets:staged.packetCount,rawTransferBytes:staged.byteLength,envelopeBytes:f.checks.envelopes,elapsedMs,transferDigest:staged.transferDigest}));
+  assert.ok(f.delivered.some(c=>c.method==='asset.stage_packet'&&JSON.parse(c.args.packet as string).kind==='texture'));f.newActor();const reconstructed=await f.observed('reconstruct',()=>f.controller.reconstruct(JOB,f.actor));assert.equal(reconstructed.objects.length,3);assert.equal(reconstructed.imported,false);
+  const elapsedMs=Date.now()-started;assert.ok(elapsedMs<STUDIO_STAGING_LIMITS.totalDeadlineMs);t.diagnostic(JSON.stringify({rawRgbaBytes:20*1024*1024,packets:staged.packetCount,rawTransferBytes:staged.byteLength,envelopeBytes:f.checks.envelopes,elapsedMs,transferDigest:staged.transferDigest,observation:f.observation()}));
   f.restart();const historical=f.store.readStageRun(f.work.projectId,JOB)!;assert.deepEqual(historical.receipt,run.receipt);assert.equal(historical.intent.plan.length,staged.packetCount);const {commandId:_command,...recorded}=reconstructed;assert.deepEqual(f.store.readStageReconstruction(f.work.projectId,JOB,run.runId)?.receipt,recorded);
+});
+
+test('a held PBR fixture heartbeat genuinely expires and cannot queue or claim native staging',{timeout:120000},async t=>{
+  const f=await fixture(t);assert.equal(f.payload.textures!.reduce((n,x)=>n+x.bytes.byteLength,0),20*1024*1024);
+  f.holdPump();const before=f.store.session(f.pair.sessionId).proof!;assert.ok(before);
+  const polls=f.observation().successfulPolls,expiresAt=Date.parse(before.expiresAt);
+  assert.equal(expiresAt-Date.parse(before.observedAt),6000);
+  await delay(Math.max(1,expiresAt-Date.now()+1));assert.ok(Date.now()>=expiresAt);
+  await assert.rejects(f.observed('stage',()=>f.controller.stage(JOB,f.actor)),{code:'STUDIO_STAGE_CONTINUITY'});
+  assert.equal(f.observation().successfulPolls,polls);assert.equal(f.observation().pumpHeld,true);
+  assert.deepEqual(f.store.session(f.pair.sessionId).proof,before);assert.deepEqual(f.failures,[]);
+  assert.equal(f.store.commands().length,0);assert.equal(f.store.readStageRun(f.work.projectId,JOB),null);
+  assert.equal(f.delivered.length,0);assert.equal(f.checks.count,0);assert.equal(f.checks.selected,1);assert.equal(f.checks.released,1);
+  assertNativeAssetStageOperationAvailable(f.actor,JOB);
 });
 
 function accounting(f:Awaited<ReturnType<typeof fixture>>,raw:number,envelope:number,count=512):StageRunIntent{

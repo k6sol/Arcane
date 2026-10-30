@@ -26,7 +26,14 @@ Later plan acceptance is a read of actual WorkStore evidence, independent of vol
 - [x] Independently review the complete five-file production change and three new fixture files.
 - [x] Author 35 expanded cases using actual session/transport, registry, files, WorkStore and connected host seams.
 - [x] Extend the original manual-grant case to distinguish retired admission from persistent explicit preference on a fresh Send; preserve other cases/deadlines.
-- [ ] Exact hosted compiler and complete unit/release regressions pass.
+- [x] Strict compilation and product builds pass in all six hosted lanes.
+- [ ] Corrected complete unit/release regressions pass.
 - [ ] Packaged customer focus/review/model-choice/Send preserves state.
 
 Controlled peers and authored fixture assets are not provider, Blender or native Studio acceptance. This slice releases no task/report/archive pins, raises no capacity/deadline/repair limit and adds no durable settlement schema. Repaired/unknown task acceptance, cross-store archival and OS custody reconciliation remain separate work.
+
+## First runtime findings
+
+The first Linux runs on `6baf19c` exposed fixture producer/observation mistakes, retained in [run 41004526017](https://github.com/k6sol/Arcane/actions/runs/41004526017): two scripted-peer cases omitted their turn-mode array; focus waited for the session join rather than the complete host handoff; and model-review rejection was asserted on metadata preparation instead of the actual gated payload path. The existing shutdown case also attempted a new playtest after the original task had normally retired.
+
+Correct the fixtures at their real boundaries: default the controlled producer's absent array, observe the genuine retained normal-success projection, preserve approval/old-actor refusal on payload preparation while showing that metadata grants no approval, and register shutdown's original playtest before native completion. Retain all original shutdown/repair/wire assertions and deadlines. These corrections do not reopen credentials, change production joins or establish complete runtime acceptance.
