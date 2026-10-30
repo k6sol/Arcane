@@ -22,10 +22,10 @@ Depends on: 1. Owner: chat functionality.
 
 ## Evidence
 
-No whole-goal completion evidence recorded yet. Add actual revision/run/artifact links and distinguish controlled tests from customer/native proof.
+Scoped evidence: installed fa7d730 passes all seven hosted checks and one actual native Sol6.1low startup conversation. Saved login recovered automatically after reviewed old connection notice, the original receipt stayed unknown, and one fresh prompt/reply remained visible without tools or old-prompt replay.194 focused chat/sidebar cases and39 diagnostics cases pass at their recorded scopes. See [[Bugs/Restart and Empty Chats]]. Full cancellation/model/provider/preview/restart coverage and first-Send empty-row correlation remain open; no whole-goal completion is claimed.
 
 ## Next action
 
-Resolve listed dependencies, then reproduce the missing outcome before editing.
+Correlate the successful original local draft ID with its exact sidebar row through first native acknowledgment; preserve unrelated, stale and reloaded history. Continue broader customer acceptance at its actual scope.
 
 [[Delivery/Goal Board]] · [[Operations/Evidence Ledger]]

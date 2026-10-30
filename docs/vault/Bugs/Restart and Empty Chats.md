@@ -18,7 +18,7 @@ The separate bounded native inventory pagination correction already exists in th
 - [x] Reproduce the old-window failure and inspect the original journal without replay.
 - [x] Implement focused restart and empty-row controls.
 - [x] Execute focused persistence, lifecycle and sidebar regression cases.
-- [ ] Pass exact-source hosted checks and install the attributable update.
+- [x] Pass exact-source hosted checks and install the attributable update.
 - [ ] Verify the user's updated restart and chat journey.
 
 Related: [[Delivery/G02 Reliable Chat]], [[Bugs/Native Connection Inventory]], [[Operations/Current State]].
@@ -32,3 +32,11 @@ All44 update-host cases,49 desktop-host cases and the enabled real-browser updat
 Original run[41113346266](https://github.com/k6sol/Arcane/actions/runs/41113346266) on signed `2b92516` completed five lanes successfully. Windows unit2 timed out in the unchanged diagnostics case that checks one durable rejection, exact replay and read-only HTTP routes. Its five-second watchdog reported10.45seconds; the old log has no internal phase witness, so the cause remains unproved. Packaging was skipped; this candidate was neither promoted nor installed.
 
 An unchanged local run passes all14 diagnostics cases, with the affected case completing in97ms. The follow-up fixture uses owned core HTTP requests, complete bounded JSON responses, the same authenticated routes and original one-second request/five-second case limits. It retains every report, durability, replay and privacy assertion, registers server cleanup before listening, and records fixed phase durations only on failure. Global-fetch initialization is removed from this transport-independent reporting check; that is not a retrospective attribution of the hosted timeout. Actual fetch/browser coverage remains separate. Production code is unchanged by this follow-up. All645 sources compile and39 focused diagnostics/reporter/privacy cases pass locally with no skips. Fresh hosted verification remains required.
+
+## Installed verification
+
+Signed `fa7d730` passes all seven jobs in [41118208318](https://github.com/k6sol/Arcane/actions/runs/41118208318); unchanged native workflow inputs retain the two passing669 jobs. Its authenticated closed payload was installed with observed original exit zero, both pipe EOFs, no issues and the exact selected manifest. The existing launcher/profile and prior releases were retained; the actual updated window was opened under explicit user authorization.
+
+After inspecting the exact finished connect record and refreshing its status, the agent locally marked that notice reviewed. The original unknown journal record remains unchanged, with no old prompt replay. Saved login then recovered automatically. New chat retained gpt-6.1-sol/low; one fresh native prompt was acknowledged once and produced the expected reply. The message remained visible and no tool activity occurred. This is actual installed native chat evidence, not a Studio build or full-product acceptance. Banner-driven restart in a future genuine update remains open.
+
+The live check also exposed an extra empty sidebar record after first Send: three empty records became one bound record plus three empty records. Source audit confirms that the explicit draft row lacks correlation with the stable provider draft ID. Follow-up must bind the exact successful original draft to its exact library row, preserving stale/provider/project/reload fences and historical records. Existing empty rows remain individually dismissible.

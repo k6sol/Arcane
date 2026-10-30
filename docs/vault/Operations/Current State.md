@@ -5,19 +5,19 @@ tags: [arcane]
 ---
 # Current state
 
-Recorded 30 October 2026. Main is SSH-verified `4f3da0a`, with seven component/package jobs passing in run41097527702 and unchanged native workflow inputs against the two passing669 jobs in run41094897137. Selected installed desktop remains `5b84a41`. The user has closed the older window and authorized opening the verified update when ready. Restart blockage and missing empty-chat close controls now take priority: see [[Bugs/Restart and Empty Chats]]. Unfinished height-aware foliage work is preserved separately and excluded from this focused hotfix.
+Recorded 30 October 2026. Verified runtime source `fa7d730` is on main, installed and open. All seven hosted component/package jobs pass in run41118208318; both prior669 native jobs remain applicable after complete input comparison. The user authorized reopening. The original finished connection notice was inspected and locally marked reviewed; its unknown journal entry remains unchanged. Saved login recovered automatically. One fresh native Sol6.1low chat returned the expected short reply, preserving the submitted message without tool activity or Studio operations. See [[Bugs/Restart and Empty Chats]]. Whole-product acceptance remains open.
 
 ## Source, delivery and live checks
 
-The first restart candidate `2b92516` has five passing hosted lanes and one Windows diagnostics-fixture timeout in run41113346266; packaging was skipped. It is not installed or promoted. A focused owned-HTTP/phase-evidence follow-up retains the original deadlines and production bytes; see [[Bugs/Restart and Empty Chats]]. The old timeout's internal cause remains unproved.
+Earlier candidate `2b92516` retained a Windows diagnostics-fixture timeout. Follow-up `fa7d730` passes all seven jobs with unchanged deadlines and stronger owned-HTTP evidence. The old timeout's internal cause remains unproved; its log is retained.
 
 | Item | Authoritative evidence | Boundary |
 |---|---|---|
-| Main | `4f3da0a` passed seven component/package jobs in [41097527702](https://github.com/k6sol/Arcane/actions/runs/41097527702), then ordinary fast-forward | Native workflow inputs match passing669; no updated customer journey follows from green checks |
+| Release source | SSH-verified `fa7d730`, seven passing [component/package jobs41118208318](https://github.com/k6sol/Arcane/actions/runs/41118208318), ordinary fast-forward to main | Any subsequent knowledge-only checkpoint leaves this installed runtime source explicit |
 | Native verification | Corrected `669adff` passes both native jobs in [41094897137](https://github.com/k6sol/Arcane/actions/runs/41094897137) and seven component jobs in41094897923; all six authenticated Windows/Linux tree images inspected | Native evidence is reused only after comparing the complete unchanged workflow inputs |
-| Desktop | `5b84a41` archive, closed payload, source and startup receipts authenticated; immutable installation selected with original exit zero and both pipes closed | Actual old window shows update banner after selection. No restart, draft replay or updated customer chat acceptance |
-| Plugin | Canonical `5b84a41` archive, manifest and all three source-generated files verified; modular identity unchanged | No plugin installation or Studio operation in this delivery |
-| Vault | Committed4f3 projection synced:174 managed files, no conflicts; this focused hotfix awaits its explicit committed revision sync | Personal notes/settings preserved; source notes remain authoritative |
+| Desktop | All closed payload/source/startup receipts authenticated; immutable install closed with exit zero, both pipe EOFs and matching selected manifest; actual new window observed | App is left open. Updated banner-driven restart still needs a future genuine update journey |
+| Plugin | Same-source fa7 archive, manifest and all three canonical generated files verified; modular identity unchanged | No Studio operation or direct plugin installation by the agent; app displays its plugin reload notice |
+| Vault | Committed fa7 projection synced:175 managed files, no conflicts; this delivery checkpoint awaits its explicit committed revision sync | Personal notes/settings preserved; no raw conversations or private operational receipts in shared notes |
 
 ## Verified functionality
 
@@ -41,6 +41,6 @@ Old candidate923 also exposed stale source guards for inert asset labels, now co
 
 Tree canopy/branch appearance, visible leaf attachment, seven bark UV folds/stretch, realistic rocks and finished forest composition remain unaccepted. Original arbitrary Blender authoring is not available to every provider: in-app Claude/Credits have bounded generator/spec and existing-GLB adoption/conversion tools, while native Codex has different file/process capabilities. Instructions do not create missing tools or train a model.
 
-Actual updated app chat, authentication/draft retention, selected-model persistence, plugin reconnect, full forest import/upload, gameplay and packaged customer acceptance remain open. Preserve the supplied redesign; external Claude owns redesign and has no newly observed acknowledgement. All ten whole-product goals remain active.
+One actual updated native chat, automatic saved-login recovery and the retained Low selection passed. Broader authentication/draft retention, model/provider switching, plugin reconnect, full forest import/upload, gameplay and packaged customer acceptance remain open. First Send leaves an extra empty sidebar row; exact draft correlation is the next correction. Preserve the supplied redesign; external Claude owns redesign and has no newly observed acknowledgement. All ten whole-product goals remain active.
 
 Continue from [[Operations/Next Session]], [[Operations/Requirements Ledger]], [[Operations/Evidence Ledger]], [[Delivery/Goal Board]], [[Bugs/Forest Blender Workflow]], [[Bugs/Original Model Review Coverage]], [[Bugs/Tree Canopy Attachments]] and [[Bugs/Asset Activity Provenance]]. Do not operate Studio, restart the user's app, approve models or replay uncertain prompts.

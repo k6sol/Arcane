@@ -15,7 +15,7 @@ tags: [arcane, dashboard]
 
 The [[Delivery/Goal Board|ten urgent goals]] track the path to a dependable customer release. Open a goal for its outcome, dependencies and acceptance criteria. Check it off only after recording evidence.
 
-Current priority: unblock safe updates and close empty chats through [[Bugs/Restart and Empty Chats]], then resume the Blender forest workflow, original asset quality and supplied interface reference. [[Operations/Requirements Ledger|All requirements]] · [[Design/Interface Reference|Design reference]] · [[Bugs/Forest Blender Workflow|Forest regression]]. Main `4f3da0a` passed its seven component/package jobs and retains unchanged inputs against both passing669 native jobs. Selected installed source is still `5b84a41`; the older running window has a blocked update. The focused restart fix requires its own hosted checks. Customer restart and Studio acceptance remain separate.
+The restart and empty-chat controls are delivered in installed runtime `fa7d730`. All seven hosted component/package jobs pass, and the updated app is open. One actual new Sol6.1low chat returned its expected reply without tools or old-prompt replay. Next priority: correlate the original empty sidebar draft with its first native conversation; the live check exposed an extra empty row. Future banner-driven restart and broader customer acceptance remain open. See [[Bugs/Restart and Empty Chats]], [[Operations/Requirements Ledger|all requirements]], [[Design/Interface Reference|design reference]] and [[Bugs/Forest Blender Workflow|forest regression]].
 
 ## Build with knowledge
 
