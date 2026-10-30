@@ -19,6 +19,8 @@ The strengthened Windows observation test passed with its actual held-observatio
 
 Distribution review found why newer GitHub source has not produced an installed update: CI preserves smoke receipts but drops the full verified app directory, and the desktop watcher reads only the local installation record. Preparing a bounded success-only portable artifact export with same-run provenance, preserving the original evidence artifact and installation/update controls.
 
+All six adoption component lanes passed; its actual packaged startup is running. The cancellation candidate passed both Linux unit lanes and Windows shard 1, but Windows shard 2 exposed an existing eight-second cleanup observation wait. [[Bugs/Cleanup Observation Window]] records the exact failure and targeted correction inside the unchanged thirty-second test case and existing production limits. No whole-goal completion or current installed-app update is claimed.
+
 ## 2026-10-29 · Working knowledge foundation
 
 Located the user's new Arcane Obsidian vault. Established versioned knowledge notes, ten linked delivery goals, original developer skills, a catalog of the existing product skills, templates and a Canvas map. Added a conflict-protecting committed-source sync and repository startup guidance.

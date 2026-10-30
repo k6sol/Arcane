@@ -228,7 +228,13 @@ describe('createStudioTestService: SDK/store/ledger fixture integration', { conc
       return value;
     };
     await f.service.humanControl.approve(approval(job), () => {});
-    await until(() => f.status(job).review.phase === 'done' && f.state.closes === 1);
+    // Observe the five-second run plus the service's fifteen-second cleanup
+    // grace, within this case's unchanged thirty-second outer budget.
+    await until(() => f.status(job).review.phase === 'done' && f.state.closes === 1, 20_000, () => {
+      const review=f.status(job).review;
+      return {phase:review.phase,outcome:review.outcome,code:review.code,cleanup:review.cleanup,
+        deadline:review.deadline,cleanupDeadline:review.cleanupDeadline,closes:f.state.closes,heartbeats:f.heartbeats()};
+    });
     const complete = f.status(job), journal = await f.records();
     assert.equal(delayed, true); assert.equal(complete.review.deadline! - complete.review.startedAt!, 5000);
     assert.equal(complete.review.outcome, 'succeeded'); assert.equal(complete.review.code, 'OK');
