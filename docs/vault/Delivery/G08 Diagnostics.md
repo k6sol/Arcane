@@ -31,3 +31,12 @@ Validate [[Bugs/Studio Staging Diagnostics]] through its real controller, native
 [[Delivery/Goal Board]] · [[Operations/Evidence Ledger]]
 
 Current work adds finite staging phase/reason details and preserves unknown/no-retry results. Existing generation diagnostics remain intact. Source implementation and controlled fixtures do not prove a configured central server or whole-goal completion.
+
+## Scoped connection evidence verified
+
+- [x] Original transport frame-limit failures retain finite direction, byte-bound observation, pending-method mask and actual connect phase without payload content.
+- [x] Actual SQLite terminal action commit precedes optional reporting; replay and reporting failures do not resend the native operation or alter its recorded outcome.
+- [x] The finite event survives encrypted local reload and strict authenticated gateway validation within the existing byte bound.
+- [ ] Configure and verify a real central endpoint and authenticated customer reproduction.
+
+Evidence: functional code `87188b7`, compiled locally with 642-source inventory; 294 focused passes/one browser skip, plus nine outbox and nine gateway cases. These scoped checks do not complete every failure family or the whole goal. See [[Operations/Evidence Ledger]].
