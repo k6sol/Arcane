@@ -93,6 +93,9 @@ jobs:
       - name: Verify actual foliage card attachment and native save/reopen
         id: native-foliage
         run: node --test --test-concurrency=1 tests/native/foliage-attachment.test.mjs
+      - name: Verify actual current boulder and retain native review views
+        id: native-rock
+        run: node --test --test-concurrency=1 tests/native/rock-quality.test.mjs
       - name: Retain bounded native conversion evidence
         if: ${{ always() && steps.native-conversion.outcome != 'skipped' && steps.native-conversion.outcome != '' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -117,5 +120,16 @@ jobs:
             runtime/ci-foliage-attachment-artifacts/foliage-side.png
             runtime/ci-foliage-attachment-artifacts/foliage-alpha-front.png
             runtime/ci-foliage-attachment-artifacts/foliage-alpha-oblique.png
+          if-no-files-found: error
+          retention-days: 7
+      - name: Retain bounded current boulder review evidence
+        if: ${{ always() && steps.native-rock.outcome != 'skipped' && steps.native-rock.outcome != '' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: arcane-rock-quality-${{ matrix.os }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            runtime/ci-rock-quality-artifacts/rock-quality.json
+            runtime/ci-rock-quality-artifacts/rock-hero.png
+            runtime/ci-rock-quality-artifacts/rock-side.png
           if-no-files-found: error
           retention-days: 7
