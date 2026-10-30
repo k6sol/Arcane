@@ -87,3 +87,7 @@ Exact `9151892` passed both native jobs in [run 41010961594](https://github.com/
 ## First exact-handle query result
 
 [Native run 41037253135](https://github.com/k6sol/Arcane/actions/runs/41037253135), source `2cbe9d8`, passed Linux and failed Windows at the original conversion probe (`RUNTIME_PROCESS_IDENTITY`). The Windows failure is not a successful Blender export or import. Fixed query-stage observation is prepared to distinguish the new failure without publishing raw native output. [Component run 41037253149](https://github.com/k6sol/Arcane/actions/runs/41037253149) exposes a stale generated tool description, exact-wording assertion, shop routing case and SDK default execution metadata in the new measurement fixture. The metadata guard failed before any byte totals were produced; no oversized-frame cause is established. Existing assertions, bounds and full schemas remain required.
+
+## Current catalogue projection measured
+
+The actual SDK catalogue fixture passed in [component run 41039685202](https://github.com/k6sol/Arcane/actions/runs/41039685202), Linux unit shard 2, source `820f72c`: standalone 41 tools / 96,878 bytes; native 51 tools / 113,789 bytes, with complete pinned schemas and the unchanged 1,048,576-byte limit. No daemon/provider fetch occurred. The current Arcane catalogue alone fits the bound; the original installed connection overflow, including any inherited discovery inventory, remains unproved. Separate remaining shard failures do not invalidate this individual passing measurement or make the entire run pass.

@@ -20,6 +20,6 @@ Recorded 30 October 2026. Revalidate Git, hosted runs and installed identity bef
 | Running desktop | Old installed directory begins `66f74350`; no new installation/restart | A source push does not update the installed app or create a banner |
 | Actual chat diagnostic | Sol 6.1 low; draft retained after connect unknown acknowledgement with `FRAME_LIMIT` | Dispatch not confirmed; no resend or Studio writes. Original skill-selection cause is still unknown |
 | Interface | Exact supplied HTML retained; folder usability proposal complete | Implementation/rendered reference matching remains open |
-| Connection frame | Actual current MCP catalogue/status-frame measurement fixture prepared | Original 1 MiB limit remains; totals await hosted execution and cannot diagnose the older installed run |
+| Connection frame | Actual SDK fixture passed: 51 native tools, 113,789-byte status projection; standalone 41 tools, 96,878 bytes | Original 1 MiB limit remains; this catalogue alone does not establish the older installed overflow cause |
 
 Current priorities: [[Bugs/Forest Blender Workflow]], [[Bugs/Windows Model Supervision]], [[Skills/Production Upgrade]] and [[Operations/Requirements Ledger]]. The ten [[Delivery/Goal Board|release goals]] remain active. Scoped prompt/visual tests are authorized in the open app and designated Test baseplate; preserve existing content and unrelated places. Do not close/restart the running app without applicable authorization. Arcane only; never work on ArchLiquid.
