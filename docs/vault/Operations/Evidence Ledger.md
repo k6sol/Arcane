@@ -30,6 +30,12 @@ Payload manifest: `fdcfb20752403dee220a469eab293a661cf1b5d9f5be3060aeefc41904762
 
 The active installation is still the 20 October build. The verified download does not install it, launch it or show its update banner. No provider inference or Studio operation occurred during artifact inspection.
 
+## Subsequent verification
+
+The same source promoted to main and the later notes commit passed every unit lane and Linux release, but Windows release hit [[Bugs/Key Navigation Timeout]]. Those later runs are not green and their package jobs were skipped. The original exact seven-job success and independently inspected artifact remain valid evidence at their stated scope.
+
+Original-authoring candidate `b72cdb9` passed real native Blender conversion on both platforms in [run 40992537597](https://github.com/k6sol/Arcane/actions/runs/40992537597). Its component failures identified corrected instruction/reference companions; [[Bugs/Model Review Observation]] records a separate browser lifetime correction. [[Bugs/Foliage Card Attachment]] is prepared for native validation and does not yet establish tree quality.
+
 ## Historical failures
 
 [[Bugs/Converted Import Timeout]], [[Bugs/Cleanup Observation Window]] and [[Bugs/Development Vault Packaging]] retain their distinct original failures and corrections. Earlier failures are not erased by the new passing baseline.

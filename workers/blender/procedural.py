@@ -292,7 +292,9 @@ class MeshData:
         u0, v0, u1, v1 = rect
 
         def at(t, across):
-            curl = length * (bend * 4 * t * (1 - t) - droop * t * t) - cup * width * across * across
+            # Keep the basal edge centred on its declared root. The other sampled
+            # stations (t=.5 and t=1) retain the original cup and tip shape.
+            curl = length * (bend * 4 * t * (1 - t) - droop * t * t) - cup * width * across * across * smoothstep(2 * t)
             return add(add(add(base, mul(axis, length * t)), mul(side, width * across / 2)), mul(up, curl))
         rim = [(0, 1), (.5, 1), (1, 1), (1, -1), (.5, -1), (0, -1)]
         indices = [self.vertex(at(t, across)) for t, across in rim]

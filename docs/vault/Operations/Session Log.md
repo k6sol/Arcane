@@ -5,6 +5,12 @@ tags: [arcane]
 ---
 # Session log
 
+## 2026-10-30 · Original authoring and geometry
+
+Published capability-gated original Blender guidance and preserved its experimental integrity policy. Actual native conversion passed on both platforms; corrected stale instruction/reference companions and a separately observed Edge review-preparation fixture. Subsequent main checks exposed a distinct key-navigation timeout, retained with precise diagnostics rather than treated as the same failure.
+
+Prepared [[Bugs/Foliage Card Attachment]]: a narrow production geometry correction with full real-Blender mesh, save/reopen and contact regressions. Scoped independent review preserves limits and whole-tree/atlas uncertainty. [[Delivery/Supported Desktop Activation]] records verified extraction and unchanged compatible launcher; fresh activation preflight failed available commit, so no installer or app restart began. Normal retirement's connected implementation is in progress with admission-only fencing, original-work joins and separate later-human review; no completion claim.
+
 ## 2026-10-30 · Verified delivery milestone
 
 All seven jobs passed on `9a69619`; promoted the signed revision to main. Downloaded the actual portable build and independently verified the authenticated archive checksum, all 4,657 file hashes, closed inventory, source fingerprints and same-run smoke receipts. Checked off the demonstrated bug criteria and updated current/next-state notes. Installation, authenticated customer and native acceptance remain outstanding. See [[Sessions/2026-10-30 Verified Desktop Delivery]].

@@ -22,7 +22,7 @@ Depends on: 1; coordinate previews with 2 and job ownership with 4. Owner: asset
 
 ## Evidence
 
-[[Bugs/Original Asset Authoring]] corrects connected guidance that overstated bounded generators and omitted the existing native authoring route. Two SDK/MCP regressions are authored; hosted validation and actual generated geometry/rendered quality remain pending. This is not model training or whole-goal completion.
+[[Bugs/Original Asset Authoring]] corrects connected guidance that overstated bounded generators and omitted the existing native authoring route. Two SDK/MCP regressions are authored; hosted validation and actual generated geometry/rendered quality remain pending. This is not model training or whole-goal completion. [[Bugs/Foliage Card Attachment]] also corrects an actual card-base displacement and prepares 39 mandatory real-Blender representation cases, save/reopen, contact measurement and two neutral renders. Native execution and full-tree quality remain pending.
 
 ## Next action
 

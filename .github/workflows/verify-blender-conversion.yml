@@ -90,6 +90,9 @@ jobs:
       - name: Verify real source conversion and owned cancellation
         id: native-conversion
         run: node --test --test-concurrency=1 tests/native/blender-conversion.test.mjs
+      - name: Verify actual foliage card attachment and native save/reopen
+        id: native-foliage
+        run: node --test --test-concurrency=1 tests/native/foliage-attachment.test.mjs
       - name: Retain bounded native conversion evidence
         if: ${{ always() && steps.native-conversion.outcome != 'skipped' && steps.native-conversion.outcome != '' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -101,5 +104,16 @@ jobs:
             runtime/ci-blender-conversion-artifacts/none-side.png
             runtime/ci-blender-conversion-artifacts/hull-hero.png
             runtime/ci-blender-conversion-artifacts/hull-side.png
+          if-no-files-found: error
+          retention-days: 7
+      - name: Retain bounded foliage attachment evidence
+        if: ${{ always() && steps.native-foliage.outcome != 'skipped' && steps.native-foliage.outcome != '' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: arcane-foliage-attachment-${{ matrix.os }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            runtime/ci-foliage-attachment-artifacts/foliage-attachment.json
+            runtime/ci-foliage-attachment-artifacts/foliage-front.png
+            runtime/ci-foliage-attachment-artifacts/foliage-side.png
           if-no-files-found: error
           retention-days: 7
