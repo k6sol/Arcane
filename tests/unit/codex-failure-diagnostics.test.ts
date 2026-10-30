@@ -5,7 +5,7 @@ import {DatabaseSync} from 'node:sqlite';
 import {mkdtemp,mkdir,realpath,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {isAbsolute,join,relative,sep} from 'node:path';
-import {createServer} from 'node:http';
+import {createServer,request,type ClientRequest} from 'node:http';
 import {createCodexService,type CodexServiceOptions,type CodexActionRecord,type CodexHostClient} from '../../apps/daemon/src/codex-service.js';
 import {codexRoutes} from '../../apps/daemon/src/codex-routes.js';
 import type {FailureReporter} from '../../apps/daemon/src/diagnostic-reporter.js';
@@ -16,54 +16,97 @@ import {JsonlTransport,annotateNativeConnectFrame,readNativeFrameEvidence} from 
 import {limits} from '../../packages/codex-client/src/validation.js';
 
 const PRIVATE='private prompt/source C:\\Users\\fixture\\scene.lua account@example.invalid token=synthetic';
+type ReportPhase='case-start'|'fixture-boundary'|'fixture-directory'|'fixture-project'|'service-open'|'inspector-open'|
+  'invalid-admission'|'rejection-action'|'rejection-assertions'|'exact-replay'|'state-direct'|'http-listen'|'http-state'|'http-history'|
+  'final-assertions'|'body-complete'|'http-close'|'http-closed'|'service-close'|'inspector-close'|'registry-close'|'directory-check'|'directory-remove'|'fixture-closed';
+interface PhaseObservation {mark:(phase:ReportPhase)=>void;failure:()=>void}
 async function fixture(t:test.TestContext,options:{
   reportFailure?:FailureReporter;connect?:CodexServiceOptions['connect'];
   registry?:(projectPath:string)=>NativeAssetRegistry;
+  observation?:PhaseObservation;
 }={}){
-  const boundary=await realpath(tmpdir()),root=await mkdtemp(join(boundary,'arcane-codex-report-')),project=join(root,'project'),directory=join(root,'journal');
-  await mkdir(project);const projectPath=await realpath(project),registry=options.registry?.(projectPath);
+  options.observation?.mark('fixture-boundary');const boundary=await realpath(tmpdir());
+  options.observation?.mark('fixture-directory');const root=await mkdtemp(join(boundary,'arcane-codex-report-')),project=join(root,'project'),directory=join(root,'journal');
+  options.observation?.mark('fixture-project');await mkdir(project);const projectPath=await realpath(project),registry=options.registry?.(projectPath);
   let connects=0;
   const services:ReturnType<typeof createCodexService>[]=[];
   const open=()=>{
+    options.observation?.mark('service-open');
     const service=createCodexService({directory,projectPath,...(registry?{assetRegistry:registry}:{}),...(options.reportFailure?{reportFailure:options.reportFailure}:{}),
       connect:async hooks=>{connects++;if(options.connect)return options.connect(hooks);throw new CodexClientError('CLI_MISSING',PRIVATE);}});
     services.push(service);return service;
   };
-  const service=open(),filename=join(directory,'codex-actions.sqlite'),inspector=new DatabaseSync(filename,{readOnly:true,allowExtension:false});
+  const service=open(),filename=join(directory,'codex-actions.sqlite');options.observation?.mark('inspector-open');const inspector=new DatabaseSync(filename,{readOnly:true,allowExtension:false});
   const record=(requestId:string):CodexActionRecord=>{
     const row=inspector.prepare('SELECT payload FROM actions WHERE id=?').get(requestId) as {payload:string}|undefined;
     assert.ok(row);return JSON.parse(row.payload) as CodexActionRecord;
   };
   t.after(async()=>{
-    for(const service of services.reverse())await service.close();
-    inspector.close();registry?.close();
-    const part=relative(boundary,await realpath(root));assert.ok(part.startsWith('arcane-codex-report-')&&!isAbsolute(part)&&!part.includes(sep)&&!part.includes('..'));
-    await rm(root,{recursive:true,force:true});
+    try{
+      options.observation?.mark('service-close');for(const service of services.reverse())await service.close();
+      options.observation?.mark('inspector-close');inspector.close();options.observation?.mark('registry-close');registry?.close();
+      options.observation?.mark('directory-check');const part=relative(boundary,await realpath(root));assert.ok(part.startsWith('arcane-codex-report-')&&!isAbsolute(part)&&!part.includes(sep)&&!part.includes('..'));
+      options.observation?.mark('directory-remove');await rm(root,{recursive:true,force:true});options.observation?.mark('fixture-closed');
+    }catch(error){options.observation?.failure();throw error;}
   });
   return{service,open,record,filename,connects:()=>connects};
 }
 
 test('a newly committed rejection reports once; state GETs and exact request replays do not report',{timeout:5000},async t=>{
+  const started=performance.now(),phases:{phase:ReportPhase;at:number}[]=[{phase:'case-start',at:0}],requests=new Set<ClientRequest>();
+  let phase:ReportPhase='case-start',dropped=0,reported=false,fixtureClosed=false,httpClosed=false;
+  const boundedMs=(value:number)=>Math.min(60000,Math.max(0,Math.round(value)));
+  const failure=()=>{
+    if(reported)return;reported=true;const elapsed=performance.now()-started;
+    try{t.diagnostic(JSON.stringify({fixture:'codex-report-committed-rejection',phase,elapsedMs:boundedMs(elapsed),clipped:elapsed>60000,droppedPhases:dropped,
+      phases:phases.map((row,index)=>({phase:row.phase,durationMs:boundedMs((phases[index+1]?.at??elapsed)-row.at)}))}));}catch{/* Never replace the original failure. */}
+  };
+  const aborted=()=>{failure();for(const request of requests)request.destroy();};
+  const observation:PhaseObservation={failure,mark(next){phase=next;if(phases.length<32)phases.push({phase:next,at:performance.now()-started});else dropped++;
+    if(next==='fixture-closed')fixtureClosed=true;if(next==='http-closed')httpClosed=true;
+    if(fixtureClosed&&httpClosed)t.signal.removeEventListener('abort',aborted);
+  }};
+  t.signal.addEventListener('abort',aborted,{once:true});
+  try{
   const events:DiagnosticEvent[]=[],observed:string[]=[];let read:(id:string)=>CodexActionRecord=()=>assert.fail('report before fixture ready');
-  const f=await fixture(t,{reportFailure:event=>{events.push(event);observed.push(read(event.context!.operationId!).state);return Promise.resolve(event.eventId);}});read=f.record;
+  const f=await fixture(t,{observation,reportFailure:event=>{events.push(event);observed.push(read(event.context!.operationId!).state);return Promise.resolve(event.eventId);}});read=f.record;
+  observation.mark('invalid-admission');
   await assert.rejects(f.service.action({requestId:randomUUID(),connectionId:null,action:'connect',reportFailure:'not a host callback'}),{code:'ARGUMENTS'});
   assert.deepEqual([...events],[]);assert.equal(f.connects(),0);
+  observation.mark('rejection-action');
   const input={requestId:randomUUID(),connectionId:null,action:'connect'} as const,outcome=await f.service.action(input);
+  observation.mark('rejection-assertions');
   assert.equal(outcome.record.state,'rejected');assert.equal(outcome.record.errorCode,'CLI_MISSING');
   assert.equal(outcome.replayed,false);assert.deepEqual(observed,['rejected']);assert.equal(events.length,1);assert.deepEqual(events[0]!.context,{operationId:input.requestId});
   assert.equal(events[0]!.component,'chat');assert.equal(events[0]!.stage,'authenticate');assert.equal(events[0]!.code,'PROCESS_LAUNCH');
   assert.deepEqual(diagnosticEvent(events[0]),events[0]);assert.ok(f.record(input.requestId).finishedAt);
   assert.doesNotMatch(JSON.stringify(events),/private|scene\.lua|account@|synthetic/);
-  assert.equal((await f.service.action(input)).replayed,true);for(let i=0;i<3;i++)f.service.state();
+  observation.mark('exact-replay');assert.equal((await f.service.action(input)).replayed,true);observation.mark('state-direct');for(let i=0;i<3;i++)f.service.state();
   const token='a'.repeat(64),agent='b'.repeat(64),route=codexRoutes(f.service);let origin='';
   const server=createServer((request,response)=>{void route(request,response,new URL(request.url??'/',origin),token,origin,agent).catch(()=>response.destroy());});
-  await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));origin='http://127.0.0.1:'+(server.address() as {port:number}).port;
-  t.after(async()=>{server.closeAllConnections();await new Promise<void>((resolve,reject)=>server.close(error=>error?reject(error):resolve()));});
+  t.after(async()=>{observation.mark('http-close');try{for(const request of requests)request.destroy();server.closeAllConnections();await new Promise<void>((resolve,reject)=>server.close(error=>error?reject(error):resolve()));observation.mark('http-closed');}catch(error){failure();throw error;}});
+  observation.mark('http-listen');await new Promise<void>((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',()=>{server.off('error',reject);resolve();});});origin='http://127.0.0.1:'+(server.address() as {port:number}).port;
   for(const path of ['/v1/codex/state','/v1/codex/history']){
-    const response=await fetch(origin+path,{headers:{Authorization:'Bearer '+token,Origin:origin},signal:AbortSignal.timeout(1000)});
-    assert.equal(response.status,200);await response.arrayBuffer();
+    observation.mark(path==='/v1/codex/state'?'http-state':'http-history');
+    // These are actual authenticated loopback routes. An owned core HTTP request
+    // avoids unrelated lazy global-fetch startup and never retains a pooled socket.
+    const response=await new Promise<{status:number|undefined;bytes:Buffer}>((resolve,reject)=>{
+      const owned=request(origin+path,{method:'GET',agent:false,headers:{Authorization:'Bearer '+token,Origin:origin},signal:AbortSignal.any([t.signal,AbortSignal.timeout(1000)])},incoming=>{
+        const chunks:Buffer[]=[];let bytes=0;
+        incoming.on('data',(value:Buffer)=>{bytes+=value.length;if(bytes>4*1024*1024){owned.destroy(Error('Fixture response exceeded the route 4MiB limit.'));return;}chunks.push(value);});
+        incoming.once('error',reject);incoming.once('aborted',()=>reject(Error('Fixture response ended before its complete body.')));
+        incoming.once('end',()=>resolve({status:incoming.statusCode,bytes:Buffer.concat(chunks)}));
+      });
+      requests.add(owned);owned.once('close',()=>requests.delete(owned));owned.once('error',reject);owned.end();
+    });
+    assert.equal(response.status,200);
+    let body:unknown;try{body=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(response.bytes));}catch{assert.fail('Fixture route returned invalid JSON.');}
+    assert.ok(JSON.stringify(body)===JSON.stringify(path==='/v1/codex/state'?{state:f.service.state()}:{nativeHistory:null}),'GET returned the complete actual state/history projection.');
   }
+  observation.mark('final-assertions');
   assert.equal(events.length,1);assert.equal(f.connects(),1);
+  observation.mark('body-complete');
+  }catch(error){failure();throw error;}
 });
 
 for(const [code,dispatched,expected]of[['TIMEOUT',true,'unknown'],['REMOTE_REJECTED',true,'rejected']]as const)

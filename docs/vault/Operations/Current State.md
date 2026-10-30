@@ -9,6 +9,8 @@ Recorded 30 October 2026. Main is SSH-verified `4f3da0a`, with seven component/p
 
 ## Source, delivery and live checks
 
+The first restart candidate `2b92516` has five passing hosted lanes and one Windows diagnostics-fixture timeout in run41113346266; packaging was skipped. It is not installed or promoted. A focused owned-HTTP/phase-evidence follow-up retains the original deadlines and production bytes; see [[Bugs/Restart and Empty Chats]]. The old timeout's internal cause remains unproved.
+
 | Item | Authoritative evidence | Boundary |
 |---|---|---|
 | Main | `4f3da0a` passed seven component/package jobs in [41097527702](https://github.com/k6sol/Arcane/actions/runs/41097527702), then ordinary fast-forward | Native workflow inputs match passing669; no updated customer journey follows from green checks |
