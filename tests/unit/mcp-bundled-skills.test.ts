@@ -346,7 +346,7 @@ test('actual bundled whole-game composition progressively loads intact presentat
     const refused = await call(client, 'skills_get', { ids: [id], byteBudget: 10_240 });
     assert.equal(refused.result.isError, true); assert.equal(refused.data.error.code, 'UNAPPROVED');
     const loaded = await call(client, 'skills_get', { ids: [id], allowExperimental: true, byteBudget: 10_240 });
-    const entry = registry.skills.find(entry => entry.id === id); assert.ok(entry);
+    const entry: Entry | undefined = registry.skills.find(candidate => candidate.id === id); assert.ok(entry);
     const source = await readFile(join(ROOT, entry.path), 'utf8'); assert.equal(hash(source), entry.sha256);
     assert.notEqual(loaded.result.isError, true); assert.deepEqual(loaded.data.ids, [id]); assert.deepEqual(loaded.data.references, []);
     assert.ok(loaded.data.context.includes(`## Loaded skill: ${id}\n${source}`));
