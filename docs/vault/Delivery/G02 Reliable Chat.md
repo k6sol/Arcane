@@ -26,6 +26,9 @@ Scoped evidence: installed fa7d730 passes all seven hosted checks and one actual
 
 ## Next action
 
-Publish and verify the exact draft-correlation candidate, then complete its installed customer journey. Local compilation,201 focused cases,56 preload/host cases and eleven existing Edge journeys pass, plus a separate first-Send/reload browser fixture. Broader cancellation/model/provider/preview/restart and atomic cross-record crash recovery remain open.
+Complete the loaded5d customer journey after user-chosen restart, then verify the caption-layout follow-up. Local compilation,201 focused cases,56 preload/host cases and eleven existing Edge journeys pass, plus a separate first-Send/reload browser fixture. Broader cancellation/model/provider/preview/restart and atomic cross-record crash recovery remain open.
 
 [[Delivery/Goal Board]] · [[Operations/Evidence Ledger]]
+
+
+Delivery checkpoint:5d81794 passes seven original hosted jobs and is selected in the immutable desktop installation, with original exit zero, both pipe EOFs and exact selection observed. Main is fast-forwarded. The older fa7 window shows the update banner; no forced restart or new customer prompt. Actual5d first-Send acceptance and broader old-chat/cancellation/provider/preview/update coverage remain open. The prepared caption-layout follow-up passes14 controlled window/update cases without requesting a real restart.

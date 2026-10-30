@@ -103,12 +103,18 @@ test('studio.css: the search pill has one focus state and the field inside it no
   assert.ok(block.includes('.arcane-app .workspace-topbar .workspace-search:focus-within{border-color:Highlight;outline:2px solid Highlight;outline-offset:2px;box-shadow:none}'), 'forced colours keep a system ring');
 });
 
+test('studio.css: the update banner reserves the same caption area without moving ordinary browser layouts',()=>{
+  assert.match(chrome,/\.arcane-app \.desktop-update-banner\{flex-shrink:0;min-height:var\(--arcane-titlebar-h\);padding-right:max\(18px,calc\(var\(--arcane-titlebar-inset\) \+ 12px\)\)\}/);
+  assert.match(chrome,/@media\(max-width:520px\)\{\s*\.arcane-app \.desktop-update-banner\{padding-right:max\(12px,calc\(var\(--arcane-titlebar-inset\) \+ 12px\)\)\}/);
+  assert.equal(css.match(/\.desktop-update-banner\{display:flex[^}]*padding:10px 18px/)?.length,1,'original banner layout is retained');
+});
+
 // ---- Edge: the real studio.html, studio.css and compiled WorkspaceShell (no provider, daemon or Studio). ----
 const browserModule = process.env.ARCANE_UI_BROWSER_MODULE;
 const browserOptions = { skip: !browserModule, timeout: 120_000 };
 const region = (node: Element) => { const style = getComputedStyle(node); return (style.getPropertyValue('-webkit-app-region') || style.getPropertyValue('app-region')).trim(); };
 
-async function shellPage(t: TestContext, viewport: { width: number; height: number }, overlay = false): Promise<Page> {
+async function shellPage(t: TestContext, viewport: { width: number; height: number }, overlay = false, updates = false): Promise<Page> {
   const build = process.env.ARCANE_UI_BUILD_DIR;
   assert.ok(build, 'Set ARCANE_UI_BUILD_DIR to the private compiled output.');
   const assets = 'apps/desktop/public';
@@ -136,10 +142,13 @@ async function shellPage(t: TestContext, viewport: { width: number; height: numb
         document.getElementById('workspace-stage').classList.remove('provider-required');
         document.getElementById('provider-login-gate').hidden = true;
         window.chromeFixture = startWorkspaceShell(document, () => {});
+        ${updates?`window.updateCalls=0;window.arcaneDesktop={updates:{status:async()=>({version:1,state:'available',buildId:'a'.repeat(64),message:'Ready'}),restart:async()=>{window.updateCalls++;return{state:'refused',message:'Fixture only'};}}};
+        const {startDesktopUpdates}=await import('/desktop-update.js');window.updateFixture=startDesktopUpdates(document,{pollMs:60000});await window.updateFixture.check();window.updateReady=true;`:''}
       ` }); return;
     }
     if (url.pathname === '/studio.css') { await route.fulfill({ contentType: 'text/css', body: await readFile(resolve(assets, 'studio.css')) }); return; }
     if (url.pathname === '/workspace-shell.js') { await route.fulfill({ contentType: 'text/javascript', body: await readFile(join(build, 'apps/desktop/src/workspace-shell.js')) }); return; }
+    if (updates&&url.pathname === '/desktop-update.js') { await route.fulfill({ contentType:'text/javascript',body:await readFile(join(build,'apps/desktop/src/desktop-update.js')) });return; }
     if (/^\/(fonts|brand)\/[\w.-]+$/.test(url.pathname)) {
       try { await route.fulfill({ body: await readFile(resolve(assets, url.pathname.slice(1))), contentType: url.pathname.endsWith('.woff2') ? 'font/woff2' : 'image/png' }); }
       catch { await route.fulfill({ status: 404, body: '' }); }
@@ -151,6 +160,7 @@ async function shellPage(t: TestContext, viewport: { width: number; height: numb
   page.on('pageerror', error => errors.push(error.message));
   await page.goto('http://chrome.fixture/studio');
   await page.waitForFunction(() => !!(window as unknown as { chromeFixture?: unknown }).chromeFixture);
+  if(updates)await page.waitForFunction(()=>!!(window as unknown as {updateReady?:boolean}).updateReady);
   t.after(() => { assert.deepEqual(errors, [], 'no page errors'); assert.deepEqual(unexpected, [], 'only fixture files'); });
   return page;
 }
@@ -234,4 +244,35 @@ test('Edge: with the window buttons overlay the pills and the settings close but
     assert.ok((await page.locator('#settings-drawer').boundingBox())!.y >= 48, width + 'px: settings opens below the title bar');
     await page.context().close();
   }
+});
+
+test('Edge: update Restart stays visible and hittable beside simulated caption controls across desktop and narrow layouts',browserOptions,async t=>{
+  for(const width of [1514,1100,760,390,380]){
+    const page=await shellPage(t,{width,height:969},true,true),banner=page.locator('#desktop-update-banner'),button=banner.locator('button');
+    await page.addStyleTag({content:'#simulated-caption{position:fixed;right:0;top:0;width:138px;height:48px;z-index:2147483647;background:#200b0f}'});
+    await page.evaluate(()=>{const caption=document.createElement('div');caption.id='simulated-caption';caption.setAttribute('aria-hidden','true');document.body.append(caption);});
+    assert.equal(await banner.isVisible(),true);
+    const geometry=await button.evaluate(node=>{const r=node.getBoundingClientRect();return{left:r.left,right:r.right,top:r.top,bottom:r.bottom,hit:document.elementFromPoint(r.left+r.width/2,r.top+r.height/2)===node};});
+    assert.ok(geometry.left>=0&&geometry.right<=width-138-12+1,width+'px: Restart ends before the caption exclusion plus gap');
+    assert.ok(geometry.top>=0&&geometry.bottom<=969,width+'px: whole action remains in the viewport');
+    assert.equal(geometry.hit,true,width+'px: caption controls do not intercept Restart');assert.equal(await button.evaluate(region),'no-drag');
+    await button.click({trial:true});assert.equal(await page.evaluate(()=>(window as unknown as {updateCalls:number}).updateCalls),0,'geometry checks never request restart');
+    assert.ok(await banner.evaluate(node=>node.getBoundingClientRect().height>=48));
+    assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),width+'px: no horizontal overflow');
+    if(process.env.ARCANE_UI_SCREENSHOT)await page.screenshot({path:process.env.ARCANE_UI_SCREENSHOT+'.update-caption-'+width+'.png'});
+    await page.context().close();
+  }
+});
+
+test('Edge: update banner keeps browser spacing and follows simulated overlay geometry changes without restarting',browserOptions,async t=>{
+  const page=await shellPage(t,{width:1514,height:969},false,true),banner=page.locator('#desktop-update-banner'),button=banner.locator('button');
+  const padding=()=>banner.evaluate(node=>getComputedStyle(node).paddingRight);
+  assert.equal(await padding(),'18px','undefined titlebar environment leaves the original desktop padding');
+  await page.addStyleTag({content:':root{--arcane-titlebar-h:48px!important;--arcane-titlebar-inset:138px!important}'});
+  assert.equal(await padding(),'150px');assert.ok((await button.boundingBox())!.x+(await button.boundingBox())!.width<=1514-150+1);
+  await page.setViewportSize({width:390,height:844});assert.equal(await padding(),'150px');
+  assert.equal(await banner.evaluate(node=>getComputedStyle(node).flexDirection),'column','existing narrow layout is retained');
+  await page.addStyleTag({content:':root{--arcane-titlebar-h:0px!important;--arcane-titlebar-inset:0px!important}'});
+  assert.equal(await padding(),'12px','hidden overlay restores the original narrow spacing');await button.click({trial:true});
+  assert.equal(await page.evaluate(()=>(window as unknown as {updateCalls:number}).updateCalls),0);assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
 });

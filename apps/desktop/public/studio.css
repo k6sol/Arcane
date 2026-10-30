@@ -4673,6 +4673,12 @@ body.arcane-app::before{content:"";position:fixed;top:0;right:0;left:0;z-index:-
 .arcane-app .workspace-topbar>:not([hidden]),.arcane-app :is(.workspace-search-results,.studio-diagnostics-panel,.chat-head-actions,.chat-head-menu,.settings-drawer,.arcane-modal-layer,.compact-header>*){-webkit-app-region:no-drag;app-region:no-drag}
 /* The window buttons' area stays clear: the last pill ends 12px before it, at every width. */
 :root body.arcane-app .workspace-topbar{padding-right:max(24px,calc(var(--arcane-titlebar-inset) + 12px))}
+/* The update banner precedes the top bar, but the native caption stays at the window's top edge.
+   Keep its action inside the same available titlebar rectangle; browser fallbacks preserve its original spacing. */
+.arcane-app .desktop-update-banner{flex-shrink:0;min-height:var(--arcane-titlebar-h);padding-right:max(18px,calc(var(--arcane-titlebar-inset) + 12px))}
+@media(max-width:520px){
+  .arcane-app .desktop-update-banner{padding-right:max(12px,calc(var(--arcane-titlebar-inset) + 12px))}
+}
 @media (max-width:639px){
   :root body.arcane-app .workspace-topbar{padding-right:max(12px,calc(var(--arcane-titlebar-inset) + 12px))}
 }
