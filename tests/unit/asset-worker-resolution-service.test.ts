@@ -28,8 +28,8 @@ function queryHost(mode: (pid: number) => Mode) {
     stats.calls++;
     const pid = Number(options.env.ARCANE_WORKER_PID), m = mode(pid), n = pid - 7000;
     const answer = () => callback(null, m === 'malformed' ? 'garbage C:\\Users\\private' : JSON.stringify(m === 'live'
-      ? { v: 1, found: true, pid, created: T(n), executable: BLENDER } : m === 'reused'
-        ? { v: 1, found: true, pid, created: T(n + 30), executable: 'C:\\Windows\\notepad.exe' } : { v: 1, found: false }), '');
+      ? { v: 2, found: true, pid, created: T(n), executable: BLENDER } : m === 'reused'
+        ? { v: 2, found: true, pid, created: T(n + 30), executable: 'C:\\Windows\\notepad.exe' } : { v: 2, found: false }), '');
     if (m === 'gate') stats.gates.push(answer); else queueMicrotask(answer);
     return undefined;
   } };
@@ -37,7 +37,7 @@ function queryHost(mode: (pid: number) => Mode) {
 }
 const closed = (n: number) => ({ schemaVersion: 1, role: 'probe', reservationId: rid(n), reservedAt: T(n), state: 'closed', closure: 'exit-observed', closedAt: T(n + 1), identity: null });
 const captured = (n: number) => ({ schemaVersion: 1, role: 'generate', reservationId: rid(n), reservedAt: T(n), state: 'captured',
-  identity: { schemaVersion: 1, role: 'generate', pid: 7000 + n, processCreatedAt: T(n), executable: BLENDER } });
+  identity: { schemaVersion: 2, role: 'generate', pid: 7000 + n, processCreatedAt: T(n), executable: BLENDER } });
 
 async function fixture(t: test.TestContext) {
   const base = await realpath(tmpdir()), root = await mkdtemp(join(base, 'arcane-resolution-service-'));
@@ -164,6 +164,17 @@ test('one operation at a time: a running check refuses start, probe and a second
   await assert.rejects(service.resolveInterrupted(job.jobId), code('BUSY'));
   await assert.rejects(service.start(request), code('BUSY'));
   const started = await starting; await service.cancel(started.jobId);
+});
+
+test('legacy creation-time conflict retains the service fence and original journal without a marker', serial, async t => {
+  const f = await fixture(t), native = captured(5), legacy = { ...native, identity: { ...native.identity, schemaVersion: 1 } };
+  const job = await f.seed([legacy]), original = await readFile(join(job.directory, 'job.json'));
+  const q = queryHost(() => 'reused'), service = await f.open({ workerQueryHost: q.host });
+  assert.deepEqual(await service.resolveInterrupted(job.jobId), { jobId: job.jobId, status: 'refused', reason: 'identity-conflict' });
+  assert.equal(q.stats.calls, 1); assert.equal(await f.marker(job.directory), null);
+  assert.deepEqual(await readFile(join(job.directory, 'job.json')), original);
+  await assert.rejects(service.start(request), code('RECONCILIATION'));
+  assert.equal(service.jobs().find(record => record.jobId === job.jobId)!.state, 'interrupted');
 });
 
 test('a journal changed during assessment is stale and writes nothing', serial, async t => {

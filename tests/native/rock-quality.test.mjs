@@ -110,7 +110,8 @@ async function failureJournalEvidence(job, result) {
     summary.diagnosticReason = ['HOST_FAILURE', 'RUNTIME_PROCESS_IDENTITY'].includes(diagnostic?.reasonCode) ? diagnostic.reasonCode : diagnostic ? 'other' : null;
     const workers = parseWorkerRecords(journal.workers); summary.status = workers ? 'readable-valid-workers' : 'readable-invalid-workers';
     if (workers) summary.workers = workers.map(worker => ({ role: worker.role, state: worker.state,
-      closure: worker.state === 'closed' ? worker.closure : null, identityPresent: 'identity' in worker && worker.identity !== null }));
+      closure: worker.state === 'closed' ? worker.closure : null, identityPresent: 'identity' in worker && worker.identity !== null,
+      identityVersion: 'identity' in worker && worker.identity !== null ? worker.identity.schemaVersion : null }));
   } catch { /* No paths, native text, IDs or identity data escape a failed read. */ }
   return summary;
 }
@@ -250,6 +251,7 @@ test('real current boulder: original native geometry, 512px world bake, saved sc
   for (const role of ['probe', 'python-probe', 'generate']) {
     const matching = workers.filter(worker => worker.role === role); assert.equal(matching.length, 1);
     assert.equal(matching[0].closure, 'exit-observed');
+    if (process.platform === 'win32' && role === 'generate') assert.equal(matching[0].identity?.schemaVersion, 2, 'The actual long Windows generation must retain its native FILETIME identity.');
   }
   assert.equal(await realpath(manifest.runtime.executable), executable); assert.match(manifest.runtime.version, /^5\.2\.3(?: LTS)?$/);
   assert.equal(manifest.runtime.background, true); assert.deepEqual(manifest.runtime.capabilities, { glbExport: true, glbImport: true, fbxExport: true, fbxImport: true, cycles: true });

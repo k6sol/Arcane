@@ -8,6 +8,7 @@ const SYSTEM_ROOT = 'C:\\Windows';
 const BLENDER = 'C:\\Program Files\\Blender Foundation\\Blender 4.2\\blender.exe';
 const CREATED = '2026-10-16T01:02:03.4567890Z';
 const identity: WorkerIdentity = { schemaVersion: 1, role: 'generate', pid: 4242, processCreatedAt: CREATED, executable: BLENDER };
+const nativeIdentity: WorkerIdentity = { ...identity, schemaVersion: 2 };
 type Reply = { error?: Error & { code?: unknown; killed?: boolean; signal?: unknown }; stdout?: string; throws?: boolean };
 function host(reply: Reply | ((pid: string) => Reply), overrides: Partial<ProcessQueryHost> = {}) {
   const calls: { file: string; args: readonly string[]; options: Record<string, unknown> }[] = [];
@@ -24,8 +25,8 @@ function host(reply: Reply | ((pid: string) => Reply), overrides: Partial<Proces
   };
   return { value, calls };
 }
-const present = (fields: Record<string, unknown> = {}) => ({ stdout: JSON.stringify({ v: 1, found: true, pid: 4242, created: CREATED, executable: BLENDER, ...fields }) });
-const absent = { stdout: '{"v":1,"found":false}' };
+const present = (fields: Record<string, unknown> = {}) => ({ stdout: JSON.stringify({ v: 2, found: true, pid: 4242, created: CREATED, executable: BLENDER, ...fields }) });
+const absent = { stdout: '{"v":2,"found":false}' };
 
 test('fixed argv, env, cwd and bounds; only the validated PID reaches the query', async () => {
   const h = host(absent);
@@ -38,18 +39,49 @@ test('fixed argv, env, cwd and bounds; only the validated PID reaches the query'
   assert.equal(Buffer.from(call!.args[4]!, 'base64').toString('utf16le'), WORKER_QUERY_SCRIPT);
   assert.deepEqual(call!.options, { cwd: 'C:\\Windows\\System32', env: { SystemRoot: SYSTEM_ROOT, ARCANE_WORKER_PID: '4242' },
     shell: false, windowsHide: true, timeout: QUERY_TIMEOUT_MS, maxBuffer: QUERY_MAX_OUTPUT_BYTES, encoding: 'utf8' });
-  // The constant script performs one exact-PID lookup and nothing else.
-  assert.match(WORKER_QUERY_SCRIPT, /Get-CimInstance -ClassName Win32_Process -Filter \('ProcessId = ' \+ \$id\)/);
-  assert.doesNotMatch(WORKER_QUERY_SCRIPT, /CommandLine|Stop-Process|Terminate|Invoke-|taskkill|Get-Process|\$env:(?!x)/i);
+  // Five fixed kernel32 bindings, one exact uint32 PID and one retained handle.
+  for (const name of ['OpenProcess', 'GetProcessTimes', 'QueryFullProcessImageNameW', 'WaitForSingleObject', 'CloseHandle'])
+    assert.ok(WORKER_QUERY_SCRIPT.includes("Bind '" + name + "'"), name);
+  assert.match(WORKER_QUERY_SCRIPT, /\[uint32\]0x101000,\[int32\]0,\$workerPid/);
+  assert.match(WORKER_QUERY_SCRIPT, /\$queryLastError = \$openArguments\[3\]/);
+  assert.match(WORKER_QUERY_SCRIPT, /OpCodes\]::Call, \$imports\['OpenProcess'\][\s\S]*OpCodes\]::Call, \[Runtime.InteropServices.Marshal\].GetMethod\('GetLastWin32Error'[\s\S]*OpCodes\]::Stind_I4/);
+  assert.match(WORKER_QUERY_SCRIPT, /\$queryLastError -eq 87[\s\S]*else \{ \$failed = \$true \}/);
+  assert.match(WORKER_QUERY_SCRIPT, /SetLastError/); assert.match(WORKER_QUERY_SCRIPT, /GetCustomAttributes/);
+  assert.match(WORKER_QUERY_SCRIPT, /PreserveSig/); assert.match(WORKER_QUERY_SCRIPT, /FromFileTimeUtc/);
+  assert.match(WORKER_QUERY_SCRIPT, /OutputEncoding = \[Text.UTF8Encoding\]::new\(\$false\)/);
+  assert.match(WORKER_QUERY_SCRIPT, /finally[\s\S]*GetMethod\('CloseHandle'\)/);
+  assert.doesNotMatch(WORKER_QUERY_SCRIPT, /CommandLine|Stop-Process|Terminate|Invoke-|taskkill|Get-Process|GetProcessById|GetProcessIds|GetProcesses|Get-Cim|Get-Wmi|Add-Type|SeDebugPrivilege|ALL_ACCESS|VM_READ|\.Save\(|\$env:(?!x)/i);
 });
 
 test('invocation cannot be widened by caller values or an untrusted system root', () => {
   for (const pid of [0, -1, 1.5, 2 ** 32, Number.NaN, '4242' as never]) assert.throws(() => workerQueryInvocation(host(absent).value, pid), /Invalid worker PID/);
+  for (const pid of [1, 0x7fffffff, 0x80000000, 0xffffffff]) assert.equal(workerQueryInvocation(host(absent).value, pid).options.env.ARCANE_WORKER_PID, String(pid));
   for (const systemRoot of [undefined, '', 'Windows', '\\\\server\\share', 'C:\\Windows\\..\\Users', 'C:\\Win\u0000dows']) {
     assert.throws(() => workerQueryInvocation(host(absent, { systemRoot }).value, 4242), /Trusted system root unavailable/);
   }
   const invocation = workerQueryInvocation(host(absent).value, 4242);
   assert.ok(Object.isFrozen(invocation) && Object.isFrozen(invocation.args) && Object.isFrozen(invocation.options.env));
+  assert.ok(invocation.args.reduce((total, arg) => total + arg.length + 3, 4096 + 128) < 32767, 'Encoded fixed script fits the Windows invocation bound even with the maximum trusted SystemRoot.');
+});
+
+test('native FILETIME identities preserve precision without turning a legacy CIM mismatch into gone', async () => {
+  assert.deepEqual(parseWorkerIdentity(identity), identity); assert.deepEqual(parseWorkerIdentity(nativeIdentity), nativeIdentity);
+  for (const value of [identity, nativeIdentity]) assert.equal(parseWorkerIdentity({ ...value, timeSource: 'caller' }), null);
+  for (const created of ['2026-10-16T01:02:03.4567891Z', '2026-10-16T05:00:00.0000000Z']) {
+    assert.deepEqual(await attestRecordedWorker(identity, host(present({ created })).value), { verdict: 'unknown', reason: 'identity-conflict' });
+    assert.deepEqual(await attestRecordedWorker(nativeIdentity, host(present({ created })).value), { verdict: 'recorded-worker-gone', reason: 'pid-reused' });
+  }
+  assert.deepEqual(await attestRecordedWorker(identity, host(present()).value), { verdict: 'same-worker-running', reason: 'identity-matched' });
+  assert.deepEqual(await attestRecordedWorker(nativeIdentity, host(present()).value), { verdict: 'same-worker-running', reason: 'identity-matched' });
+  assert.deepEqual(await attestRecordedWorker(identity, host(absent).value), { verdict: 'recorded-worker-gone', reason: 'pid-absent' });
+});
+
+test('query helper error codes never substitute for positive native absence metadata', async () => {
+  for (const nativeCode of [5, 87]) {
+    const h = host({ error: Object.assign(new Error('synthetic query helper failed'), { code: nativeCode }), stdout: absent.stdout });
+    assert.deepEqual(await attestRecordedWorker(nativeIdentity, h.value), { verdict: 'unknown', reason: 'query-failed' });
+    assert.deepEqual(await captureWorkerIdentity({ pid: nativeIdentity.pid, role: nativeIdentity.role, executable: nativeIdentity.executable }, h.value), { status: 'uncertain', reason: 'query-failed' });
+  }
 });
 
 test('absent PID: the recorded worker is gone', async () => {
@@ -57,7 +89,7 @@ test('absent PID: the recorded worker is gone', async () => {
 });
 
 test('reused PID with a different creation time: the recorded worker is gone', async () => {
-  assert.deepEqual(await attestRecordedWorker(identity, host(present({ created: '2026-10-16T05:00:00.0000000Z', executable: 'C:\\Windows\\notepad.exe' })).value),
+  assert.deepEqual(await attestRecordedWorker(nativeIdentity, host(present({ created: '2026-10-16T05:00:00.0000000Z', executable: 'C:\\Windows\\notepad.exe' })).value),
     { verdict: 'recorded-worker-gone', reason: 'pid-reused' });
 });
 
@@ -75,22 +107,22 @@ test('inaccessible or partial metadata is unknown, never gone', async () => {
 test('malformed, partial or oversized output is unknown', async () => {
   const cases: [string, string][] = [
     ['', 'output-malformed'], ['not json', 'output-malformed'], ['[]', 'output-malformed'], ['null', 'output-malformed'],
-    ['{"v":2,"found":false}', 'output-malformed'], ['{"v":1,"found":false,"extra":1}', 'output-malformed'], ['{"v":1,"found":"false"}', 'output-malformed'],
-    [JSON.stringify({ v: 1, found: true, pid: 4243, created: CREATED, executable: BLENDER }), 'output-malformed'],
-    [JSON.stringify({ v: 1, found: true, pid: 4242, created: '2026-10-16 01:02:03', executable: BLENDER }), 'output-malformed'],
-    [JSON.stringify({ v: 1, found: true, pid: 4242, created: CREATED, executable: 'relative\\blender.exe' }), 'output-malformed'],
-    [JSON.stringify({ v: 1, found: true, pid: 4242, created: CREATED }), 'output-malformed'],
+    ['{"v":1,"found":false}', 'output-malformed'], ['{"v":2,"found":false,"extra":1}', 'output-malformed'], ['{"v":2,"found":"false"}', 'output-malformed'],
+    [JSON.stringify({ v: 2, found: true, pid: 4243, created: CREATED, executable: BLENDER }), 'output-malformed'],
+    [JSON.stringify({ v: 2, found: true, pid: 4242, created: '2026-10-16 01:02:03', executable: BLENDER }), 'output-malformed'],
+    [JSON.stringify({ v: 2, found: true, pid: 4242, created: CREATED, executable: 'relative\\blender.exe' }), 'output-malformed'],
+    [JSON.stringify({ v: 2, found: true, pid: 4242, created: CREATED }), 'output-malformed'],
     ['x'.repeat(QUERY_MAX_OUTPUT_BYTES + 1), 'output-oversized'],
   ];
   for (const [stdout, reason] of cases) assert.deepEqual(await attestRecordedWorker(identity, host({ stdout }).value), { verdict: 'unknown', reason }, stdout.slice(0, 60));
   const maxBuffer = Object.assign(new Error('maxBuffer'), { code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' });
   assert.deepEqual(await attestRecordedWorker(identity, host({ error: maxBuffer }).value), { verdict: 'unknown', reason: 'output-oversized' });
-  assert.deepEqual(await attestRecordedWorker(identity, host({ stdout: '\uFEFF{"v":1,"found":false}\r\n' }).value), { verdict: 'recorded-worker-gone', reason: 'pid-absent' });
+  assert.deepEqual(await attestRecordedWorker(identity, host({ stdout: '\uFEFF{"v":2,"found":false}\r\n' }).value), { verdict: 'recorded-worker-gone', reason: 'pid-absent' });
 });
 
 test('timeout, failed exit, spawn failure and unavailable host are unknown', async () => {
   assert.deepEqual(await attestRecordedWorker(identity, host({ error: Object.assign(new Error('timeout'), { killed: true, signal: 'SIGTERM' }) }).value), { verdict: 'unknown', reason: 'query-timeout' });
-  assert.deepEqual(await attestRecordedWorker(identity, host({ error: Object.assign(new Error('exit 4'), { code: 4 }), stdout: '{"v":1,"found":false}' }).value), { verdict: 'unknown', reason: 'query-failed' });
+  assert.deepEqual(await attestRecordedWorker(identity, host({ error: Object.assign(new Error('exit 4'), { code: 4 }), stdout: '{"v":2,"found":false}' }).value), { verdict: 'unknown', reason: 'query-failed' });
   assert.deepEqual(await attestRecordedWorker(identity, host({ throws: true }).value), { verdict: 'unknown', reason: 'query-failed' });
   assert.deepEqual(await attestRecordedWorker(identity, host(absent, { systemRoot: undefined }).value), { verdict: 'unknown', reason: 'host-unavailable' });
 });
@@ -99,7 +131,7 @@ test('missing, legacy or invalid identity is unknown without running a query', a
   const h = host(absent);
   assert.deepEqual(await attestRecordedWorker(undefined, h.value), { verdict: 'unknown', reason: 'identity-missing' });
   assert.deepEqual(await attestRecordedWorker(null, h.value), { verdict: 'unknown', reason: 'identity-missing' });
-  for (const value of [{}, { ...identity, schemaVersion: 2 }, { ...identity, role: 'other' }, { ...identity, pid: 0 }, { ...identity, processCreatedAt: null },
+  for (const value of [{}, { ...identity, schemaVersion: 3 }, { ...identity, role: 'other' }, { ...identity, pid: 0 }, { ...identity, processCreatedAt: null },
     { ...identity, executable: 'blender.exe' }, { ...identity, extra: true }, { pid: 4242 }, 'pid:4242']) {
     assert.deepEqual(await attestRecordedWorker(value, h.value), { verdict: 'unknown', reason: 'identity-invalid' });
   }
@@ -118,7 +150,7 @@ test('non-Windows platforms are unknown without running a query', async () => {
 test('capture records the exact identity for probe and generate workers', async () => {
   for (const role of ['probe', 'python-probe', 'generate'] as const) {
     assert.deepEqual(await captureWorkerIdentity({ pid: 4242, role, executable: BLENDER }, host(present()).value),
-      { status: 'captured', identity: { schemaVersion: 1, role, pid: 4242, processCreatedAt: CREATED, executable: BLENDER } });
+      { status: 'captured', identity: { schemaVersion: 2, role, pid: 4242, processCreatedAt: CREATED, executable: BLENDER } });
   }
 });
 
@@ -181,7 +213,7 @@ test('a query host that never settles is bounded by the adapter watchdog, never 
   mock.timers.tick(1);
   assert.deepEqual(await pending, { verdict: 'unknown', reason: 'query-unsettled' });
   assert.equal(kills, 1);
-  late!(null, '{"v":1,"found":false}', ''); // A late completion cannot change the settled verdict.
+  late!(null, '{"v":2,"found":false}', ''); // A late completion cannot change the settled verdict.
   assert.deepEqual(await pending, { verdict: 'unknown', reason: 'query-unsettled' });
   const capture = captureWorkerIdentity({ pid: 4242, role: 'generate', executable: BLENDER },
     { platform: 'win32', systemRoot: SYSTEM_ROOT, execFile() { return undefined; } });
@@ -196,14 +228,14 @@ test('watchdog settles unknown BEFORE cleanup: a kill that synchronously reports
   mock.timers.enable({ apis: ['setTimeout'] }); t.after(() => mock.timers.reset());
   let kills = 0;
   const reentrant: ProcessQueryHost = { platform: 'win32', systemRoot: SYSTEM_ROOT, execFile(_f, _a, _o, callback) {
-    return { kill() { kills++; callback(null, '{"v":1,"found":false}', ''); return true; } };
+    return { kill() { kills++; callback(null, '{"v":2,"found":false}', ''); return true; } };
   } };
   const pending = attestRecordedWorker(identity, reentrant);
   mock.timers.tick(QUERY_WATCHDOG_MS);
   assert.deepEqual(await pending, { verdict: 'unknown', reason: 'query-unsettled' });
   assert.equal(kills, 1);
   const capture = captureWorkerIdentity({ pid: 4242, role: 'generate', executable: BLENDER }, { platform: 'win32', systemRoot: SYSTEM_ROOT,
-    execFile(_f, _a, _o, callback) { return { kill() { callback(null, JSON.stringify({ v: 1, found: true, pid: 4242, created: CREATED, executable: BLENDER }), ''); return true; } }; } });
+    execFile(_f, _a, _o, callback) { return { kill() { callback(null, JSON.stringify({ v: 2, found: true, pid: 4242, created: CREATED, executable: BLENDER }), ''); return true; } }; } });
   mock.timers.tick(QUERY_WATCHDOG_MS);
   assert.deepEqual(await capture, { status: 'uncertain', reason: 'query-unsettled' });
 });

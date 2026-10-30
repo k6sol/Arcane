@@ -34,7 +34,7 @@ class World {
     return { platform: this.platform, systemRoot: 'C:\\Windows', execFile: (_f, _a, options, callback) => {
       this.queries++;
       const pid = Number(options.env.ARCANE_WORKER_PID), p = this.procs.get(pid);
-      const out = !p || !p.alive ? { v: 1, found: false } : { v: 1, found: true, pid, created: p.created, executable: this.metadataInaccessible ? null : p.executable };
+      const out = !p || !p.alive ? { v: 2, found: false } : { v: 2, found: true, pid, created: p.created, executable: this.metadataInaccessible ? null : p.executable };
       queueMicrotask(() => callback(null, JSON.stringify(out), ''));
       return undefined;
     } };
@@ -113,6 +113,21 @@ test('six-record bound refuses safely and never evicts an unresolved record', ()
   assert.equal(records.length, MAX_WORKER_RECORDS);
   assert.throws(() => reserveWorker(records, 'generate', id(99), T(1)), code('SUPERVISION_BOUND'));
   assert.equal(records.filter(r => r.state === 'reserved').length, 1);
+});
+
+test('journal wrapper stays version one while retaining both exact identity domains', async () => {
+  const world = new World(), pid = world.start(BLENDER), original = world.procs.get(pid)!;
+  for (const schemaVersion of [1, 2] as const) {
+    const raw = [{ schemaVersion: 1, role: 'generate', reservationId: id(1), reservedAt: T(1), state: 'captured',
+      identity: { schemaVersion, role: 'generate', pid, processCreatedAt: original.created, executable: BLENDER } }];
+    const records = parseWorkerRecords(JSON.parse(JSON.stringify(raw))); assert.ok(records);
+    assert.deepEqual(records, raw); assert.equal(records[0]!.schemaVersion, 1);
+    assert.deepEqual(await attestJobWorkers(records, world.host()), { verdict: 'same-worker-running', reason: 'identity-matched' });
+    world.procs.set(pid, { ...original, created: T(30) });
+    assert.deepEqual(await attestJobWorkers(records, world.host()), schemaVersion === 1
+      ? { verdict: 'unknown', reason: 'identity-conflict' } : { verdict: 'recorded-worker-gone', reason: 'pid-absent' });
+    world.procs.set(pid, original);
+  }
 });
 
 test('job attestation: legacy/empty/invalid/reserved stay unknown without queries; closed records need no query', async () => {

@@ -8,7 +8,8 @@ import { win32 } from 'node:path';
 export const WORKER_ROLES = Object.freeze(['probe', 'python-probe', 'generate'] as const);
 export type WorkerRole = typeof WORKER_ROLES[number];
 export interface WorkerIdentity {
-  readonly schemaVersion: 1;
+  /** 1: legacy CIM timestamp; 2: exact native FILETIME timestamp. */
+  readonly schemaVersion: 1 | 2;
   readonly role: WorkerRole;
   readonly pid: number;
   readonly processCreatedAt: string;
@@ -50,21 +51,88 @@ export const QUERY_WATCHDOG_MS = QUERY_TIMEOUT_MS + 2000;
 export const QUERY_MAX_OUTPUT_BYTES = 4096;
 const MAX_PID = 0xffffffff;
 const TIMESTAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.(\d{7})Z$/;
-// Constant script. The only input is a decimal PID passed through the environment and revalidated here.
-// One exact-PID Win32_Process lookup; no enumeration, command lines, kill or other process access.
+// Constant script. Only a validated decimal PID comes from the environment.
+// One same-handle native identity query; no enumeration, privilege changes or compiler.
 export const WORKER_QUERY_SCRIPT = [
+  "# Fixed exact-PID query. No caller-provided code or method names.",
   "$ErrorActionPreference = 'Stop'",
-  "$raw = [Environment]::GetEnvironmentVariable('ARCANE_WORKER_PID')",
-  "if ($raw -notmatch '^[1-9][0-9]{0,9}$') { exit 3 }",
-  '$id = [uint32]$raw',
-  "$found = @(Get-CimInstance -ClassName Win32_Process -Filter ('ProcessId = ' + $id) -Property ProcessId,CreationDate,ExecutablePath -OperationTimeoutSec 4)",
-  "if ($found.Count -eq 0) { [Console]::Out.Write('{\"v\":1,\"found\":false}'); exit 0 }",
-  'if ($found.Count -ne 1) { exit 4 }',
-  '$p = $found[0]',
-  "$created = $null; if ($null -ne $p.CreationDate) { $created = $p.CreationDate.ToUniversalTime().ToString('o') }",
-  '$o = [ordered]@{ v = 1; found = $true; pid = [uint32]$p.ProcessId; created = $created; executable = $p.ExecutablePath }',
-  '[Console]::Out.Write(($o | ConvertTo-Json -Compress))',
-  'exit 0',
+  "try {",
+  "  [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)",
+  "  $raw = [Environment]::GetEnvironmentVariable('ARCANE_WORKER_PID')",
+  "  [uint32]$workerPid = 0",
+  "  if ($raw -notmatch '^[1-9][0-9]{0,9}$' -or -not [uint32]::TryParse($raw, [Globalization.NumberStyles]::None, [Globalization.CultureInfo]::InvariantCulture, [ref]$workerPid) -or $workerPid -eq 0) { exit 3 }",
+  "  $assembly = [AppDomain]::CurrentDomain.DefineDynamicAssembly([Reflection.AssemblyName]::new('ArcaneWorkerIdentity'), [Reflection.Emit.AssemblyBuilderAccess]::Run)",
+  "  $module = $assembly.DefineDynamicModule('Native')",
+  "  $typeBuilder = $module.DefineType('ArcaneWorkerIdentity.Native', [Reflection.TypeAttributes]'Public,Abstract,Sealed')",
+  "  $attributeType = [Runtime.InteropServices.DllImportAttribute]",
+  "  $constructor = $attributeType.GetConstructor([type[]]@([string]))",
+  "  [Reflection.FieldInfo[]]$fields = @('EntryPoint','SetLastError','ExactSpelling','CharSet','CallingConvention') | ForEach-Object { $attributeType.GetField($_) }",
+  "  $imports = @{}",
+  "  function Bind([string]$name, [type]$returnType, [type[]]$parameters) {",
+  "    $method = $typeBuilder.DefinePInvokeMethod($name, 'kernel32.dll', $name, [Reflection.MethodAttributes]'Public,Static,PinvokeImpl', [Reflection.CallingConventions]::Standard, $returnType, $parameters, [Runtime.InteropServices.CallingConvention]::Winapi, [Runtime.InteropServices.CharSet]::Unicode)",
+  "    [object[]]$values = @($name, $true, $true, [Runtime.InteropServices.CharSet]::Unicode, [Runtime.InteropServices.CallingConvention]::Winapi)",
+  "    $method.SetCustomAttribute([Reflection.Emit.CustomAttributeBuilder]::new($constructor, [object[]]@('kernel32.dll'), $fields, $values))",
+  "    $method.SetImplementationFlags($method.GetMethodImplementationFlags() -bor [Reflection.MethodImplAttributes]::PreserveSig)",
+  "    $imports[$name] = $method",
+  "  }",
+  "  Bind 'OpenProcess' ([IntPtr]) ([type[]]@([uint32],[int32],[uint32]))",
+  "  Bind 'GetProcessTimes' ([int32]) ([type[]]@([IntPtr],[long].MakeByRefType(),[long].MakeByRefType(),[long].MakeByRefType(),[long].MakeByRefType()))",
+  "  Bind 'QueryFullProcessImageNameW' ([int32]) ([type[]]@([IntPtr],[uint32],[Text.StringBuilder],[uint32].MakeByRefType()))",
+  "  Bind 'WaitForSingleObject' ([uint32]) ([type[]]@([IntPtr],[uint32]))",
+  "  Bind 'CloseHandle' ([int32]) ([type[]]@([IntPtr]))",
+  "  # Cache last error inside managed IL, before Reflection.Invoke/PowerShell resumes.",
+  "  $openWrapper = $typeBuilder.DefineMethod('OpenProcessWithError', [Reflection.MethodAttributes]'Public,Static', [IntPtr], [type[]]@([uint32],[int32],[uint32],[int32].MakeByRefType()))",
+  "  $il = $openWrapper.GetILGenerator()",
+  "  $handleLocal = $il.DeclareLocal([IntPtr])",
+  "  $il.Emit([Reflection.Emit.OpCodes]::Ldarg_0)",
+  "  $il.Emit([Reflection.Emit.OpCodes]::Ldarg_1)",
+  "  $il.Emit([Reflection.Emit.OpCodes]::Ldarg_2)",
+  "  $il.Emit([Reflection.Emit.OpCodes]::Call, $imports['OpenProcess'])",
+  "  $il.Emit([Reflection.Emit.OpCodes]::Stloc, $handleLocal)",
+  "  $il.Emit([Reflection.Emit.OpCodes]::Ldarg_3)",
+  "  $il.Emit([Reflection.Emit.OpCodes]::Call, [Runtime.InteropServices.Marshal].GetMethod('GetLastWin32Error', [Type]::EmptyTypes))",
+  "  $il.Emit([Reflection.Emit.OpCodes]::Stind_I4)",
+  "  $il.Emit([Reflection.Emit.OpCodes]::Ldloc, $handleLocal)",
+  "  $il.Emit([Reflection.Emit.OpCodes]::Ret)",
+  "  $nativeType = $typeBuilder.CreateType()",
+  "  foreach ($name in @('OpenProcess','GetProcessTimes','QueryFullProcessImageNameW','WaitForSingleObject','CloseHandle')) {",
+  "    $method = $nativeType.GetMethod($name)",
+  "    $attributes = @($method.GetCustomAttributes($attributeType, $false))",
+  "    if ($attributes.Count -ne 1 -or $attributes[0].Value -ne 'kernel32.dll' -or $attributes[0].EntryPoint -ne $name -or -not $attributes[0].SetLastError -or -not $attributes[0].ExactSpelling -or $attributes[0].CharSet -ne [Runtime.InteropServices.CharSet]::Unicode -or $attributes[0].CallingConvention -ne [Runtime.InteropServices.CallingConvention]::Winapi -or -not ($method.GetMethodImplementationFlags() -band [Reflection.MethodImplAttributes]::PreserveSig)) { exit 4 }",
+  "  }",
+  "  [IntPtr]$workerHandle = [IntPtr]::Zero",
+  "  $observation = $null; $failed = $false",
+  "  try {",
+  "    [object[]]$openArguments = @([uint32]0x101000,[int32]0,$workerPid,[int32]0)",
+  "    $workerHandle = $nativeType.GetMethod('OpenProcessWithError').Invoke($null, $openArguments)",
+  "    $queryLastError = $openArguments[3]",
+  "    if ($workerHandle -eq [IntPtr]::Zero) {",
+  "      if ($queryLastError -eq 87) { $observation = [ordered]@{v=2;found=$false} } else { $failed = $true }",
+  "    } else {",
+  "      $before = $nativeType.GetMethod('WaitForSingleObject').Invoke($null, [object[]]@($workerHandle,[uint32]0))",
+  "      if ($before -eq 0) { $observation = [ordered]@{v=2;found=$false} }",
+  "      elseif ($before -eq 258) {",
+  "        $created = $null; $executable = $null",
+  "        [object[]]$timeArguments = @($workerHandle,[long]0,[long]0,[long]0,[long]0)",
+  "        if ($nativeType.GetMethod('GetProcessTimes').Invoke($null, $timeArguments) -ne 0) {",
+  "          try { $created = [DateTime]::FromFileTimeUtc([long]$timeArguments[1]).ToString('o', [Globalization.CultureInfo]::InvariantCulture) } catch { $created = $null }",
+  "        }",
+  "        $pathBuffer = [Text.StringBuilder]::new(4096)",
+  "        [object[]]$pathArguments = @($workerHandle,[uint32]0,$pathBuffer,[uint32]4096)",
+  "        if ($nativeType.GetMethod('QueryFullProcessImageNameW').Invoke($null, $pathArguments) -ne 0 -and $pathArguments[3] -gt 0 -and $pathArguments[3] -lt 4096) { $executable = $pathBuffer.ToString(0, [int]$pathArguments[3]) }",
+  "        $after = $nativeType.GetMethod('WaitForSingleObject').Invoke($null, [object[]]@($workerHandle,[uint32]0))",
+  "        if ($after -eq 0) { $observation = [ordered]@{v=2;found=$false} }",
+  "        elseif ($after -eq 258) { $observation = [ordered]@{v=2;found=$true;pid=$workerPid;created=$created;executable=$executable} }",
+  "        else { $failed = $true }",
+  "      } else { $failed = $true }",
+  "    }",
+  "  } finally {",
+  "    if ($workerHandle -ne [IntPtr]::Zero -and $nativeType.GetMethod('CloseHandle').Invoke($null, [object[]]@($workerHandle)) -eq 0) { $failed = $true }",
+  "  }",
+  "  if ($failed -or $null -eq $observation) { exit 4 }",
+  "  [Console]::Out.Write(($observation | ConvertTo-Json -Compress))",
+  "  exit 0",
+  "} catch { exit 4 }",
 ].join('\n');
 const ENCODED_SCRIPT = Buffer.from(WORKER_QUERY_SCRIPT, 'utf16le').toString('base64');
 
@@ -111,7 +179,7 @@ function parseObservation(pid: number, stdout: string): Observation {
   try { value = JSON.parse(stdout.replace(/^﻿/, '').trim()); } catch { return { kind: 'failed', reason: 'output-malformed' }; }
   if (!value || typeof value !== 'object' || Array.isArray(value)) return { kind: 'failed', reason: 'output-malformed' };
   const record = value as Record<string, unknown>, keys = Object.keys(record).sort().join(',');
-  if (record.v !== 1) return { kind: 'failed', reason: 'output-malformed' };
+  if (record.v !== 2) return { kind: 'failed', reason: 'output-malformed' };
   if (keys === 'found,v' && record.found === false) return { kind: 'absent' };
   if (keys !== 'created,executable,found,pid,v' || record.found !== true || record.pid !== pid) return { kind: 'failed', reason: 'output-malformed' };
   if (record.created !== null && !canonicalTimestamp(record.created)) return { kind: 'failed', reason: 'output-malformed' };
@@ -156,8 +224,8 @@ export function parseWorkerIdentity(value: unknown): WorkerIdentity | null {
   if (keys !== 'executable,pid,processCreatedAt,role,schemaVersion' || Object.values(descriptors).some(d => !('value' in d))) return null;
   const schemaVersion = descriptors.schemaVersion!.value, role = descriptors.role!.value, pid = descriptors.pid!.value;
   const processCreatedAt = descriptors.processCreatedAt!.value, executable = descriptors.executable!.value;
-  if (schemaVersion !== 1 || !validRole(role) || !validPid(pid) || !canonicalTimestamp(processCreatedAt) || !localAbsolute(executable)) return null;
-  return Object.freeze({ schemaVersion: 1, role, pid, processCreatedAt, executable });
+  if ((schemaVersion !== 1 && schemaVersion !== 2) || !validRole(role) || !validPid(pid) || !canonicalTimestamp(processCreatedAt) || !localAbsolute(executable)) return null;
+  return Object.freeze({ schemaVersion, role, pid, processCreatedAt, executable });
 }
 
 /** Read the identity of a worker this supervisor just spawned. Anything short of a complete,
@@ -171,7 +239,7 @@ export async function captureWorkerIdentity(input: { pid: unknown; role: unknown
   if (seen.kind === 'absent') return { status: 'uncertain', reason: 'pid-absent' };
   if (seen.created === null || seen.executable === null) return { status: 'uncertain', reason: 'metadata-inaccessible' };
   if (!sameExecutable(seen.executable, executable)) return { status: 'uncertain', reason: 'executable-mismatch' };
-  return { status: 'captured', identity: Object.freeze({ schemaVersion: 1, role, pid, processCreatedAt: seen.created, executable }) };
+  return { status: 'captured', identity: Object.freeze({ schemaVersion: 2, role, pid, processCreatedAt: seen.created, executable }) };
 }
 
 /** Host evidence about one recorded worker. Only an exact PID+creation-time comparison can yield
@@ -185,7 +253,11 @@ export async function attestRecordedWorker(recorded: unknown, host: ProcessQuery
   // The PID is unique among live processes; no live process with it means the recorded one ended.
   if (seen.kind === 'absent') return { verdict: 'recorded-worker-gone', reason: 'pid-absent' };
   if (seen.created === null) return { verdict: 'unknown', reason: 'metadata-inaccessible' };
-  if (seen.created !== identity.processCreatedAt) return { verdict: 'recorded-worker-gone', reason: 'pid-reused' };
+  // CIM supplied microsecond metadata. Never interpret a cross-source precision
+  // difference as PID reuse; only v2 compares exact native FILETIME timestamps.
+  if (seen.created !== identity.processCreatedAt) return identity.schemaVersion === 2
+    ? { verdict: 'recorded-worker-gone', reason: 'pid-reused' }
+    : { verdict: 'unknown', reason: 'identity-conflict' };
   if (seen.executable === null) return { verdict: 'unknown', reason: 'metadata-inaccessible' };
   if (!sameExecutable(seen.executable, identity.executable)) return { verdict: 'unknown', reason: 'identity-conflict' };
   return { verdict: 'same-worker-running', reason: 'identity-matched' };

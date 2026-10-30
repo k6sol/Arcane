@@ -15,7 +15,7 @@ const rid = (n: number) => '00000000-0000-4000-8000-' + String(n).padStart(12, '
 const NOW = () => T(59);
 type Behaviour = 'absent' | 'reused' | 'live' | 'malformed' | 'stall' | 'manual';
 
-function identity(n: number, role: WorkerRole = 'generate'): WorkerIdentity { return { schemaVersion: 1, role, pid: 5000 + n, processCreatedAt: T(n), executable: BLENDER }; }
+function identity(n: number, role: WorkerRole = 'generate'): WorkerIdentity { return { schemaVersion: 2, role, pid: 5000 + n, processCreatedAt: T(n), executable: BLENDER }; }
 /** `closedFirst` closed records, then `count` captured ones (distinct ids; roles cycle). Built as persisted JSON so
  * up to six captured records can exercise the query bound; the writer itself keeps one unresolved record per role. */
 function captured(count: number, closedFirst = 0): readonly WorkerRecord[] {
@@ -40,12 +40,12 @@ function host(behaviour: (pid: number) => Behaviour) {
     stats.calls++; stats.inflight++; stats.max = Math.max(stats.max, stats.inflight);
     const reply = (out: unknown) => { stats.inflight--; callback(null, typeof out === 'string' ? out : JSON.stringify(out), ''); };
     const answer = () => {
-      if (mode === 'absent' || mode === 'manual') reply({ v: 1, found: false });
-      else if (mode === 'reused') reply({ v: 1, found: true, pid, created: T(n + 30), executable: 'C:\\Windows\\notepad.exe' });
-      else if (mode === 'live') reply({ v: 1, found: true, pid, created: T(n), executable: BLENDER });
+      if (mode === 'absent' || mode === 'manual') reply({ v: 2, found: false });
+      else if (mode === 'reused') reply({ v: 2, found: true, pid, created: T(n + 30), executable: 'C:\\Windows\\notepad.exe' });
+      else if (mode === 'live') reply({ v: 2, found: true, pid, created: T(n), executable: BLENDER });
       else if (mode === 'malformed') reply('not json C:\\Users\\private');
     };
-    if (mode === 'stall') { stats.late.push(() => reply({ v: 1, found: false })); return { kill() { stats.inflight--; return true; } }; }
+    if (mode === 'stall') { stats.late.push(() => reply({ v: 2, found: false })); return { kill() { stats.inflight--; return true; } }; }
     if (mode === 'manual') stats.pending.set(pid, answer); else queueMicrotask(answer);
     return undefined;
   } };
@@ -130,6 +130,16 @@ test('invalid journals, identities, jobs and states refuse with zero queries', a
   for (const [bytes, reason] of cases) assert.deepEqual(await assess(bytes, h.value), { status: 'refused', reason }, reason);
   assert.deepEqual(await assessJobForResolution({ jobId: 'bad', journal: journal(), host: h.value }), { status: 'refused', reason: 'job-mismatch' });
   assert.equal(h.stats.calls, 0);
+});
+
+test('legacy timestamp disagreement cannot mint PID-reuse resolution evidence', async () => {
+  const legacy = captured(1).map(record => record.state === 'captured'
+    ? { ...record, identity: { ...record.identity, schemaVersion: 1 } } : record);
+  assert.ok(parseWorkerRecords(legacy));
+  assert.deepEqual(await assess(journal({}, legacy), host(() => 'reused').value), { status: 'refused', reason: 'identity-conflict' });
+  assert.deepEqual(await assess(journal({}, legacy), host(() => 'live').value), { status: 'refused', reason: 'same-worker-running' });
+  const absent = await assess(journal({}, legacy), host(() => 'absent').value); assert.ok(absent.status === 'resolvable');
+  assert.equal(absent.record.basis[0]!.evidence, 'pid-absent');
 });
 
 test('the assessment copies the journal bytes before awaiting: later caller mutation cannot change the record', async () => {
