@@ -17,7 +17,8 @@ const sourceNames = ['workers/blender/procedural.py', 'workers/blender/textures.
 const sourceHashes = async () => Object.fromEntries(await Promise.all(sourceNames.map(async name => [name, sha(await readRegularFile(join(repository, name), 512 * 1024))])));
 
 function originalTextures(bytes) {
-  // Exact inverse to a FULL reviewed original module, never a projected algorithm.
+  // Exact basal-paint inverse to the FULL reviewed current-layout module.
+  // Preserve the separately reviewed oak distribution when isolating root paint.
   let text = bytes.toString('utf8');
   const newline = text.includes('\r') ? '\r\n' : '\n';
   if (newline === '\r\n') assert.ok(!text.replaceAll('\r\n', '').includes('\r') && !text.replaceAll('\r\n', '').includes('\n'));
@@ -46,10 +47,23 @@ function originalTextures(bytes) {
     text = text.replace(fragment, before.join(newline));
   }
   const original = Buffer.from(text, 'utf8');
-  assert.ok(['166392242ea95622b92f0cf51d14c9dbe433381f4f3d161921cc1ef030f62cd2',
-    '37aabeae667a63db3e608293b2268356aff5cdc216a2bb2d3394837e331eae4d'].includes(sha(original)), 'Complete original module must match its reviewed LF/CRLF pin.');
+  assert.ok(['d0f0f08795e14431e9609007ebe78bb2f6654a45d51df595cc0932380a45dc89',
+    '4c61f58d6281181bfcba3d1391de03b9cf90baf4c4aaa18976e00d2891eec187'].includes(sha(original)), 'Complete original module must match its reviewed LF/CRLF pin.');
   return original;
 }
+
+test('reviewed foliage baseline preserves current layout and refuses unrelated source edits', async () => {
+  const text = (await readRegularFile(join(repository, 'workers/blender/textures.py'), 512 * 1024)).toString('utf8').replaceAll('\r\n', '\n');
+  for (const [source, expected] of [[text, 'd0f0f08795e14431e9609007ebe78bb2f6654a45d51df595cc0932380a45dc89'],
+    [text.replaceAll('\n', '\r\n'), '4c61f58d6281181bfcba3d1391de03b9cf90baf4c4aaa18976e00d2891eec187']]) {
+    const baseline = originalTextures(Buffer.from(source));
+    assert.equal(sha(baseline), expected);
+    assert.ok(baseline.toString('utf8').includes('terminal = 2 if number == 0 else 1'));
+    assert.ok(!baseline.toString('utf8').includes('painted[0] = np.array((width * .5, 2.0))'));
+    assert.throws(() => originalTextures(Buffer.from('# unrelated edit' + (source.includes('\r\n') ? '\r\n' : '\n') + source)),
+      /Complete original module must match its reviewed LF\/CRLF pin/);
+  }
+});
 
 function model(bytes) {
   assert.ok(bytes.length >= 28 && bytes.length <= 20_000_000);
