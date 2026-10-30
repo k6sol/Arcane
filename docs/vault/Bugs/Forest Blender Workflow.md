@@ -38,3 +38,7 @@ Source review identified the forest resolver's implicit built-in fallback. The c
 Missing sources now refuse before dispatch, and live/saved failure Details carry finite supported reason/code information with an honest unavailable fallback. Existing import-staging phase/reason display is preserved. Whole-game and focused routing are separately checked; habitat creation should not lose nature guidance behind a pillar/prop detail. Revised guidance includes actual field names, UV/PBR/preview/import requirements and scene finishing.
 
 Corrected foliage component views passed on Windows and Linux in native run 41025696581 and were inspected. A full current boulder passed genuine Linux authoring/export/reopen but Windows stopped with `SUPERVISION_UNRECORDED`: [[Bugs/Windows Model Supervision]]. The running customer app remains older and its retained diagnostic is blocked at connect/unknown `FRAME_LIMIT`. This regression is not yet accepted as fixed in the installed app.
+
+## Original Windows authoring proof
+
+The actual local asset pipeline completed one original boulder through Blender 4.5.3 LTS, UV/PBR, GLB/FBX export, round-trip, saved-scene reopen and original-worker closure. Both real review views were inspected. Geometry/export success does not establish acceptable rock art: rounded mass and repetitive cracks still need improvement. Studio import, the complete forest composition and the updated installed-app prompt remain unverified.

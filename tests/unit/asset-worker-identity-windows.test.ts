@@ -134,12 +134,12 @@ test('actual default Windows same-handle query captures a held Node child and pr
 });
 
 test('actual default Windows query preserves an owned Unicode executable path as UTF8', { skip: process.platform !== 'win32', timeout: 30000 }, async t => {
-  const f = await fixture(t), source = await realpath(process.execPath), target = join(f.root, 'worker-é.exe');
+  const f = await fixture(t), source = await realpath(process.execPath), target = join(f.root, 'worker-é-🌿.exe');
   const before = await lstat(source); assert.ok(before.isFile() && before.size > 0 && before.size <= 512 * 1024 * 1024);
   await copyFile(source, target); const copied = await lstat(target);
   assert.ok(copied.isFile() && !copied.isSymbolicLink() && copied.nlink === 1 && copied.size === before.size);
   const child = await f.start(await realpath(target)), identity = await capture(t, child);
-  assert.ok(identity.executable.includes('é')); t.signal.throwIfAborted();
+  assert.ok(identity.executable.includes('é')); assert.ok(identity.executable.includes('🌿')); t.signal.throwIfAborted();
   assert.deepEqual(await attestRecordedWorker(identity), { verdict: 'same-worker-running', reason: 'identity-matched' });
   const exit = await child.close(); assert.equal(exit.code, 0); assert.equal(exit.signal, null);
 });

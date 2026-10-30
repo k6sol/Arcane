@@ -33,3 +33,11 @@ The subsequent fixed observation in [native run 41041175344](https://github.com/
 - [ ] Verify reviewed model import and appearance in the designated Studio place.
 
 The hosted query on source `4511a4f` still timed out with no output; that separate result remains unresolved. Fixed bounded stage progress is now emitted to stderr, while incidental PowerShell progress display is suppressed so it cannot obscure the closed diagnostic grammar. Actual local query traces decode completely and return in about 1.3 seconds. No deadline, output limit, success JSON, native flag check or cleanup proof was relaxed. ConvertTo-Json module loading is a hypothesis for the remaining hosted delay, not an established cause.
+
+## Fixed-shape serialization and actual local Blender run
+
+Run 41046371741 on `c063be4` reaches the final serialization stage in both original Windows queries, then exceeds the unchanged five-second deadline. The corresponding Windows unit shard fails only those two query cases; the other five component lanes and Linux native job pass. This establishes the reached boundary, not an internal module-loader cause.
+
+The correction serializes only the existing version-two observation envelope without PowerShell JSON module discovery. Native flags, same-handle reads, Unicode paths, output/deadline caps and original closure checks remain unchanged. All 642 product sources compile; 22 identity tests pass locally, including actual Windows capture, close and a path containing BMP and supplementary Unicode. Fresh hosted checks remain required.
+
+A separate real local Blender 4.5.3 LTS run completed generation, UV/PBR, both review renders, GLB/FBX export, round-trip and saved-scene reopen. All three original worker roles were observed closed. The model has 5,488 render triangles and 512px original PBR images, with an angle-distortion UV warning. Both actual views were inspected: the rounded mass and uniform crack pattern are not accepted as production art. This is no proof of Studio import or the installed chat journey.
