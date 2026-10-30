@@ -53,7 +53,7 @@ export interface KitReport { kind: 'plinth' | 'forest'; key: string; parts: numb
   /** Plinth safe zone: the ring's centre/radius, the protected world-Y band and the server Script to install (scene_create Script,
    * script_update with this source, script_set_enabled). */
   safeZone?: { at: number[]; radius: number; style: string; bottom: number; top: number; segments: number; particles: number; script: { name: string; source: string } };
-  /** Forest layers cloned from Blender original template variants (`<use>-<n>`), and the ones that fell back to blockouts. */
+  /** Forest template variant families (`<use>-<n>`); names alone are not Blender provenance. Legacy blockout fields are read-compatible only. */
   originals?: Record<string, string[]>; blockouts?: string[]; note?: string; recipe?: OriginalVariant[] }
 /** Internal bookkeeping consumed by compileSceneBuild: which items/scatter specs belong to each kit. */
 export interface KitPlan { report: KitReport; items: [number, number]; scatter: number[]; tris: Map<string, number> }
@@ -127,7 +127,7 @@ const block = (name: string, size: number[], at: number[], orientation: number[]
   part(name, { Size: size.map(r2) as Vec, Position: at.map(r2) as Vec, Orientation: orientation.map(r2) as Vec, ...rest });
 
 const BARK = '#4a3627', LEAF = { CanCollide: false } as const, SMALL = { CanCollide: false, CastShadow: false } as const;
-/** Stylised blockout species used when a kit names one that is not declared; realistic work passes Blender templates instead. */
+/** Stylised primitives retained for explicitly selected plinth columns; forest layers require declared sources. */
 function builtin(kind: string): Proto | undefined {
   const parts: ProtoPart[] = [];
   const add = (...items: ProtoPart[]) => { parts.push(...items); };
@@ -502,14 +502,14 @@ export function expandKits(input: SceneBuildInput): { input: SceneBuildInput; pl
     if (raw.radius === undefined || raw.radius < 16) throw new BridgeError('INPUT', `Forest "${key}" needs radius 16..2048.`);
     const trees = raw.trees ?? 80;
     const kit = { ...raw, radius: raw.radius, center: raw.at as Vec, trees, undergrowth: raw.undergrowth ?? trees * 2, edge: raw.radius * 0.2, ground: true }, seed = kit.seed;
-    const tris = new Map<string, number>(), originals: Record<string, string[]> = {}, blockouts = new Set<string>();
-    /** A declared use is placed as is; otherwise its `<use>-<n>` template variants (Blender originals); otherwise a blockout. */
+    const tris = new Map<string, number>(), originals: Record<string, string[]> = {};
+    /** Use an explicit source or numbered template family; never manufacture forest geometry for a missing source. */
     const resolve = (use: string): string[] => {
       if (declared(use) && !blockout.has(use)) return [use];
       const variants = Object.keys(templates).map(name => [name, /^(.+)-(\d{1,3})$/.exec(name)] as const)
         .filter(([, m]) => m?.[1] === use).sort((a, b) => Number(a[1]![2]) - Number(b[1]![2])).map(([name]) => name).slice(0, 16);
       if (variants.length) return originals[use] = variants;
-      ensure(use); blockouts.add(use); return [use];
+      throw new BridgeError('FOREST_SOURCES_REQUIRED', 'Forest layers require explicit prototypes or templates. Generate, review and import the intended models when needed, then pass their template refs; use explicit primitive prototypes for an intended blockout.');
     };
     items.push({ key, className: 'Model', name: kit.name ?? 'Forest', ...(kit.in ? { in: kit.in } : {}) },
       { key: key + '-trees', className: 'Model', name: 'Trees', in: key }, { key: key + '-cover', className: 'Model', name: 'Undergrowth', in: key });
@@ -549,14 +549,6 @@ export function expandKits(input: SceneBuildInput): { input: SceneBuildInput; pl
     for (const u of under) { indices.push(scatter.length); scatter.push(layer(u.l, u.count, key + '-cover', u.i, true, cover)); }
     const report: KitReport = { kind: 'forest', key, parts: 0, triangles: 0, placed: 0, requested: treeLayers.reduce((s, t) => s + t.count, 0) + under.reduce((s, u) => s + u.count, 0) };
     if (Object.keys(originals).length) report.originals = originals;
-    if (blockouts.size) {
-      const fallback = [...blockouts], recipe = forestOriginals(seed, fallback);
-      report.blockouts = fallback;
-      report.note = `Blockout primitives for ${fallback.join(', ')}: no <use>-<n> Blender original templates were passed. ` + (recipe.length
-        ? 'If assets_procedural is available: run recipe, the user approves each preview, place one copy each in a hidden template Folder, rebuild with templates. Otherwise tell the user the forest is a blockout.'
-        : 'Tell the user these layers are blockouts.');
-      if (recipe.length) report.recipe = recipe;
-    }
     plans.push({ report, items: [start, items.length], scatter: indices, tris });
   }
   // Tilt: a few pre-tilted copies per part prototype (the wire placement only carries yaw), chosen per point like any variant.

@@ -237,6 +237,52 @@ test('fixture SDK: tools/list is token-lean and the compact schemas accept and r
   assert.notEqual(tagged.data.error?.code, 'INPUT', JSON.stringify(tagged.data));
 });
 
+test('MCP forest kits refuse missing sources before any daemon request and accept explicit primitive sources', async t => {
+  const f = await fixture(t), client = await linked(t, f);
+  const kit = { kind: 'forest', at: [0, 0, 0], radius: 80, trees: 4, undergrowth: 4, seed: 7,
+    species: [{ use: 'oak', spacing: 12 }], cover: [{ use: 'fern', spacing: 3 }] };
+  const oak = { parts: [{ name: 'Trunk', props: { Size: [2, 8, 2], Position: [0, 4, 0], Material: 'Wood' } }] };
+  for (const sources of [{}, { prototypes: { oak } }]) {
+    const refused = await call(client, 'scene_build', { sessionId: SESSION_ID, parent: REFERENCE, name: 'MissingForestSources', ...sources, kits: [kit] });
+    assert.equal(refused.result.isError, true);
+    assert.equal(refused.data.error.code, 'FOREST_SOURCES_REQUIRED');
+    assert.equal(refused.data.error.message, 'Forest layers require explicit prototypes or templates. Generate, review and import the intended models when needed, then pass their template refs; use explicit primitive prototypes for an intended blockout.');
+    assert.equal(f.state.posts, 0, 'no refused command was enqueued');
+    assert.equal(f.state.polls, 0, 'no refused command was polled');
+    assert.equal(f.requests.length, 0, 'the missing-source refusal is local, before daemon I/O');
+    assert.equal(f.commands.size, 0);
+  }
+  const explicit = await call(client, 'scene_build', { sessionId: SESSION_ID, parent: REFERENCE, name: 'ExplicitBlockout', prototypes: { oak },
+    kits: [{ ...kit, undergrowth: 0 }] });
+  assert.notEqual(explicit.result.isError, true, JSON.stringify(explicit.data));
+  assert.equal(explicit.data.state, 'succeeded');
+  assert.equal(f.state.posts, 1, 'the supplied source is dispatched exactly once');
+  const command = [...f.commands.values()][0]!;
+  assert.equal(command.method, 'scene.build');
+  assert.ok((command.args.prototypes as Json[]).length > 0);
+  assert.equal(explicit.data.kits[0].requested, 4);
+  assert.equal(explicit.data.kits[0].placed, 4);
+  assert.equal(explicit.data.kits[0].originals, undefined, 'a supplied primitive is not original Blender evidence');
+  assert.equal(explicit.data.kits[0].blockouts, undefined);
+});
+
+test('MCP forest kits preserve numeric template variant ordering without manufacturing geometry', async t => {
+  const f = await fixture(t), client = await linked(t, f);
+  const template = (id: string) => ({ ...REFERENCE, instanceId: id, className: 'Model' });
+  const result = await call(client, 'scene_build', { sessionId: SESSION_ID, parent: REFERENCE, name: 'ExplicitTemplates',
+    templates: { 'oak-10': template('oak-ten'), 'oak-2': template('oak-two'), 'oak-1': template('oak-one') },
+    kits: [{ kind: 'forest', at: [0, 0, 0], radius: 100, trees: 6, undergrowth: 0, seed: 7, species: [{ use: 'oak', spacing: 12 }] }] });
+  assert.notEqual(result.result.isError, true, JSON.stringify(result.data));
+  assert.equal(result.data.state, 'succeeded');
+  assert.equal(f.state.posts, 1);
+  assert.deepEqual(result.data.kits[0].originals, { oak: ['oak-1', 'oak-2', 'oak-10'] }, 'family metadata is numeric ordering, not an import provenance claim');
+  const command = [...f.commands.values()][0]!;
+  assert.equal((command.args.prototypes as Json[]).length, 0, 'no primitive prototype was generated');
+  assert.equal((command.args.templates as Json[]).length, 3);
+  assert.equal(result.data.kits[0].placed, 6);
+  assert.equal(result.data.kits[0].blockouts, undefined);
+});
+
 test('compact outcomes keep state, ids, results and receipts but drop repeated session metadata and echoed bulk', () => {
   const source = 'print("x")\n'.repeat(200), ref = REFERENCE as unknown as Json;
   const command: StudioCommand = { protocolVersion: 1, id: 'cmd-1', requestId: 'req-1', sessionId: SESSION_ID, clientSessionId: 'lifetime', method: 'script.update',

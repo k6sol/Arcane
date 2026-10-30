@@ -62,6 +62,20 @@ test('compact forest compiles into one strict scene.build that the daemon accept
   assert.deepEqual(compileSceneBuild(forestInput(), ROOT_REF as unknown as Json).args, compiled.args, 'seeded scatter is deterministic');
 });
 
+test('forest kits require explicit source geometry before compilation, while declared primitive sources remain valid', () => {
+  const kit = { kind: 'forest', at: [0, 0, 0], radius: 100, trees: 12, undergrowth: 0, seed: 7, species: [{ use: 'Pine', spacing: 8 }] };
+  assert.throws(() => compileSceneBuild(parse({ name: 'Missing', kits: [kit] }), ROOT_REF as unknown as Json), { code: 'FOREST_SOURCES_REQUIRED' });
+  const pine = forestInput(12).prototypes!.Pine!;
+  const compiled = compileSceneBuild(parse({ name: 'ExplicitBlockout', prototypes: { Pine: pine }, kits: [kit] }), ROOT_REF as unknown as Json);
+  const validated = validateCommandArgs('scene.build', compiled.args, session());
+  assert.equal(sceneBuildInstanceCount(validated), compiled.instances);
+  assert.equal(compiled.kits[0]!.requested, 12);
+  assert.equal(compiled.kits[0]!.placed, 12);
+  assert.equal(compiled.kits[0]!.originals, undefined, 'explicit primitive input is not Blender provenance');
+  assert.equal(compiled.kits[0]!.blockouts, undefined, 'no implicit fallback report');
+  assert.equal(compiled.kits[0]!.recipe, undefined);
+});
+
 test('scatter is natural: spacing, clearing and keep-out respected, never rings', () => {
   const items = compileSceneBuild(forestInput(), ROOT_REF as unknown as Json).args.items as { kind: string; parent: number; at: number[]; yaw: number; scale: number; tint: number[] | null }[];
   const trees = items.filter(item => item.kind === 'place' && item.parent === 1);
