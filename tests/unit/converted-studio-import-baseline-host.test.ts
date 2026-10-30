@@ -280,8 +280,13 @@ test('foreign native conversation cannot use the known prepared revision or obse
   }finally{registry.close();}
 });
 
-test('retiring the current actor while its observation ACK is held cannot arm application',{timeout:30_000},async t=>{
-  const f=await baselineFixture(t);await f.initial();await f.staged();f.observe(()=>{f.incarnation.ended(f.operation);return false;});
+test('retiring the current actor while its observation ACK is held cannot arm application',{timeout:90_000},async t=>{
+  const started=Date.now(),f=await baselineFixture(t);let heldObservations=0;
+  t.diagnostic('baseline fixture ready after '+(Date.now()-started)+'ms');
+  await f.initial();t.diagnostic('initial placement recorded after '+(Date.now()-started)+'ms');
+  await f.staged();t.diagnostic('revision reconstruction recorded after '+(Date.now()-started)+'ms');
+  f.observe(()=>{heldObservations++;f.incarnation.ended(f.operation);return false;});
   await assert.rejects(()=>f.controller.applyRevision(NEXT,f.nextActor()),refused('NATIVE_ASSET_AUTHORITY'));
+  assert.equal(heldObservations,1,'the original observation was delivered and its ACK was withheld before actor retirement refused application');
   assert.equal(f.delivered.some(command=>command.method==='asset.apply_revision'),false);assert.equal((await f.controller.revisionStatus(NEXT,f.registry.capture(f.incarnation.credential(),'read'))).revision,null);
 });

@@ -12,7 +12,7 @@ Check a goal off only when its acceptance criteria pass and its evidence is reco
 - [ ] [[Delivery/G01 Release Baseline|G01 · Establish one reproducible release baseline]] — in progress
 - [ ] [[Delivery/G02 Reliable Chat|G02 · Make chat dependable]]
 - [ ] [[Delivery/G03 Persistent Sessions|G03 · Preserve sessions through restart and update]]
-- [ ] [[Delivery/G04 Task Lifetimes|G04 · Finish task lifetimes and parallel work]]
+- [ ] [[Delivery/G04 Task Lifetimes|G04 · Finish task lifetimes and parallel work]] — in progress
 - [ ] [[Delivery/G05 Blender Quality|G05 · Enforce a measurable Blender quality pipeline]]
 - [ ] [[Delivery/G06 Connected Import|G06 · Complete connected import and scene editing]]
 - [ ] [[Delivery/G07 Test and Repair|G07 · Close the task, test and repair loop]]

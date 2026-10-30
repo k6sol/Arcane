@@ -15,6 +15,8 @@ tags: [arcane]
 
 ## Still missing
 
+30 October update: [run 40975403615](https://github.com/k6sol/Arcane/actions/runs/40975403615) on the knowledge commit has one Windows test cancellation, not an assertion failure. [[Bugs/Converted Import Timeout]] records the exact fixture and proposed correction. Installed release fingerprints are now inspected in [[Operations/Current State]], but exact source attribution and customer execution remain outstanding.
+
 - Installed app/plugin revision matching the intended release.
 - Authenticated customer send/reopen/update and complete production workflow.
 - Native Studio rendering, upload, placement and gameplay acceptance; this agent must not operate Studio.

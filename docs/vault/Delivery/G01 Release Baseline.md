@@ -15,17 +15,18 @@ Depends on: none. Owner: release integration.
 
 ## Acceptance record
 
-- [ ] Required behavior implemented against current source.
-- [ ] Each outcome above verified at its stated scope.
-- [ ] Evidence and remaining limitations recorded below.
-- [ ] Relevant regression checks passed for the published revision.
+- [x] Identify remote source revisions and exact hosted validation outcome.
+- [x] Identify active installation metadata and installed plugin file fingerprint.
+- [ ] Attribute the installed source to its exact release revision or documented equivalent file inventory.
+- [ ] Reproduce the shortest failing customer path and retain its evidence without assuming a source-only fix is installed.
+- [ ] Validate the corrected published revision and record remaining release blockers.
 
 ## Evidence
 
-No whole-goal completion evidence recorded yet. Add actual revision/run/artifact links and distinguish controlled tests from customer/native proof.
+30 October: main `ee7534c`; previous green product baseline `7e52f67`. Run 40975403615 has one Windows fixture cancellation, detailed in [[Bugs/Converted Import Timeout]]. Active desktop installed 20 October; its manifest and plugin fingerprint are recorded in [[Operations/Current State]]. No app launch, plugin operation or native Studio acceptance performed. G01 remains in progress.
 
 ## Next action
 
-Identify the installed revision and shortest failing customer path.
+Verify the targeted CI correction, then compare the active source inventory and complete original lifetime fixes before a separately verified desktop release.
 
 [[Delivery/Goal Board]] · [[Operations/Evidence Ledger]]

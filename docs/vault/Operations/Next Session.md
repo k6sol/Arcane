@@ -13,10 +13,10 @@ tags: [arcane]
 
 ## Resume the actual work
 
-- Re-read remote main and the installed-version metadata. The old validation revision `2531c06` is superseded; do not run an observer pinned to it or restart old jobs.
+- Re-read remote main. Baseline `ee7534c` has one Windows outer test timeout; inspect the subsequent correction's actual hosted run before promoting further work. See [[Bugs/Converted Import Timeout]]. The old observer pinned to `2531c06` is obsolete.
 - Preserve the shared checkout's existing modifications. Use the current authoritative source and a narrow change, with isolated Git plumbing/checkouts if necessary.
-- Compare pending adoption/cancellation drafts against current main; reuse only actual missing improvements.
-- Choose the first reproducible customer blocker, implement it and verify the same failing path.
+- Finish original adoption lifetime and deliberate-close request provenance changes against current source. The five adoption paths were unchanged from the old draft baseline; the registry's newer Stop-after-close behavior needs a companion regression. The coordinator changed, so cancellation work needs a current-source merge.
+- The active desktop directory was installed 20 October (Electron 44.7.0); metadata has no Git revision. Identify release/source fingerprints before any installation. The installed plugin file was inspected, not loaded or exercised.
 - Update the goal's acceptance checklist and evidence, then publish a concise SSH-signed commit.
 
 ## Keep context small

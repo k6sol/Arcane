@@ -5,7 +5,7 @@ tags: [arcane]
 ---
 # Finish task lifetimes and parallel work
 
-Status: **Queued**. Priority and original scope: Finish task lifetimes and parallel work — P0, queued.
+Status: **In progress**. Priority: P0.
 
 Deliver: planning, Blender generation and placement preparation can overlap within existing resource limits; cancellation joins original work; normal completion does not cancel accepted work; ordinary interruption is distinguished from genuine cleanup failure; lost acknowledgements remain inspectable without replay.
 
@@ -22,10 +22,10 @@ Depends on: 1. Owner: task/runtime integration.
 
 ## Evidence
 
-No whole-goal completion evidence recorded yet. Add actual revision/run/artifact links and distinguish controlled tests from customer/native proof.
+30 October: original adoption work can escape task accounting, and deliberate client closure can be misclassified as a cleanup failure during repair. Both source-backed fixes are being finished against current main with original file/transport and held-operation regressions. No whole-goal or native acceptance claim yet.
 
 ## Next action
 
-Resolve listed dependencies, then reproduce the missing outcome before editing.
+Review, publish and verify the original adoption lifetime and deliberate-close provenance changes. Then connect normal retirement and preserve independent later human review/import paths.
 
 [[Delivery/Goal Board]] · [[Operations/Evidence Ledger]]
