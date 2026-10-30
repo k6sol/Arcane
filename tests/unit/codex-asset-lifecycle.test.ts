@@ -26,9 +26,27 @@ type Scenario = { mode?: string; action?: string; hooks?: boolean; profile?: boo
 type Receipt = { event: string; launch?: number; args?: string[]; envKeys?: string[]; tokenHash?: string | null;
   audience?: string | null; daemonUrl?: string | null; method?: string; params?: Record<string, unknown>; code?: string;
   dispatched?: boolean; intent?: { connectionId: string; threadId: string; operationId: string }; frozen?: boolean;
-  snapshot?: Snapshot; operation?: Operation; pending?: boolean; key?: string; };
+  snapshot?: Snapshot; operation?: Operation; pending?: boolean; key?: string;
+  phase?: string; diagnostic?: { phase?: string; name?: string; code?: string }; };
 const events = (rows: Receipt[], event: string) => rows.filter(row => row.event === event);
 const calls = (rows: Receipt[], method: string) => rows.filter(row => row.event === 'rpc' && row.method === method);
+// Failure messages project only finite synthetic phases/categories, never audit
+// bodies, native IDs, error text, paths, provider content or stacks.
+function lifecycleDetails(rows: Receipt[]): string {
+  const phases = new Set(['connecting', 'thread-setup', 'turn-preflight', 'dispatched', 'peer-held', 'retiring', 'turn-settlement', 'finished']);
+  const names = new Set(['Error', 'SyntaxError', 'TypeError', 'RangeError', 'ReferenceError', 'AssertionError', 'CodexClientError']);
+  const codes = new Set(['ERR_ASSERTION', 'DISCONNECTED', 'GRANT_REVOKED', 'ACCOUNT_CHANGED', 'UNKNOWN', 'TIMEOUT', 'IO', 'MCP_INVENTORY', 'MCP_ISOLATION', 'MCP_CAPABILITIES', 'STATE', 'PROTOCOL', 'ARGUMENTS', 'PROCESS_EXIT_UNCONFIRMED']);
+  const latest = events(rows, 'phase').at(-1)?.phase;
+  return 'Synthetic lifecycle ' + JSON.stringify({
+    phase: latest !== undefined && phases.has(latest) ? latest : 'unavailable',
+    errors: events(rows, 'error').slice(0, 2).map(row => ({
+      phase: row.diagnostic?.phase !== undefined && phases.has(row.diagnostic.phase) ? row.diagnostic.phase : 'unavailable',
+      name: row.diagnostic?.name !== undefined && names.has(row.diagnostic.name) ? row.diagnostic.name : 'other',
+      code: row.diagnostic?.code !== undefined && codes.has(row.diagnostic.code) ? row.diagnostic.code : 'other',
+    })),
+  });
+}
+
 
 // Reuse the discovery authority fixture's real factory/schema peer. Only synthetic
 // responses and the Node process boundary change; product modules are copied verbatim.
@@ -44,7 +62,10 @@ const TURN_PEER = String.raw`
     const turn = { id: 'native.turn:asset-' + (++turns), status: 'inProgress' };
     if (mode === 'reject') return reject(id);
     if (mode === 'unknown') return result(id, {});
-    if (mode === 'lost-ack' || mode === 'close' || mode === 'revoke') return;
+    if (mode === 'close' || mode === 'revoke') {
+      require('node:fs').writeFileSync(audit + '.held-turn', '', { flag: 'wx' }); return;
+    }
+    if (mode === 'lost-ack') return;
     if (mode === 'disconnect') return process.exit(0);
     if (mode === 'tool-before-ack') {
       heldAck = id;
@@ -70,7 +91,7 @@ const PEER = basePeer
 
 const HARNESS = String.raw`
 import assert from 'node:assert/strict';
-import { appendFileSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, statSync } from 'node:fs';
 import { registerHooks } from 'node:module';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -93,7 +114,25 @@ const { JsonlTransport } = await import(library + 'transport.js');
 const { limits } = await import(library + 'validation.js');
 const profile = { nodeExecutable: process.execPath, serverEntry: join(root, 'apps', 'mcp', 'src', 'main.js'),
   projectRoot: root, daemonUrl: 'http://127.0.0.1:47831', agentToken: 'a4'.repeat(32) };
-let client;
+let client, dispatchedObserved = false, phase = 'connecting';
+const setPhase = value => { phase = value; record({ event: 'phase', phase }); };
+const diagnostic = error => {
+  let name = 'other', code = 'other';
+  try {
+    if (error !== null && typeof error === 'object') {
+      const ownName = Object.getOwnPropertyDescriptor(error, 'name'), ownCode = Object.getOwnPropertyDescriptor(error, 'code');
+      const names = ['Error', 'SyntaxError', 'TypeError', 'RangeError', 'ReferenceError', 'AssertionError', 'CodexClientError'];
+      if (ownName && 'value' in ownName && names.includes(ownName.value)) name = ownName.value;
+      else {
+        const builtin = new Map([[Error.prototype, 'Error'], [SyntaxError.prototype, 'SyntaxError'], [TypeError.prototype, 'TypeError'], [RangeError.prototype, 'RangeError'], [ReferenceError.prototype, 'ReferenceError']]);
+        name = builtin.get(Object.getPrototypeOf(error)) || 'other';
+      }
+      const codes = ['ERR_ASSERTION', 'DISCONNECTED', 'GRANT_REVOKED', 'ACCOUNT_CHANGED', 'UNKNOWN', 'TIMEOUT', 'IO', 'MCP_INVENTORY', 'MCP_ISOLATION', 'MCP_CAPABILITIES', 'STATE', 'PROTOCOL', 'ARGUMENTS', 'PROCESS_EXIT_UNCONFIRMED'];
+      if (ownCode && 'value' in ownCode && codes.includes(ownCode.value)) code = ownCode.value;
+    }
+  } catch { /* Diagnostics cannot replace the original controlled failure. */ }
+  return { phase, name, code };
+};
 const nativeAssetHooks = Object.freeze({
   finalCredential() {
     assert.ok(rows().some(row => row.event === 'close' && row.launch === 1), 'Discovery close precedes credential acquisition');
@@ -105,6 +144,7 @@ const nativeAssetHooks = Object.freeze({
   dispatched(intent) {
     assert.ok(client.snapshot().operations.some(op => op.operationId === intent.operationId && op.requestId !== null && op.state === 'pending'));
     record({ event: 'dispatched', intent, frozen: Object.isFrozen(intent) });
+    dispatchedObserved = true; setPhase('dispatched');
     if (scenario.mode === 'hook-throw') throw new Error('SYNTHETIC_PRIVATE_CALLBACK_ERROR');
   },
   ended(intent) { record({ event: 'ended', intent }); if (scenario.mode === 'end-throw' || scenario.mode === 'end-notification-throw') throw new Error('SYNTHETIC_PRIVATE_CALLBACK_ERROR'); },
@@ -131,7 +171,7 @@ try {
       record({ event: 'history' });
     } else if (scenario.action !== 'connect') {
       client.selectModel({ ...human, model: 'fixture-model', effort: 'low' });
-      await client.startThread(human);
+      setPhase('thread-setup'); await client.startThread(human);
       if (scenario.action === 'input') {
         for (const key of ['nativeAssetHooks', 'finalCredential', 'operationId', 'ARCANE_ASSET_AUDIENCE']) {
           try { await client.startTurn({ ...input, [key]: nativeAssetHooks }); } catch (error) { record({ event: 'input-error', key, code: error.code }); }
@@ -139,7 +179,8 @@ try {
         try { await client.startTurn({ ...input, initiatedBy: 'agent' }); } catch (error) { record({ event: 'input-error', code: error.code }); }
       } else {
         if (scenario.mode === 'revoke') client.grantThreadWrites({ ...human, threadId: input.threadId });
-        const starting = client.startTurn(input).then(value => record({ event: 'ack', snapshot: client.snapshot() }), error => record({ event: 'error', code: error.code, dispatched: error.dispatched }));
+        setPhase('turn-preflight');
+        const starting = client.startTurn(input).then(value => record({ event: 'ack', snapshot: client.snapshot() }), error => record({ event: 'error', code: error.code, dispatched: error.dispatched, diagnostic: diagnostic(error) }));
         if (scenario.mode === 'tool-before-ack') {
           await until(() => client.snapshot().approvals.length === 1);
           const approval = client.snapshot().approvals[0], snapshot = client.snapshot();
@@ -149,13 +190,15 @@ try {
           client.respondApproval({ ...human, handle: approval.handle, connectionId: approval.connectionId, threadId: approval.threadId, turnId: approval.turnId, decision: 'decline' });
         }
         if (scenario.mode === 'close' || scenario.mode === 'revoke') {
-          await until(() => rows().some(row => row.event === 'rpc' && row.method === 'turn/start'));
+          await until(() => dispatchedObserved && existsSync(audit + '.held-turn'));
+          assert.equal(statSync(audit + '.held-turn').size, 0);
+          setPhase('peer-held'); setPhase('retiring');
           const closing = scenario.mode === 'close' ? client.close() : client.revokeThreadWrites({ ...human, threadId: input.threadId });
           record({ event: 'synchronous-fence', snapshot: client.snapshot() });
           assert.equal(rows().filter(row => row.event === 'retired').length, 1);
           await closing;
         }
-        await starting;
+        setPhase('turn-settlement'); await starting;
         if (scenario.mode === 'interrupt') {
           const interrupting = client.interruptTurn({ ...human, threadId: input.threadId, turnId: client.snapshot().thread.turnId });
           assert.equal(rows().filter(row => row.event === 'ended').length, 1);
@@ -173,9 +216,9 @@ try {
         }
       }
     }
-    record({ event: 'before-close', snapshot: client.snapshot() });
+    record({ event: 'before-close', snapshot: client.snapshot() }); setPhase('finished');
   }
-} catch (error) { record({ event: 'error', code: error.code, dispatched: error.dispatched }); }
+} catch (error) { record({ event: 'error', code: error.code, dispatched: error.dispatched, diagnostic: diagnostic(error) }); }
 finally { await client?.close(); }
 `;
 
@@ -330,10 +373,10 @@ test('an ended exception after a queued ACK retires without restoring native aut
 });
 
 for (const mode of ['close', 'revoke', 'disconnect', 'account', 'account-chatgpt', 'account-before-ack', 'account-read', 'retire-throw']) test(mode + ' retires authority once and synchronously fences the current intent', async t => {
-  const rows = await fixture(t, { mode });
-  assert.equal(events(rows, 'dispatched').length, 1); assert.equal(events(rows, 'ended').length, 1); assert.equal(events(rows, 'retired').length, 1);
-  assert.ok(rows.indexOf(events(rows, 'ended')[0]!) < rows.indexOf(events(rows, 'retired')[0]!));
-  if (mode !== 'retire-throw') assert.equal(events(rows, 'before-close')[0]?.snapshot?.ready, false);
+  const rows = await fixture(t, { mode }), details = lifecycleDetails(rows);
+  assert.equal(events(rows, 'dispatched').length, 1, details); assert.equal(events(rows, 'ended').length, 1, details); assert.equal(events(rows, 'retired').length, 1, details);
+  assert.ok(rows.indexOf(events(rows, 'ended')[0]!) < rows.indexOf(events(rows, 'retired')[0]!), details);
+  if (mode !== 'retire-throw') assert.equal(events(rows, 'before-close')[0]?.snapshot?.ready, false, details);
 });
 
 test('bounded native operation history retires without erasing operations or opening another intent', async t => {
