@@ -141,7 +141,7 @@ test('handoff MCP end to end: studio_viewport_capture returns the native image; 
 });
 
 test('handoff credential reaches every chat tool route with the same fences as the workbench agent token', async t => {
-  const f = await fixture(t), { credential } = await f.sealed(), core = await f.workbench();
+  const f = await fixture(t, { heartbeat: true }), { credential } = await f.sealed(), core = await f.workbench();
   const s = f.sessionId;
   // [method, path, body]: each is a chat tool route. The handoff must never get AUTH and must see the
   // workbench token's exact status/error (same exact-session, grant, Edit-mode, budget and input fences).
