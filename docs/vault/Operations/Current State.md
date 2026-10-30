@@ -5,17 +5,20 @@ tags: [arcane]
 ---
 # Current state
 
-Recorded 30 October 2026. Git, actual runs and installed identity remain authoritative.
+Recorded 30 October 2026. Revalidate Git, hosted runs and installed identity before acting.
 
-| Area | Evidence | Boundary |
+| Area | Observed evidence | Boundary |
 |---|---|---|
-| Main | `499261b`; component/package run 41011110058 passed all seven jobs | Native run 41010961594 passed on `9151892`; the subsequent main diff changed only one unit fixture and three notes |
-| Current validation | Four signed fixes through `fc60574`: truthful incomplete headings, isolated foliage review framing, actual current-boulder native fixture and failure-only Claude queue observations | New hosted checks must pass before promotion |
-| Native review | Run 41022518748 failed both platforms at the new foliage camera-framing assertion | Actual oblique camera is rolled; correct the view rather than relax the acceptance assertion. Boulder stage was not reached |
-| Skills | All 62 entrypoints and 22 supporting references substantially revised; registry descriptions/checksums aligned; official format validation passed all 62 | Source/format validation is not observed game quality, model training or production approval |
-| Forest regression | Implicit primitive fallback identified in the forest kit resolver; missing sources must refuse before scene dispatch | Actual Blender generation, model review and native import still need end-to-end acceptance |
-| Running desktop | The open app uses the installed release directory beginning `66f74350`, installed 20 October | Publishing source does not install it, restart the app or show an update banner |
-| Actual app test | Sol 6.1 low selected; one read-only diagnostic prompt retained after connect returned unknown acknowledgement with `FRAME_LIMIT` | No dispatch confirmed, no resend, no Studio edits; original skill-selection error remains unproved |
-| Interface | Exact supplied HTML retained in [[Design/Interface Reference]]; folder drag/drop and accessible per-row moves have a source proposal | Proposal is not implemented or visually accepted |
+| Main | `499261b`; all seven component/package jobs passed in 41011110058 | Both native jobs passed on `9151892` in 41010961594; later main changed only one unit fixture and notes |
+| Forest source fix | `bb9f539` refuses unresolved forest sources with `FOREST_SOURCES_REQUIRED` before daemon dispatch | Explicitly supplied primitives remain possible for requested blockouts; template names are not Blender provenance |
+| Skills | All 62 revised; technical field/preset guides restored and registry hashes aligned; official format validation passes | Experimental policy unchanged; output quality and real installed behavior are not established by source checks |
+| Routing correction | Whole games receive director/genre guidance and bounded specialist phases; focused habitat/NPC work retains its proper domain | Default context remains 10,240 bytes; required deferred bodies must be read progressively |
+| Progress and Details | Incomplete build heading and finite live/saved tool failure display are implemented; existing staging phase/reason remains | Unknown provider errors stay unavailable; no guessed message, raw secret or automatic replay |
+| Latest inspected components | Run 41025696653 on `0e1744b` passed strict typing, then exposed content/routing regressions | Those exact cases have scoped source corrections; fresh hosted verification is required |
+| Native foliage | Actual corrected contact views passed on both platforms in 41025696581; authenticated artifacts/source pins and images inspected | 39 geometry cases, 24 export probes and three negative controls; component evidence is not a full-tree or Studio-quality pass |
+| Native boulder | Same run: Linux genuine generation, textures, export/reopen and owned closure passed | Windows failed `SUPERVISION_UNRECORDED` after reaching generation/render stages; exact query/parser cause remains unproved |
+| Running desktop | Old installed directory begins `66f74350`; no new installation/restart | A source push does not update the installed app or create a banner |
+| Actual chat diagnostic | Sol 6.1 low; draft retained after connect unknown acknowledgement with `FRAME_LIMIT` | Dispatch not confirmed; no resend or Studio writes. Original skill-selection cause is still unknown |
+| Interface | Exact supplied HTML retained; folder usability proposal complete | Implementation/rendered reference matching remains open |
 
-Primary work: [[Bugs/Forest Blender Workflow]], [[Skills/Production Upgrade]] and [[Operations/Requirements Ledger]]. Earlier requirements and the ten [[Delivery/Goal Board|release goals]] remain active. The user permits scoped prompt/visual tests in the open Arcane app and designated Test baseplate; preserve existing content and avoid unrelated places. Do not close/restart the running app without applicable authorization. Never work on ArchLiquid.
+Current priorities: [[Bugs/Forest Blender Workflow]], [[Bugs/Windows Model Supervision]], [[Skills/Production Upgrade]] and [[Operations/Requirements Ledger]]. The ten [[Delivery/Goal Board|release goals]] remain active. Scoped prompt/visual tests are authorized in the open app and designated Test baseplate; preserve existing content and unrelated places. Do not close/restart the running app without applicable authorization. Arcane only; never work on ArchLiquid.
