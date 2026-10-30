@@ -15,7 +15,7 @@ tags: [arcane, dashboard]
 
 The [[Delivery/Goal Board|ten urgent goals]] track the path to a dependable customer release. Open a goal for its outcome, dependencies and acceptance criteria. Check it off only after recording evidence.
 
-Runtime `5d81794` is on main and selected in the desktop installation. All seven original hosted jobs pass. The last observed older window shows its update banner and remains open for user-chosen restart; loaded5d customer acceptance remains separate. Next: verify the caption-safe restart control and the staged Blender branch/quality improvements against their actual output. The earlier fa7 native Sol6.1low startup chat passed without tools or old-prompt replay. See [[Bugs/Restart and Empty Chats]], [[Operations/Requirements Ledger|all requirements]], [[Design/Interface Reference|design reference]] and [[Bugs/Original Model Review Coverage|model review]].
+Runtime `b3f9f3f` is on main and selected in the desktop installation. All seven original component/package jobs and both fresh Blender verification jobs pass. The immutable installation closed successfully, preserving prior releases and the stable launcher. The last observed window still runs the older version and was left open; loaded-update customer acceptance remains separate. See [[Sessions/2026-10-30 Caption and Tree Delivery]] for the delivered changes, verification and remaining art work.
 
 ## Build with knowledge
 

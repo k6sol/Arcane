@@ -5,7 +5,7 @@ tags: [arcane]
 ---
 # Current state
 
-Recorded 30 October 2026. Main and the selected installed runtime are SSH-verified `5d81794`. All seven original hosted component/package jobs pass in41131259832; complete unchanged native inputs retain the two passing669 jobs. The authenticated immutable installation closed with original exit zero, both pipe EOFs and matching selection, preserving prior releases and the stable launcher. The last read-only live view showed the older fa7 window with the update banner; it was left open. Actual first Send in the loaded5d customer app remains unverified. The earlier fa7 native Sol6.1low startup chat succeeded without tools or old-prompt replay; its unknown old journal entry remained unchanged. Whole-product acceptance remains open.
+Recorded 30 October 2026. Runtime `b3f9f3f` is on main and selected in the desktop installation. All seven original component/package jobs and both fresh Blender verification jobs pass. The immutable installation closed successfully, preserving prior releases and the stable launcher. The last observed window still runs the older version and was left open; loaded-update customer acceptance remains separate. The update carries the first-Send correction, caption-safe restart control, height-aware oak leaves, costed branch refinement and richer fresh broadleaf requests. Six authenticated native artifact archives and sixteen images were inspected. Tree/rock realism remains unaccepted; see [[Sessions/2026-10-30 Caption and Tree Delivery]]. Historical evidence below retains its original source scope.
 
 ## Source, delivery and live checks
 
