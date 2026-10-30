@@ -14,7 +14,7 @@ import sys
 sys.dont_write_bytecode = True
 import bpy
 import bmesh
-from mathutils import Euler, Vector
+from mathutils import Euler, Matrix, Vector
 from mathutils.bvhtree import BVHTree
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -397,11 +397,16 @@ def render_alpha_contact(directory, failures):
     camera = scene.camera
     camera.hide_render = False
     camera.data.ortho_scale = 2.
+    camera.rotation_mode = "QUATERNION"
     target = Vector((.425, 0, -.02875))
     # Both rays have dy=0, keeping the separated cases disjoint in projection.
     for name, location in (("foliage-alpha-front.png", (.425, 0, 3.97125)), ("foliage-alpha-oblique.png", (3.425, 0, 3.97125))):
         camera.location = location
-        camera.rotation_euler = (target - camera.location).to_track_quat('-Z', 'Y').to_euler()
+        direction = (target - camera.location).normalized()
+        right = direction.cross(Vector((0, 1, 0))).normalized()
+        up = right.cross(direction).normalized()
+        # Camera local -Z follows direction; world Y stays screen-up in both views.
+        camera.rotation_quaternion = Matrix((right, up, -direction)).transposed().to_quaternion()
         frames.append(alpha_contact_frame(scene, camera, contacts, failures, name))
         scene.render.filepath = str(directory / name)
         bpy.ops.render.render(write_still=True)
