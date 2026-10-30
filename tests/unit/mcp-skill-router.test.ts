@@ -523,6 +523,50 @@ test('functional shops load systems and verification progressively while GUI and
   assert.equal(network.mock.callCount(), 0);
 });
 
+test('physical following pets receive authentic character and animation guidance without expanding presentation-only scope', async t => {
+  const network = t.mock.method(globalThis, 'fetch', async () => { throw Error('Follower guidance must stay offline.'); });
+  const client = await linked(t), registry = new SkillRegistry(), original = await readFile(join(ROOT, 'skills/registry.json'));
+  for (const [request, first] of [
+    ['add a pet that follows me', 'arcane-simulator-kit'],
+    ['Add a pet that follows me with an inventory.', 'arcane-gameplay-systems'],
+    ['Add a pet model that follows me.', 'arcane-simulator-kit'],
+    ['Add a following pet.', 'arcane-simulator-kit'],
+  ] as const) {
+    const { result, data } = await call(client, SKILLS_RECOMMEND_TOOL, { request });
+    assert.notEqual(result.isError, true); assert.equal(data.ids[0], first, request);
+    assert.ok([...(data.ids as string[]), ...(data.deferredIds as string[])].includes('arcane-characters'), request);
+    const reference = 'arcane-characters:pets';
+    assert.ok([...(data.references as string[]), ...(data.deferredReferences as string[])].includes(reference), request);
+    const context = await intactSkillGet(client, 'arcane-characters', [reference]);
+    for (const contract of ['Animator:LoadAnimation', 'verified clips', 'arcane-rig-animation']) assert.ok(context.includes(contract), contract);
+    assert.equal(data.byteBudget, SKILL_ROUTER_LIMITS.defaultBytes);
+    assert.ok(data.bytes <= 10_240 && data.bytes === Buffer.byteLength(data.context));
+    assert.equal(data.composition.intent, 'focused'); assert.equal(data.approvalChanged, false);
+  }
+  const primary = await registry.get({ ids: ['arcane-simulator-kit'], references: [],
+    byteBudget: SKILL_ROUTER_LIMITS.maximumBytes, allowExperimental: true });
+  const { result: tightResult, data: tight } = await call(client, SKILLS_RECOMMEND_TOOL,
+    { request: 'add a pet that follows me', byteBudget: primary.bytes });
+  assert.notEqual(tightResult.isError, true); assert.deepEqual(tight.ids, ['arcane-simulator-kit']);
+  assert.equal(tight.context, primary.context); assert.equal(tight.bytes, primary.bytes);
+  assert.ok((tight.deferredIds as string[]).includes('arcane-characters'));
+  assert.ok((tight.deferredReferences as string[]).includes('arcane-characters:pets'));
+  for (const request of [
+    'Create a pet inventory GUI with a follow button.',
+    'Create a pet inventory with a follow toggle.',
+    'Create a static pet model in a following pose.',
+    'Create a model-only pet in a follower pose.',
+    'Create only a pet model in a following pose.',
+  ]) {
+    const { result, data } = await call(client, SKILLS_RECOMMEND_TOOL, { request });
+    assert.notEqual(result.isError, true);
+    assert.ok(![...(data.references as string[]), ...(data.deferredReferences as string[])].includes('arcane-characters:pets'), request);
+    assert.equal(data.composition.intent, 'focused'); assert.ok(data.bytes <= SKILL_ROUTER_LIMITS.defaultBytes);
+  }
+  assert.deepEqual(await readFile(join(ROOT, 'skills/registry.json')), original);
+  assert.equal(network.mock.callCount(), 0);
+});
+
 test('habitat creation leads with natural guidance while a local feature merely in a habitat remains focused', async () => {
   for (const request of ['Build a full forest with caves and a detailed spawn pillar.', 'Make a cave environment with a traversable interior.', 'Create a natural environment with clearings and routes.']) {
     const result = await recommendSkills(new SkillRegistry(), { ...INPUT, request });

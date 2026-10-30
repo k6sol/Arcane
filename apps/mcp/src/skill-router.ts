@@ -104,7 +104,17 @@ const SCRIPT_CONTEXT = tokens('script scripting luau module modulescript code');
 const DEBUG_CONTEXT = tokens(HINTS['arcane-debugging'] ?? '');
 const SHOP_FUNCTION_CONTEXT = tokens('work working functional functionality');
 const SHOP_UI_CONTEXT = tokens('ui gui hud menu screen screengui panel button layout interface');
-function rank(skill: Metadata, terms: Set<string>): number {
+const PET_FOLLOW_CONTEXT = tokens('follow following follower');
+const PET_PRESENTATION_CONTEXT = tokens('ui gui hud menu screen screengui panel button layout interface thumbnail static model-only');
+function followingPet(request: string): boolean {
+  const terms = tokens(request);
+  if (!terms.has('pet') || ![...terms].some(term => PET_FOLLOW_CONTEXT.has(term))) return false;
+  const primary = tokens(request.normalize('NFKC').toLowerCase().split(/[,;.!?\n]|\b(?:with|for|using)\b/, 1)[0]!);
+  const inventoryOnly = primary.has('inventory') && ![...primary].some(term => PET_FOLLOW_CONTEXT.has(term));
+  return !inventoryOnly && ![...primary].some(term => PET_PRESENTATION_CONTEXT.has(term)) &&
+    !(primary.has('model') && (primary.has('only') || primary.has('just')));
+}
+function rank(skill: Metadata, terms: Set<string>, petFollower: boolean): number {
   const identity = tokens(skill.id.replace(/^arcane-/, '').replaceAll('-', ' '));
   const npcJob = [...terms].some(term => NPC_CONTEXT.has(term));
   const functionalShop = terms.has('shop') && [...terms].some(term => SHOP_FUNCTION_CONTEXT.has(term)) &&
@@ -114,6 +124,8 @@ function rank(skill: Metadata, terms: Set<string>): number {
     (skill.id === 'arcane-gameplay-systems' && functionalShop ? ' work working functional functionality' : ''));
   let score = 0;
   for (const term of terms) score += hints.has(term) ? 12 : identity.has(term) ? 8 : title.has(term) ? 4 : description.has(term) ? 1 : 0;
+  // Follower behavior needs the character contract below the primary pet/system hints, not a walking-rig promise.
+  if (skill.id === 'arcane-characters' && petFollower) score = Math.max(score, 6);
   // Script diagnosis needs verification guidance below the debug/Luau hints, even when QA metadata has no lexical match.
   if (score === 0 && skill.id === 'arcane-playtest-qa' && [...terms].some(term => SCRIPT_CONTEXT.has(term)) &&
       [...terms].some(term => DEBUG_CONTEXT.has(term))) return 6;
@@ -221,10 +233,10 @@ export async function recommendSkills(registry: SkillRegistry, input: SkillRecom
   }
   const catalogue = await registry.list({ limit: SKILL_ROUTER_LIMITS.catalogue, allowExperimental: input.allowExperimental });
   if (catalogue.truncated) fail('SKILL_CATALOGUE_LIMIT', 'Bundled skill catalogue exceeds the bounded router inventory.');
-  const game = gameIntent(input.request), terms = tokens(game?.brief ?? input.request);
+  const game = gameIntent(input.request), terms = tokens(game?.brief ?? input.request), petFollower = followingPet(input.request);
   const primary = !game && primaryHabitat(input.request) ? 'arcane-natural-scenes' : null;
   const ranked = catalogue.items.filter(skill => !CORE.includes(skill.id as typeof CORE[number]))
-    .map(skill => { const score = rank(skill, terms) + (skill.id === primary ? 1 : 0), boost = input.boosts?.[skill.id]; return { skill, score: score > 0 && typeof boost === 'number' && boost > 0 ? score + Math.min(4, boost) : score }; })
+    .map(skill => { const score = rank(skill, terms, petFollower) + (skill.id === primary ? 1 : 0), boost = input.boosts?.[skill.id]; return { skill, score: score > 0 && typeof boost === 'number' && boost > 0 ? score + Math.min(4, boost) : score }; })
     .filter(row => row.score > 0)
     .sort((a, b) => Number(b.skill.id === primary) - Number(a.skill.id === primary) || b.score - a.score || a.skill.id.localeCompare(b.skill.id));
   // Preserve domain space for small budgets/limits; core process is also always
@@ -250,7 +262,7 @@ export async function recommendSkills(registry: SkillRegistry, input: SkillRecom
     if (genre.references.includes(name) && !references.includes(reference) && references.length < SKILL_ROUTER_LIMITS.references) references.push(reference);
   }
   for (const skill of selected) {
-    const name = CODE_REFERENCES[skill.id];
+    const name = skill.id === 'arcane-characters' && petFollower ? 'pets' : CODE_REFERENCES[skill.id];
     if (name && skill.references.includes(name) && references.length < SKILL_ROUTER_LIMITS.references) references.push(`${skill.id}:${name}`);
   }
   const deferredIds: string[] = initial.slice(input.limit).map(skill => skill.id), deferredReferences: string[] = [];
