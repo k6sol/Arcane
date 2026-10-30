@@ -2331,6 +2331,32 @@ test('native Claude tab restoration keeps separate unsent drafts and the active 
  assert.equal(fresh.input.value,'Second native draft');fresh.chat.selectTab(saved.tabs[0]!.localId);await tick();assert.equal(fresh.input.value,'First native draft');
 });
 
+test('successful Claude NewChat reports its stable persisted source before draft publication, with fresh incarnations',async t=>{
+ const native=nativeClaudePreferences(),backend=fakeBridge(),f=mount(backend.bridge,memory(),true,native.bridge);t.after(()=>f.chat.stop());await f.chat.refresh();await tick();
+ f.type('Retain original draft');const first=f.chat.conversationSource()!,sources:{projectPath:string;localId:string}[]=[];
+ f.chat.newChat(source=>{sources.push(source);assert.equal(f.chat.isDraftConversation(),true);assert.deepEqual(f.chat.conversationSource(),source);});
+ assert.equal(sources.length,1);const created=sources[0]!;assert.notEqual(created.localId,first.localId);assert.equal(created.projectPath,nativeClaudeProject);assert.equal(sends(backend).length,0);
+ await f.chat.prepareForRestart();const fresh=mount(fakeBridge().bridge,memory(),true,native.bridge);t.after(()=>fresh.chat.stop());await fresh.chat.refresh();await tick();
+ assert.deepEqual(fresh.chat.conversationSource(),created,'reload preserves the original local source');
+ await fresh.chat.openDraftConversation(first.localId);assert.equal(fresh.input.value,'Retain original draft');
+ const unrelated=mount(fakeBridge().bridge,memory(),true,nativeClaudePreferences().bridge);t.after(()=>unrelated.chat.stop());await unrelated.chat.refresh();await tick();
+ assert.notEqual(unrelated.chat.conversationSource()!.localId,first.localId);assert.notEqual(unrelated.chat.conversationSource()!.localId,created.localId);
+});
+
+test('Claude NewChat correlation is ready during an older held history read and ignores its late reply',async t=>{
+ const native=nativeClaudePreferences(),backend=fakeBridge();let release!:(value:unknown)=>void;
+ backend.setList([{conversationId:'saved-old',title:'Old task',updatedAt:'2026-10-30T12:00:00Z',model:'opus',effort:'low'}]);
+ backend.histories.set('saved-old',()=>new Promise(resolve=>{release=resolve;}));
+ const f=mount(backend.bridge,memory(),true,native.bridge);t.after(()=>f.chat.stop());await f.chat.refresh();await tick();
+ const opening=f.chat.open('saved-old');await tick();assert.ok(release);
+ const sources:{projectPath:string;localId:string}[]=[];
+ f.chat.newChat(source=>{assert.equal(f.chat.isDraftConversation(),true);sources.push(source);});
+ assert.equal(sources.length,1);assert.deepEqual(f.chat.conversationSource(),sources[0]);
+ release({conversationId:'saved-old',messages:[{id:'old',role:'user',text:'Never adopt old history',at:'2026-10-30T12:00:00Z'}]});await opening;await tick();
+ assert.deepEqual(f.chat.conversationSource(),sources[0]);assert.equal(f.chat.activeConversation(),null);
+ assert.equal(f.messages.textContent.includes('Never adopt old history'),false);assert.equal(sends(backend).length,0);
+});
+
 test('a native Claude save failure blocks restart and retries without clearing or sending the text',async t=>{
  const native=nativeClaudePreferences(),backend=fakeBridge(),f=mount(backend.bridge,memory(),true,native.bridge);t.after(()=>f.chat.stop());await f.chat.refresh();await tick();
  const draft='Keep me while the save is unavailable';f.type(draft);native.setRefuse(true);

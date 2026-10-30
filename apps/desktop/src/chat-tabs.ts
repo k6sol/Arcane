@@ -20,6 +20,8 @@ export interface ChatTabsOptions {
   captureLegacyNewChat?: boolean;
   /** Presentation-only navigation hook; never starts or grants native work. */
   beforeNewChat?: () => void;
+  /** Runs only after the requested local draft exists, before its first publication. */
+  afterNewChat?: (source: {projectPath:string;localId:string}) => void;
   /** Presentation-only notice hook: a native preference save failed or recovered. */
   onPersistenceChange?: () => void;
   /** Presentation-only routing: while another chat surface is active, New chat starts there instead of a Codex draft. */
@@ -673,6 +675,7 @@ export async function startChatTabs(doc:Document,options:StartChatTabsOptions):P
   await chat.enableChatTabs({...(preferences?{preferences}:{}),...(options.storage?{storage:options.storage}:{}),
     ...(options.captureLegacyNewChat!==undefined?{captureLegacyNewChat:options.captureLegacyNewChat}:{}),
     ...(options.beforeNewChat?{beforeNewChat:options.beforeNewChat}:{}),
+    ...(options.afterNewChat?{afterNewChat:options.afterNewChat}:{}),
     ...(options.alternateNewChat?{alternateNewChat:options.alternateNewChat}:{})});
   return connectChatTabPreferences(doc,chat);
 }

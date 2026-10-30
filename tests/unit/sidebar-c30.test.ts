@@ -57,7 +57,7 @@ test('Edge: folder tree, folder menu, Show all and the footer menu use the exist
     const library={version:1,projectPath:P,activeId:'a',folders:[{id:'forest',name:'Forest'},{id:'shop',name:'Shop'}],expandedFolderIds:['forest'],
       conversations:[conv('a','forest',1),conv('b','shop',2),...[1,2,3,4,5,6,7].map(i=>conv('u'+i,null,10+i,i%2?'codex':'arcane'))]};
     window.saves=[];window.opened=[];
-    const peer=p=>({recordedTranscript:()=>({provider:p,projectPath:P,conversationId:null,sessionId:null,messages:[]}),isDraftConversation:()=>false,subscribeTranscriptChange:()=>()=>{},setBeforeMessageSubmit(){},showConversationNotice(){},open:async id=>{window.opened.push(id);return true;},newChat:async()=>true});
+    const peer=p=>({recordedTranscript:()=>({provider:p,projectPath:P,conversationId:null,sessionId:null,messages:[]}),conversationSource:()=>({projectPath:P,localId:p+'-fixture'}),isDraftConversation:()=>false,subscribeTranscriptChange:()=>()=>{},setBeforeMessageSubmit(){},showConversationNotice(){},open:async id=>{window.opened.push(id);return true;},openDraftConversation:async()=>false,newChat:async()=>true});
     window.shell=startWorkspaceShell(document);
     window.library=new SharedConversations(document,{bridge:{version:1,read:async()=>({available:true,projectPath:P,preferences:library}),save:async v=>{window.saves.push(v);return{saved:true};}},provider:()=>'claude',requestProvider:()=>true,peers:{claude:peer('claude'),codex:peer('codex')}});`;
   const server = createServer((request, response) => { void (async () => {

@@ -15,7 +15,7 @@ tags: [arcane, dashboard]
 
 The [[Delivery/Goal Board|ten urgent goals]] track the path to a dependable customer release. Open a goal for its outcome, dependencies and acceptance criteria. Check it off only after recording evidence.
 
-The restart and empty-chat controls are delivered in installed runtime `fa7d730`. All seven hosted component/package jobs pass, and the updated app is open. One actual new Sol6.1low chat returned its expected reply without tools or old-prompt replay. Next priority: correlate the original empty sidebar draft with its first native conversation; the live check exposed an extra empty row. Future banner-driven restart and broader customer acceptance remain open. See [[Bugs/Restart and Empty Chats]], [[Operations/Requirements Ledger|all requirements]], [[Design/Interface Reference|design reference]] and [[Bugs/Forest Blender Workflow|forest regression]].
+The restart and empty-chat controls are delivered in installed runtime `fa7d730`. All seven hosted component/package jobs pass, and the updated app is open. One actual new Sol6.1low chat returned its expected reply without tools or old-prompt replay. Next priority: verify and deliver the implemented exact draft/sidebar correlation; local tests and actual Edge fixtures now keep the original row through first Send and reload. Future banner-driven restart and broader customer acceptance remain open. See [[Bugs/Restart and Empty Chats]], [[Operations/Requirements Ledger|all requirements]], [[Design/Interface Reference|design reference]] and [[Bugs/Forest Blender Workflow|forest regression]].
 
 ## Build with knowledge
 

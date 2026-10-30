@@ -26,6 +26,6 @@ Scoped evidence: installed fa7d730 passes all seven hosted checks and one actual
 
 ## Next action
 
-Correlate the successful original local draft ID with its exact sidebar row through first native acknowledgment; preserve unrelated, stale and reloaded history. Continue broader customer acceptance at its actual scope.
+Publish and verify the exact draft-correlation candidate, then complete its installed customer journey. Local compilation,201 focused cases,56 preload/host cases and eleven existing Edge journeys pass, plus a separate first-Send/reload browser fixture. Broader cancellation/model/provider/preview/restart and atomic cross-record crash recovery remain open.
 
 [[Delivery/Goal Board]] · [[Operations/Evidence Ledger]]

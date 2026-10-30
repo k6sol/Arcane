@@ -2841,14 +2841,15 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   void codexChat.start().then(async () => {
     const module = await import('./chat-tabs.js');
     chatTabController = await module.startChatTabs(document, { chat: codexChat, captureLegacyNewChat: true,
-      beforeNewChat: () => {sharedConversations?.beginNewConversation();workspaceShell.showConversation();},
+      beforeNewChat: () => {workspaceShell.showConversation();},
+      afterNewChat: source => sharedConversations?.beginNewConversation('codex',source),
       // While the Claude surface is shown, sidebar New chat and Ctrl/Cmd+N start a new Claude conversation instead.
       alternateNewChat: { active: () => !claudeChatStopped && (!!claudeChat && providerSetup.chatSurface() === 'claude' || !!arcaneChat && providerSetup.chatSurface() === 'arcane'),
-        start: () => { if (providerSetup.chatSurface() === 'arcane') arcaneChat?.newChat(); else claudeChat?.newChat(); } } });
+        start: () => { if (providerSetup.chatSurface() === 'arcane') arcaneChat?.newChat(); else claudeChat?.newChat(source=>sharedConversations?.beginNewConversation('claude',source)); } } });
     if(claudeChat){
       sharedConversations=new SharedConversations(document,{provider:()=>providerSetup.chatSurface(),requestProvider:p=>providerSetup.requestProvider(p),peers:{
-        codex:{recordedTranscript:()=>codexChat.recordedTranscript(),isDraftConversation:()=>codexChat.isDraftConversation(),subscribeTranscriptChange:f=>codexChat.subscribeTranscriptChange(f),setBeforeMessageSubmit:f=>codexChat.setBeforeMessageSubmit(f),showConversationNotice:t=>codexChat.showConversationNotice(t),open:id=>codexChat.openSavedChat(id),newChat:()=>codexChat.newChat()},
-        claude:{recordedTranscript:()=>claudeChat.recordedTranscript(),isDraftConversation:()=>claudeChat.isDraftConversation(),subscribeTranscriptChange:f=>claudeChat.subscribeTranscriptChange(f),setBeforeMessageSubmit:f=>claudeChat.setBeforeMessageSubmit(f),showConversationNotice:t=>claudeChat.showConversationNotice(t),open:id=>claudeChat.openRecordedConversation(id),newChat:async()=>{await claudeChat.readyForRuntimeRecovery();claudeChat.newChat();return claudeChat.isDraftConversation();}},
+        codex:{recordedTranscript:()=>codexChat.recordedTranscript(),conversationSource:()=>codexChat.conversationSource(),isDraftConversation:()=>codexChat.isDraftConversation(),subscribeTranscriptChange:f=>codexChat.subscribeTranscriptChange(f),setBeforeMessageSubmit:f=>codexChat.setBeforeMessageSubmit(f),showConversationNotice:t=>codexChat.showConversationNotice(t),open:id=>codexChat.openSavedChat(id),openDraftConversation:id=>codexChat.openDraftConversation(id),newChat:()=>codexChat.newChat()},
+        claude:{recordedTranscript:()=>claudeChat.recordedTranscript(),conversationSource:()=>claudeChat.conversationSource(),isDraftConversation:()=>claudeChat.isDraftConversation(),subscribeTranscriptChange:f=>claudeChat.subscribeTranscriptChange(f),setBeforeMessageSubmit:f=>claudeChat.setBeforeMessageSubmit(f),showConversationNotice:t=>claudeChat.showConversationNotice(t),open:id=>claudeChat.openRecordedConversation(id),openDraftConversation:id=>claudeChat.openDraftConversation(id),newChat:async()=>{await claudeChat.readyForRuntimeRecovery();claudeChat.newChat();return claudeChat.isDraftConversation();}},
       }});
       window.addEventListener('pagehide',()=>sharedConversations?.stop());window.addEventListener('pageshow',e=>{if(e.persisted)sharedConversations?.resume();});
     }

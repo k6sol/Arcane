@@ -37,7 +37,8 @@ function presentationModel(value) {
 }
 function libraryPreferences(value, scope) {
   const expanded=!!value&&typeof value==='object'&&!types.isProxy(value)&&Object.hasOwn(value,'expandedFolderIds');
-  fields(value, ['version','projectPath','activeId','folders','conversations',...(expanded?['expandedFolderIds']:[])]);
+  const drafts=!!value&&typeof value==='object'&&!types.isProxy(value)&&Object.hasOwn(value,'draftLinks');
+  fields(value, ['version','projectPath','activeId','folders','conversations',...(expanded?['expandedFolderIds']:[]),...(drafts?['draftLinks']:[])]);
   const projectPath=text(value.projectPath,4096);
   const array=(v,max)=>{if(types.isProxy(v)||!Array.isArray(v)||Object.getPrototypeOf(v)!==Array.prototype||v.length>max||Reflect.ownKeys(v).length!==v.length+1)fail();return Array.from({length:v.length},(_,i)=>{const d=Object.getOwnPropertyDescriptor(v,String(i));if(!d?.enumerable||!Object.hasOwn(d,'value'))fail();return d.value;});};
   const singleLine=(v,max)=>{const s=text(v,max);if(/[\x00-\x1f\x7f]/.test(s))fail();return s;};
@@ -56,6 +57,15 @@ function libraryPreferences(value, scope) {
   const activeId=nullableId(value.activeId,256),result={version:1,projectPath,activeId,folders,conversations};
   // Optional presentation field: the open sidebar folders (unique, existing, omitted when empty).
   if(expanded){const open=array(value.expandedFolderIds,64).map(id=>text(id,256,true));if(!open.length||new Set(open).size!==open.length||open.some(id=>!folderIds.has(id)))fail();result.expandedFolderIds=open;}
+  if(drafts){
+    const sources=new Set(),targets=new Set();
+    const links=array(value.draftLinks,768).map(v=>{
+      const link=fields(v,['provider','localId','libraryId']),provider=link.provider,localId=text(link.localId,128,true),libraryId=text(link.libraryId,256,true),row=conversations.find(c=>c.id===libraryId);
+      if(!['codex','claude','arcane'].includes(provider)||!row||row.bindings.some(b=>b.provider===provider))fail();
+      const source=JSON.stringify([provider,localId]),target=JSON.stringify([libraryId,provider]);if(sources.has(source)||targets.has(target))fail();sources.add(source);targets.add(target);return{provider,localId,libraryId};
+    });
+    if(!links.length)fail();result.draftLinks=links;
+  }
   if(activeId!==null&&!conversationIds.has(activeId)||count>1024||Buffer.byteLength(JSON.stringify(result))>480*1024)fail();return result;
 }
 // Queue records contain unsubmitted text and advisory identifiers, never native execution authority.

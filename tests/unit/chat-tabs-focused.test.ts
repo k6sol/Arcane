@@ -9,6 +9,8 @@ import { ChatTabs, nativeChatKey, validateSavedThreads, CHAT_TAB_LIMITS, startCh
 import { CodexChat, CodexChatApi, readCodexState, type ChatAction, type ChatState } from '../../apps/desktop/src/codex-chat.js';
 import { createCodexService, type CodexActionOutcome, type CodexHostClient, type CodexService } from '../../apps/daemon/src/codex-service.js';
 import { CodexClientError, type Snapshot, type ThreadState } from '../../packages/codex-client/src/types.js';
+import { SharedConversations } from '../../apps/desktop/src/shared-conversations.js';
+import { ConversationLibrary, type ConversationLibrarySnapshot } from '../../apps/desktop/src/conversation-library.js';
 
 // Controlled SDK/document fixtures only. No CLI, browser install, Studio or inference.
 const TOKEN='a'.repeat(64), PROJECT=resolve('.');
@@ -58,8 +60,8 @@ function newChatShortcut(doc:DocumentFixture, modifiers:Partial<Pick<KeyboardEve
 }
 
 test('sidebar and Ctrl/Cmd+N create actual local chats through one navigation hook without sending drafts',async t=>{
-  const f=controller();let navigations=0;t.after(()=>f.chat.stop());
-  await f.chat.enableChatTabs({storage:f.storage,captureLegacyNewChat:true,beforeNewChat:()=>{navigations++;}});
+  const f=controller();let navigations=0;const created:{projectPath:string;localId:string}[]=[];t.after(()=>f.chat.stop());
+  await f.chat.enableChatTabs({storage:f.storage,captureLegacyNewChat:true,beforeNewChat:()=>{navigations++;},afterNewChat:source=>{assert.deepEqual(source,f.chat.conversationSource());assert.equal(f.chat.isDraftConversation(),true);created.push(source);}});
   await f.chat.start();const first=f.chat.chatTabsView()[0]!;
   f.doc.getElementById('codex-composer').value='Keep this unsent draft.\n  ';
   f.doc.getElementById('codex-composer').dispatchEvent(new Event('input'));
@@ -70,12 +72,20 @@ test('sidebar and Ctrl/Cmd+N create actual local chats through one navigation ho
   assert.equal(newChatShortcut(f.doc).defaultPrevented,true);await tick();
   assert.equal(newChatShortcut(f.doc,{metaKey:true},'N').defaultPrevented,true);await tick();
   assert.equal(f.chat.chatTabsView().length,4);assert.equal(navigations,3);
+  assert.equal(created.length,3);assert.equal(new Set(created.map(source=>source.localId)).size,3);
   for(const modifiers of [{ctrlKey:true,isComposing:true},{ctrlKey:true,repeat:true},{ctrlKey:true,shiftKey:true},{ctrlKey:true,altKey:true},{}])
     assert.equal(newChatShortcut(f.doc,modifiers).defaultPrevented,false);
   const handled=new Event('keydown',{cancelable:true});Object.defineProperties(handled,{key:{value:'n'},ctrlKey:{value:true}});handled.preventDefault();f.doc.dispatchEvent(handled);
   assert.equal(f.chat.chatTabsView().length,4);assert.equal(navigations,3);
   assert.ok(f.calls.every(call=>call==='/v1/codex/state:GET'));
   f.chat.stop();assert.equal(newChatShortcut(f.doc).defaultPrevented,false);assert.equal(navigations,3);
+});
+
+test('a tab-limit refusal never reports successful NewChat or allocates a correlated sidebar row',async t=>{
+  const f=controller();t.after(()=>f.chat.stop());await f.chat.enableChatTabs({storage:f.storage});
+  for(let i=f.chat.chatTabsView().length;i<CHAT_TAB_LIMITS.open;i++)assert.equal(await f.chat.newChat(),true);
+  let created=0;assert.equal(await f.chat.newChat(()=>{created++;}),false);assert.equal(created,0);
+  assert.equal(f.chat.chatTabsView().length,CHAT_TAB_LIMITS.open);assert.ok(f.calls.every(call=>call.endsWith(':GET')));
 });
 
 test('busy and uncertain native work never hold New chat: both buttons and the shortcut open a local draft with no native action',async t=>{
@@ -271,7 +281,7 @@ test('optional native token reports and duration events survive state projection
   assert.throws(()=>readCodexState({...initial,snapshot:{...initial.snapshot,usage:{...initial.snapshot!.usage,total:counts}}}));assert.equal(invoked,0);
 });
 
-async function serviceFixture(t:test.TestContext) {
+async function serviceFixture(t:test.TestContext,allowTurn=false) {
   const temp=await realpath(tmpdir()),directory=await mkdtemp(join(temp,'arcane-chat-tabs-fixture-')),project=join(directory,'project');await mkdir(project);const projectPath=await realpath(project);
   const actual=new Map<string,ThreadState>(),calls:string[]=[],services:CodexService[]=[],cleanup:(()=>void)[]=[];let current:Snapshot|null=null,number=0,live=0,maxLive=0,historyHook:((threadId:string)=>Promise<void>)|null=null;
   const factory=async():Promise<CodexHostClient>=>{
@@ -281,7 +291,7 @@ async function serviceFixture(t:test.TestContext) {
       resumeThread:async action=>{const owned=actual.get(action.threadId);if(!owned)throw new CodexClientError('THREAD','Unknown fixture thread');s.thread={...structuredClone(owned),selection:{...s.selection!},writeGranted:false};return structuredClone(s.thread);},
       readThreadHistory:async action=>{await historyHook?.(action.threadId);return {entries:[{role:'user',text:'Public question for '+action.threadId,ids:{threadId:action.threadId,sessionId:action.sessionId??null,turnId:'turn-'+action.threadId,itemId:'user'}},{role:'assistant',text:'Public answer for '+action.threadId,ids:{threadId:action.threadId,sessionId:action.sessionId??null,turnId:'turn-'+action.threadId,itemId:'answer'}}],completeness:'complete',gaps:[],truncated:false,marker:null,excludedItems:0,droppedGaps:0,redacted:false};},
       grantThreadWrites:()=>{s.thread!.writeGranted=true;return structuredClone(s.thread!);},revokeThreadWrites:()=>{s.thread!.writeGranted=false;},
-      startTurn:async()=>{assert.fail('No automatic turn is permitted');},interruptTurn:async()=>{},respondApproval:()=>{},
+      startTurn:async()=>{assert.ok(allowTurn,'No automatic turn is permitted');calls.push('turn-start');s.thread!.turnId='fixture-accepted-turn';s.thread!.turnStatus='inProgress';return structuredClone(s.thread!);},interruptTurn:async()=>{},respondApproval:()=>{},
       close:async()=>{if(!closed){closed=true;live--;}s.connected=false;s.ready=false;if(s.thread)s.thread.writeGranted=false;},};
   };
   const open=()=>{const service=createCodexService({directory:join(directory,'journal'),projectPath,connect:factory});services.push(service);return service;};
@@ -290,6 +300,39 @@ async function serviceFixture(t:test.TestContext) {
   t.after(async()=>{for(const close of cleanup)close();for(const owned of services)await owned.close();const target=resolve(directory),child=relative(temp,target);assert.ok(!isAbsolute(child)&&child.startsWith('arcane-chat-tabs-fixture-')&&!child.includes('..'));await rm(target,{recursive:true,force:true});});
   return {service,open,seed,calls,actual,projectPath,directory,current:()=>current,maxLive:()=>maxLive,setHistoryHook:(hook:typeof historyHook)=>{historyHook=hook;},onCleanup:(close:()=>void)=>cleanup.push(close)};
 }
+
+test('actual Codex draft upgrade and service acknowledgement bind the same third sidebar row once',async t=>{
+  const f=await serviceFixture(t,true);await f.service.action({requestId:randomUUID(),action:'connect',connectionId:null});
+  const doc=new DocumentFixture(),storage=memoryStorage(),requests:string[]=[];
+  const api=new CodexChatApi(TOKEN,async(path,init)=>{
+    if(path==='/v1/codex/state')return Response.json({state:f.service.state()});
+    const input=JSON.parse(String(init?.body));requests.push(input.action);const result=await f.service.action(input);
+    return Response.json(result,{status:result.record.state==='acknowledged'?200:result.record.state==='rejected'?409:202});
+  });
+  const chat=new CodexChat(doc.asDocument(),api);t.after(()=>chat.stop());let shared:SharedConversations|null=null;
+  await chat.enableChatTabs({storage,captureLegacyNewChat:true,afterNewChat:source=>shared?.beginNewConversation('codex',source)});await chat.start();
+  const library=new ConversationLibrary(f.projectPath);library.newConversation();library.newConversation();let saved:ConversationLibrarySnapshot=library.snapshot();
+  // This Node case validates the actual controllers and durable service, not sidebar DOM rendering.
+  const headlessLibraryDocument={getElementById:()=>null,defaultView:null} as unknown as Document;
+  shared=new SharedConversations(headlessLibraryDocument,{provider:()=>'codex',requestProvider:()=>false,bridge:{version:1,read:async()=>({available:true,projectPath:f.projectPath,preferences:saved}),save:async value=>{saved=structuredClone(value);return{saved:true};}},peers:{codex:{
+    recordedTranscript:()=>chat.recordedTranscript(),conversationSource:()=>chat.conversationSource(),isDraftConversation:()=>chat.isDraftConversation(),subscribeTranscriptChange:listener=>chat.subscribeTranscriptChange(listener),setBeforeMessageSubmit:callback=>chat.setBeforeMessageSubmit(callback),showConversationNotice:notice=>chat.showConversationNotice(notice),open:id=>chat.openSavedChat(id),openDraftConversation:id=>chat.openDraftConversation(id),newChat:()=>chat.newChat(),
+  }}});t.after(()=>shared?.cleanup());await tick();
+  // The actual public New chat gesture creates the row only after its exact local draft exists.
+  doc.getElementById('new-chat').dispatchEvent(new Event('click',{cancelable:true}));await tick();
+  await shared.prepareForRestart();assert.equal(saved.conversations.length,3);const originalId=saved.activeId!,localId=chat.conversationSource()!.localId;
+  assert.deepEqual(saved.draftLinks,[{provider:'codex',localId,libraryId:originalId}]);
+  doc.getElementById('codex-model').value='fixture-sol';doc.getElementById('codex-model').dispatchEvent(new Event('change'));
+  doc.getElementById('codex-effort').value='low';doc.getElementById('codex-effort').dispatchEvent(new Event('change'));
+  doc.getElementById('codex-composer').value='New task with no inherited context';doc.getElementById('codex-composer').dispatchEvent(new Event('input'));
+  doc.getElementById('codex-compose').dispatchEvent(new Event('submit',{cancelable:true}));
+  for(let attempt=0;attempt<100&&!requests.includes('turn-start');attempt++)await tick();
+  assert.equal(requests.filter(action=>action==='turn-start').length,1);await tick();await chat.refresh();await shared.prepareForRestart();
+  assert.equal(chat.conversationSource()!.localId,localId);assert.equal(chat.currentStateView().activeChat!.kind,'native');
+  assert.equal(saved.conversations.length,3);assert.equal(saved.activeId,originalId);assert.equal(saved.draftLinks,undefined);
+  const bound=saved.conversations.find(row=>row.id===originalId)!;assert.equal(bound.bindings[0]!.conversationId,chat.recordedTranscript().conversationId);
+  assert.equal(bound.messages.filter(row=>row.role==='user'&&row.text==='New task with no inherited context').length,1);
+  assert.equal(saved.conversations.filter(row=>row.id!==originalId).every(row=>!row.bindings.length&&!row.messages.length),true);
+});
 
 test('real service journal preserves multiple public histories across reload; explicit idle switches resume only exact owned chats and separate models/drafts',async t=>{
   const f=await serviceFixture(t),a=await f.seed(),b=await f.seed('fixture-alt','high');f.calls.length=0;

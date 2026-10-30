@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {ConversationLibrary,readConversationLibrary,type LibraryTranscript} from '../../apps/desktop/src/conversation-library.js';
+import {ConversationLibrary,readConversationLibrary,type LibraryTranscript,type LibraryDraftSource,type ConversationLibrarySnapshot} from '../../apps/desktop/src/conversation-library.js';
 const project='C:/ArcaneProject';
 function fixture(){let id=0;return new ConversationLibrary(project,undefined,()=>`chat-${++id}`);}
 function transcript(provider:'codex'|'claude',conversationId:string,text:string,id='message-1'):LibraryTranscript{return{provider,projectPath:project,conversationId,sessionId:null,messages:[{id,role:'user',text,at:'2026-10-20T12:00:00.000Z',model:null}]};}
@@ -88,4 +88,91 @@ test('a real native binding remains protected even when it has no messages and i
   assert.equal(library.dismissEmpty(bound.id),false);assert.deepEqual(library.snapshot(),before);
   library.observe(transcript('codex','empty-native','Now recorded'));const recorded=library.snapshot();
   assert.equal(library.dismissEmpty(bound.id),false);assert.deepEqual(library.snapshot(),recorded);
+});
+
+test('first native send binds its exact persisted draft row across reload without adding a fourth row',()=>{
+  const library=fixture(),first={provider:'codex',localId:'draft:1'} as const,second={provider:'codex',localId:'draft:2'} as const,third={provider:'codex',localId:'draft:3'} as const;
+  const ids=[library.newConversation(first),library.newConversation(second),library.newConversation(third)];
+  const folder=library.createFolder('Trees');library.move(ids[2]!,folder);
+  const restored=new ConversationLibrary(project,library.snapshot());
+  assert.equal(restored.draftConversation(third)!.id,ids[2]);
+  assert.equal(restored.observe(transcript('codex','native-third','Exact third prompt'),false,third),true);
+  const result=restored.snapshot();assert.deepEqual(result.conversations.map(c=>c.id),ids);assert.equal(result.activeId,ids[2]);
+  assert.equal(result.conversations[2]!.folderId,folder);assert.equal(result.conversations[2]!.messages[0]!.text,'Exact third prompt');
+  assert.deepEqual(result.draftLinks?.map(link=>link.localId),['draft:1','draft:2']);
+  assert.equal(restored.draftConversation(third),null);assert.equal(restored.draftConversation(first)!.id,ids[0]);
+  // The source owns its original row even after another empty row is selected.
+  restored.observe(transcript('codex','native-first','First draft late acknowledgement'),false,first);
+  assert.equal(restored.active()!.id,ids[0]);assert.equal(restored.snapshot().conversations.length,3);
+});
+
+test('native binding wins over a different linked draft and source presence never falls back to the active row',()=>{
+  const library=fixture();library.observe(transcript('codex','known-native','Original'));
+  const known=library.active()!.id,source={provider:'codex',localId:'draft:linked'} as const,empty=library.newConversation(source);
+  library.observe(transcript('codex','known-native','Updated'),true,source);
+  assert.equal(library.active()!.id,known);assert.equal(library.draftConversation(source)!.id,empty);
+  assert.equal(library.snapshot().conversations.length,2);
+  library.observe(transcript('codex','known-native','Native binding still wins'),false,{provider:'claude',localId:'irrelevant-provider-draft'});
+  assert.equal(library.active()!.id,known);assert.equal(library.draftConversation(source)!.id,empty);
+  library.select(empty);library.observe(transcript('codex','unrelated-native','Separate history'),true,{provider:'codex',localId:'draft:unlinked'});
+  assert.notEqual(library.active()!.id,empty);assert.equal(library.draftConversation(source)!.id,empty);
+  assert.equal(library.snapshot().conversations.find(c=>c.id===empty)!.bindings.length,0);
+});
+
+test('draft link mutations reject collisions and malformed sources atomically and return detached row copies',()=>{
+  const library=fixture(),source:LibraryDraftSource={provider:'codex',localId:'draft:one'},first=library.newConversation(source),second=library.newConversation();
+  source.localId='late-caller-mutation';
+  const stable={provider:'codex',localId:'draft:one'} as const;
+  assert.equal(library.draftConversation(stable)!.id,first);
+  library.linkDraft(first,stable);const before=library.snapshot();
+  for(const action of[()=>library.linkDraft(second,stable),()=>library.linkDraft(first,{provider:'codex',localId:'other'}),()=>library.linkDraft('missing',stable),()=>library.newConversation(stable)]){
+    assert.throws(action);assert.deepEqual(library.snapshot(),before);
+  }
+  for(const invalid of[{provider:'other',localId:'draft:one'},{provider:'codex',localId:'bad\n'},{provider:'codex',localId:'x'.repeat(129)},{provider:'codex',localId:'draft:one',libraryId:first}]){
+    assert.throws(()=>library.linkDraft(second,invalid as LibraryDraftSource));assert.deepEqual(library.snapshot(),before);
+  }
+  let calls=0;const getter={provider:'codex',get localId(){calls++;return'draft:getter';}};
+  assert.throws(()=>library.newConversation(getter as LibraryDraftSource));assert.equal(calls,0);assert.deepEqual(library.snapshot(),before);
+  const copy=library.draftConversation(stable)!;copy.title='Changed copy';assert.equal(library.draftConversation(stable)!.title,'New chat');
+});
+
+test('binding prunes only its provider draft link, dismissal prunes all row links, and empty metadata is omitted',()=>{
+  const library=fixture(),codex={provider:'codex',localId:'draft:codex'} as const,claude={provider:'claude',localId:'draft:claude'} as const,row=library.newConversation(codex);
+  library.linkDraft(row,claude);library.observe(transcript('codex','bound-codex','Codex text'),false,codex);
+  assert.deepEqual(library.snapshot().draftLinks,[{...claude,libraryId:row}]);
+  assert.throws(()=>library.linkDraft(row,codex));assert.equal(library.dismissEmpty(row),false);
+  library.observe(transcript('claude','bound-claude','Claude text'),false,claude);assert.equal(Object.hasOwn(library.snapshot(),'draftLinks'),false);
+  const empty=library.newConversation({provider:'codex',localId:'discarded'});library.linkDraft(empty,{provider:'claude',localId:'discarded'});
+  assert.equal(library.dismissEmpty(empty),true);assert.equal(Object.hasOwn(library.snapshot(),'draftLinks'),false);
+  library.observe(transcript('codex','late-native','Retain real native history'),true,{provider:'codex',localId:'discarded'});
+  assert.ok(library.snapshot().conversations.every(c=>c.id!==empty),'a stale acknowledgement cannot recreate the dismissed row');
+});
+
+test('draft source observation cannot cross unknown or foreign project scope or mismatched provider',()=>{
+  const library=fixture(),source={provider:'codex',localId:'scoped-draft'} as const;library.newConversation(source);const before=library.snapshot();
+  for(const projectPath of[null,'C:/OtherProject'])assert.equal(library.observe({...transcript('codex','foreign-native','Foreign'),projectPath},false,source),false);
+  assert.throws(()=>library.observe(transcript('claude','wrong-provider','Wrong provider'),false,source));assert.deepEqual(library.snapshot(),before);
+  assert.throws(()=>new ConversationLibrary('C:/OtherProject',before));
+  assert.equal(library.observe({...transcript('codex','native','Correct'),conversationId:null},false,source),false);assert.deepEqual(library.snapshot(),before);
+});
+
+test('strict persisted draft links reject duplicate sources, duplicate row providers, unknown fields and invalid targets',()=>{
+  const library=fixture(),source={provider:'codex',localId:'draft:one'} as const,id=library.newConversation(source),other=library.newConversation(),value=library.snapshot(),link=value.draftLinks![0]!;
+  const invalid:unknown[]=[[],{},[{...link,permission:true}],[{...link,provider:'unknown'}],[{...link,localId:'bad\n'}],[{...link,localId:'x'.repeat(129)}],[{...link,libraryId:'missing'}],[link,{...link,libraryId:other}],[link,{...link,localId:'different'}]];
+  for(const draftLinks of invalid)assert.throws(()=>readConversationLibrary({...value,draftLinks},project));
+  const bound=structuredClone(value);bound.conversations.find(c=>c.id===id)!.bindings.push({provider:'codex',conversationId:'already-bound',sessionId:null});assert.throws(()=>readConversationLibrary(bound,project));
+  let calls=0;const accessor={...value};Object.defineProperty(accessor,'draftLinks',{enumerable:true,get(){calls++;return value.draftLinks;}});assert.throws(()=>readConversationLibrary(accessor,project));assert.equal(calls,0);
+  const old={...value};delete old.draftLinks;assert.equal(Object.hasOwn(readConversationLibrary(old,project),'draftLinks'),false);
+});
+
+test('the 768-link bound accepts all provider slots and failed capacity mutations preserve the original snapshot',()=>{
+  const providers=['codex','claude','arcane'] as const;
+  const conversations=Array.from({length:256},(_,i)=>({id:'row-'+i,title:'New chat',folderId:null,bindings:[],messages:[]}));
+  const draftLinks=conversations.flatMap(row=>providers.map(provider=>({provider,localId:'draft:'+row.id,libraryId:row.id})));
+  const value:ConversationLibrarySnapshot={version:1,projectPath:project,activeId:null,folders:[],conversations,draftLinks};
+  assert.equal(readConversationLibrary(value,project).draftLinks!.length,768);
+  assert.throws(()=>readConversationLibrary({...value,draftLinks:[...draftLinks,{provider:'codex',localId:'overflow',libraryId:'row-0'}]},project));
+  const library=new ConversationLibrary(project,value,()=> 'overflow-row'),before=library.snapshot();
+  assert.throws(()=>library.newConversation({provider:'codex',localId:'overflow'}));assert.deepEqual(library.snapshot(),before);
+  assert.throws(()=>library.linkDraft('row-0',{provider:'codex',localId:'overflow'}));assert.deepEqual(library.snapshot(),before);
 });

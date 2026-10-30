@@ -3003,7 +3003,7 @@ export class CodexChat {
     const module=await import('./chat-tabs.js');
     const preferences=options.preferences??module.workspacePreferencesAdapter(this.doc);
     const tabs=new module.ChatTabs(this.doc,value=>this.api.safe(value),{
-      select:key=>this.selectChat(key),close:key=>this.closeChat(key),newChat:()=>this.newChat(),openSaved:id=>this.openSavedChat(id),unsent:key=>this.unsentDraft(key),
+      select:key=>this.selectChat(key),close:key=>this.closeChat(key),newChat:()=>this.newChat(options.afterNewChat),openSaved:id=>this.openSavedChat(id),unsent:key=>this.unsentDraft(key),
     },{...options,...(preferences?{preferences}:{}),onPersistenceChange:()=>{options.onPersistenceChange?.();this.persistenceChanged(tabs);}});
     if(!this.state||!this.fresh)await this.refresh();
     if(!this.state||!this.fresh)throw new Error('Read the canonical project before restoring chat tabs.');
@@ -3121,6 +3121,15 @@ export class CodexChat {
     const tab=this.tabs?.active(),persistence=this.tabs?.persistenceStatus();
     return !this.stopped&&!!this.state?.projectPath&&persistence!=='native-loading'&&persistence!=='native-error'&&tab?.kind==='draft'&&tab.projectPath===this.state.projectPath;
   }
+  conversationSource():{projectPath:string;localId:string}|null {
+    const tab=this.tabs?.active(),persistence=this.tabs?.persistenceStatus();
+    return !this.stopped&&tab&&tab.projectPath===this.state?.projectPath&&persistence!=='native-loading'&&persistence!=='native-error'
+      ?{projectPath:tab.projectPath,localId:tab.localId}:null;
+  }
+  async openDraftConversation(localId:string):Promise<boolean> {
+    const tab=this.tabs?.views().find(row=>row.kind==='draft'&&row.localId===localId&&row.projectPath===this.state?.projectPath);
+    return !!tab&&await this.selectChat(tab.key);
+  }
   showConversationNotice(message:string):void{this.text('codex-notice',message);}
   recordedTranscript():RecordedChatTranscript {
     const active=this.tabs?.active();
@@ -3222,11 +3231,12 @@ export class CodexChat {
     }
   }
   /** A local draft only: it performs no native action, so only draftBlockReason holds it (never receipts, connecting or busy state). */
-  async newChat():Promise<boolean> {
+  async newChat(created?:(source:{projectPath:string;localId:string})=>void):Promise<boolean> {
     if(!this.tabs)return false;
     const blocked=this.draftBlockReason();if(blocked){this.text('codex-notice',blocked);return false;}
     this.stashTabDraft();if(!this.tabs.createDraft()){this.text('codex-notice','Close an open tab before creating another draft. Saved native history is retained.');return false;}
-    this.loadTabDraft();this.render();this.publishState();this.el('codex-composer').focus({preventScroll:true});return true;
+    this.loadTabDraft();const source=this.conversationSource();if(source)created?.(source);
+    this.render();this.publishState();this.el('codex-composer').focus({preventScroll:true});return true;
   }
   async selectChat(key:string):Promise<boolean> {
     const target=this.tabs?.views().find(row=>row.key===key);if(!target||this.preparingMessage&&target.kind!=='draft')return false;

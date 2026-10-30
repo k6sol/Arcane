@@ -383,7 +383,6 @@ export class ClaudeChat {
   private listed = false;
   private tabs: Tab[] = [];
   private activeKey: string | null = null;
-  private tabSeq = 0;
   private turn: Turn | null = null;
   private buffered: Record<string, unknown>[] = [];
   private notice = '';
@@ -438,6 +437,7 @@ export class ClaudeChat {
   private preparingSend=false;
   /** New chat pressed while a message is still being handed to the bridge: it opens as soon as that hand-off settles. */
   private newChatAfterSend=false;
+  private newChatAfterSendCreated:((source:{projectPath:string;localId:string})=>void)|undefined;
   private readonly transcriptListeners=new Set<()=>void>();
   private transcriptSignature='';
   private conversationRevision=0;
@@ -519,6 +519,16 @@ export class ClaudeChat {
 
   isDraftConversation():boolean {
     const tab=this.activeTab();return !this.nativeDisposed&&!this.nativeHydrating&&!this.loading&&!!tab&&tab.conversationId===null&&this.turn?.tabKey!==tab.key;
+  }
+  conversationSource():{projectPath:string;localId:string}|null {
+    const tab=this.activeTab(),projectPath=this.preferenceStore?.projectPath;
+    return !this.nativeDisposed&&!this.nativeHydrating&&tab&&projectPath?{projectPath,localId:tab.key}:null;
+  }
+  async openDraftConversation(localId:string):Promise<boolean> {
+    const tab=this.tabs.find(row=>row.key===localId&&row.conversationId===null);
+    if(!tab||this.nativeDisposed||this.nativeHydrating||this.turn&&this.turn.turnId===null)return false;
+    this.saveDraft();await this.showTab(tab.key);
+    return this.activeTab()===tab&&tab.conversationId===null;
   }
   subscribeTranscriptChange(listener:()=>void):()=>void{this.transcriptListeners.add(listener);return()=>{this.transcriptListeners.delete(listener);};}
   recordedTranscript():RecordedChatTranscript {
@@ -803,15 +813,16 @@ export class ClaudeChat {
    * New chat: reuses an empty draft tab, otherwise opens a new one. It is never refused: while a message is still being
    * handed to the bridge (no turn ID yet) it waits for that hand-off, so the message stays with the tab it was sent from.
    */
-  newChat(): void {
-    if(this.nativeHydrating){void this.nativeReading?.then(()=>{if(!this.nativeDisposed)this.newChat();});return;}
-    if (this.turn && this.turn.turnId === null) { this.newChatAfterSend = true; return; }
+  newChat(created?:(source:{projectPath:string;localId:string})=>void): void {
+    if(this.nativeHydrating){void this.nativeReading?.then(()=>{if(!this.nativeDisposed)this.newChat(created);});return;}
+    if (this.turn && this.turn.turnId === null) { this.newChatAfterSend = true;this.newChatAfterSendCreated=created; return; }
     this.newChatAfterSend = false;
+    this.newChatAfterSendCreated=undefined;
     this.saveDraft();
     const empty = this.tabs.find(tab => tab.conversationId === null && !tab.draft.trim());
     if (!empty && this.tabs.length >= CLAUDE_CHAT_TAB_LIMIT) { this.notice = 'Close a tab before opening another chat.'; this.render(); return; }
     const tab = empty ?? this.createTab(null);
-    this.showTab(tab.key);
+    void this.showTab(tab.key,undefined,()=>{const source=this.conversationSource();if(source)created?.(source);});
     try { this.input()?.focus(); } catch { /* Focus is presentation only. */ }
   }
 
@@ -1127,7 +1138,7 @@ export class ClaudeChat {
     catch (error) { reply = null; failure = bridgeError(error, failure, this.profile.knownErrors); }
     const turnId = text(reply?.turnId, 256), nextConversation = text(reply?.conversationId, 256);
     // A New chat pressed during the hand-off opens once this send has settled (after the code below has run).
-    if (this.newChatAfterSend) queueMicrotask(() => { if (!this.newChatAfterSend) return; this.newChatAfterSend = false; if (!this.nativeDisposed && this.active) this.newChat(); });
+    if (this.newChatAfterSend) queueMicrotask(() => { if (!this.newChatAfterSend) return; const created=this.newChatAfterSendCreated;this.newChatAfterSend = false;this.newChatAfterSendCreated=undefined; if (!this.nativeDisposed && this.active) this.newChat(created); });
     if (!turnId || !nextConversation) {
       delivery.state='failed';delivery.finishedAt=new Date().toISOString();delivery.error=failure;this.refreshMessageDetails();
       this.turn = null; this.buffered = [];
@@ -1209,12 +1220,12 @@ export class ClaudeChat {
   }
   private saveDraft(): void { const tab = this.activeTab(), input = this.input(); if (this.active && tab && input && tab.draft!==input.value) {tab.draft = input.value;this.preferenceEdits++;if(this.preferenceStore)this.persistTabs();} }
 
-  private async showTab(key: string,prepared?:Record<string,unknown>): Promise<void> {
+  private async showTab(key: string,prepared?:Record<string,unknown>,selected?:()=>void): Promise<void> {
     const tab = this.tabs.find(row => row.key === key); if (!tab) return;
     if(key!==this.activeKey)this.pauseQueue('Paused after changing chats. Choose Send next to resume.');
     this.rememberMessages();
     this.activeKey = key; this.confirmingDelete = false; this.persistTabs();
-    if (!this.active) { this.render(); return; }
+    if (!this.active) { this.loading=!!tab.conversationId;selected?.();this.render(); return; }
     const epoch = ++this.viewEpoch;
     const input = this.input(); if (input) input.value = tab.draft;
     this.cancelStream();
@@ -1224,6 +1235,7 @@ export class ClaudeChat {
     this.shownKey=key;
     for(const message of this.cachedMessages.get(key)??[])this.appendMessage(message,false,true);
     this.attachRunningBubble();
+    selected?.();
     this.render();
     if (!tab.conversationId || !this.bridge) return;
     const atReadStart=new Set(this.shown),readingDelivery=this.turnOwnsActiveTab()?this.turn?.delivery:null;
@@ -2032,7 +2044,7 @@ export class ClaudeChat {
       }
     })().finally(()=>{this.nativeReading=null;});return this.nativeReading;
   }
-  private nextTabKey():string {let key:string;do{key=this.profile.tabPrefix+(++this.tabSeq);}while(this.tabs.some(tab=>tab.key===key)||this.nativeDeferred.some(tab=>tab.key===key));return key;}
+  private nextTabKey():string {let key:string;do{key=this.profile.tabPrefix+crypto.randomUUID();}while(this.tabs.some(tab=>tab.key===key)||this.nativeDeferred.some(tab=>tab.key===key));return key;}
   private restoreDeferredPreferences():void {
     while(this.nativeDeferred.length&&this.tabs.length<CLAUDE_CHAT_TAB_LIMIT)this.tabs.push(this.nativeDeferred.shift()!);
     if(!this.nativeDeferred.length&&this.notice?.startsWith('Close a chat tab to load'))this.notice='';

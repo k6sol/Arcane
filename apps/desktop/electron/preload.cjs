@@ -207,7 +207,8 @@ const workspacePreferenceInvoke = async (action, args, record = 'workspace') => 
 };
 function librarySnapshot(value, scope) {
   const expanded=!!value&&typeof value==='object'&&Object.hasOwn(value,'expandedFolderIds');
-  workspacePreferenceFields(value, ['version','projectPath','activeId','folders','conversations',...(expanded?['expandedFolderIds']:[])]);
+  const drafts=!!value&&typeof value==='object'&&Object.hasOwn(value,'draftLinks');
+  workspacePreferenceFields(value, ['version','projectPath','activeId','folders','conversations',...(expanded?['expandedFolderIds']:[]),...(drafts?['draftLinks']:[])]);
   const projectPath=workspacePreferenceText(value.projectPath,4096);
   const array=(v,max)=>{if(!Array.isArray(v)||Object.getPrototypeOf(v)!==Array.prototype||v.length>max||Reflect.ownKeys(v).length!==v.length+1)workspacePreferenceError();return Array.from({length:v.length},(_,i)=>{const d=Object.getOwnPropertyDescriptor(v,String(i));if(!d?.enumerable||!Object.hasOwn(d,'value'))workspacePreferenceError();return d.value;});};
   const singleLine=(v,max)=>{const s=workspacePreferenceText(v,max);if(/[\x00-\x1f\x7f]/.test(s))workspacePreferenceError();return s;};
@@ -226,6 +227,15 @@ function librarySnapshot(value, scope) {
   const activeId=workspacePreferenceId(value.activeId,256),result={version:1,projectPath,activeId,folders,conversations};
   // Optional presentation field: the open sidebar folders (unique, existing, omitted when empty).
   if(expanded){const open=array(value.expandedFolderIds,64).map(id=>workspacePreferenceText(id,256,true));if(!open.length||new Set(open).size!==open.length||open.some(id=>!folderIds.has(id)))workspacePreferenceError();result.expandedFolderIds=open;}
+  if(drafts){
+    const sources=new Set(),targets=new Set();
+    const links=array(value.draftLinks,768).map(v=>{
+      const link=workspacePreferenceFields(v,['provider','localId','libraryId']),provider=link.provider,localId=workspacePreferenceText(link.localId,128,true),libraryId=workspacePreferenceText(link.libraryId,256,true),row=conversations.find(c=>c.id===libraryId);
+      if(!['codex','claude','arcane'].includes(provider)||!row||row.bindings.some(b=>b.provider===provider))workspacePreferenceError();
+      const source=JSON.stringify([provider,localId]),target=JSON.stringify([libraryId,provider]);if(sources.has(source)||targets.has(target))workspacePreferenceError();sources.add(source);targets.add(target);return{provider,localId,libraryId};
+    });
+    if(!links.length)workspacePreferenceError();result.draftLinks=links;
+  }
   if(activeId!==null&&!conversationIds.has(activeId)||count>1024||new TextEncoder().encode(JSON.stringify(result)).byteLength>480*1024)workspacePreferenceError();return result;
 }
 

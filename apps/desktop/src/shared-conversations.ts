@@ -1,13 +1,16 @@
 /// <reference lib="dom" />
-import {ConversationLibrary,type ConversationLibrarySnapshot,type ConversationProvider,type LibraryConversation,type LibraryTranscript} from './conversation-library.js';
+import {ConversationLibrary,type ConversationLibrarySnapshot,type ConversationProvider,type LibraryConversation,type LibraryTranscript,type LibraryDraftSource} from './conversation-library.js';
 type BeforeMessageSubmit=(draft:string)=>string|Promise<string>;
+export interface SharedConversationSource {projectPath:string;localId:string}
 export interface SharedConversationPeer {
   recordedTranscript():LibraryTranscript;
+  conversationSource():SharedConversationSource|null;
   isDraftConversation():boolean;
   subscribeTranscriptChange(listener:()=>void):()=>void;
   setBeforeMessageSubmit(callback:BeforeMessageSubmit|null):void;
   showConversationNotice(text:string):void;
   open(id:string):Promise<boolean>;
+  openDraftConversation(localId:string):Promise<boolean>;
   newChat():Promise<boolean>;
 }
 interface LibraryBridge {version:1;read():Promise<unknown>;save(value:ConversationLibrarySnapshot):Promise<unknown>}
@@ -42,7 +45,11 @@ export class SharedConversations {
   private suspended=0;
   private stopped=false;
   private ready=false;
-  private pendingAttach:ConversationProvider|null=null;
+  private pendingNew:{provider:ConversationProvider;source:SharedConversationSource;revision:number;navigation:number}|null=null;
+  private navigationRevision=0;
+  private sourceKeys=new Map<ConversationProvider,string>();
+  private sourceRevisions=new Map<ConversationProvider,number>();
+  private providerSeen:ConversationProvider;
   private scheduled=false;
   private signature='';
   private historySignature='';
@@ -60,10 +67,12 @@ export class SharedConversations {
   private lastActive:string|null=null;
   private bridge:LibraryBridge|null;
   constructor(private readonly doc:Document,private readonly options:SharedConversationsOptions){
+    this.providerSeen=options.provider();
     this.bridge=options.bridge??(doc.defaultView as unknown as {arcaneDesktop?:{conversationLibrary?:LibraryBridge}}|null)?.arcaneDesktop?.conversationLibrary??null;
-    for(const peer of Object.values(options.peers)){
-      this.removers.push(peer.subscribeTranscriptChange(()=>this.schedule()));
-      peer.setBeforeMessageSubmit(draft=>this.prepareMessage(draft));
+    for(const [provider,peer] of Object.entries(options.peers) as [ConversationProvider,SharedConversationPeer][]){
+      this.source(provider);
+      this.removers.push(peer.subscribeTranscriptChange(()=>{this.source(provider);this.schedule();}));
+      peer.setBeforeMessageSubmit(draft=>this.prepareMessage(provider,draft));
     }
     this.reading=this.initialize();
   }
@@ -75,17 +84,34 @@ export class SharedConversations {
       if(reply?.available!==true||typeof reply.projectPath!=='string'||!reply.projectPath)throw Error();
       this.library=new ConversationLibrary(reply.projectPath,reply.preferences===null?undefined:reply.preferences);
       this.lastActive=this.library.snapshot().activeId;
-      this.ready=true;this.observe();
+      this.ready=true;this.finishNewConversation();this.observe();
     }catch{this.persistenceError=true;}finally{this.render();}
   }
   private peer(provider=this.options.provider()):SharedConversationPeer|undefined{return this.options.peers[provider];}
+  private source(provider:ConversationProvider):SharedConversationSource|null {
+    const value=this.peer(provider)?.conversationSource()??null;
+    const source=value&&typeof value.projectPath==='string'&&value.projectPath&&typeof value.localId==='string'&&/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}(?![\s\S])/.test(value.localId)?{projectPath:value.projectPath,localId:value.localId}:null;
+    const key=JSON.stringify(source),previous=this.sourceKeys.get(provider);
+    if(previous!==undefined&&previous!==key)this.sourceRevisions.set(provider,(this.sourceRevisions.get(provider)??0)+1);
+    this.sourceKeys.set(provider,key);
+    const selected=this.options.provider();if(this.providerSeen!==selected){this.providerSeen=selected;this.navigationRevision++;}
+    return source;
+  }
+  private draftSource(provider:ConversationProvider,source:SharedConversationSource|null):LibraryDraftSource|undefined {
+    return source&&source.projectPath===this.library?.snapshot().projectPath?{provider,localId:source.localId}:undefined;
+  }
   private notice(text:string):void{this.peer()?.showConversationNotice(text);}
   private schedule():void{if(this.stopped||this.scheduled)return;this.scheduled=true;queueMicrotask(()=>{this.scheduled=false;if(!this.stopped)this.observe();});}
   private observe():void{
     if(!this.library||this.suspended||this.stopped)return;
-    const p=this.options.provider(),snapshot=this.peer(p)?.recordedTranscript();if(!snapshot)return;
-    if(!snapshot.conversationId&&this.peer(p)?.isDraftConversation()===true&&this.pendingAttach!==p&&this.library.active()?.bindings.length){this.library.newConversation();this.persist();}
-    try{if(this.library.observe(snapshot,this.pendingAttach===p)){if(snapshot.conversationId)this.pendingAttach=null;this.persist();}}catch(error){this.notice(error instanceof Error?error.message:'Shared history could not be saved.');}
+    this.finishNewConversation();
+    const p=this.options.provider(),snapshot=this.peer(p)?.recordedTranscript(),source=this.source(p);if(!snapshot)return;
+    const draft=this.draftSource(p,source);
+    try{
+      if(!snapshot.conversationId&&draft&&this.peer(p)?.isDraftConversation()===true){
+        const linked=this.library.draftConversation(draft);if(linked&&linked.id!==this.library.active()?.id){this.library.select(linked.id);this.persist();}
+      }else if(this.library.observe(snapshot,false,draft))this.persist();
+    }catch(error){this.notice(error instanceof Error?error.message:'Shared history could not be saved.');}
     this.render();
   }
   private persist():void{if(!this.library)return;this.queued=this.library.snapshot();if(this.saveTimer===null)this.saveTimer=setTimeout(()=>{this.saveTimer=null;this.flush();},250);}
@@ -102,49 +128,97 @@ export class SharedConversations {
     if(this.queued){this.persistenceError=false;this.flush();if(this.saving)await this.saving;}
     if(this.persistenceError||this.queued)throw Error('Shared chat history could not be saved. Keep this window open and retry.');
   }
-  private async prepareMessage(draft:string):Promise<string>{
+  private async prepareMessage(provider:ConversationProvider,draft:string):Promise<string>{
+    const source=this.source(provider),revision=this.sourceRevisions.get(provider)??0,navigation=this.navigationRevision;
     await this.reading;
-    if(this.stopped||this.suspended)throw Error('Wait for this conversation to finish switching models.');
-    this.observe();return this.library?.contextFor(this.options.provider(),draft)??draft;
+    const current=this.source(provider);
+    if(this.stopped||this.suspended||this.options.provider()!==provider||navigation!==this.navigationRevision||revision!==(this.sourceRevisions.get(provider)??0)||JSON.stringify(source)!==JSON.stringify(current))throw Error('Wait for this conversation to finish switching models.');
+    if(!this.library)return draft;
+    const exact=this.draftSource(provider,current);if(!exact)throw Error('Wait for this conversation’s project and draft to finish loading.');
+    this.observe();
+    if(this.peer(provider)?.isDraftConversation()===true&&!this.library.draftConversation(exact)){this.library.newConversation(exact);this.persist();}
+    this.observe();const library=this.library,rowId=library.active()?.id??null,prepared=library.contextFor(provider,draft);
+    const transcript=this.peer(provider)!.recordedTranscript(),binding=JSON.stringify([transcript.projectPath,transcript.conversationId,transcript.sessionId]);
+    const owned=()=>{
+      const latest=this.source(provider),recorded=this.peer(provider)?.recordedTranscript();
+      if(this.stopped||this.suspended||this.library!==library||this.options.provider()!==provider||navigation!==this.navigationRevision||revision!==(this.sourceRevisions.get(provider)??0)||
+        JSON.stringify(current)!==JSON.stringify(latest)||library.snapshot().projectPath!==current!.projectPath||library.active()?.id!==rowId||
+        !recorded||JSON.stringify([recorded.projectPath,recorded.conversationId,recorded.sessionId])!==binding)throw Error('This conversation changed while its draft was being saved. Your text is retained.');
+    };
+    // The exact draft link must reach the host before this hook releases any native effect.
+    // Join an older write, then checkpoint the captured latest state without a debounce or retry.
+    owned();this.flush();
+    if(this.saving){await this.saving;owned();}
+    if(this.persistenceError)throw Error('Shared chat history could not be saved. Your draft is retained.');
+    if(this.queued){this.flush();if(this.saving){await this.saving;owned();}}
+    if(this.persistenceError||this.queued)throw Error('Shared chat history could not be saved. Your draft is retained.');
+    owned();return prepared;
   }
-  beginNewConversation():void{if(!this.library||this.suspended||this.stopped)return;this.observe();this.library.newConversation();this.pendingAttach=null;this.persist();this.render();}
+  /** Called only after the provider has actually selected the new local draft. */
+  beginNewConversation(provider:ConversationProvider,source:SharedConversationSource):void{
+    if(this.suspended||this.stopped)return;
+    const current=this.source(provider);if(this.options.provider()!==provider||JSON.stringify(current)!==JSON.stringify(source)||this.peer(provider)?.isDraftConversation()!==true)return;
+    this.navigationRevision++;this.pendingNew={provider,source:{...source},revision:this.sourceRevisions.get(provider)??0,navigation:this.navigationRevision};this.finishNewConversation();this.render();
+  }
+  private finishNewConversation():void {
+    const pending=this.pendingNew;if(!pending||!this.library)return;
+    this.pendingNew=null;const current=this.source(pending.provider),draft=this.draftSource(pending.provider,current);
+    if(this.stopped||this.suspended||this.options.provider()!==pending.provider||pending.navigation!==this.navigationRevision||pending.revision!==(this.sourceRevisions.get(pending.provider)??0)||JSON.stringify(current)!==JSON.stringify(pending.source)||!draft||this.peer(pending.provider)?.isDraftConversation()!==true)return;
+    try{const existing=this.library.draftConversation(draft);if(existing)this.library.select(existing.id);else this.library.newConversation(draft);this.persist();}
+    catch(error){this.notice(error instanceof Error?error.message:'Shared history could not be saved.');}
+  }
   /** Only an explicit model choice calls this. It never sends a message, replays tools or transfers grants. */
   async beforeProviderSwitch(from:ConversationProvider,to:ConversationProvider):Promise<boolean>{
     if(from==='arcane'||to==='arcane')return true;
-    await this.reading;if(!this.ready||!this.library)return !this.bridge;
-    if(this.stopped||this.suspended||from!==this.options.provider())return false;
+    this.source(from);
+    const navigation=++this.navigationRevision;
+    await this.reading;
+    if(this.stopped||this.suspended||from!==this.options.provider()||navigation!==this.navigationRevision)return false;
+    if(!this.ready||!this.library)return !this.bridge;
     this.observe();
     const active=this.library.active(),activeId=active?.id??null,peer=this.peer(to);if(!peer)return false;
+    const origin=this.source(from),originRevision=this.sourceRevisions.get(from)??0;
     const binding=active?.bindings.find(b=>b.provider===to);
+    const linked=activeId?this.library.snapshot().draftLinks?.find(row=>row.libraryId===activeId&&row.provider===to):undefined;
     this.suspended++;
     try{
-      const ok=binding?(peer.recordedTranscript().conversationId===binding.conversationId||await peer.open(binding.conversationId)):await peer.newChat();
-      if(!ok||(this.library.active()?.id??null)!==activeId||this.stopped)return false;
-      this.pendingAttach=to;this.persist();return true;
+      const recorded=peer.recordedTranscript();
+      const ok=binding?(recorded.projectPath===this.library.snapshot().projectPath&&recorded.conversationId===binding.conversationId||await peer.open(binding.conversationId))
+        :linked?await peer.openDraftConversation(linked.localId):await peer.newChat();
+      const currentOrigin=this.source(from);
+      if(!ok||(this.library.active()?.id??null)!==activeId||this.stopped||navigation!==this.navigationRevision||from!==this.options.provider()||originRevision!==(this.sourceRevisions.get(from)??0)||JSON.stringify(origin)!==JSON.stringify(currentOrigin))return false;
+      if(!binding&&activeId){const source=this.draftSource(to,this.source(to));if(!source||linked&&source.localId!==linked.localId||peer.isDraftConversation()!==true)return false;this.library.linkDraft(activeId,source);}
+      this.persist();return true;
     }catch{return false;}finally{this.suspended--;}
   }
   private async open(id:string):Promise<void>{
-    if(!this.library||this.suspended)return;
-    this.observe();const previous=this.library.active()?.id;this.library.select(id);
+    if(!this.library||this.suspended||this.stopped)return;
+    this.source(this.options.provider());
+    const navigation=++this.navigationRevision;
+    this.observe();const previous=this.library.active()?.id??null;this.library.select(id);
+    const restore=()=>{if(!this.stopped&&navigation===this.navigationRevision&&this.library?.active()?.id===id)this.library.select(previous);};
     const target=this.library.active()!,current=this.options.provider(),binding=target.bindings.find(b=>b.provider===current)??target.bindings[0];
-    if(!binding){this.render();return;}
+    const link=!binding?this.library.snapshot().draftLinks?.find(row=>row.libraryId===id&&row.provider===current)??this.library.snapshot().draftLinks?.find(row=>row.libraryId===id):undefined;
+    if(!binding&&!link){this.render();return;}
     this.suspended++;
     try{
-      const peer=this.peer(binding.provider),ok=!!peer&&await peer.open(binding.conversationId);
-      if(!ok){if(previous)this.library.select(previous);this.notice('This saved conversation could not be opened. Your current chat and draft were retained.');return;}
-      if(binding.provider!==current&&!this.options.requestProvider(binding.provider)){if(previous)this.library.select(previous);return;}
-      this.pendingAttach=null;this.persist();
-    }catch{if(previous)this.library.select(previous);this.notice('This saved conversation could not be opened. Try again after checking the provider connection.');}
+      const provider=binding?.provider??link!.provider,peer=this.peer(provider),ok=!!peer&&(binding?await peer.open(binding.conversationId):await peer.openDraftConversation(link!.localId));
+      const source=link?this.source(provider):null;
+      if(this.stopped||navigation!==this.navigationRevision||this.options.provider()!==current||this.library.active()?.id!==id)return;
+      if(!ok||link&&(source?.projectPath!==this.library.snapshot().projectPath||source.localId!==link.localId||peer?.isDraftConversation()!==true)){restore();this.notice('This saved conversation could not be opened. Your current chat and draft were retained.');return;}
+      if(provider!==current&&!this.options.requestProvider(provider)){restore();return;}
+      this.persist();
+    }catch{if(!this.stopped&&navigation===this.navigationRevision&&this.library.active()?.id===id){restore();this.notice('This saved conversation could not be opened. Try again after checking the provider connection.');}}
     finally{this.suspended--;this.render();}
   }
   private dismissEmpty(id:string):void{
     if(!this.library||this.suspended||this.stopped)return;
     const active=this.library.active()?.id===id;
     if(!this.library.dismissEmpty(id))return;
-    if(active)this.pendingAttach=null;
+    if(active){this.navigationRevision++;this.pendingNew=null;}
     this.persist();this.flush();this.render();
     const mount=this.doc.getElementById('conversation-library');
-    const next=mount?.querySelector<HTMLButtonElement>('.library-chat')??mount?.querySelector<HTMLElement>('.library-new-folder');
+    const next=mount?.querySelector<HTMLButtonElement>('#library-chats .library-chat')??mount?.querySelector<HTMLElement>('.library-new-folder');
     next?.focus({preventScroll:true});
   }
   private edit(action:()=>void):void{if(!this.library||this.suspended)return;try{action();this.persist();this.flush();this.render();}catch(error){this.notice(error instanceof Error?error.message:'Chat organisation could not be saved.');}}
@@ -353,7 +427,7 @@ export class SharedConversations {
     const signature=JSON.stringify([c.id,c.messages]);if(signature===this.historySignature)return;this.historySignature=signature;list.replaceChildren();
     for(const m of c.messages){const article=this.node('article');article.className='shared-history-message';article.setAttribute('role','listitem');article.dataset.role=m.role;const meta=this.node('small',(m.provider==='codex'?'Codex':m.provider==='claude'?'Claude':'Arcane')+' · '+m.role+(m.model?' · '+m.model:''));meta.className='shared-history-meta';article.append(meta,this.node('p',m.text));list.append(article);}
   }
-  stop():void{this.flush();this.stopped=true;}
+  stop():void{this.flush();this.stopped=true;this.navigationRevision++;this.pendingNew=null;}
   resume():void{this.stopped=false;this.observe();this.flush();}
   cleanup():void{this.stop();this.closeMenuListener();for(const remove of this.removers)remove();for(const peer of Object.values(this.options.peers))peer.setBeforeMessageSubmit(null);}
 }

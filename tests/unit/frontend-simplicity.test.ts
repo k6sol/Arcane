@@ -44,7 +44,8 @@ test('manual workflows stay in Advanced settings and New chat is disabled until 
   assert.match(html,/<button id="new-chat"[^>]*data-chat-action="new"[^>]*aria-label="New chat"[^>]*disabled/);
   const boot=await source('apps/desktop/src/studio.ts');
   const beforeNewChat=boot.match(/beforeNewChat:\s*\(\)\s*=>\s*\{([^}]+)\}/)?.[1]??'';
-  assert.match(beforeNewChat,/sharedConversations\?\.beginNewConversation\(\)/);
+  assert.doesNotMatch(beforeNewChat,/beginNewConversation/,'an attempted New chat must not allocate a sidebar row');
+  assert.match(boot,/afterNewChat:\s*source\s*=>\s*sharedConversations\?\.beginNewConversation\('codex',source\)/);
   assert.match(beforeNewChat,/workspaceShell\.showConversation\(\)/);
 });
 
@@ -238,7 +239,12 @@ test('Edge simplicity: optional key details, exact navigation, one draft, empty 
     await page.locator('#go-assets').click();
     assert.equal(await page.locator('.composer-tool-context').isVisible(), false, 'Chat needs no manual tool context badge.');
     assert.equal(await page.locator('#workspace-tool-label').textContent(), 'Blender');
-    assert.equal(await drawer.isVisible(), false);
+    assert.equal(await drawer.evaluate(node => node.matches(':modal')), true, 'Blender opens its existing Tools settings');
+    assert.equal(await drawer.locator('[data-settings-section]:visible').count(), 1);
+    assert.equal(await page.locator('#settings-tools').isVisible(), true);
+    assert.equal(await page.locator('#asset-heading').isVisible(), true);
+    assert.equal(await page.locator('#asset-heading').evaluate(node => node === document.activeElement), true);
+    await page.keyboard.press('Escape');await drawer.waitFor({ state: 'hidden' });
     assert.equal(await page.locator('#codex-composer').inputValue(), draft);
     assert.equal(await page.locator('#codex-compose').count(), 1);
     await page.evaluate(async () => {
@@ -269,7 +275,7 @@ test('F2: the sidebar New chat routes to the Claude or Arcane chat only while th
   // Active only while chats run and the shown surface is Claude (with a Claude chat) or Arcane (with an Arcane chat); ChatGPT keeps the default.
   assert.match(boot, /alternateNewChat:\s*\{\s*active:\s*\(\)\s*=>\s*!claudeChatStopped\s*&&\s*\(!!claudeChat\s*&&\s*providerSetup\.chatSurface\(\)\s*===\s*'claude'\s*\|\|\s*!!arcaneChat\s*&&\s*providerSetup\.chatSurface\(\)\s*===\s*'arcane'\),/);
   // Start opens a new chat on exactly the surface that is shown.
-  assert.match(boot, /start:\s*\(\)\s*=>\s*\{\s*if\s*\(providerSetup\.chatSurface\(\)\s*===\s*'arcane'\)\s*arcaneChat\?\.newChat\(\);\s*else\s*claudeChat\?\.newChat\(\);\s*\}\s*\}/);
+  assert.match(boot, /start:\s*\(\)\s*=>\s*\{\s*if\s*\(providerSetup\.chatSurface\(\)\s*===\s*'arcane'\)\s*arcaneChat\?\.newChat\(\);\s*else\s*claudeChat\?\.newChat\(source=>sharedConversations\?\.beginNewConversation\('claude',source\)\);\s*\}\s*\}/);
   const tabs = await source('apps/desktop/src/chat-tabs.ts');
   assert.match(tabs, /\.\.\.\(options\.alternateNewChat\?\{alternateNewChat:options\.alternateNewChat\}:\{\}\)/, 'startChatTabs forwards the routing hook');
 });

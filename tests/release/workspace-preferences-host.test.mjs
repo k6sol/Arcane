@@ -43,6 +43,52 @@ test('shared history stays unavailable without encryption and failed saves retai
   const f=fixture({includeLibrary:true});await f.library('save',librarySnapshot());f.safeStorage.setAvailable(false);await assert.rejects(f.library('save',{...librarySnapshot(),folders:[]}),ERROR);f.safeStorage.setAvailable(true);assert.deepEqual(json((await f.library('read')).preferences),librarySnapshot());
 });
 
+test('exact local draft links survive encrypted preload/host save and reload independently of native history',async()=>{
+  const f=fixture({includeLibrary:true}),value=librarySnapshot();
+  value.conversations.push({id:'empty-one',title:'New chat',folderId:null,bindings:[],messages:[]},{id:'empty-two',title:'New chat',folderId:'folder-1',bindings:[],messages:[]});
+  value.draftLinks=[{provider:'codex',localId:'draft:private-one',libraryId:'empty-one'},{provider:'claude',localId:'draft:private-two',libraryId:'empty-two'}];
+  assert.deepEqual(json(await f.library('save',value)),{saved:true});
+  const full=win32.join(f.stateRoot,'conversation-library.v1.json'),sealed=f.disk.node(full).bytes;
+  assert.equal(sealed.includes(Buffer.from('draft:private-one')),false);assert.equal(sealed.includes(Buffer.from('A private tree prompt')),false);
+  const reopened=fixture({disk:f.disk,safeStorage:f.safeStorage,includeLibrary:true});
+  assert.deepEqual(json((await reopened.library('read')).preferences),value);assert.deepEqual(json((await reopened.rawLibrary('read')).preferences),value);
+  assert.equal(reopened.disk.descriptors.size,0);assert.equal((await reopened.call('read')).preferences,null);
+  const legacy=json(value);delete legacy.draftLinks;await reopened.library('save',legacy);
+  assert.deepEqual(json((await reopened.library('read')).preferences),legacy);assert.equal(Object.hasOwn((await reopened.library('read')).preferences,'draftLinks'),false);
+});
+
+test('both preload and host refuse malformed draft links without replacing the encrypted record',async()=>{
+  const f=fixture({includeLibrary:true}),value=librarySnapshot();
+  value.conversations.push({id:'empty-one',title:'New chat',folderId:null,bindings:[],messages:[]},{id:'empty-two',title:'New chat',folderId:null,bindings:[],messages:[]});
+  const link={provider:'codex',localId:'draft:one',libraryId:'empty-one'};value.draftLinks=[link];
+  await f.library('save',value);const full=win32.join(f.stateRoot,'conversation-library.v1.json'),sealed=Buffer.from(f.disk.node(full).bytes),writes=f.disk.writes.length;
+  for(const draftLinks of[[],{},[null],[{...link,provider:'unknown'}],[{...link,localId:''}],[{...link,localId:'bad\n'}],[{...link,localId:'x'.repeat(129)}],[{...link,libraryId:'missing'}],[{...link,libraryId:'shared-1'}],[{...link,grant:'writes'}],[link,{...link,libraryId:'empty-two'}],[link,{...link,localId:'another'}]]){
+    const invalid={...value,draftLinks};await assert.rejects(f.library('save',invalid),ERROR);await assert.rejects(f.rawLibrary('save',invalid),ERROR);
+    f.setReply({available:true,projectPath:f.projectPath,preferences:invalid});await assert.rejects(f.library('read'),ERROR);f.setReply(undefined);
+  }
+  await assert.rejects(f.library('save',{...value,projectPath:'C:\\Foreign'}),ERROR);await assert.rejects(f.rawLibrary('save',{...value,projectPath:'C:\\Foreign'}),ERROR);
+  assert.equal(f.disk.writes.length,writes);assert.ok(f.disk.node(full).bytes.equals(sealed));assert.deepEqual(json((await f.library('read')).preferences),value);
+  const getter="({version:1,projectPath:'C:\\\\Project',activeId:'empty',folders:[],conversations:[{id:'empty',title:'New chat',folderId:null,bindings:[],messages:[]}],draftLinks:[{provider:'codex',get localId(){globalThis.draftGetterRead=true;return 'draft:one'},libraryId:'empty'}]})";
+  await assert.rejects(f.exposed.conversationLibrary.save(f.preloadValue(getter)),ERROR);assert.equal(f.preloadValue('globalThis.draftGetterRead'),undefined);
+  await assert.rejects(f.handlers.get('arcane:conversation-library-save')(f.event,f.hostValue(getter)),ERROR);assert.equal(f.hostValue('globalThis.draftGetterRead'),undefined);
+  assert.ok(f.disk.node(full).bytes.equals(sealed));assert.equal(f.disk.descriptors.size,0);
+  const stored=fixture({includeLibrary:true}),bad={version:1,projectId:stored.projectId,record:'library',preferences:{...value,draftLinks:[{...link,libraryId:'missing'}]}};
+  const storedFull=win32.join(stored.stateRoot,'conversation-library.v1.json');
+  stored.disk.put(storedFull,{kind:'file',bytes:Buffer.from(JSON.stringify({version:1,ciphertext:stored.safeStorage.encryptString(JSON.stringify(bad)).toString('base64')})+'\n')});
+  await assert.rejects(stored.rawLibrary('read'),ERROR);await assert.rejects(stored.library('read'),ERROR);
+});
+
+test('preload and host accept all768 distinct provider draft slots and reject excess links',async()=>{
+  const f=fixture({includeLibrary:true}),providers=['codex','claude','arcane'];
+  const conversations=Array.from({length:256},(_,i)=>({id:'row-'+i,title:'New chat',folderId:null,bindings:[],messages:[]}));
+  const draftLinks=conversations.flatMap(row=>providers.map(provider=>({provider,localId:'draft:'+row.id,libraryId:row.id})));
+  const value={version:1,projectPath:f.projectPath,activeId:null,folders:[],conversations,draftLinks};
+  await f.library('save',value);assert.equal((await f.library('read')).preferences.draftLinks.length,768);
+  const invalid={...value,draftLinks:[...draftLinks,{provider:'codex',localId:'overflow',libraryId:'row-0'}]};
+  await assert.rejects(f.library('save',invalid),ERROR);await assert.rejects(f.rawLibrary('save',invalid),ERROR);
+  assert.deepEqual(json((await f.library('read')).preferences),value);assert.equal(f.disk.descriptors.size,0);
+});
+
 function filesystemDouble() {
   const nodes = new Map(), descriptors = new Map(), writes = []; let identity = 0n, descriptor = 10, reads = 0;
   const key = name => win32.resolve(name).toLowerCase();
@@ -217,6 +263,7 @@ function fixture({ disk = filesystemDouble(), safeStorage = encryptedTestDouble(
     },
     queue(action,...args){preloadContext.serializedArgs=JSON.stringify(args);return exposed.chatQueue[action](...vm.runInContext('JSON.parse(serializedArgs)',preloadContext));},
     library(action,...args){preloadContext.serializedArgs=JSON.stringify(args);return exposed.conversationLibrary[action](...vm.runInContext('JSON.parse(serializedArgs)',preloadContext));},
+    rawLibrary(action,...args){hostContext.serialized=JSON.stringify(args);return handlers.get('arcane:conversation-library-'+action)(activeEvent,...vm.runInContext('JSON.parse(serialized)',hostContext));},
     rawTools(action, ...args) {
       hostContext.serialized = JSON.stringify(args);
       return handlers.get('arcane:tool-drafts-' + action)(activeEvent, ...vm.runInContext('JSON.parse(serialized)', hostContext));
