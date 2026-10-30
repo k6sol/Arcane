@@ -130,3 +130,58 @@ test('diagnostic output cannot make an unobserved worker closure terminal', asyn
   assert.equal(result.state, 'interrupted'); assert.equal(result.error?.code, 'SUPERVISION_UNRESOLVED');
   assert.match(result.error!.message, /closure was not observed/);
 });
+
+test('specific measured material codes survive decoding while incomplete or untrusted causes do not', () => {
+  const material = { ...report, reasonCode: 'MESH_MATERIAL_NODE',
+    metrics: { renderTriangles: 10310, triangleBudget: 16000, collisionTriangles: 12, invalidMeshes: 1, errorCount: 1 } };
+  for (const reasonCode of ['MESH_MATERIAL_NODE', 'MESH_MATERIAL_LINK', 'MESH_MATERIAL_SURFACE', 'MESH_MATERIAL_PBR']) {
+    const error = workerFailure(output({ ...material, reasonCode }), 'generate');
+    assert.equal(error.diagnostic?.reasonCode, reasonCode); assert.equal(error.diagnostic?.stage, 'mesh-validation');
+    assert.match(error.message, /generated mesh/); assert.ok(!JSON.stringify(error).includes(secret));
+    const saved = { code: error.code, message: error.message, diagnostic: { ...error.diagnostic!, logPath: 'failure.json' } };
+    assert.deepEqual(decodeAssetJobError(saved), saved);
+    assert.throws(() => decodeAssetJobError({ ...saved, diagnostic: { ...saved.diagnostic, reason: secret } }), { code: 'RECOVERY' });
+  }
+  for (const bad of [{ ...material, stage: 'texture-authoring' }, { ...material, exceptionType: 'RuntimeError' },
+    { ...material, auditPath: undefined }, { ...material, metrics: undefined }, { ...material, metrics: { errorCount: 1, invalidMeshes: 1 } },
+    { ...material, metrics: { ...material.metrics, errorCount: 0 } }, { ...material, metrics: { ...material.metrics, invalidMeshes: 0 } },
+    { ...material, metrics: { ...material.metrics, invalidMeshes: 2 } }, { ...material, metrics: { ...material.metrics, renderTriangles: 0 } },
+    { ...material, metrics: { ...material.metrics, triangleBudget: 0 } }, { ...material, metrics: { ...material.metrics, renderTriangles: 16001 } },
+    { ...material, metrics: { ...material.metrics, collisionTriangles: 0 } },
+    { ...material, reason: secret }, { ...material, meshName: secret }, { ...material, reasonCode: 'MESH_MATERIAL_PRIVATE' }]) {
+    const error = workerFailure(output(bad), 'generate');
+    assert.equal(error.diagnostic?.reasonCode, 'WORKER_EXIT'); assert.ok(!JSON.stringify(error).includes(secret));
+  }
+  const legacy = workerFailure(output({ ...report, metrics: undefined }), 'generate');
+  assert.equal(legacy.diagnostic?.reason, 'Structural mesh validation rejected the generated geometry; inspect the per-mesh audit.');
+  assert.deepEqual(decodeAssetJobError({ code: legacy.code, message: legacy.message, diagnostic: legacy.diagnostic }),
+    { code: legacy.code, message: legacy.message, diagnostic: legacy.diagnostic });
+});
+
+test('measured material cause survives actual pipeline recovery and active/archive MCP history', async t => {
+  const material = { ...report, reasonCode: 'MESH_MATERIAL_NODE',
+    metrics: { renderTriangles: 10310, triangleBudget: 16000, collisionTriangles: 12, invalidMeshes: 1, errorCount: 1 } };
+  const f = await fixture(t, async spec => {
+    await writeFile(join(spec.cwd, 'audit.json'), JSON.stringify({ meshes: [{ name: 'SM_material-crate', errors: ['Missing named node material'] }],
+      totals: { renderTriangles: 10310, lod1Triangles: 0, collisionTriangles: 12, materials: 1 }, errors: ['SM_material-crate: Missing named node material'] }));
+    return output(material);
+  }), handle = f.pipeline.start({ template: 'hero-prop', name: 'material-crate', triangleBudget: 16000 }), result = await handle.completion;
+  assert.equal(result.state, 'failed'); assert.equal(result.error?.code, 'BLENDER_FAILED');
+  assert.equal(result.error?.diagnostic?.reasonCode, 'MESH_MATERIAL_NODE'); assert.equal(result.error?.diagnostic?.stage, 'mesh-validation');
+  assert.match(result.error!.message, /missing or incorrectly named material/);
+  assert.deepEqual((await f.pipeline.recover(handle.directory)).result.error, result.error);
+  assert.ok(!(await readFile(join(handle.directory, 'failure.json'), 'utf8')).includes(secret));
+  let service = await createAssetService({ cwd: resolve(process.cwd()), outputRoot: f.outputRoot });
+  try { assert.deepEqual(assetJobPage.parse(service.jobPage()).jobs[0]?.error, result.error); }
+  finally { await service.close(); }
+  const archive = await AssetArchiveStore.open({ root: f.outputRoot });
+  try { await archive.archive({ jobIds: [handle.id], activeCount: 1, guard: () => {}, facts: async () => ({ active: false, readPinned: false,
+    importCaptured: false, preparationRecord: false, pendingStage: false, uncertainLatch: false, manifestVerified: false }) }); }
+  finally { archive.close(); }
+  service = await createAssetService({ cwd: resolve(process.cwd()), outputRoot: f.outputRoot });
+  try {
+    const page = await service.historyPage({ limit: 1 }); assert.equal(page.jobs[0]?.retention?.status, 'archived');
+    assert.deepEqual(assetJobPage.parse(page).jobs[0]?.error, result.error);
+    assert.deepEqual((await service.lookupJobs([handle.id])).jobs[0]?.error, result.error);
+  } finally { await service.close(); }
+});

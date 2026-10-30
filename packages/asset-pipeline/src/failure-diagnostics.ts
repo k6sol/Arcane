@@ -137,6 +137,10 @@ const REASONS: Record<string, string> = {
   WINDOWS_PATH_LIMIT: 'The installed Blender cannot use this long Windows asset path because no verified short directory alias is available; choose a shorter asset output directory.',
   MESH_REPAIR: 'Generated mesh required structural repair and was rejected.',
   MESH_AUDIT: 'Structural mesh validation rejected the generated geometry; inspect the per-mesh audit.',
+  MESH_MATERIAL_NODE: 'A generated mesh has a missing or incorrectly named material, or a material without shader nodes.',
+  MESH_MATERIAL_LINK: 'A generated mesh material has an invalid connection between shader nodes.',
+  MESH_MATERIAL_SURFACE: 'A generated mesh material has no connected active surface output.',
+  MESH_MATERIAL_PBR: 'A generated mesh material is missing its PBR shader or has an invalid metallic or roughness value.',
   RENDER_CONTENT: 'Review render was empty, uniform or contained nonfinite pixels.',
   FOLIAGE_ATTACHMENT: 'Foliage could not remain attached to the final emitted branch surface.',
   SCENE_REOPEN: 'Reopened scene geometry differs from the validated generated scene.',
@@ -155,6 +159,7 @@ const REASONS: Record<string, string> = {
   HOST_FAILURE: 'The host rejected the asset operation in this stage.',
 };
 const METRICS = new Set(['renderTriangles', 'triangleBudget', 'collisionTriangles', 'invalidMeshes', 'errorCount']);
+const MATERIAL_REASONS = new Set(['MESH_MATERIAL_NODE', 'MESH_MATERIAL_LINK', 'MESH_MATERIAL_SURFACE', 'MESH_MATERIAL_PBR']);
 const ARTIFACTS = new Set(['request.json', 'blockout.blend', 'asset.blend', 'asset.glb', 'asset.fbx', 'collision.glb',
   'asset-lod1.glb', 'preview-hero.png', 'preview-side.png', 'preview-structure.png', 'audit.json', 'assembly.json']);
 function object(value: unknown): Record<string, unknown> {
@@ -196,6 +201,10 @@ function wireDiagnostic(value: unknown): AssetFailureDiagnostic {
       metrics[key] = n;
     }
   }
+  if (MATERIAL_REASONS.has(v.reasonCode) && (v.stage !== 'mesh-validation' || v.exceptionType !== 'ValueError' || v.auditPath !== 'audit.json' ||
+      !metrics || Object.keys(metrics).length !== METRICS.size || !metrics.errorCount || !metrics.invalidMeshes || metrics.invalidMeshes > metrics.errorCount ||
+      !metrics.renderTriangles || !metrics.triangleBudget || metrics.renderTriangles > metrics.triangleBudget || !metrics.collisionTriangles))
+    throw new AssetError('RECOVERY', 'Invalid measured material failure diagnostic.');
   return { schemaVersion: 1, stage: v.stage, reasonCode: v.reasonCode, reason: reason(v.reasonCode, metrics), exceptionType: v.exceptionType as string | null,
     ...(metrics ? { metrics } : {}), ...(v.artifactPath ? { artifactPath: v.artifactPath as string } : {}), ...(v.auditPath ? { auditPath: 'audit.json' } : {}) };
 }

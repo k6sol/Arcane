@@ -10,6 +10,8 @@ sys.path.insert(0, str(ROOT / "tests" / "unit"))
 import worker_paths
 import bpy
 import procedural
+from audit import mesh_metrics
+from asset_worker import mesh_audit_reason
 
 
 def geometry(mesh):
@@ -69,5 +71,18 @@ for union in (inherited_slots, lambda *_: None):
     assert all(p.material_index == 0 for p in mesh.polygons)
     if union is inherited_slots:
         assert mesh == observed["mesh"] and geometry(mesh) == observed["geometry"]
+        # The actual Blender audit, rather than a fabricated exception string,
+        # must distinguish this material defect from geometry or UV failures.
+        authored = mesh.materials[0]
+        mesh.materials.clear()
+        mesh.materials.append(None)
+        mesh.materials.append(authored)
+        measured = mesh_metrics(main[0], "render")
+        assert measured["errors"] == ["Missing named node material"], measured["errors"]
+        errors = [measured["name"] + ": " + e for e in measured["errors"]]
+        assert mesh_audit_reason([measured], errors) == "MESH_MATERIAL_NODE"
+        assert mesh_audit_reason([measured], errors + ["Render triangle budget failed"]) == "MESH_AUDIT"
+        mesh.materials.clear()
+        mesh.materials.append(authored)
 procedural.union_wood = original_union
-print("ARCANE_GENERATED_MATERIAL_SLOTS_OK " + json.dumps({"cases": 2, "blender": bpy.app.version_string}))
+print("ARCANE_GENERATED_MATERIAL_SLOTS_OK " + json.dumps({"cases": 2, "diagnosticCases": 1, "blender": bpy.app.version_string}))

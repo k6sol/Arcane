@@ -9,9 +9,10 @@ class WorkerFailureTests(unittest.TestCase):
     def setUp(self):
         worker = Path(__file__).resolve().parents[2] / "workers" / "blender" / "asset_worker.py"
         parsed = ast.parse(worker.read_text(encoding="utf-8"))
-        functions = [node for node in parsed.body if isinstance(node, ast.FunctionDef) and node.name == "failure_report"]
-        self.assertEqual(len(functions), 1)
-        self.scope = {"_failure_stage": "review-render", "_failure_artifact": "preview-hero.png", "_failure_metrics": None, "_failure_audit": False}
+        functions = [node for node in parsed.body if isinstance(node, ast.FunctionDef) and node.name in ("failure_report", "mesh_audit_reason")]
+        self.assertEqual(len(functions), 2)
+        self.scope = {"_failure_stage": "review-render", "_failure_artifact": "preview-hero.png", "_failure_metrics": None,
+                      "_failure_audit": False, "_failure_mesh_reason": None}
         exec(compile(ast.Module(body=functions, type_ignores=[]), "bundled_failure_classifier", "exec"), self.scope)
 
     def report(self, error):
@@ -53,6 +54,52 @@ class WorkerFailureTests(unittest.TestCase):
         report = self.report(error)
         self.assertEqual(report["auditPath"], "audit.json")
         self.assertEqual(report["metrics"]["renderTriangles"], 1080)
+        self.assertNotIn("private", json.dumps(report))
+
+    def test_measured_material_categories_retain_written_audit_and_safe_counters(self):
+        for errors, expected in [(["Missing named node material"], "MESH_MATERIAL_NODE"),
+                                 (["Invalid material node link"], "MESH_MATERIAL_LINK"),
+                                 (["Material surface is disconnected"], "MESH_MATERIAL_SURFACE"),
+                                 (["Missing PBR shader", "Invalid PBR Metallic", "Invalid PBR Roughness"], "MESH_MATERIAL_PBR")]:
+            with self.subTest(code=expected):
+                meshes = [{"name": "private mesh C:/private/source.py", "errors": errors}, {"name": "private clean mesh", "errors": []}]
+                global_errors = [meshes[0]["name"] + ": " + error for error in errors]
+                reason = self.scope["mesh_audit_reason"](meshes, global_errors)
+                self.assertEqual(reason, expected)
+                metrics = {"renderTriangles": 10310, "triangleBudget": 16000, "collisionTriangles": 12,
+                           "errorCount": len(errors), "invalidMeshes": 1}
+                self.scope.update(_failure_stage="mesh-validation", _failure_artifact=None, _failure_audit=True,
+                                  _failure_metrics=metrics, _failure_mesh_reason=reason)
+                report = self.report(ValueError("Asset mesh gate failed: private mesh and token"))
+                self.assertEqual(report["reasonCode"], expected)
+                self.assertEqual(report["metrics"], metrics)
+                self.assertEqual(report["stage"], "mesh-validation")
+                self.assertEqual(report["auditPath"], "audit.json")
+                self.assertNotIn("private", json.dumps(report))
+
+    def test_material_labels_never_hide_mixed_geometry_unknown_or_global_errors(self):
+        node = {"name": "private", "errors": ["Missing named node material"]}
+        for other in ["nonManifoldEdges: 1", "UV foldedFraction 0.01 above (0.005)", "private arbitrary failure",
+                      "Material surface is disconnected"]:
+            meshes = [node, {"name": "private other", "errors": [other]}]
+            errors = [mesh["name"] + ": " + error for mesh in meshes for error in mesh["errors"]]
+            self.assertEqual(self.scope["mesh_audit_reason"](meshes, errors), "MESH_AUDIT")
+        for extra in ["Render triangle budget failed", "Global material budget failed", "Collision budget failed"]:
+            self.assertEqual(self.scope["mesh_audit_reason"]([node], ["private: Missing named node material", extra]), "MESH_AUDIT")
+        for meshes, errors in [(None, []), ([node], []), ([node], ["different source: Missing named node material"]),
+                               ([{"name": "private", "errors": [None]}], ["private"]), ([node], [None])]:
+            self.assertEqual(self.scope["mesh_audit_reason"](meshes, errors), "MESH_AUDIT")
+
+    def test_exception_text_and_unwritten_or_wrong_stage_audits_cannot_mint_material_reason(self):
+        error = ValueError("Asset mesh gate failed: private Missing named node material")
+        self.assertEqual(self.report(error)["reasonCode"], "MESH_AUDIT")
+        self.scope.update(_failure_mesh_reason="MESH_MATERIAL_NODE", _failure_metrics={"errorCount": 1}, _failure_stage="mesh-validation")
+        self.assertEqual(self.report(error)["reasonCode"], "MESH_AUDIT")
+        self.scope.update(_failure_audit=True, _failure_stage="texture-authoring")
+        self.assertEqual(self.report(error)["reasonCode"], "MESH_AUDIT")
+        self.scope.update(_failure_mesh_reason="private arbitrary code", _failure_stage="mesh-validation")
+        report = self.report(error)
+        self.assertEqual(report["reasonCode"], "MESH_AUDIT")
         self.assertNotIn("private", json.dumps(report))
 
 

@@ -7,6 +7,7 @@ import {readStudioStagingDiagnostic, type StudioStagingDiagnostic} from '../../p
 import {JsonlTransport, readNativeFrameEvidence, annotateNativeConnectFrame} from '../../packages/codex-client/src/transport.js';
 import {CodexClientError} from '../../packages/codex-client/src/types.js';
 import {limits} from '../../packages/codex-client/src/validation.js';
+import {DIAGNOSTIC_REASONS} from '../../packages/diagnostics/src/report.js';
 const jobId='8e6bc8a1-a0ea-4823-8998-0f82d14469ba';
 const event=()=>assetFailureEvent(jobId,{code:'BLENDER_FAILED',message:'private C:\\Users\\me\\script.py prompt and token',
   diagnostic:{schemaVersion:1,stage:'mesh-validation',reasonCode:'MESH_AUDIT',reason:'private raw reason',exceptionType:'ValueError',metrics:{renderTriangles:17000,triangleBudget:16000},logPath:'failure.json'}},1792500000000);
@@ -17,6 +18,25 @@ test('asset reports preserve stage, safe class and measured cause without transp
   const result=event();assert.equal(result.stage,'mesh-validation');assert.equal(result.code,'MESH_AUDIT');assert.equal(result.context?.exceptionType,'ValueError');
   assert.equal(result.context?.renderTriangles,17000);assert.ok(!JSON.stringify(result).includes('private'));assert.ok(!JSON.stringify(result).includes('failure.json'));
   assert.equal(assetFailureEvent(jobId,{code:'UNKNOWN_PRIVATE',message:'private'}).code,'INTERNAL_ERROR');
+});
+
+test('measured material reasons reach the central reporter with only finite fields and require the original durable ACK',async()=>{
+  for(const reasonCode of ['MESH_MATERIAL_NODE','MESH_MATERIAL_LINK','MESH_MATERIAL_SURFACE','MESH_MATERIAL_PBR'] as const){
+    const input=assetFailureEvent(jobId,{code:'BLENDER_FAILED',message:'private C:/source.py token',diagnostic:{schemaVersion:1,
+      stage:'mesh-validation',reasonCode,reason:'private raw material error',exceptionType:'ValueError',auditPath:'audit.json',logPath:'failure.json',
+      metrics:{renderTriangles:10310,triangleBudget:16000,collisionTriangles:12,invalidMeshes:1,errorCount:1}}});
+    assert.equal(input.component,'blender');assert.equal(input.stage,'mesh-validation');assert.equal(input.code,reasonCode);
+    assert.equal(input.reason,DIAGNOSTIC_REASONS[reasonCode]);assert.notEqual(input.reason,DIAGNOSTIC_REASONS.MESH_AUDIT);
+    assert.deepEqual(input.context,{jobId,exceptionType:'ValueError',renderTriangles:10310,triangleBudget:16000,collisionTriangles:12,invalidMeshes:1,errorCount:1});
+    assert.doesNotMatch(JSON.stringify(input),/private|source\.py|token|failure\.json|audit\.json/);
+    const c=channel(),reporter=createDiagnosticReporter(c.wire);let settled=false;
+    try{
+      const pending=reporter.report(input).then(value=>{settled=true;return value;});
+      c.callback(null);await Promise.resolve();assert.equal(settled,false);
+      assert.equal((c.messages[0]!.event as {code:string}).code,reasonCode);
+      c.ack(true);assert.equal(await pending,input.eventId);
+    }finally{reporter.close();}
+  }
 });
 test('successful pipe write is not a durable ack and delayed EPIPE cannot produce a report id',async()=>{
   const c=channel(),reporter=createDiagnosticReporter(c.wire);let settled=false;

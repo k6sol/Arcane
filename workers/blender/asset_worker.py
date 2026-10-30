@@ -35,6 +35,7 @@ _failure_stage = "request-validation"
 _failure_artifact = "request.json"
 _failure_metrics = None
 _failure_audit = False
+_failure_mesh_reason = None
 
 
 def event(stage, artifact=None):
@@ -42,6 +43,31 @@ def event(stage, artifact=None):
     _failure_stage = stage
     _failure_artifact = artifact
     print("ARCANE_EVENT " + json.dumps({"stage": stage}), flush=True)
+
+
+def mesh_audit_reason(meshes, errors):
+    """Classify only measured, exclusively material errors; never exception text."""
+    categories = {"Missing named node material": "MESH_MATERIAL_NODE",
+                  "Invalid material node link": "MESH_MATERIAL_LINK",
+                  "Material surface is disconnected": "MESH_MATERIAL_SURFACE",
+                  "Missing PBR shader": "MESH_MATERIAL_PBR",
+                  "Invalid PBR Metallic": "MESH_MATERIAL_PBR",
+                  "Invalid PBR Roughness": "MESH_MATERIAL_PBR"}
+    if type(meshes) is not list or type(errors) is not list or not errors or any(type(error) is not str for error in errors):
+        return "MESH_AUDIT"
+    expected, reasons = [], set()
+    for mesh in meshes:
+        if type(mesh) is not dict or type(mesh.get("name")) is not str or type(mesh.get("errors")) is not list:
+            return "MESH_AUDIT"
+        for error in mesh["errors"]:
+            if type(error) is not str or error not in categories:
+                return "MESH_AUDIT"
+            expected.append(mesh["name"] + ": " + error)
+            reasons.add(categories[error])
+    # audit_scene appends global budget/LOD errors after this exact flattening.
+    if errors != expected or len(reasons) != 1:
+        return "MESH_AUDIT"
+    return next(iter(reasons))
 
 
 def failure_report(error):
@@ -53,6 +79,10 @@ def failure_report(error):
         code = "WINDOWS_PATH_LIMIT"
     elif text.startswith("Asset mesh gate failed:") or text == "Saved scene failed structural audit":
         code = "MESH_AUDIT"
+        if (_failure_audit and _failure_stage == "mesh-validation" and _failure_metrics is not None
+                and type(_failure_mesh_reason) is str and _failure_mesh_reason in
+                ("MESH_MATERIAL_NODE", "MESH_MATERIAL_LINK", "MESH_MATERIAL_SURFACE", "MESH_MATERIAL_PBR")):
+            code = _failure_mesh_reason
     elif text.endswith("mesh required repair") or text in ["Input mesh required structural repair", "Procedural mesh required structural repair"]:
         code = "MESH_REPAIR"
     elif text in ["Review render is empty, uniform or nonfinite", "Tree structure render dimensions changed"]:
@@ -90,7 +120,7 @@ def failure_report(error):
               "exceptionType": name if name in known else "Exception"}
     if _failure_artifact:
         result["artifactPath"] = _failure_artifact
-    if code == "MESH_AUDIT" and _failure_metrics is not None:
+    if code in ("MESH_AUDIT", "MESH_MATERIAL_NODE", "MESH_MATERIAL_LINK", "MESH_MATERIAL_SURFACE", "MESH_MATERIAL_PBR") and _failure_metrics is not None:
         result["metrics"] = _failure_metrics
     if _failure_audit:
         result["auditPath"] = "audit.json"
@@ -457,7 +487,7 @@ def write_json(path, value):
 
 
 def main():
-    global _failure_metrics, _failure_audit
+    global _failure_metrics, _failure_audit, _failure_mesh_reason
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["generate", "audit"], required=True)
     parser.add_argument("--directory", required=True)
@@ -535,10 +565,12 @@ def main():
         else:
             from procedural import author_finish
         author_finish(request, directory, main_objects + lods)
+    event("mesh-validation")
     meshes, totals, errors = audit_scene(main_objects + lods + collision, request)
     if tree_review is not None:
         tree_review.enrich_tree_meshes(request, main_objects + lods + collision, meshes, semantic_id, bpy.context.evaluated_depsgraph_get())
     if errors:
+        _failure_mesh_reason = mesh_audit_reason(meshes, errors)
         _failure_metrics = {"renderTriangles": totals["renderTriangles"], "triangleBudget": request["triangleBudget"],
                             "collisionTriangles": totals["collisionTriangles"], "errorCount": len(errors),
                             "invalidMeshes": sum(bool(mesh["errors"]) for mesh in meshes)}
