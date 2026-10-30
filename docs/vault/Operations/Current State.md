@@ -5,17 +5,17 @@ tags: [arcane]
 ---
 # Current state
 
-Recorded 30 October 2026. Latest functional source is signed `e91780f`, following material diagnostics `753459d`; its final evidence-only publication must receive exact-source hosted checks. Prior verification candidate is SSH-verified `5b84a41be92c60cc35fb4c37ab0a989565d4776d`. Main remains `c5aa882`; installed source remains `62da083`. Local results alone do not establish installation or release acceptance.
+Recorded 30 October 2026. Main and selected installed source are SSH-verified `5b84a41be92c60cc35fb4c37ab0a989565d4776d`, with all nine required hosted jobs passing. Installation completed with observed exit zero and both pipes closed; the older running window visibly offers Restart to update. It was not restarted. Latest functional source remains `e91780f` plus material diagnostics `753459d`; native test baseline correction `6b058f7` needs fresh exact-source checks before promotion or installation.
 
 ## Source, delivery and live checks
 
 | Item | Authoritative evidence | Boundary |
 |---|---|---|
-| Main | `c5aa882` passed all seven component/package jobs in [41068083887](https://github.com/k6sol/Arcane/actions/runs/41068083887), ordinary fast-forward | No new customer journey follows from green checks |
-| Verification candidate | `5b84a41` includes material binding `972c5f0`, tree branch/contact and same-source structure views, finite failure Details and honest background-job labels | [Native Blender 41087633487](https://github.com/k6sol/Arcane/actions/runs/41087633487) passed both platforms; [components 41087633471](https://github.com/k6sol/Arcane/actions/runs/41087633471) remains active. Require all seven component/package and both native jobs |
-| Desktop | `62da083` authenticated immutable installation completed with matching selected release, original exit zero and both pipes closed | Earlier running window visibly offered Restart to update; agent has not restarted it, and current customer restart state is not reverified |
-| Plugin | Canonical `62da083` archive, manifest and source bytes verified | No plugin installation or Studio operation in this delivery |
-| Vault | Committed `5b84a41` projection synced:174 managed files, no conflicts | Personal notes/settings preserved; source notes remain authoritative |
+| Main | `5b84a41` passed seven component/package jobs in [41087633471](https://github.com/k6sol/Arcane/actions/runs/41087633471) and both pinned native jobs in [41087633487](https://github.com/k6sol/Arcane/actions/runs/41087633487), ordinary fast-forward | No updated customer journey follows from green checks |
+| New verification work | `e91780f` oak distribution and `753459d` diagnostics pass local gates; `6b058f7` updates the full reviewed foliage control pins | Prior48 native run41091574377 failed before Blender launch on stale pins; fresh corrected candidate must pass all required jobs |
+| Desktop | `5b84a41` archive, closed payload, source and startup receipts authenticated; immutable installation selected with original exit zero and both pipes closed | Actual old window shows update banner after selection. No restart, draft replay or updated customer chat acceptance |
+| Plugin | Canonical `5b84a41` archive, manifest and all three source-generated files verified; modular identity unchanged | No plugin installation or Studio operation in this delivery |
+| Vault | Latest committed48 projection synced:174 managed files, no conflicts; this delivery note awaits the next explicit revision sync | Personal notes/settings preserved; source notes remain authoritative |
 
 ## Verified functionality
 

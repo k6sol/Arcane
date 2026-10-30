@@ -17,13 +17,13 @@ Depends on: none. Owner: release integration.
 
 - [x] Identify remote source revisions and exact hosted validation outcome.
 - [x] Identify active installation metadata and installed plugin file fingerprint.
-- [ ] Attribute the installed source to its exact release revision or documented equivalent file inventory.
+- [x] Attribute the selected installed source to its exact release revision or documented equivalent file inventory.
 - [ ] Reproduce the shortest failing customer path and retain its evidence without assuming a source-only fix is installed.
 - [x] Validate the corrected published revision and record remaining release blockers.
 
 ## Evidence
 
-Main `9a69619` passed all seven jobs and its real portable archive passed independent checksum, closed-inventory, payload-hash and provenance checks. Active installation and plugin fingerprints are recorded, but the installed app is still the 20 October build. No customer failure reproduction or native Studio acceptance is claimed. G01 remains in progress. See [[Sessions/2026-10-30 Verified Desktop Delivery]] and [[Operations/Evidence Ledger]].
+Main and selected installation are signed `5b84a41`, with seven passing component/package jobs and two pinned Blender jobs. Its authenticated archive, closed payload hashes and source/startup receipts passed before immutable installation. Original installer exit zero, both pipe EOFs and matching selected manifest establish source attribution. The older running window visibly offers Restart to update and is retained; no updated customer journey or Studio acceptance is claimed. The modular plugin artifact/source bytes are verified without installation. G01 remains in progress. See [[Operations/Evidence Ledger]].
 
 ## Next action
 
@@ -31,4 +31,4 @@ Verify supported installation identity and the shortest customer update/reopen p
 
 [[Delivery/Goal Board]] · [[Operations/Evidence Ledger]]
 
-Latest exact baseline: main `1f87ea3` passed all nine component/package/native Blender jobs (runs 41002979317 and 41002979268) and was promoted by ordinary fast-forward with a valid SSH signature. Task handoff is newer validation work; installed/customer attribution and shortest customer reproduction remain outstanding.
+Historical exact baseline `1f87ea3` passed all nine jobs in runs41002979317/41002979268. Current baseline5b supersedes it with runs41087633471/41087633487 and confirmed installation. The shortest updated customer failure reproduction still needs the user-chosen restart; source attribution alone does not complete this goal.
