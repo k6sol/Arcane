@@ -21,6 +21,8 @@ Distribution review found why newer GitHub source has not produced an installed 
 
 All six adoption component lanes passed; its actual packaged startup is running. The cancellation candidate passed both Linux unit lanes and Windows shard 1, but Windows shard 2 exposed an existing eight-second cleanup observation wait. [[Bugs/Cleanup Observation Window]] records the exact failure and targeted correction inside the unchanged thirty-second test case and existing production limits. No whole-goal completion or current installed-app update is claimed.
 
+The adoption package job subsequently failed before executable verification. Retained its bounded failure artifact and traced the deterministic source path conflict introduced by developer vault filenames. [[Bugs/Development Vault Packaging]] keeps the vault in Git/Obsidian but outside the desktop release closure, preserving strict package/install path rules and ordinary product docs/skills. Authored a real collection/verification regression; hosted and packaged acceptance remain pending.
+
 ## 2026-10-29 · Working knowledge foundation
 
 Located the user's new Arcane Obsidian vault. Established versioned knowledge notes, ten linked delivery goals, original developer skills, a catalog of the existing product skills, templates and a Canvas map. Added a conflict-protecting committed-source sync and repository startup guidance.

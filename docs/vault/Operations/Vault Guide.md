@@ -9,6 +9,8 @@ tags: [arcane]
 
 `docs/vault` is the versioned source for shared knowledge. `.agents/skills/arcane-*` contains developer skills. `skills/arcane` remains the executable product skill source. The sync projects these into Obsidian as notes, `Development Skills` and `Skill Library/Arcane`; it does not duplicate skill authority in the repo.
 
+The development vault is intentionally outside desktop release payloads. It stays available in Git and Obsidian, while the product skill library and ordinary product documentation continue to ship. Preserve the existing package/install path policies rather than relaxing them for developer-note filenames. See [[Bugs/Development Vault Packaging]].
+
 ## Daily workflow
 
 Open [[Home]], choose a goal from [[Delivery/Goal Board]], use the relevant skill and complete a concrete implementation. Record the actual result before changing a checkbox. At a meaningful milestone update [[Operations/Current State]], [[Operations/Next Session]] and [[Operations/Session Log]]. Use [[Templates/Session]] for a longer session.

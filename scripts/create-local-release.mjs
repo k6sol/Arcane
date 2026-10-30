@@ -87,6 +87,7 @@ export function inside(root, target) {
 }
 function validPath(path) {
   if (typeof path !== 'string' || path.length > 512 || !/^[A-Za-z0-9_.\-/]+$/.test(path)) throw new Error('Invalid release path.');
+  if (path === 'docs/vault' || path.startsWith('docs/vault/')) throw new Error('Development vault is outside the release allowlist.');
   const segments = path.split('/');
   if (segments.some(segment => !segment || segment === '.' || segment === '..' || FORBIDDEN_NAMES.test(segment) || EXCLUDED_DIRECTORIES.has(segment))) throw new Error('Forbidden release path.');
   if (!(ROOT_FILES.includes(path) || SOURCE_ROOTS.includes(segments[0])) || (!ROOT_FILES.includes(path) && !allowedFile(path))) throw new Error('File is outside the release allowlist.');
@@ -148,6 +149,8 @@ async function collect(repository) {
     for (const entry of entries) {
       if (EXCLUDED_DIRECTORIES.has(entry.name) || FORBIDDEN_NAMES.test(entry.name) || entry.name.startsWith('.')) continue;
       const child = path + '/' + entry.name;
+      // Developer context stays in Git and Obsidian, outside customer payloads.
+      if (child === 'docs/vault') continue;
       // Windows directory entries can misclassify OneDrive cloud placeholders.
       // lstat + canonical path checks remain authoritative; genuine links fail.
       const kind = await lstat(join(repository, child));

@@ -206,3 +206,30 @@ test('Windows compiler wrapper scopes memory settings to its child, preserves ho
   const overridden=run(['--noEmit'],{...env,GOMAXPROCS:'2',GOMEMLIMIT:'512MiB'});assert.equal(overridden.status,0);const meta=JSON.parse(overridden.stdout.trim().split(/\r?\n/)[0]);assert.equal(meta.gomax,'2');assert.equal(meta.gomem,'512MiB');assert.equal(meta.args.at(-1),'--noEmit');
   const refused=run(['--outDir','outside']);assert.equal(refused.status,2);assert.equal(refused.stdout,'');assert.match(refused.stderr,/Usage:/);assert.equal(Object.hasOwn(env,'GOMAXPROCS'),false);
 });
+
+
+test('development vault stays source-only while product documentation and skills remain packaged', async t => {
+  const { root, write } = await fixture(t);
+  const context = 'Developer context stays in Git and Obsidian.\n';
+  await write('docs/vault/Home.md', context);
+  await write('docs/vault/Operations/Current State.md', context);
+  await write('docs/build/ordinary.md', 'Customer setup documentation.\n');
+  const result = await createLocalRelease({ repository: root });
+  const manifestPath = join(result.directory, 'release-manifest.json');
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+  assert.ok(manifest.files.every(file => !file.path.startsWith('docs/vault/')));
+  assert.ok(manifest.files.some(file => file.path === 'docs/build/ordinary.md'));
+  assert.ok(manifest.files.some(file => file.path === 'skills/registry.json'));
+  await assert.rejects(readFile(join(result.directory, 'docs/vault/Home.md')), { code: 'ENOENT' });
+  assert.equal(await readFile(join(root, 'docs/vault/Operations/Current State.md'), 'utf8'), context);
+  await verifyLocalRelease(result.directory);
+
+  // Rehashing a manifest cannot opt developer context back into the payload.
+  await mkdir(join(result.directory, 'docs/vault'), { recursive: true });
+  await writeFile(join(result.directory, 'docs/vault/Home.md'), context);
+  const bytes = Buffer.from(context);
+  manifest.files.push({ path: 'docs/vault/Home.md', bytes: bytes.length, sha256: hash(bytes) });
+  manifest.fileCount++; manifest.totalBytes += bytes.length;
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  await assert.rejects(verifyLocalRelease(result.directory), /Development vault is outside/);
+});
