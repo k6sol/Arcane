@@ -15,7 +15,7 @@ tags: [arcane, dashboard]
 
 The [[Delivery/Goal Board|ten urgent goals]] track the path to a dependable customer release. Open a goal for its outcome, dependencies and acceptance criteria. Check it off only after recording evidence.
 
-Current priority: deliver the verified desktop update and finish task retirement and original asset quality. Main `9a69619` passed all seven hosted checks; the real portable download and every payload hash were independently verified. The installed app remains unchanged. [[Sessions/2026-10-30 Verified Desktop Delivery|Latest milestone]] records completed substeps and remaining acceptance.
+Current priority: validate the connected task handoff and full-map staging diagnostics, then continue real model quality and customer delivery. Main `1f87ea3` passed all nine component, packaged and native Blender checks. Its 39-case foliage anchor evidence and Windows contact views are verified. The installed app remains unchanged because the activation memory gate failed. [[Operations/Current State|Current state]] separates verified main from newer validation work.
 
 ## Build with knowledge
 

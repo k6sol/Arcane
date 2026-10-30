@@ -30,3 +30,5 @@ Main `9a69619` passed all seven jobs and its real portable archive passed indepe
 Verify supported installation identity and the shortest customer update/reopen path while preserving user state and the running app.
 
 [[Delivery/Goal Board]] · [[Operations/Evidence Ledger]]
+
+Latest exact baseline: main `1f87ea3` passed all nine component/package/native Blender jobs (runs 41002979317 and 41002979268) and was promoted by ordinary fast-forward with a valid SSH signature. Task handoff is newer validation work; installed/customer attribution and shortest customer reproduction remain outstanding.

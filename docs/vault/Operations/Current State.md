@@ -9,9 +9,9 @@ Recorded 30 October 2026. Revalidate Git refs, installed identity and live jobs 
 
 | Area | Observed evidence | Boundary |
 |---|---|---|
-| Verified source baseline | Main promoted to SSH-verified `9a69619696b620c502daabf4a5ce7c3ff09ea0a4` | Shared checkout has unrelated work; preserve it |
-| Hosted acceptance | All seven jobs succeeded in [run 40988115669](https://github.com/k6sol/Arcane/actions/runs/40988115669): six Windows/Linux component lanes plus actual Windows packaged startup/shutdown | Controlled and packaged evidence; no subscription inference or native Studio work |
-| Subsequent main checks | All unit lanes and Linux release passed; Windows release encountered [[Bugs/Key Navigation Timeout]] | Exact first seven-job success remains valid; newer main runs are not green |
+| Verified source baseline | Main promoted to SSH-verified `1f87ea3f0e14f195f33a50bd279ff0ef323bd389` | Shared checkout has unrelated work; preserve it |
+| Hosted acceptance | All seven component/package jobs succeeded in [run 41002979317](https://github.com/k6sol/Arcane/actions/runs/41002979317), plus both native Blender jobs in [run 41002979268](https://github.com/k6sol/Arcane/actions/runs/41002979268): nine successful jobs on the same exact revision | Controlled and packaged evidence; no subscription inference or native Studio work |
+| Historical main failures | Earlier `9a69619`/`e1007ab` runs encountered [[Bugs/Key Navigation Timeout]] | Current `1f87ea3` passed all nine jobs; retain the older diagnostics without claiming its historical timing cause is resolved |
 | Task fixes | Adoption work registration, exact deliberate-close provenance and captured final saves passed controlled regressions on both platforms | [[Bugs/Normal Task Handoff]] connects normal retirement for validation; full human acceptance and bounded archival remain incomplete |
 | Portable delivery | Actual archive digest, all 4,657 payload hashes, closed inventory, same-run receipts and source fingerprints verified | No downloaded code executed or installation performed |
 | Build identity | Node 24.22.1, Electron 44.9.1; payload 531,932,053 bytes; directory manifest `fdcfb20752403dee220a469eab293a661cf1b5d9f5be3060aeefc41904762edb` | Unsigned directory build; no installer/public channel acceptance |
@@ -28,3 +28,5 @@ Next: [[Operations/Next Session]]. Evidence: [[Operations/Evidence Ledger]] and 
 New verification work: [[Bugs/Normal Task Handoff]] is implemented and independently source-reviewed for exact hosted validation. [[Bugs/PBR Staging Boundary]] records a distinct full-resolution receipt-loop continuity failure; no deadline or byte budget is relaxed.
 
 Task-handoff strict compilation/build passed in all six lanes on `6baf19c`. Its first runtime findings require three precise fixture corrections described in [[Bugs/Normal Task Handoff]]; complete acceptance remains pending. The full-map [[Bugs/PBR Staging Boundary]] fixture now has reviewed pump-readiness/phase evidence and an actual expired-proof countercase prepared for hosted execution.
+
+Current validation branch contains the newer connected task handoff `6baf19c` and four fixture corrections `dcf3f96`; these are not on main and their complete acceptance is pending. The fresh main promotion is an ordinary fast-forward after exact-revision checks, not an app installation or native Studio result.

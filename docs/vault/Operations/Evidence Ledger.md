@@ -5,7 +5,13 @@ tags: [arcane]
 ---
 # Evidence ledger
 
-## Current verified baseline · 30 October 2026
+## Current verified main · 30 October 2026
+
+Main `1f87ea3f0e14f195f33a50bd279ff0ef323bd389` was promoted by ordinary fast-forward after [run 41002979317](https://github.com/k6sol/Arcane/actions/runs/41002979317) passed all seven component/package jobs and [run 41002979268](https://github.com/k6sol/Arcane/actions/runs/41002979268) passed both native Blender jobs. GitHub verifies its SSH source signature. Actual foliage measurements/artifacts and Windows contact views were independently inspected as recorded below.
+
+The newer task-handoff implementation and corrected fixtures remain under validation. Main promotion did not install, launch or restart the app. Native Blender acceptance is distinct from native Studio and authenticated customer acceptance. The independently downloaded full desktop artifact below belongs to the earlier exact `9a69619` revision; no newer binary download is implied.
+
+## Earlier verified delivery artifact · 30 October 2026
 
 | Claim | Evidence | Scope |
 |---|---|---|
