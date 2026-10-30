@@ -60,3 +60,25 @@ test('local support reads and offline flush prune expired reports without making
  assert.equal(f.host.list().events.length,0);await f.host.report({...input(),occurredAt:clock});clock+=30*86400000+1;
  assert.equal((await f.host.flush()).state,'disabled');assert.equal(f.host.list().events.length,0);assert.equal(f.calls.length,0);
 });
+
+test('closed staging context survives encrypted local outbox and host reload without account or remote delivery',async t=>{
+ const f=await fixture(t),event={...input(),component:'studio',stage:'studio-import',code:'STUDIO_STAGE_CONTINUITY',context:{stagingPhase:'packet-receipt',stagingReason:'proof-expired',packetOrdinal:12}};
+ assert.deepEqual(await f.host.report(event),{stored:true,eventId:event.eventId,state:'local-only'});
+ assert.doesNotMatch(JSON.stringify(f.db.prepare('SELECT * FROM diagnostic_outbox').all()),/STUDIO_STAGE_CONTINUITY|packet-receipt|proof-expired/);
+ assert.equal(await f.host.close(),true);const next=await createDiagnosticsHost(f.opts);t.after(()=>next.close());
+ const rows=next.list().events;assert.equal(rows.length,1);assert.equal(rows[0].event.code,'STUDIO_STAGE_CONTINUITY');assert.deepEqual(rows[0].event.context,event.context);assert.equal(rows[0].state,'local-only');
+ assert.equal((await next.flush()).state,'disabled');assert.equal(f.calls.length,0,'An encrypted local record does not claim configured hosted delivery.');
+});
+
+test('actual child staging acknowledgements reflect successful versus rejected SQLite storage', {timeout:5000}, async t=>{
+ const f=await fixture(t),child=new EventEmitter(),acks=[];let acceptAck;child.connected=true;
+ child.send=(value,callback)=>{acks.push(value);acceptAck?.(value);callback(null);return true;};
+ const detach=f.host.attach(child,()=>true);t.after(detach);
+ const event=()=>({...input(),component:'studio',stage:'studio-import',code:'STUDIO_STAGE_CONTINUITY',context:{stagingPhase:'seal-check',stagingReason:'edit-epoch-changed'}});
+ const emit=async value=>{const pending=new Promise(resolve=>{acceptAck=resolve;});child.emit('message',{type:'arcane-diagnostic-report',protocolVersion:1,requestId:randomUUID(),event:value});return pending;};
+ const first=event(),stored=await emit(first);assert.equal(stored.stored,true);assert.equal(stored.eventId,first.eventId);assert.equal(f.host.list().events.length,1);
+ f.db.exec("CREATE TRIGGER reject_staging_diagnostic BEFORE INSERT ON diagnostic_outbox BEGIN SELECT RAISE(ABORT,'controlled write refusal'); END;");
+ const rejected=await emit(event());assert.equal(rejected.stored,false);assert.equal(f.host.list().events.length,1);assert.equal(acks.length,2);
+ const invalid={...event(),context:{stagingPhase:'packet-receipt',stagingReason:'proof-expired',packetOrdinal:512}};
+ assert.deepEqual(await f.host.report(invalid),{stored:false,state:'unavailable'});assert.equal(f.host.list().events.length,1);assert.equal(f.calls.length,0);
+});

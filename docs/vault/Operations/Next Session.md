@@ -26,6 +26,8 @@ Inspect [[Bugs/PBR Staging Boundary]] independently: historical failure is insid
 
 Verify the current three task-fixture corrections and one full-map readiness/diagnostic fixture together. Keep the actual guarded payload review path and original native-task authorization window. Preserve real expiry refusals; do not infer a historical PBR cause from one passing run or alter production limits.
 
-The connected handoff and its corrected fixtures are newer validation work, not the verified main baseline. Source-only investigations continue for user-facing staging diagnostics and alpha-visible petiole attachment; neither is implemented or accepted yet. Do not confuse their proposals with the tested geometric card-root correction.
+The connected handoff and its corrected fixtures are newer validation work, not the verified main baseline. User-facing staging diagnostics are implemented for exact hosted verification; alpha-visible petiole attachment is in source implementation. Neither has complete acceptance yet. Do not confuse their proposals with the tested geometric card-root correction.
 
 The final preflight fixture correction distinguishes the normal fence (zero retirement while held) from the existing refused-isolation path (one original retirement after release). Observe the exact latest source run; do not weaken refusal/transport state or infer a successful handoff from its failed-preflight case.
+
+Validate [[Bugs/Studio Staging Diagnostics]] without weakening unknown/no-retry semantics or treating reporter acknowledgement as operation success. Keep real shared provider history rendering and strict report schema tests in scope. Hosted service deployment remains unconfigured. Record the new exact validation revision and preserve the nine-job verified main baseline until newer checks pass.

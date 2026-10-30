@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {EventEmitter} from 'node:events';
 import {randomUUID} from 'node:crypto';
-import {assetFailureEvent, codexActionFailureEvent, createDiagnosticReporter, type DiagnosticChannel} from '../../apps/daemon/src/diagnostic-reporter.js';
+import {assetFailureEvent, codexActionFailureEvent, studioStagingFailureEvent, createDiagnosticReporter, type DiagnosticChannel} from '../../apps/daemon/src/diagnostic-reporter.js';
+import {readStudioStagingDiagnostic, type StudioStagingDiagnostic} from '../../packages/asset-pipeline/src/failure-diagnostics.js';
 const jobId='8e6bc8a1-a0ea-4823-8998-0f82d14469ba';
 const event=()=>assetFailureEvent(jobId,{code:'BLENDER_FAILED',message:'private C:\\Users\\me\\script.py prompt and token',
   diagnostic:{schemaVersion:1,stage:'mesh-validation',reasonCode:'MESH_AUDIT',reason:'private raw reason',exceptionType:'ValueError',metrics:{renderTriangles:17000,triangleBudget:16000},logPath:'failure.json'}},1792500000000);
@@ -71,4 +72,37 @@ test('reserved operation correlation cannot acknowledge an owned-child IPC reque
     await Promise.resolve();assert.equal(settled,false);
   }
   c.ack(true);assert.equal(await pending,input.eventId);reporter.close();
+});
+
+test('staging reports preserve only the actual closed check and ordinal, without job or native identities',()=>{
+  const raw={schemaVersion:1,operation:'stage',phase:'packet-receipt',reason:'proof-expired',packetOrdinal:12},diagnostic=readStudioStagingDiagnostic(raw);assert.ok(diagnostic);
+  const result=studioStagingFailureEvent(diagnostic,1792500000000);
+  assert.equal(result.component,'studio');assert.equal(result.stage,'studio-import');assert.equal(result.code,'STUDIO_STAGE_CONTINUITY');assert.equal(result.occurredAt,1792500000000);
+  assert.deepEqual(result.context,{packetOrdinal:12,stagingPhase:'packet-receipt',stagingReason:'proof-expired'});
+  assert.equal(result.reason,'Studio staging continuity could not be confirmed; inspect the recorded check without repeating the request.');
+  assert.deepEqual(Object.keys(result).sort(),['code','component','context','eventId','occurredAt','reason','schemaVersion','stage']);
+  raw.reason='private error C:\\Users\\fixture\\model.glb token';assert.equal(result.context?.stagingReason,'proof-expired');
+  const target=readStudioStagingDiagnostic({schemaVersion:1,operation:'stage',phase:'target-check',reason:'plugin-lifetime-changed',packetOrdinal:null});assert.ok(target);
+  assert.deepEqual(studioStagingFailureEvent(target).context,{stagingPhase:'target-check',stagingReason:'plugin-lifetime-changed'});
+  assert.equal(assetFailureEvent(jobId,{code:'STUDIO_STAGE_CONTINUITY',message:'private'}).code,'INTERNAL_ERROR','The new staging code cannot relabel a generated worker failure.');
+});
+
+test('staging mapper refuses forged descriptors before any report can contain arbitrary text or identities',()=>{
+  const value={schemaVersion:1,operation:'stage',phase:'packet-enqueue',reason:'disconnected',packetOrdinal:0};let getters=0;
+  for(const bad of [{...value,message:'private prompt'}, {...value,jobId}, {...value,reason:'private C:\\Users\\fixture'}, {...value,packetOrdinal:512},
+    {...value,phase:'target-check'}, Object.defineProperty({...value},'reason',{enumerable:true,get(){getters++;throw Error('private');}}),
+    new Proxy(value,{get(){getters++;throw Error('private');}})])assert.throws(()=>studioStagingFailureEvent(bad as unknown as StudioStagingDiagnostic));
+  assert.equal(getters,0);
+});
+
+test('actual staging events still require durable owner acknowledgements and closed or faulted channels return no id',async()=>{
+  const diagnostic=readStudioStagingDiagnostic({schemaVersion:1,operation:'stage',phase:'seal-check',reason:'edit-epoch-changed',packetOrdinal:null});assert.ok(diagnostic);
+  const c=channel(),reporter=createDiagnosticReporter(c.wire),event=studioStagingFailureEvent(diagnostic);let settled=false;
+  const pending=reporter.report(event).then(value=>{settled=true;return value;});c.callback(null);await Promise.resolve();assert.equal(settled,false);
+  assert.deepEqual((c.messages[0]!.event as {context:unknown}).context,{stagingPhase:'seal-check',stagingReason:'edit-epoch-changed'});
+  c.ack(true);assert.equal(await pending,event.eventId);
+  const failed=reporter.report(studioStagingFailureEvent(diagnostic));c.callback(new Error('private send failure'));assert.equal(await failed,null);
+  reporter.close();const count=c.messages.length;assert.equal(await reporter.report(studioStagingFailureEvent(diagnostic)),null);assert.equal(c.messages.length,count);
+  const absent=channel();absent.wire.connected=false;const unavailable=createDiagnosticReporter(absent.wire);
+  assert.equal(await unavailable.report(studioStagingFailureEvent(diagnostic)),null);assert.equal(absent.messages.length,0);unavailable.close();
 });

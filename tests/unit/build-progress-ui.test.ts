@@ -7,11 +7,28 @@ import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { deflateSync } from 'node:zlib';
 import { randomUUID } from 'node:crypto';
+import {readStudioStagingDiagnostic,studioStagingDiagnosticMessage,STUDIO_STAGING_PHASES,STUDIO_STAGING_REASONS} from '../../packages/asset-pipeline/src/failure-diagnostics.js';
 import { buildProgressSummary, compactCount, describeToolActivity, formatElapsed, inferToolFromResult, inferToolFromText, readToolResultText, retriedRows, toolFailureReason, toolResultFacts,
   toolResultImage, UNNAMED_TOOL_TEXT, type ChatState } from '../../apps/desktop/src/codex-chat.js';
 
 // ---- Fact extraction: a few plain numbers from the compact results the Arcane tools really return ----
 const outcome = (method: string, result: unknown, extra: Record<string, unknown> = {}) => ({ commandId: 'cmd-1', state: 'succeeded', terminal: true, command: { method, args: {}, result }, ...extra });
+test('actual closed staging descriptors reach loaded-history and shared named-result reasons without confirmed failure or import',()=>{
+  for(const phase of STUDIO_STAGING_PHASES)for(const reason of STUDIO_STAGING_REASONS){
+    const diagnostic=readStudioStagingDiagnostic({schemaVersion:1,operation:'stage',phase,reason,packetOrdinal:phase==='packet-enqueue'||phase==='packet-receipt'?511:null})!;
+    const value={state:'unknown',terminal:false,ambiguous:true,retry:false,error:{code:'STUDIO_STAGE_CONTINUITY',message:'private native-id source text',diagnostic}};
+    const read=readToolResultText(JSON.stringify(value));assert.equal(read.name,'assets_stage_studio_import');assert.equal(read.state,'finished');
+    for(const name of [read.name!,'mcp__arcane__assets_stage_studio_import']){
+      const activity=describeToolActivity(name,null,read.result,'finished');assert.equal(activity.unconfirmed,true);assert.equal(activity.text,'Studio staging outcome unconfirmed');
+      assert.equal(activity.reason,studioStagingDiagnosticMessage(diagnostic).replace(/^Studio staging outcome is unconfirmed\. /,''));
+      assert.equal(activity.change,null);assert.deepEqual(activity.facts,[]);assert.doesNotMatch(activity.text+' '+activity.reason,/private native-id|source text/);
+    }
+  }
+  assert.equal(describeToolActivity('assets_stage_studio_import',null,null,'started').unconfirmed,undefined,'identity-only live events cannot invent a result');
+  const malformed={state:'unknown',terminal:false,ambiguous:true,retry:false,error:{code:'STUDIO_STAGE_CONTINUITY',diagnostic:{schemaVersion:1,operation:'stage',phase:'packet-receipt',reason:'private',packetOrdinal:0}}};
+  assert.equal(describeToolActivity('assets_stage_studio_import',null,malformed,'finished').unconfirmed,undefined);
+  assert.equal(readToolResultText(JSON.stringify({error:{code:'OTHER',message:'Original failure'}})).state,'failed');
+});
 const forestKit = { kind: 'forest', key: 'grove', parts: 0, triangles: 11500, placed: 240, requested: 260, originals: { oak: ['oak-1', 'oak-2'] } };
 const plinthKit = { kind: 'plinth', key: 'spawn', parts: 14, triangles: 2400, top: 52.7, spawn: { at: [0, 52.7, 0], top: 53.2 } };
 
@@ -216,6 +233,21 @@ test('Edge: build progress group, live and collapsed, with facts, retry, reason 
     await page.clock.install({ time: new Date('2026-10-20T10:00:00Z') });
     await page.goto('http://127.0.0.1:' + (server.address() as { port: number }).port + '/studio');
     await page.waitForFunction(() => (window as any).fx?.ready === true);
+    await page.evaluate(async()=>{
+      const module=await import(new URL('/codex-chat.js',location.origin).href),value={state:'unknown',terminal:false,ambiguous:true,retry:false,
+        error:{code:'STUDIO_STAGE_CONTINUITY',message:'untrusted text',diagnostic:{schemaVersion:1,operation:'stage',phase:'packet-receipt',reason:'proof-expired',packetOrdinal:12}}};
+      const read=module.readToolResultText(JSON.stringify(value)),activity=module.describeToolActivity(read.name,null,read.result,read.state);
+      const article=document.createElement('article');article.id='staging-diagnostic-proof';article.className='codex-message tool';
+      article.append(...module.renderToolActivity(document,activity,read.state,module.toolDetailText([['Result',value]])));document.body.append(article);
+    });
+    const staging=page.locator('#staging-diagnostic-proof');
+    assert.equal(await staging.locator('.tool-activity-mark').getAttribute('data-tool-state'),'unknown');
+    assert.match(await staging.locator('.visually-hidden').innerText(),/Outcome unconfirmed/);
+    assert.equal(await staging.locator('.tool-activity-reason').innerText(),'Packet receipt, packet 13: the Studio connection check expired.');
+    assert.equal(await staging.locator('.tool-fact').count(),0);await staging.locator('.tool-activity').press('Enter');
+    assert.equal(await staging.locator('details').evaluate(node=>(node as HTMLDetailsElement).open),true);
+    assert.match(await staging.locator('pre').innerText(),/"state": "unknown"/);assert.doesNotMatch(await staging.locator('.message-text').innerText(),/Imported|Failed/);
+    await staging.evaluate(node=>node.remove());
     await page.evaluate(() => document.dispatchEvent(new CustomEvent('workspace:providerpreference', { detail: { provider: 'claude' } })));
     await page.waitForFunction(() => !document.getElementById('claude-chat-tabs')!.hidden);
     await page.evaluate(() => (window as any).fx.refreshed);

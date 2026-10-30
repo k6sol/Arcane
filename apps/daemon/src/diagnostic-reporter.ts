@@ -1,7 +1,8 @@
 import {randomUUID} from 'node:crypto';
 import type {DiagnosticEvent} from '../../../packages/diagnostics/src/report.js';
-import {diagnosticEvent, diagnosticEventId, DIAGNOSTIC_EXCEPTIONS, DIAGNOSTIC_REASONS, DIAGNOSTIC_STAGES} from '../../../packages/diagnostics/src/report.js';
+import {diagnosticEvent, diagnosticEventId, DiagnosticValidationError, DIAGNOSTIC_EXCEPTIONS, DIAGNOSTIC_REASONS, DIAGNOSTIC_STAGES} from '../../../packages/diagnostics/src/report.js';
 import type {AssetJobError} from '../../../packages/asset-pipeline/src/types.js';
+import {readStudioStagingDiagnostic, type StudioStagingDiagnostic} from '../../../packages/asset-pipeline/src/failure-diagnostics.js';
 
 export interface DiagnosticChannel {
   connected?: boolean;
@@ -15,7 +16,7 @@ export function assetFailureEvent(jobId: string, error: AssetJobError, occurredA
   const d = error.diagnostic, raw = d?.reasonCode ?? error.code;
   const code = error.code === 'DEADLINE' ? 'REQUEST_TIMEOUT' : error.code === 'CANCELLED' ? 'OPERATION_CANCELLED' :
     ['SUPERVISION_UNRESOLVED','SUPERVISION_LOST'].includes(error.code) ? 'SUPERVISION_LOST' :
-    Object.hasOwn(DIAGNOSTIC_REASONS, raw) ? raw as DiagnosticEvent['code'] : 'INTERNAL_ERROR';
+    raw !== 'STUDIO_STAGE_CONTINUITY' && Object.hasOwn(DIAGNOSTIC_REASONS, raw) ? raw as DiagnosticEvent['code'] : 'INTERNAL_ERROR';
   const stage = d?.stage && (DIAGNOSTIC_STAGES as readonly string[]).includes(d.stage) ? d.stage as DiagnosticEvent['stage'] : 'generate';
   const context: Record<string, unknown> = {jobId};
   if (d?.exceptionType && (DIAGNOSTIC_EXCEPTIONS as readonly string[]).includes(d.exceptionType)) context.exceptionType = d.exceptionType;
@@ -23,6 +24,13 @@ export function assetFailureEvent(jobId: string, error: AssetJobError, occurredA
     const value = d.metrics[key]; if (Number.isSafeInteger(value) && Number(value) >= 0 && Number(value) <= 1e9) context[key] = value;
   }
   return diagnosticEvent({schemaVersion: 1, eventId: randomUUID(), occurredAt, component: 'blender', stage, code, context});
+}
+/** Fixed observed stage checks only; no job/native IDs, raw errors or messages. */
+export function studioStagingFailureEvent(value: StudioStagingDiagnostic, occurredAt = Date.now()): DiagnosticEvent {
+  const diagnostic = readStudioStagingDiagnostic(value);
+  if (!diagnostic) throw new DiagnosticValidationError();
+  return diagnosticEvent({schemaVersion:1,eventId:randomUUID(),occurredAt,component:'studio',stage:'studio-import',code:'STUDIO_STAGE_CONTINUITY',
+    context:{stagingPhase:diagnostic.phase,stagingReason:diagnostic.reason,...(diagnostic.packetOrdinal===null?{}:{packetOrdinal:diagnostic.packetOrdinal})}});
 }
 const CODEX_FAILURE_STAGES = {
   connect:'authenticate',disconnect:'request-stream',select:'request-validation',

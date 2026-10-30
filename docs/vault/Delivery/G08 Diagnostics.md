@@ -5,7 +5,7 @@ tags: [arcane]
 ---
 # Make every failure diagnosable
 
-Status: **Queued**. Priority and original scope: Make every failure diagnosable — P1, queued.
+Status: **In progress**. Priority and original scope: Make every failure diagnosable — P1.
 
 Deliver: message details show real operations, model/effort, timing and errors; failed jobs show stage, cause and remedy; bounded local reports feed the prepared central service through a redacted retry queue.
 
@@ -26,6 +26,8 @@ No whole-goal completion evidence recorded yet. Add actual revision/run/artifact
 
 ## Next action
 
-Resolve listed dependencies, then reproduce the missing outcome before editing.
+Validate [[Bugs/Studio Staging Diagnostics]] through its real controller, native route, MCP result, shared message details and existing reporter/outbox. Keep all acceptance boxes open until actual checks pass. Remote service configuration and authenticated customer reproduction remain separate requirements.
 
 [[Delivery/Goal Board]] · [[Operations/Evidence Ledger]]
+
+Current work adds finite staging phase/reason details and preserves unknown/no-retry results. Existing generation diagnostics remain intact. Source implementation and controlled fixtures do not prove a configured central server or whole-goal completion.

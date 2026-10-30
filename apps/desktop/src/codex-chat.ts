@@ -8,6 +8,7 @@ import type { ChatAttachmentsController, ChatAttachmentSend } from './chat-attac
 import type { ChatFeedbackHooks, ChatFeedbackTool } from './learned-preferences.js';
 import type { SubmittedChatMessage, SubmittedChatTranscript } from '../../../packages/storage/src/submitted-chat-store.js';
 import type {ChatQueueBridge,ChatQueueProvider,ChatQueueSnapshot,StoredChatQueueRow} from '../../../packages/protocol/src/chat-queue.js';
+import type {StudioStagingDiagnostic} from '../../../packages/asset-pipeline/src/failure-diagnostics.js';
 
 export const CODEX_STATE_BYTES = 4 * 1024 * 1024;
 export const CODEX_INPUT_BYTES = 131072;
@@ -1314,6 +1315,8 @@ export interface ToolGroupInfo {
 }
 export interface ToolActivity {
   text:string; change:ToolChange|null; group?:ToolGroupInfo|null;
+  /** A completed tool response can still leave its native operation unconfirmed. */
+  unconfirmed?:boolean;
   /** Arcane tool name (no MCP prefix), for retry counting in the build progress group. */
   tool?:string;
   /** Short result facts shown as chips, e.g. ['240 trees','11.5k tris']. */
@@ -1451,6 +1454,9 @@ function fallbackToolPhrase(tool:string):string {
 export function describeToolActivity(name:string,input:unknown,result:unknown,state:ToolActivityState):ToolActivity {
   const activity=describeToolCall(name,input,result,state),tool=arcaneToolName(name),command=activityRecord(activityRecord(result)?.command);
   const args=activityRecord(input)??activityRecord(command?.args);
+  const diagnostic=tool==='assets_stage_studio_import'?stagingUnknownDiagnostic(result):null;
+  if(diagnostic)return {text:'Studio staging outcome unconfirmed',change:null,group:null,tool,facts:[],image:null,unconfirmed:true,
+    reason:studioStagingDiagnosticMessage(diagnostic).replace(/^Studio staging outcome is unconfirmed\. /,'')};
   return {...activity,group:toolGroupInfo(tool,args),tool,facts:state==='finished'?toolResultFacts(tool,args,result):[],
     reason:state==='failed'&&!/ — /.test(activity.text)?toolFailureReason(result):null,image:state==='finished'?toolResultImage(result):null};
 }
@@ -1623,6 +1629,7 @@ function describeToolCall(name:string,input:unknown,result:unknown,state:ToolAct
  */
 export function readToolResultText(text:string):{name:string|null;input:unknown;result:unknown;state:ToolActivityState} {
   const result=activityRecord(parseToolDetail(text)),command=activityRecord(result?.command),method=typeof command?.method==='string'?command.method:'';
+  if(stagingUnknownDiagnostic(result))return {name:'assets_stage_studio_import',input:null,result,state:'finished'};
   const failed=!!result&&(!!activityRecord(result.error)||['failed','cancelled','needs_reconciliation'].includes(String(result.state)));
   return {name:STUDIO_METHOD_TOOLS[method]??null,input:command?.args??null,result,state:failed?'failed':'finished'};
 }
@@ -1641,15 +1648,51 @@ export function codexFeedbackTools(messages: readonly ChatMessage[], threadId: s
   return tools.slice(-48);
 }
 const STATE_WORDS:Record<ToolActivityState,string>={started:'Running',finished:'Done',failed:'Failed'};
+// Keep this standalone browser surface free of new runtime module requests.
+// Independent finite decoding also keeps provider/tool text out of the reason.
+const STAGING_PHASE_TEXT:Record<StudioStagingDiagnostic['phase'],string>={
+  'prior-attempt-check':'Previous attempt check','target-check':'Target check',admission:'Admission',
+  'packet-enqueue':'Packet enqueue','packet-receipt':'Packet receipt','seal-check':'Final seal check',
+};
+const STAGING_REASON_TEXT:Record<StudioStagingDiagnostic['reason'],string>={
+  'proof-missing':'no current Studio connection check was available','plugin-lifetime-changed':'the Studio plugin connection changed',
+  'plugin-artifact-changed':'the loaded Studio plugin changed','edit-epoch-changed':'the Studio editing session changed',
+  'not-edit':'Studio was outside Edit mode',disconnected:'the Studio connection was disconnected',
+  'continuity-unsupported':'the Studio connection could not establish continuity','proof-expired':'the Studio connection check expired',
+};
+function readStudioStagingDiagnostic(value:unknown):StudioStagingDiagnostic|null {
+  try{
+    if(!value||typeof value!=='object'||Array.isArray(value)||![Object.prototype,null].includes(Object.getPrototypeOf(value)))return null;
+    const fields=Object.getOwnPropertyDescriptors(value),keys=Reflect.ownKeys(fields);
+    if(keys.length!==5||keys.some(key=>typeof key!=='string'||!['schemaVersion','operation','phase','reason','packetOrdinal'].includes(key))
+      ||Object.values(fields).some(field=>!field.enumerable||!Object.hasOwn(field,'value')))return null;
+    const phase=fields.phase!.value,reason=fields.reason!.value,ordinal=fields.packetOrdinal!.value;
+    if(fields.schemaVersion!.value!==1||fields.operation!.value!=='stage'||typeof phase!=='string'||!Object.hasOwn(STAGING_PHASE_TEXT,phase)
+      ||typeof reason!=='string'||!Object.hasOwn(STAGING_REASON_TEXT,reason))return null;
+    if(phase==='packet-enqueue'||phase==='packet-receipt'){if(!Number.isSafeInteger(ordinal)||ordinal<0||ordinal>511)return null;}
+    else if(ordinal!==null)return null;
+    structuredClone(value);
+    return Object.freeze({schemaVersion:1,operation:'stage',phase:phase as StudioStagingDiagnostic['phase'],reason:reason as StudioStagingDiagnostic['reason'],packetOrdinal:ordinal});
+  }catch{return null;}
+}
+function studioStagingDiagnosticMessage(diagnostic:StudioStagingDiagnostic):string {
+  return 'Studio staging outcome is unconfirmed. '+STAGING_PHASE_TEXT[diagnostic.phase]+
+    (diagnostic.packetOrdinal===null?'':', packet '+(diagnostic.packetOrdinal+1))+': '+STAGING_REASON_TEXT[diagnostic.reason]+'.';
+}
+function stagingUnknownDiagnostic(value:unknown):StudioStagingDiagnostic|null {
+  const result=activityRecord(value),error=activityRecord(result?.error);
+  return result?.state==='unknown'&&result.terminal===false&&result.ambiguous===true&&result.retry===false&&error?.code==='STUDIO_STAGE_CONTINUITY'
+    ?readStudioStagingDiagnostic(error.diagnostic):null;
+}
 /**
  * The activity line for a tool message: a state mark (red dot running, check finished, cross failed), the plain-language
  * text in .message-text and, collapsed, the raw details. Returns the nodes to place inside article.codex-message.tool.
  */
 export function renderToolActivity(doc:Document,activity:ToolActivity,state:ToolActivityState,details:string):HTMLElement[] {
   const line=doc.createElement('div');line.className='tool-activity';line.dataset.toolState=state;
-  const mark=doc.createElement('span');mark.className='tool-activity-mark';mark.setAttribute('aria-hidden','true');mark.dataset.toolState=state;
+  const mark=doc.createElement('span');mark.className='tool-activity-mark';mark.setAttribute('aria-hidden','true');mark.dataset.toolState=activity.unconfirmed?'unknown':state;
   const label=doc.createElement('span');label.className='message-text tool-activity-text';label.textContent=activity.text;
-  const status=doc.createElement('span');status.className='visually-hidden';status.textContent=' · '+STATE_WORDS[state];
+  const status=doc.createElement('span');status.className='visually-hidden';status.textContent=' · '+(activity.unconfirmed?'Outcome unconfirmed':STATE_WORDS[state]);
   line.append(mark,label,status);
   if(activity.tool)line.dataset.toolName=activity.tool;
   // A row shows at most two fact chips (the headline numbers); the rest stay in the raw details.
@@ -1665,7 +1708,7 @@ export function renderToolActivity(doc:Document,activity:ToolActivity,state:Tool
   const group=activity.group;
   if(group){line.dataset.toolGroup=group.key;line.dataset.toolVerbs=group.verbs.join('|');line.dataset.toolNoun=group.noun.join('|');if(group.container)line.dataset.toolContainer=group.container;}
   const out:HTMLElement[]=[line];
-  if(state==='failed'&&activity.reason){const reason=doc.createElement('p');reason.className='tool-activity-reason';reason.textContent=activity.reason;out.push(reason);}
+  if((state==='failed'||activity.unconfirmed)&&activity.reason){const reason=doc.createElement('p');reason.className='tool-activity-reason';reason.textContent=activity.reason;out.push(reason);}
   const thumb=activity.image?renderToolThumbnail(doc,activity.image,activity.facts?.[0]??null):null;if(thumb)out.push(thumb);
   // Raw details have no per-row "Details" link: the row itself is the disclosure control (click, Enter or Space).
   const more=doc.createElement('details');more.className='message-details tool-details';more.id='tool-details-'+(++toolDetailsSeq);

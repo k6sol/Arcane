@@ -36,6 +36,7 @@ export const DIAGNOSTIC_REASONS = {
   STORAGE_UNAVAILABLE: 'The operation could not save or recover its local state.',
   PERMISSION_DENIED: 'The required filesystem or tool permission was refused.',
   IMPORT_FAILED: 'Studio could not import the generated asset.',
+  STUDIO_STAGE_CONTINUITY: 'Studio staging continuity could not be confirmed; inspect the recorded check without repeating the request.',
   UPDATE_FAILED: 'The desktop update could not complete this stage.',
   INTERNAL_ERROR: 'An unexpected exception prevented this operation; its safe exception class is recorded when known.',
 } as const;
@@ -51,6 +52,10 @@ export const DIAGNOSTIC_EXCEPTIONS = ['Error', 'AbortError', 'RangeError', 'Synt
   'ImportError', 'ModuleNotFoundError', 'ZeroDivisionError', 'NotImplementedError', 'Exception'] as const;
 const SIGNALS = ['SIGABRT', 'SIGINT', 'SIGKILL', 'SIGTERM', 'SIGSEGV', 'SIGPIPE'] as const;
 const NUMERIC = ['elapsedMs', 'attempt', 'renderTriangles', 'triangleBudget', 'collisionTriangles', 'invalidMeshes', 'errorCount'] as const;
+// This schema is also consumed directly by the gateway. Keep its closed wire
+// boundary standalone; do not import the desktop/asset-pipeline runtime here.
+const STAGING_PHASES = ['prior-attempt-check', 'target-check', 'admission', 'packet-enqueue', 'packet-receipt', 'seal-check'] as const;
+const STAGING_REASONS = ['proof-missing', 'plugin-lifetime-changed', 'plugin-artifact-changed', 'edit-epoch-changed', 'not-edit', 'disconnected', 'continuity-unsupported', 'proof-expired'] as const;
 export const DIAGNOSTIC_MAX_BYTES = 8192;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 export interface DiagnosticContext {
@@ -58,6 +63,7 @@ export interface DiagnosticContext {
   exceptionType?: typeof DIAGNOSTIC_EXCEPTIONS[number]; signal?: typeof SIGNALS[number];
   exitCode?: number; httpStatus?: number; elapsedMs?: number; attempt?: number;
   renderTriangles?: number; triangleBudget?: number; collisionTriangles?: number; invalidMeshes?: number; errorCount?: number;
+  stagingPhase?: typeof STAGING_PHASES[number]; stagingReason?: typeof STAGING_REASONS[number]; packetOrdinal?: number;
 }
 export interface DiagnosticEvent {
   schemaVersion: 1; eventId: string; occurredAt: number;
@@ -82,12 +88,25 @@ export function diagnosticEvent(value: unknown): DiagnosticEvent {
   if (v.reason !== undefined && v.reason !== reason) fail();
   if (v.release !== undefined && (typeof v.release !== 'string' || !/^[a-f0-9]{40}$/.test(v.release))) fail();
   if (v.platform !== undefined && !['win32', 'darwin', 'linux'].includes(v.platform as string)) fail();
+  const staging = v.code === 'STUDIO_STAGE_CONTINUITY';
+  if (staging && (v.component !== 'studio' || v.stage !== 'studio-import' || v.context === undefined)) fail();
   let context: DiagnosticContext | undefined;
   if (v.context !== undefined) {
     const raw = record(v.context); const clean: Record<string, string | number> = {};
+    if (staging) {
+      const keys = Reflect.ownKeys(raw);
+      if (keys.some(key => typeof key !== 'string' || !['stagingPhase', 'stagingReason', 'packetOrdinal'].includes(key) ||
+        !Object.getOwnPropertyDescriptor(raw,key)?.enumerable || !Object.hasOwn(Object.getOwnPropertyDescriptor(raw,key) ?? {},'value')) ||
+        !Object.hasOwn(raw,'stagingPhase') || !Object.hasOwn(raw,'stagingReason')) fail();
+      const packet = raw.stagingPhase === 'packet-enqueue' || raw.stagingPhase === 'packet-receipt';
+      if (packet ? !Object.hasOwn(raw,'packetOrdinal') : Object.hasOwn(raw,'packetOrdinal')) fail();
+    }
     for (const key of Object.keys(raw).sort()) {
       const entry = raw[key];
-      if (key === 'jobId') { if (!diagnosticEventId(entry)) fail(); }
+      if (key === 'stagingPhase') { if (!staging || !(STAGING_PHASES as readonly unknown[]).includes(entry)) fail(); }
+      else if (key === 'stagingReason') { if (!staging || !(STAGING_REASONS as readonly unknown[]).includes(entry)) fail(); }
+      else if (key === 'packetOrdinal') { if (!staging || !Number.isSafeInteger(entry) || Number(entry) < 0 || Number(entry) > 511) fail(); }
+      else if (key === 'jobId') { if (!diagnosticEventId(entry)) fail(); }
       else if (key === 'operationId') {
         // Correlation only: native action UUIDs also admit the two reserved RFC forms.
         if (!diagnosticEventId(entry) && entry !== '00000000-0000-0000-0000-000000000000' && entry !== 'ffffffff-ffff-ffff-ffff-ffffffffffff') fail();

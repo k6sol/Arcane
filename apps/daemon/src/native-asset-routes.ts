@@ -7,6 +7,9 @@ import {parseConvertGlbInput} from './conversion-start.js';
 import {normalizeRequest,AssetError} from '../../../packages/asset-pipeline/src/index.js';
 import type {AssetService} from './asset-service.js';
 import type {createStudioImportStagingController} from './studio-import-staging-controller.js';
+import {studioStagingFailureDiagnostic} from './studio-import-staging-controller.js';
+import {studioStagingDiagnosticMessage} from '../../../packages/asset-pipeline/src/failure-diagnostics.js';
+import {studioStagingFailureEvent,type FailureReporter} from './diagnostic-reporter.js';
 import type {NativeAssetConversationHost} from './asset-conversation-host.js';
 import {nativeAssetConversationJobPageAsync} from './asset-conversation-page.js';
 import {assertNativeAssetActor,nativeAssetActorScope,type NativeAssetRegistry} from './native-asset-authority.js';
@@ -41,7 +44,7 @@ function ingress(request:IncomingMessage,url:URL,origin:string):string {
 }
 /** Dedicated native audience. Generic/human bearers cannot acquire registry captures.
  * Caller payloads contain bounded recipe/job/page data only, never authority. */
-export function nativeAssetRoutes(service:AssetService,host:NativeAssetConversationHost,registry:NativeAssetRegistry,staging?: Pick<ReturnType<typeof createStudioImportStagingController>, 'stage'> & Partial<Pick<ReturnType<typeof createStudioImportStagingController>, 'status'|'reconstruct'|'reconstructionStatus'|'applyRevision'|'revisionStatus'>>) {
+export function nativeAssetRoutes(service:AssetService,host:NativeAssetConversationHost,registry:NativeAssetRegistry,staging?: Pick<ReturnType<typeof createStudioImportStagingController>, 'stage'> & Partial<Pick<ReturnType<typeof createStudioImportStagingController>, 'status'|'reconstruct'|'reconstructionStatus'|'applyRevision'|'revisionStatus'>>,reportFailure?:FailureReporter) {
  return async(request:IncomingMessage,response:ServerResponse,url:URL,origin:string):Promise<boolean>=>{
   if(!url.pathname.startsWith(PREFIX))return false;
   const send=async(status:number,payload:unknown,serialized?:string)=>{
@@ -180,7 +183,13 @@ export function nativeAssetRoutes(service:AssetService,host:NativeAssetConversat
   }catch(error){
    const code=error instanceof ArcaneError||error instanceof AssetError?error.code:'NATIVE_ASSET_UNAVAILABLE';
    const status=code==='HOST'||code==='ORIGIN'||code==='AUTH'||code==='NATIVE_ASSET_AUTHORITY'?403:code==='NOT_FOUND'?404:code==='BODY_LIMIT'?413:code==='BODY_TIMEOUT'?408:code==='ASSET_ADOPT_GLB'?422:code==='ASSET_CONVERT_INPUT'||code==='ASSET_ADOPT_INPUT'||code==='ASSET_ADOPT_PATH'||code==='INPUT'||code==='CONTENT_TYPE'||code==='JSON'||code==='BODY'?400:503;
-   await send(status,{error:code,message:'Native chat asset request refused or unavailable.'});return true;
+   const diagnostic=studioStagingFailureDiagnostic(error);
+   if(diagnostic&&reportFailure)try{
+    // The product reporter owns bounded delivery. Its ACK never changes the request outcome.
+    void Promise.resolve(reportFailure(studioStagingFailureEvent(diagnostic))).catch(()=>{});
+   }catch{/* Preserve the original refusal when reporting is unavailable. */}
+   await send(status,{error:code,message:diagnostic?studioStagingDiagnosticMessage(diagnostic):'Native chat asset request refused or unavailable.',
+    ...(diagnostic?{diagnostic}:{})});return true;
   }
  };
 }

@@ -8,6 +8,7 @@ import {ConversationWorkStore} from '../../../packages/storage/src/conversation-
 import {snapshotStudioImportSelection} from '../../../packages/asset-pipeline/src/studio-import-manifest.js';
 import {assertDecodedStudioImportPayload} from '../../../packages/asset-pipeline/src/studio-import-payload.js';
 import {createStudioImportTransfer,inspectConvertedStudioImportTransfer,measureStudioImportTransferArguments} from '../../../packages/asset-pipeline/src/studio-import-transfer.js';
+import {readStudioStagingDiagnostic,studioStagingDiagnosticMessage,type StudioStagingDiagnostic} from '../../../packages/asset-pipeline/src/failure-diagnostics.js';
 import type {AssetService} from './asset-service.js';
 import {assertStudioImportJobScope} from './asset-import-adapter.js';
 import type {StudioImportHostOptions} from './asset-import-adapter.js';
@@ -36,6 +37,17 @@ export interface NativeReconstructionStatus {
 }
 const sha = (text: string) => createHash('sha256').update(text).digest('hex');
 function fail(code: string): never {throw new ArcaneError(code, 'Native asset staging is unavailable, changed or incomplete. No import/upload was accepted.');}
+const stageContinuityErrors=new WeakMap<object,StudioStagingDiagnostic>();
+class StageContinuityError extends ArcaneError {}
+function failStageContinuity(phase:StudioStagingDiagnostic['phase'],reason:StudioStagingDiagnostic['reason'],packetOrdinal:number|null=null):never {
+  const diagnostic=readStudioStagingDiagnostic({schemaVersion:1,operation:'stage',phase,reason,packetOrdinal})!;
+  const error=new StageContinuityError('STUDIO_STAGE_CONTINUITY',studioStagingDiagnosticMessage(diagnostic));
+  stageContinuityErrors.set(error,diagnostic);throw error;
+}
+/** Original host error only; matching codes or serialized properties cannot mint details. */
+export function studioStagingFailureDiagnostic(error:unknown):StudioStagingDiagnostic|null {
+  return error&&typeof error==='object'?readStudioStagingDiagnostic(stageContinuityErrors.get(error)):null;
+}
 
 /** Host composition, not a request decoder. Keeps exact native authority across
  * preparation and every durable packet receipt. stage() admits CPU bytes only;
@@ -223,13 +235,14 @@ export function createStudioImportStagingController(config: StudioImportStagingC
         if(previous.closedAt===null)fail('STUDIO_STAGE_BUSY');
         const current=studio.activeSessions().filter(s=>!s.revokedAt&&Number.isFinite(Date.parse(s.lastSeenAt))&&Date.parse(s.lastSeenAt)<=now()&&now()-Date.parse(s.lastSeenAt)<=30_000);
         const proof=current.length===1?current[0]!.proof:null;
-        if(!proof)fail('STUDIO_STAGE_CONTINUITY');
+        if(!proof)failStageContinuity('prior-attempt-check','proof-missing');
         if(current[0]!.id===previous.intent.target.sessionId&&proof.clientLifetimeId===previous.intent.continuity.clientLifetimeId&&proof.playEpoch<=previous.intent.continuity.playEpoch)fail('STUDIO_STAGE_EXISTS');
       }
       assertNativeAssetStageOperationAvailable(actor, jobId);
       const work=commandWork(actor,'stage');
       busy = true;
       const expires = now() + STUDIO_STAGING_LIMITS.totalDeadlineMs;
+      let phase:StudioStagingDiagnostic['phase']='target-check',packetOrdinal:number|null=null;
       let reviewCheck:(()=>void)|undefined,observationCheck:(()=>void)|undefined;
       const base = () => {
         guard();reviewCheck?.();observationCheck?.();
@@ -263,9 +276,14 @@ export function createStudioImportStagingController(config: StudioImportStagingC
         const boundary = () => {
           base(); host.validateTarget!(scope, jobId, selection);
           const actual = studio.session(session.id).proof;
-          if (!actual || actual.clientLifetimeId !== continuity.clientLifetimeId || actual.pluginArtifactHash !== pluginArtifactHash
-            || actual.playEpoch !== continuity.playEpoch || actual.mode !== 'Edit' || !actual.connected || !actual.continuitySupported
-            || Date.parse(actual.expiresAt) <= now()) fail('STUDIO_STAGE_CONTINUITY');
+          if(!actual)failStageContinuity(phase,'proof-missing',packetOrdinal);
+          if(actual.clientLifetimeId!==continuity.clientLifetimeId)failStageContinuity(phase,'plugin-lifetime-changed',packetOrdinal);
+          if(actual.pluginArtifactHash!==pluginArtifactHash)failStageContinuity(phase,'plugin-artifact-changed',packetOrdinal);
+          if(actual.playEpoch!==continuity.playEpoch)failStageContinuity(phase,'edit-epoch-changed',packetOrdinal);
+          if(actual.mode!=='Edit')failStageContinuity(phase,'not-edit',packetOrdinal);
+          if(!actual.connected)failStageContinuity(phase,'disconnected',packetOrdinal);
+          if(!actual.continuitySupported)failStageContinuity(phase,'continuity-unsupported',packetOrdinal);
+          if(Date.parse(actual.expiresAt)<=now())failStageContinuity(phase,'proof-expired',packetOrdinal);
         };
         boundary();
         // Account for JSON-string escaping and the COMPLETE queue argument
@@ -299,16 +317,18 @@ export function createStudioImportStagingController(config: StudioImportStagingC
         // Known source/context/target/budget preflight failures consume no stage
         // claim. Latch immediately before durable admission, with NO refund:
         // begin/queue uncertainty must never authorize replay in this turn.
-        boundary(); claimNativeAssetStageOperation(actor, jobId);
+        phase='admission';boundary(); claimNativeAssetStageOperation(actor, jobId);
         const started=previous?studio.beginStageAttempt(intent,previous.runId,boundary):studio.beginStageRun(intent,boundary);
         if(!started.created)fail('STUDIO_STAGE_EXISTS');handle=started.handle;
         const commandIds: string[] = [];
         let last: StudioAssetStageReceipt | null = null, bytes = 0;
         for (const [ordinal, args] of argumentsList.entries()) {
+          phase='packet-enqueue';packetOrdinal=ordinal;
           boundary();
           const queued = work.enqueue(()=>studio.enqueueStagePacket(handle!,ordinal,args,boundary));
           commandIds.push(queued.id);
           const deadline = Math.min(expires, now() + STUDIO_STAGING_LIMITS.packetDeadlineMs);
+          phase='packet-receipt';
           while (true) {
             boundary();
             const command = studio.command(queued.id);
@@ -327,7 +347,7 @@ export function createStudioImportStagingController(config: StudioImportStagingC
             await studio.waitForCommandResult(queued.id,Math.min(25,Math.max(1,deadline-now())));
           }
         }
-        boundary(); if (!last || last.state !== 'sealed') fail('STUDIO_STAGE_RECEIPT');
+        phase='seal-check';packetOrdinal=null;boundary(); if (!last || last.state !== 'sealed') fail('STUDIO_STAGE_RECEIPT');
         return {...last, status: 'staged', imported: false, runId:started.runId, commandIds};
       } finally {
         // Cancel only an undispatched packet; a delivered unknown result is

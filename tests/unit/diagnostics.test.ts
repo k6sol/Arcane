@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {diagnosticEvent, diagnosticEventId, DiagnosticValidationError, DIAGNOSTIC_REASONS} from '../../packages/diagnostics/src/report.js';
+import {readStudioStagingDiagnostic} from '../../packages/asset-pipeline/src/failure-diagnostics.js';
 
 const input = {schemaVersion: 1, eventId: '8e6bc8a1-a0ea-4823-8998-0f82d14469ba', occurredAt: 1792500000000,
   component: 'blender', stage: 'texture-authoring', code: 'MEMORY_LIMIT', context: {exceptionType: 'MemoryError', exitCode: 1, triangleBudget: 16000}};
@@ -49,4 +50,40 @@ test('operation correlation still rejects arbitrary strings and reserved UUID ne
     '11111111-2222-4333-c444-555555555555','11111111-2222-9333-8444-555555555555','00000000-0000-0000-0000-000000000000x']){
     assert.throws(()=>diagnosticEvent({...input,context:{operationId}}),DiagnosticValidationError);
   }
+});
+
+test('standalone diagnostic schema agrees with every closed staging phase/reason and preserves packet bounds',()=>{
+  const phases=['prior-attempt-check','target-check','admission','packet-enqueue','packet-receipt','seal-check'] as const;
+  const reasons=['proof-missing','plugin-lifetime-changed','plugin-artifact-changed','edit-epoch-changed','not-edit','disconnected','continuity-unsupported','proof-expired'] as const;
+  for(const phase of phases)for(const reason of reasons){
+    const packet=phase==='packet-enqueue'||phase==='packet-receipt';
+    for(const ordinal of packet?[0,511]:[null]){
+      const source=readStudioStagingDiagnostic({schemaVersion:1,operation:'stage',phase,reason,packetOrdinal:ordinal});assert.ok(source);
+      const context={stagingReason:source.reason,stagingPhase:source.phase,...(source.packetOrdinal===null?{}:{packetOrdinal:source.packetOrdinal})};
+      const event=diagnosticEvent({...input,component:'studio',stage:'studio-import',code:'STUDIO_STAGE_CONTINUITY',context});
+      assert.deepEqual(event.context,context);assert.deepEqual(diagnosticEvent(JSON.parse(JSON.stringify(event))),event);
+      assert.equal(event.reason,DIAGNOSTIC_REASONS.STUDIO_STAGE_CONTINUITY);
+    }
+  }
+});
+
+test('staging fields are event-specific and refuse private identities, unknown predicates and invalid ordinal combinations',()=>{
+  const base={...input,component:'studio',stage:'studio-import',code:'STUDIO_STAGE_CONTINUITY'},context={stagingPhase:'packet-receipt',stagingReason:'proof-expired',packetOrdinal:0};
+  const secret='private prompt token C:\\Users\\fixture\\model.glb';
+  for(const value of [
+    {...base}, {...base,context:undefined}, {...base,component:'chat',context}, {...base,stage:'export',context},
+    {...base,context:{...context,stagingPhase:'unknown-check'}}, {...base,context:{...context,stagingReason:secret}},
+    {...base,context:{...context,jobId:input.eventId}}, {...base,context:{...context,operationId:input.eventId}},
+    {...base,context:{...context,exceptionType:'Error'}}, {...base,context:{...context,path:secret}},
+    {...base,context:{stagingPhase:'packet-enqueue',stagingReason:'disconnected'}},
+    {...base,context:{...context,stagingPhase:'target-check'}},
+    {...input,context:{stagingPhase:'target-check',stagingReason:'disconnected'}},
+    ...[-1,512,0.5,NaN,Infinity,'0',null].map(packetOrdinal=>({...base,context:{...context,packetOrdinal}})),
+  ])assert.throws(()=>diagnosticEvent(value),(error:unknown)=>error instanceof DiagnosticValidationError&&!error.message.includes(secret));
+  let called=0;
+  const getter=Object.defineProperty({...context},'stagingReason',{enumerable:true,get(){called++;throw Error(secret);}});
+  const hidden=Object.defineProperty({...context},'hidden',{value:secret,enumerable:false});
+  const symbol={...context,[Symbol('private')]:secret};
+  for(const bad of [getter,hidden,symbol])assert.throws(()=>diagnosticEvent({...base,context:bad}),DiagnosticValidationError);
+  assert.equal(called,0);
 });

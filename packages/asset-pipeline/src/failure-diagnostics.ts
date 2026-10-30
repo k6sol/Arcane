@@ -2,6 +2,49 @@ import { AssetError, type AssetFailureDiagnostic, type AssetJobError } from './t
 import type { CommandResult } from './process.js';
 import { RUNTIME_PROBE_REASONS } from './probe-diagnostics.js';
 
+/** Staging facts are separate from generated-job failures and confer no authority. */
+export const STUDIO_STAGING_PHASES = ['prior-attempt-check','target-check','admission','packet-enqueue','packet-receipt','seal-check'] as const;
+export const STUDIO_STAGING_REASONS = ['proof-missing','plugin-lifetime-changed','plugin-artifact-changed','edit-epoch-changed','not-edit','disconnected','continuity-unsupported','proof-expired'] as const;
+export interface StudioStagingDiagnostic {
+  readonly schemaVersion:1;readonly operation:'stage';readonly phase:typeof STUDIO_STAGING_PHASES[number];
+  readonly reason:typeof STUDIO_STAGING_REASONS[number];readonly packetOrdinal:number|null;
+}
+/** Exact data only; unknown fields, accessors, proxies and free text are refused. */
+export function readStudioStagingDiagnostic(value:unknown):StudioStagingDiagnostic|null {
+  try {
+    if(!value||typeof value!=='object'||Array.isArray(value)||![Object.prototype,null].includes(Object.getPrototypeOf(value)))return null;
+    const fields=Object.getOwnPropertyDescriptors(value),keys=Reflect.ownKeys(fields);
+    if(keys.length!==5||keys.some(key=>typeof key!=='string'||!['schemaVersion','operation','phase','reason','packetOrdinal'].includes(key)))return null;
+    if(Object.values(fields).some(field=>!field.enumerable||!Object.hasOwn(field,'value')))return null;
+    const version=fields.schemaVersion!.value,operation=fields.operation!.value,phase=fields.phase!.value,reason=fields.reason!.value,ordinal=fields.packetOrdinal!.value;
+    if(version!==1||operation!=='stage'||!STUDIO_STAGING_PHASES.includes(phase)||!STUDIO_STAGING_REASONS.includes(reason))return null;
+    const packet=phase==='packet-enqueue'||phase==='packet-receipt';
+    if(packet?!Number.isSafeInteger(ordinal)||ordinal<0||ordinal>511:ordinal!==null)return null;
+    // The bounded fields are primitives. Clone also rejects otherwise convincing proxies.
+    structuredClone(value);
+    return Object.freeze({schemaVersion:1,operation:'stage',phase,reason,packetOrdinal:ordinal});
+  } catch {return null;}
+}
+const STAGING_PHASE_TEXT:Record<StudioStagingDiagnostic['phase'],string>={
+  'prior-attempt-check':'Previous attempt check','target-check':'Target check',admission:'Admission',
+  'packet-enqueue':'Packet enqueue','packet-receipt':'Packet receipt','seal-check':'Final seal check',
+};
+const STAGING_REASON_TEXT:Record<StudioStagingDiagnostic['reason'],string>={
+  'proof-missing':'no current Studio connection check was available',
+  'plugin-lifetime-changed':'the Studio plugin connection changed',
+  'plugin-artifact-changed':'the loaded Studio plugin changed',
+  'edit-epoch-changed':'the Studio editing session changed',
+  'not-edit':'Studio was outside Edit mode',disconnected:'the Studio connection was disconnected',
+  'continuity-unsupported':'the Studio connection could not establish continuity',
+  'proof-expired':'the Studio connection check expired',
+};
+export function studioStagingDiagnosticMessage(value:StudioStagingDiagnostic):string {
+  const diagnostic=readStudioStagingDiagnostic(value);
+  if(!diagnostic)return 'Studio staging outcome is unconfirmed. Inspect the original staging status; do not repeat automatically.';
+  return 'Studio staging outcome is unconfirmed. '+STAGING_PHASE_TEXT[diagnostic.phase]+
+    (diagnostic.packetOrdinal===null?'':', packet '+(diagnostic.packetOrdinal+1))+': '+STAGING_REASON_TEXT[diagnostic.reason]+'.';
+}
+
 const STAGES = new Set(['prepare-output', 'probe', 'generate', 'request-validation', 'blockout', 'identity', 'checkpoint-save',
   'mesh-validation', 'texture-authoring', 'review-render', 'scene-save', 'export', 'export-identity', 'export-roundtrip', 'scene-reopen', 'audit-write', 'host-validation']);
 const CONVERSION_STAGES = new Set(['input', 'source-import', 'source-map', 'collision', 'scene-save', 'export',

@@ -19,6 +19,26 @@ const PROJECT = 'b'.repeat(64);
 const TOKEN = 'synthetic-stage-unit-bearer';
 const TOOL = 'assets_stage_studio_import';
 const PATH = '/v1/assets/native/stage-studio-import';
+
+test('typed staging continuity facts survive the actual MCP result without confirming an outcome or exposing remote text',async t=>{
+  const f=fixture(t),client=await linked(t,f.daemon),diagnostic={schemaVersion:1,operation:'stage',phase:'packet-receipt',reason:'proof-expired',packetOrdinal:511};
+  f.setResponder(async()=>json({error:'STUDIO_STAGE_CONTINUITY',message:'private source C:/private/model.py native-id secret',diagnostic},503));
+  const result=await call(client),outcome=unknown(result.structuredContent),error=outcome.error as Record<string,unknown>;
+  assert.equal(result.isError,undefined);assert.equal(error.code,'STUDIO_STAGE_CONTINUITY');assert.deepEqual(error.diagnostic,diagnostic);
+  assert.match(String(error.message),/Packet receipt, packet 512: the Studio connection check expired/);
+  assert.doesNotMatch(JSON.stringify(result),/private source|model\.py|native-id secret/);assert.equal(f.requests.length,1);
+});
+
+test('malformed staging error descriptors never become specific reasons and preserve one submitted unknown operation',async t=>{
+  for(const diagnostic of [null,{schemaVersion:1,operation:'stage',phase:'packet-receipt',reason:'proof-expired',packetOrdinal:512},
+    {schemaVersion:1,operation:'stage',phase:'packet-receipt',reason:'private model text',packetOrdinal:0},
+    {schemaVersion:1,operation:'stage',phase:'target-check',reason:'proof-expired',packetOrdinal:null,jobId:JOB}]){
+    const f=fixture(t);f.setResponder(async()=>json({error:'STUDIO_STAGE_CONTINUITY',message:'C:/private/source native-secret',diagnostic},503));
+    const outcome=unknown(await f.daemon.assetsStageStudioImport(JOB)),error=outcome.error as Record<string,unknown>;
+    assert.equal(error.code,'STUDIO_STAGE_CONTINUITY');assert.equal(error.diagnostic,undefined);assert.match(String(error.message),/could not be verified/);
+    assert.doesNotMatch(JSON.stringify(outcome),/private\/source|native-secret|private model text/);assert.equal(f.requests.length,1);
+  }
+});
 const commandId = (index: number) => index.toString(16).padStart(8, '0') + '-1111-4111-8111-111111111111';
 function staged(): NativeStudioStagingResponse['staged'] {
   return {status: 'staged', runId: '33333333-3333-4333-8333-333333333333', imported: false, engineVerification: 'pending', state: 'sealed',

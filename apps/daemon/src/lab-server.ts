@@ -116,6 +116,8 @@ interface Options {
   codexAutomaticTaskPlanning?: boolean;
   /** Owned product diagnostics callback; never supplied by HTTP or agent data. */
   codexReportFailure?: CodexServiceOptions['reportFailure'];
+  /** Trusted product-owned asset reporting; never HTTP input or a required storage ACK. */
+  assetReportFailure?: CodexServiceOptions['reportFailure'];
   /** Explicit trusted launcher configuration. Never supplied by route JSON. Missing means no compiler preflight. */
   workflowCodeVerification?: WorkflowCodeHostConfiguration;
   /** Trusted/test-only borrowed verifier. Never accepted from HTTP or agent data. */
@@ -374,7 +376,7 @@ export async function createConnectionLab(options: Options) {
   const assets = options.assetService ? assetRoutes(options.assetService, conversationAssets ?? undefined) : null;
   const modelReviewApi=modelReviews?assetReviewRoutes(modelReviews):null;
   const scopedAssets = options.assetService && conversationAssets && nativeAssetRegistry
-    ? nativeAssetRoutes(options.assetService,conversationAssets,nativeAssetRegistry,options.studioImportStaging) : null;
+    ? nativeAssetRoutes(options.assetService,conversationAssets,nativeAssetRegistry,options.studioImportStaging,options.assetReportFailure) : null;
   const workflowApi = workflow ? workflowRoutes(workflow) : null;
   const send = (response: ServerResponse, status: number, payload: unknown) => {
     response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });

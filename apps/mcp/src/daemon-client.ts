@@ -17,6 +17,7 @@ import {nativeStudioReconstructionResponse,parseNativeStudioReconstructionStatus
 import {nativeStudioRevisionResponse,parseNativeStudioRevisionStatusResponse} from '../../../packages/asset-pipeline/src/studio-revision-wire.js';
 import { playtestJobResponse, playtestListResponse, playtestPreparedResponse, playtestRequestInput, type PlaytestRequest } from './playtest-schemas.js';
 import { viewportCaptureInput, viewportCaptureResponse, type ViewportCaptureInput } from './viewport-tool.js';
+import {readStudioStagingDiagnostic,studioStagingDiagnosticMessage,type StudioStagingDiagnostic} from '../../../packages/asset-pipeline/src/failure-diagnostics.js';
 
 const ASSET_PREVIEW_BYTES = 8 * 1024 * 1024;
 const RESPONSE_LIMIT = 1024 * 1024; // A command contains up to 256 KiB args plus 512 KiB result.
@@ -24,7 +25,7 @@ const TERMINAL = new Set(['succeeded', 'failed', 'cancelled', 'needs_reconciliat
 const WAIT_LIMIT = 60_000;
 
 export class BridgeError extends Error {
-  constructor(readonly code: string, message: string, readonly rejected = false) { super(message); this.name = 'BridgeError'; }
+  constructor(readonly code: string, message: string, readonly rejected = false,readonly diagnostic?:StudioStagingDiagnostic) { super(message); this.name = 'BridgeError'; }
 }
 
 export function validateDaemonUrl(value: string | undefined): string {
@@ -161,9 +162,15 @@ export class DaemonClient {
     try { payload = JSON.parse(strictRecord ? new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)) : Buffer.concat(chunks).toString('utf8')); }
     catch { throw new BridgeError('PROTOCOL', 'Daemon response is not valid JSON.'); }
     if (!response.ok) {
-      const error = z.object({ error: z.string().min(1).max(64), message: z.string().min(1).max(8192) }).safeParse(payload);
+      const error = z.object({ error: z.string().min(1).max(64), message: z.string().min(1).max(8192),diagnostic:z.unknown().optional() }).safeParse(payload);
       const rejected = response.status >= 400 && response.status < 500;
-      if (error.success) throw new BridgeError(this.redact(error.data.error), this.redact(error.data.message), rejected);
+      if (error.success) {
+        const diagnostic=error.data.error==='STUDIO_STAGE_CONTINUITY'?readStudioStagingDiagnostic(error.data.diagnostic):null;
+        const message=error.data.error==='STUDIO_STAGE_CONTINUITY'
+          ?diagnostic?studioStagingDiagnosticMessage(diagnostic):'Studio staging continuity could not be verified. Inspect the original staging status; do not repeat automatically.'
+          :this.redact(error.data.message);
+        throw new BridgeError(this.redact(error.data.error),message,rejected,diagnostic??undefined);
+      }
       throw new BridgeError('DAEMON_HTTP', `The local daemon rejected the request (HTTP ${response.status}).`, rejected);
     }
     if (!response.headers.get('content-type')?.toLowerCase().startsWith('application/json')) throw new BridgeError('PROTOCOL', 'Daemon response must be application/json.');
@@ -489,7 +496,9 @@ export class DaemonClient {
       if (error instanceof BridgeError && error.rejected && !nativeStaging) throw error;
       // Keep the daemon's (already redacted) refusal code so a definite preflight
       // refusal is diagnosable; state/retry semantics stay unknown/no-replay.
-      const detail = !deadline.signal.aborted && error instanceof BridgeError ? { error: { code: error.code, message: error.message } } : {};
+      const diagnostic=error instanceof BridgeError&&error.code==='STUDIO_STAGE_CONTINUITY'?readStudioStagingDiagnostic(error.diagnostic):null;
+      const detail = !deadline.signal.aborted && error instanceof BridgeError ? { error: { code: error.code, message: error.message,
+        ...(nativeStaging&&diagnostic?{diagnostic}:{}) } } : {};
       return { ...identity, operationId, state: 'unknown', terminal: false, ambiguous: true,
         wait: deadline.signal.aborted ? options.signal?.aborted ? 'aborted' : 'timeout' : 'interrupted', nextStep, ...detail };
     } finally { deadline.dispose(); }

@@ -16,7 +16,7 @@ Check a goal off only when its acceptance criteria pass and its evidence is reco
 - [ ] [[Delivery/G05 Blender Quality|G05 · Enforce a measurable Blender quality pipeline]] — in progress
 - [ ] [[Delivery/G06 Connected Import|G06 · Complete connected import and scene editing]]
 - [ ] [[Delivery/G07 Test and Repair|G07 · Close the task, test and repair loop]]
-- [ ] [[Delivery/G08 Diagnostics|G08 · Make every failure diagnosable]]
+- [ ] [[Delivery/G08 Diagnostics|G08 · Make every failure diagnosable]] — in progress
 - [ ] [[Delivery/G09 Accounts and Billing|G09 · Finish accounts, administration and billing]]
 - [ ] [[Delivery/G10 Customer Release|G10 · Ship and prove the customer release]] — in progress
 

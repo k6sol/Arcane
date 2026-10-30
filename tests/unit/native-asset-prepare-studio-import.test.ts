@@ -14,7 +14,11 @@ import { createAssetConversationHost, type NativeAssetConversationHost } from '.
 import { createNativeAssetRegistry, assertNativeAssetActor, type NativeAssetActor, type NativeAssetIncarnation } from '../../apps/daemon/src/native-asset-authority.js';
 import { nativeAssetRoutes, parseNativeStudioImportResponse, NATIVE_STUDIO_IMPORT_RESPONSE_BYTES } from '../../apps/daemon/src/native-asset-routes.js';
 import {ArcaneError} from '../../packages/protocol/src/providers.js';
-import type {createStudioImportStagingController} from '../../apps/daemon/src/studio-import-staging-controller.js';
+import {createStudioImportStagingController} from '../../apps/daemon/src/studio-import-staging-controller.js';
+import type {FailureReporter} from '../../apps/daemon/src/diagnostic-reporter.js';
+import {StudioStore} from '../../packages/storage/src/studio-store.js';
+import {parseCodexThreadRead} from '../../packages/codex-client/src/history.js';
+import {readToolResultText,describeToolActivity,toolDetailText} from '../../apps/desktop/src/codex-chat.js';
 import { DaemonClient, type AssetAudience } from '../../apps/mcp/src/daemon-client.js';
 import { createMcpServer } from '../../apps/mcp/src/server.js';
 import { ConversationWorkStore } from '../../packages/storage/src/conversation-work-store.js';
@@ -50,7 +54,7 @@ const refused = (code: string) => (error: unknown) => !!error && typeof error ==
 type Mutable<T> = T extends object ? { -readonly [K in keyof T]: Mutable<T[K]> } : T;
 type Transition = 'revoke-regrant' | 'new-intent' | 'replacement' | 'close';
 
-async function fixture(t: test.TestContext, configured = true) {
+async function fixture(t: test.TestContext, configured = true,reportFailure?:FailureReporter) {
   const boundary = await realpath(tmpdir()), directory = await mkdtemp(join(boundary, 'arcane-native-prepare-test-'));
   const projectPath = await realpath(directory), outputRoot = join(projectPath, 'outputs'); await mkdir(outputRoot);
   const jobDirectory = join(outputRoot, 'test-kit-' + JOB); await mkdir(jobDirectory); await saveStudioFixture(jobDirectory, JOB);
@@ -92,7 +96,7 @@ async function fixture(t: test.TestContext, configured = true) {
   }, revisionStatus: (...args) => {
     if (!revisionStatus) throw new ArcaneError('STUDIO_REVISION_UNAVAILABLE','Fixture revision status unavailable.');
     return revisionStatus(...args);
-  }});
+  }},reportFailure);
   let origin = '', requests = 0; const failures: unknown[] = [], releases: (() => void)[] = [];
   const server = createServer((request, response) => { requests++; void route(request, response, new URL(request.url ?? '/', origin), origin)
     .then(handled => { if (!handled) { response.writeHead(404); response.end('{}'); } })
@@ -132,6 +136,7 @@ async function fixture(t: test.TestContext, configured = true) {
     return { result, captured: async () => { await entered.promise; server.off('request', observe); }, finish: () => outgoing.end(bytes.subarray(1)) };
   };
   return { origin, credential, service, host, store, registry, incarnation, http,
+    ownCleanup(dispose:()=>void){releases.push(dispose);},
     setStage(fn: NonNullable<typeof stage>) {stage = fn;}, stageCalls: () => staged,
     setRevision(fn: NonNullable<typeof revision>) {revision=fn;},
     setRevisionStatus(fn: NonNullable<typeof revisionStatus>) {revisionStatus=fn;},
@@ -499,4 +504,49 @@ test('revision status preserves true null and refuses forged current-resource me
   const result=await f.http({}, {path,method:'GET'}).result;assert.equal(result.status,200);assert.deepEqual(result.data,{jobId:JOB,projectId:f.store.projectId,revision:null});
   f.setRevisionStatus(async()=>({jobId:JOB,projectId:f.store.projectId,revision:{runId:'55555555-5555-4555-8555-555555555555',commandId:'66666666-6666-4666-8666-666666666666',state:'succeeded',receipt:revisionReceipt(f.store.projectId),receiptScope:'historical-revision',currentResources:'present',imported:false,engineVerification:'pending',retry:false}} as never));
   const refused=await f.http({}, {path,method:'GET'}).result;assert.notEqual(refused.status,200);assert.equal(refused.data.revision,undefined);
+});
+
+test('original controller continuity diagnostics cross route and MCP while absent/faulted reporting cannot alter the unknown result',async t=>{
+  for(const reporting of ['absent','stored','sync-fault','async-fault'] as const){
+    const events:Parameters<FailureReporter>[0][]=[];
+    const reporter:FailureReporter|undefined=reporting==='absent'?undefined:event=>{
+      events.push(event);if(reporting==='sync-fault')throw Error('private report failure');
+      return reporting==='async-fault'?Promise.reject(Error('private report failure')):Promise.resolve(event.eventId);
+    };
+    const f=await fixture(t,true,reporter),studio=new StudioStore({directory:join(f.store.projectPath,'staging-details')});
+    // Previous-run lookup is a controlled history port. The current absence of
+    // a paired proof and the controller/route/SDK refusal are actual; no receipt is minted.
+    t.mock.method(studio,'readStageRun',()=>({closedAt:'2026-10-30T00:00:00.000Z'} as NonNullable<ReturnType<StudioStore['readStageRun']>>));
+    const controller=createStudioImportStagingController({projectPath:f.store.projectPath,workAssociations:f.store,studio,
+      assets:{async prepareStudioImportPayload(){throw Error('Preparation must not start.');},async reviewImport(){throw Error('Review must not start.');}},
+      host:{workAssociations:f.store,beginPreparationAttempt(){throw Error('No attempt admitted.');},selectTarget(){return SELECTION;},validateTarget(){},releaseTarget(){}},pluginArtifactHash:'a'.repeat(64)});
+    f.ownCleanup(()=>{controller.close();studio.close();});f.setStage((...args)=>controller.stage(...args));
+    const sdk=await linked(t,f.origin,f.credential),result=CallToolResultSchema.parse(await sdk.client.callTool({name:'assets_stage_studio_import',arguments:{jobId:JOB}}));
+    const outcome=result.structuredContent as Record<string,unknown>,error=outcome.error as Record<string,unknown>;
+    assert.equal(result.isError,undefined);assert.equal(outcome.state,'unknown');assert.equal(outcome.terminal,false);assert.equal(outcome.ambiguous,true);assert.equal(outcome.retry,false);
+    assert.equal(error.code,'STUDIO_STAGE_CONTINUITY');assert.deepEqual(error.diagnostic,{schemaVersion:1,operation:'stage',phase:'prior-attempt-check',reason:'proof-missing',packetOrdinal:null});
+    assert.match(String(error.message),/Previous attempt check: no current Studio connection check was available/);
+    assert.equal(f.stageCalls(),1);assert.equal(studio.commands().length,0);assert.equal(outcome.staged,undefined);assert.equal(outcome.reportId,undefined);
+    assert.equal(events.length,reporting==='absent'?0:1);assert.doesNotMatch(JSON.stringify(result),/private report failure/);
+    if(events.length){assert.equal(events[0]!.code,'STUDIO_STAGE_CONTINUITY');assert.deepEqual(events[0]!.context,{stagingPhase:'prior-attempt-check',stagingReason:'proof-missing'});}
+    const historyScope={threadId:'staging-history',sessionId:'staging-session',cwd:f.store.projectPath,includeTurns:true};
+    const history=parseCodexThreadRead({thread:{id:historyScope.threadId,sessionId:historyScope.sessionId,cwd:historyScope.cwd,ephemeral:false,historyMode:'legacy',
+      turns:[{id:'staging-turn',status:'completed',itemsView:'full',items:[{id:'staging-item',type:'mcpToolCall',result}]}]}},historyScope);
+    assert.equal(history.completeness,'complete');assert.equal(history.entries.length,1);assert.equal(history.entries[0]!.role,'tool');
+    const read=readToolResultText(history.entries[0]!.text);assert.equal(read.name,'assets_stage_studio_import');assert.equal(read.state,'finished');
+    const codex=describeToolActivity(read.name!,read.input,read.result,read.state);
+    const claude=describeToolActivity('mcp__arcane__assets_stage_studio_import',null,outcome,'finished');
+    for(const activity of [codex,claude]){assert.equal(activity.unconfirmed,true);assert.equal(activity.text,'Studio staging outcome unconfirmed');
+      assert.equal(activity.reason,'Previous attempt check: no current Studio connection check was available.');assert.equal(activity.change,null);assert.deepEqual(activity.facts,[]);}
+    const details=toolDetailText([['Result',history.entries[0]!.text]]);assert.match(details,/"terminal": false/);assert.match(details,/"ambiguous": true/);assert.match(details,/"retry": false/);
+  }
+});
+
+test('matching foreign codes and forged diagnostic properties remain generic at the actual native route',async t=>{
+  let reports=0;const f=await fixture(t,true,async()=>{reports++;return null;});
+  f.setStage(async()=>{throw Object.assign(new ArcaneError('STUDIO_STAGE_CONTINUITY','private native-id C:/source/model.py'),{
+    diagnostic:{schemaVersion:1,operation:'stage',phase:'packet-receipt',reason:'proof-expired',packetOrdinal:0}});});
+  const reply=await f.http({jobId:JOB},{path:'/v1/assets/native/stage-studio-import'}).result;
+  assert.equal(reply.status,503);assert.equal(reply.data.error,'STUDIO_STAGE_CONTINUITY');assert.equal(reply.data.diagnostic,undefined);
+  assert.equal(reply.data.message,'Native chat asset request refused or unavailable.');assert.doesNotMatch(reply.text,/private native-id|model\.py/);assert.equal(reports,0);
 });

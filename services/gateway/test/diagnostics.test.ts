@@ -128,3 +128,22 @@ test('disabled service exposes no reports and does not create its event table', 
   assert.equal((await h.request('/v1/admin/diagnostics', undefined, {Cookie: h.cookie()})).status, 503);
   assert.equal(h.db.prepare("SELECT name FROM sqlite_master WHERE name='diagnostic_events'").get(), undefined);
 });
+
+test('configured collector accepts only the finite staging event and keeps original auth, privacy and disabled boundaries',async t=>{
+  const h=await fixture(t),headers={Authorization:'Bearer '+h.token};
+  const event=()=>({...h.event(),component:'studio',stage:'studio-import',code:'STUDIO_STAGE_CONTINUITY',context:{stagingPhase:'packet-receipt',stagingReason:'proof-expired',packetOrdinal:511}});
+  const report=event();assert.equal((await h.request('/v1/diagnostics/events',report)).status,401);
+  assert.deepEqual(await (await h.request('/v1/diagnostics/events',report,headers)).json(),{accepted:true,eventId:report.eventId});
+  const secret='private source C:\\Users\\fixture\\model.glb token';
+  for(const value of [
+    {...event(),context:{...report.context,packetOrdinal:512}}, {...event(),context:{...report.context,stagingReason:secret}},
+    {...event(),context:{...report.context,jobId:OWNER}}, {...event(),context:{...report.context,operationId:MEMBER}},
+    {...event(),context:{...report.context,stagingPhase:'target-check'}}, {...event(),component:'blender'},
+    {...event(),message:secret}, {...event(),context:{stagingPhase:'packet-enqueue',stagingReason:'disconnected'}},
+  ])assert.equal((await h.request('/v1/diagnostics/events',value,headers)).status,400);
+  const response=await h.request('/v1/admin/diagnostics',undefined,{Cookie:h.cookie()});assert.equal(response.status,200);
+  const view=await response.json() as {events:{event:{code:string;context:unknown}}[]};assert.equal(view.events.length,1);assert.equal(view.events[0]!.event.code,'STUDIO_STAGE_CONTINUITY');assert.deepEqual(view.events[0]!.event.context,report.context);
+  const raw=JSON.stringify(h.db.prepare('SELECT * FROM diagnostic_events').all());assert.doesNotMatch(raw,/STUDIO_STAGE_CONTINUITY|proof-expired/);assert.ok(!raw.includes(secret));assert.ok(!h.logs.join('\n').includes(secret));
+  const disabled=await fixture(t,{DIAGNOSTICS_ENABLED:'0'});assert.equal((await disabled.request('/v1/diagnostics/events',event(),{Authorization:'Bearer '+disabled.token})).status,503);
+  assert.equal(disabled.db.prepare("SELECT name FROM sqlite_master WHERE name='diagnostic_events'").get(),undefined);
+});
