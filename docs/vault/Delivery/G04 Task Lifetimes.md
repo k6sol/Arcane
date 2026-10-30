@@ -22,7 +22,7 @@ Depends on: 1. Owner: task/runtime integration.
 
 ## Evidence
 
-30 October: [[Bugs/Adoption Work Lifetime]] has a connected original host/service implementation with held file-read, publication, persistence and Stop-after-registry-close cases prepared for hosted validation. Deliberate client-close provenance is still being completed separately. No whole-goal or native acceptance claim yet.
+30 October: [[Bugs/Adoption Work Lifetime]] is on the validation branch with held file-read, publication, persistence and Stop-after-registry-close cases. [[Bugs/Cancellation Request Provenance]] now has the connected exact-error implementation and fourteen authored regressions prepared for the same branch. Hosted acceptance remains pending; no whole-goal or native acceptance claim yet.
 
 ## Next action
 

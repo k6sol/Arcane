@@ -22,6 +22,8 @@ export interface ChatTaskOwner {
   repair(report: StudioTestTaskSettled): Promise<void>;
   revoke(): void;
   cancel(): Promise<void>;
+  /** Exact original-client request errors caused by its deliberate close only. */
+  isOwnedCloseRequestError?(error: unknown): boolean;
   /** Live native account identity of this exact owned client. Owners without it gain no proposal authority. */
   accountIdentity?(): string | null;
   /** Original native client and opaque parent continuation, captured by host composition. */
@@ -431,7 +433,13 @@ export class ChatTaskCoordinator {
       value.prepared = null; value.operationId = null; value.turnId = null; value.nativeSettled = false; value.acknowledged = false; });
     try { await entry.owner.repair(report); this.acknowledged(id); }
     catch (error) {
-      if (entry.revoked) throw error;
+      if (entry.revoked) {
+        // Stop still joins owner.cancel() independently, including its actual
+        // physical-close failure. Only this original request provenance is benign.
+        try { if (entry.owner.isOwnedCloseRequestError?.(error) === true) return; }
+        catch { /* A classifier cannot replace the original request failure. */ }
+        throw error;
+      }
       const dispatched = error instanceof Error && 'dispatched' in error && error.dispatched === true;
       this.#store.update(id, value => { value.state = dispatched ? 'unknown' : 'paused'; value.reason = 'repair_dispatch_not_replayed';
         if (dispatched) value.repairDispatch = 'unknown'; });

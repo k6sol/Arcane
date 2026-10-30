@@ -26,6 +26,7 @@ export class JsonlTransport {
   #resolveClosed!: () => void;
   #fullyClosed = false;
   #joining: Promise<void> | null = null;
+  #ownedCloseRequestErrors = new WeakSet<object>();
   constructor(spec: InternalProcess, readonly bounds: Limits, private readonly onMessage: (message: Record<string, unknown>) => void, private readonly onDisconnect: (error: CodexClientError) => void) {
     if (!isAbsolute(spec.command) || !isAbsolute(spec.cwd)) fail('PROCESS_PATH', 'Executable and workspace must be absolute.');
     this.#frame = Buffer.alloc(bounds.maxFrameBytes);
@@ -145,13 +146,22 @@ export class JsonlTransport {
       pending.reject(new CodexClientError('REMOTE_REJECTED', 'Native CLI rejected the request.', pending.dispatched, code));
     } else pending.resolve(message.result);
   }
+  /** Exact errors created by this transport while its explicit close stops pending requests. */
+  isOwnedCloseRequestError(error: unknown): boolean {
+    return typeof error === 'object' && error !== null && this.#ownedCloseRequestErrors.has(error);
+  }
   stop(reason = new CodexClientError('DISCONNECTED', 'Local client disconnected.')): void {
+    this.#stop(reason, false);
+  }
+  #stop(reason: CodexClientError, ownedClose: boolean): void {
     if (this.#closed) return;
     this.#closed = true;
     this.#frame = Buffer.alloc(0); this.#partBytes = 0;
     for (const pending of this.#pending.values()) {
       clearTimeout(pending.timer);
-      pending.reject(new CodexClientError(reason.code, reason.message, pending.dispatched, reason.remoteCode));
+      const error = new CodexClientError(reason.code, reason.message, pending.dispatched, reason.remoteCode);
+      if (ownedClose) this.#ownedCloseRequestErrors.add(error);
+      pending.reject(error);
     }
     this.#pending.clear();
     this.onDisconnect(reason);
@@ -159,7 +169,7 @@ export class JsonlTransport {
     if (!this.#exited) { try { this.#child.kill(); } catch { /* close() reports an unconfirmed exit after bounded escalation. */ } }
   }
   close(): Promise<void> {
-    this.stop();
+    this.#stop(new CodexClientError('DISCONNECTED', 'Local client disconnected.'), true);
     return this.#joining ??= this.#join();
   }
   async #waitForClose(): Promise<void> {

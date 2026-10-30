@@ -8,6 +8,14 @@ import {ChatTaskStore} from '../../packages/storage/src/chat-task-store.js';
 import type {Snapshot} from '../../packages/codex-client/src/types.js';
 import type {StudioTestTaskOrigin,StudioTestTaskPrepared,StudioTestTaskSettled,StudioTestTaskWork,StudioTestTaskWorkRegistration} from '../../packages/protocol/src/chat-task-playtest.js';
 import {makeFixtureDirectory,fixtureTempDirectory} from './windows-fixture-paths.js';
+import {createCodexService} from '../../apps/daemon/src/codex-service.js';
+import {createNativeAssetRegistry} from '../../apps/daemon/src/native-asset-authority.js';
+import {CodexSession} from '../../packages/codex-client/src/session.js';
+import {nativeEnvironment} from '../../packages/codex-client/src/transport.js';
+import {limits} from '../../packages/codex-client/src/validation.js';
+import {ARCANE_NATIVE_TOOL_NAMES} from '../../packages/protocol/src/arcane-tools.js';
+import {readFile} from 'node:fs/promises';
+import {setTimeout as delay} from 'node:timers/promises';
 
 // Actual coordinator and SQLite, controlled host ports and deferred lifetimes.
 // These schedules establish accounting/error behavior, never native closure,
@@ -223,5 +231,94 @@ test('synchronous fence retirement failure is retained through cached close whil
     await assert.rejects(f.coordinator.close(),error=>Object.is(error,value));assert.equal(f.counts.owner,1);
     const reopened=new ChatTaskStore({directory:f.directory,projectPath:f.project});
     try{assert.equal(reopened.get(parent.id).state,'cancelled');}finally{reopened.close();}
+  });
+});
+
+const REPAIR_PEER=String.raw`
+const {createInterface}=require('node:readline'),{appendFileSync,writeFileSync}=require('node:fs');
+const s=JSON.parse(process.argv[1]);let turns=0;
+const send=value=>process.stdout.write(JSON.stringify(value)+'\n'),reply=(id,result)=>send({id,result});
+createInterface({input:process.stdin}).on('line',line=>{
+ const message=JSON.parse(line),{id,method,params={}}=message;
+ appendFileSync(s.audit,JSON.stringify({method})+'\n');if(!method||method==='initialized')return;
+ if(method==='initialize')return reply(id,{});
+ if(method==='account/read')return reply(id,{account:{type:'chatgpt',email:'owned-close@example.invalid',planType:'plus'},requiresOpenaiAuth:true});
+ if(method==='model/list')return reply(id,{data:[{id:'fixture',model:'fixture',displayName:'Fixture',supportedReasoningEfforts:[{reasoningEffort:'low'}]}],nextCursor:null});
+ if(method==='thread/start')return reply(id,{thread:{id:'owned-close-thread',sessionId:'owned-close-session',turns:[],status:{type:'idle'}},model:params.model,modelProvider:'openai',cwd:process.cwd(),approvalPolicy:'on-request',approvalsReviewer:'user',sandbox:{type:'readOnly',networkAccess:false}});
+ if(method==='mcpServerStatus/list'){
+  if(turns===1&&s.mode==='preflight'){writeFileSync(s.entered,'held');return;}
+  return reply(id,{data:[{name:'arcane',runtimeStatus:'connected',toolsError:null,pluginId:null,tools:Object.fromEntries(s.tools.map(name=>[name,{}]))}],nextCursor:null});
+ }
+ if(method==='turn/start'){
+  if(++turns===1)return reply(id,{turn:{id:'owned-initial-turn',status:'completed'}});
+  writeFileSync(s.entered,'held');if(s.mode==='remote')return send({id,error:{code:-32001,message:'Controlled original repair rejection'}});return;
+ }
+ throw Error('Unexpected controlled peer method');
+});`;
+async function repairServiceFixture(t:TestContext,mode:'preflight'|'ack'|'remote',closeFailure?:Error,foreignRepairFailure?:{value:unknown}){
+  const root=makeFixtureDirectory('arcane-owned-repair-'),project=join(root,'project');mkdirSync(project);
+  const registry=createNativeAssetRegistry({projectPath:project}),audit=join(root,'methods.jsonl'),entered=join(root,'repair-entered');
+  let client:CodexSession|undefined,credential='',repairFailure:unknown,hasRepairFailure=false,closes=0,expectedClose:{value:unknown}|null=null;
+  const service=createCodexService({directory:join(root,'journal'),projectPath:project,assetRegistry:registry,connect:async hooks=>{
+    assert.ok(hooks);credential=hooks.finalCredential();client=new CodexSession({command:process.execPath,args:['-e',REPAIR_PEER,JSON.stringify({mode,audit,entered,tools:ARCANE_NATIVE_TOOL_NAMES})],cwd:project,env:nativeEnvironment()},limits({requestTimeoutMs:5000}),'spawned-node-fixture','arcane-only',hooks);
+    const originalRepair=client.continueTask.bind(client),originalClose=client.close.bind(client);
+    client.continueTask=async input=>{try{return await originalRepair(input);}catch(error){const failure=foreignRepairFailure?foreignRepairFailure.value:error;repairFailure=failure;hasRepairFailure=true;throw failure;}};
+    client.close=async()=>{closes++;await originalClose();if(closeFailure)throw closeFailure;};
+    await client.initialize();return client;
+  }});
+  let job:{origin:StudioTestTaskOrigin;packet:StudioTestTaskSettled;work:StudioTestTaskWork;life:ReturnType<typeof deferred>}|null=null;
+  service.attachPlaytestCancellation(Object.freeze({async cancelExact(jobId:string,origin:StudioTestTaskOrigin){assert.ok(job);assert.equal(job.packet.jobId,jobId);assert.equal(job.origin,origin);service.playtestTasks!.terminal(origin,job.packet,job.work);job.life.resolve();},async revalidateExact(){return 'current' as const;}}));
+  t.after(async()=>{try{if(expectedClose)await assert.rejects(service.close(),error=>error===expectedClose!.value);else await service.close();}
+    finally{try{if(client){if(closeFailure)await assert.rejects(client.close(),error=>error===closeFailure);else await client.close();}}finally{registry.close();const tail=relative(fixtureTempDirectory(),root);assert.ok(!isAbsolute(tail)&&tail.startsWith('arcane-owned-repair-')&&!tail.startsWith('..'));rmSync(root,{recursive:true,force:true});}}});
+  const action=(name:string,fields:Record<string,unknown>={})=>service.action({requestId:randomUUID(),connectionId:name==='connect'?null:service.state().snapshot!.connectionId,action:name,...fields});
+  for(const[name,fields]of [['connect',{}],['select',{model:'fixture',effort:'low'}],['thread-start',{}],['turn-start',{threadId:'owned-close-thread',text:'Controlled task'}]]as const)
+    assert.equal((await action(name,fields)).record.state,'acknowledged',name);
+  assert.ok(client);const originalClient=client,connectionId=client.snapshot().connectionId,taskId=service.state().chatTasks![0]!.taskId;
+  const origin=service.playtestTasks!.capture('agent-'+sha(credential));assert.ok(origin);
+  const prepared={jobId:randomUUID(),displayDigest:sha('display'),scenarioDigest:sha('scenario'),subjectDigest:sha('subject')},life=deferred();
+  const work=service.playtestTasks!.registerWork(origin,Object.freeze({kind:'prepare' as const,completion:life.promise,cancel:async()=>assert.fail('Published original job uses exact cancellation.')}));
+  const packet=report(prepared,'failed');job={origin,packet,work,life};service.playtestTasks!.prepared(origin,prepared,work);service.playtestTasks!.terminal(origin,packet,work);life.resolve();
+  const waitFor=async(check:()=>boolean|Promise<boolean>)=>{const end=Date.now()+6000;while(!await check()){assert.ok(Date.now()<end,'Expected actual controlled repair dispatch.');await delay(5);}};
+  await waitFor(async()=>{try{return await readFile(entered,'utf8')==='held';}catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')return false;throw error;}});
+  return {service,client:originalClient,waitFor,repairFailure:()=>({seen:hasRepairFailure,value:repairFailure}),closes:()=>closes,
+    expectClose:(value:unknown)=>{expectedClose={value};},methods:async()=>(await readFile(audit,'utf8')).trim().split('\n').map(line=>(JSON.parse(line)as {method:string}).method),
+    stop:()=>service.action({requestId:randomUUID(),connectionId,action:'task-stop',threadId:'owned-close-thread',taskId})};
+}
+for(const mode of ['preflight','ack']as const)test('actual Stop joins a deliberately closed held repair '+mode+' without inventing a cleanup failure',{timeout:20000},async t=>{
+  const f=await repairServiceFixture(t,mode),stopped=await f.stop();assert.equal(stopped.record.state,'acknowledged');
+  assert.equal(f.repairFailure().seen,true);const error=f.repairFailure().value;assert.equal(f.client.isOwnedCloseRequestError(error),true);
+  assert.ok(error instanceof Error);assert.equal(f.client.isOwnedCloseRequestError({...error}),false);
+  assert.equal((await f.methods()).filter(method=>method==='turn/start').length,mode==='preflight'?1:2);
+  await f.service.close();await f.service.close();assert.equal(f.closes(),1);
+});
+test('actual Stop preserves the independent owned close failure after its repair request was intentionally interrupted',{timeout:20000},async t=>{
+  const original=new Error('original owned close failure'),f=await repairServiceFixture(t,'ack',original);f.expectClose(original);
+  assert.equal((await f.stop()).record.state,'rejected');assert.equal(f.client.isOwnedCloseRequestError(f.repairFailure().value),true);
+  await assert.rejects(f.service.close(),error=>error===original);await assert.rejects(f.service.close(),error=>error===original);
+});
+test('an actual original repair rejection remains a failure after later owned closure',{timeout:20000},async t=>{
+  const f=await repairServiceFixture(t,'remote');await f.waitFor(()=>f.repairFailure().seen);
+  const original=f.repairFailure().value;assert.equal(f.client.isOwnedCloseRequestError(original),false);f.expectClose(original);
+  await assert.rejects(f.service.close(),error=>error===original);await assert.rejects(f.service.close(),error=>error===original);
+});
+test('another actual session\'s deliberate-close error cannot settle this original service task',{timeout:20000},async t=>{
+  const first=await repairServiceFixture(t,'preflight');assert.equal((await first.stop()).record.state,'acknowledged');
+  const foreign=first.repairFailure().value;assert.equal(first.client.isOwnedCloseRequestError(foreign),true);
+  const second=await repairServiceFixture(t,'ack',undefined,{value:foreign});second.expectClose(foreign);
+  assert.equal(second.client.isOwnedCloseRequestError(foreign),false);assert.equal((await second.stop()).record.state,'rejected');
+  await assert.rejects(second.service.close(),error=>error===foreign);await assert.rejects(second.service.close(),error=>error===foreign);
+  await first.service.close();assert.equal(first.closes(),1);
+});
+test('revocation cannot relabel a copied close error or a failed/missing classifier',{timeout:15000},async t=>{
+  for(const mode of ['missing','false','throws']as const)await t.test(mode,async st=>{
+    const f=fixture(st),parent=f.own(),job=f.prepare(parent),entered=f.gate(),released=f.gate();
+    const original=Object.assign(new Error('Local client disconnected.'),{code:'DISCONNECTED',dispatched:true});f.expectClose(original);
+    parent.owner.repair=async()=>{entered.resolve();await released.promise;throw original;};
+    parent.owner.cancel=async()=>{f.counts.owner++;released.resolve();};
+    if(mode==='false')parent.owner.isOwnedCloseRequestError=()=>false;
+    if(mode==='throws')parent.owner.isOwnedCloseRequestError=()=>{throw new Error('Later classifier fault');};
+    f.terminal(job,'failed');job.life.resolve();parent.acknowledge();await entered.promise;
+    await assert.rejects(f.coordinator.cancel(parent.id,'actual Stop'),error=>error===original);assert.equal(f.counts.owner,1);
+    await assert.rejects(f.coordinator.close(),error=>error===original);
   });
 });

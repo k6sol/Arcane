@@ -6,6 +6,9 @@ import {tmpdir} from 'node:os';
 import {join,relative,isAbsolute,sep} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {nativeEnvironment} from '../../packages/codex-client/src/transport.js';
+import {JsonlTransport} from '../../packages/codex-client/src/transport.js';
+import {CodexClientError} from '../../packages/codex-client/src/types.js';
+import {limits} from '../../packages/codex-client/src/validation.js';
 
 const LIBRARY=fileURLToPath(new URL('../../packages/codex-client/src/',import.meta.url));
 // Only the spawn boundary is synthetic. The production transport/session code,
@@ -86,4 +89,46 @@ test('native session propagates unconfirmed transport shutdown to its host',asyn
   const events=await fixture(t,'never-closes','session');
   assert.ok(events.filter(e=>e.event==='returned').every(e=>e.confirmed===false&&e.code==='PROCESS_EXIT_UNCONFIRMED'));
   assert.equal(events.filter(e=>e.signal==='SIGKILL').length,1);
+});
+
+// Real owned Node stdio peer; these are transport provenance regressions, not
+// native-provider or Studio evidence. Readiness precedes the timed request.
+const REQUEST_PEER=String.raw`
+const {createInterface}=require('node:readline');const mode=process.argv[1];
+const send=value=>process.stdout.write(JSON.stringify(value)+'\n');
+send({method:'fixture/ready',params:{}});
+createInterface({input:process.stdin}).on('line',line=>{
+ const message=JSON.parse(line);if(!message.method)return;
+ if(mode==='remote')return send({id:message.id,error:{code:-32001,message:'Controlled remote rejection'}});
+ if(mode==='malformed')return process.stdout.write('not-json\n');
+ if(mode==='exit')return process.exit(0);
+ send({method:'fixture/held',params:{}});
+});`;
+async function requestFixture(t:test.TestContext,mode='held'){
+  let ready!:()=>void,held!:()=>void;
+  const readiness=new Promise<void>(resolve=>{ready=resolve;}),entered=new Promise<void>(resolve=>{held=resolve;});
+  const transport=new JsonlTransport({command:process.execPath,args:['-e',REQUEST_PEER,mode],cwd:process.cwd(),env:nativeEnvironment()},
+    limits({requestTimeoutMs:1000}),message=>{if(message.method==='fixture/ready')ready();if(message.method==='fixture/held')held();},()=>{});
+  t.after(()=>transport.close());await readiness;
+  return {transport,entered,request:()=>transport.request('initialize',{}).then(()=>assert.fail('The controlled request cannot succeed.'),error=>error as unknown)};
+}
+test('deliberate transport close marks only its original pending error object',{timeout:10000},async t=>{
+  const first=await requestFixture(t),second=await requestFixture(t),pending=first.request();await first.entered;
+  await first.transport.close();const original=await pending;assert.ok(original instanceof CodexClientError);
+  assert.equal(first.transport.isOwnedCloseRequestError(original),true);
+  assert.equal(second.transport.isOwnedCloseRequestError(original),false);
+  for(const copy of [new CodexClientError(original.code,original.message,original.dispatched,original.remoteCode),{...original},new Proxy(original,{}),null,undefined,false,0])
+    assert.equal(first.transport.isOwnedCloseRequestError(copy),false);
+  const later=await first.request();assert.equal(first.transport.isOwnedCloseRequestError(later),false);
+  await first.transport.close();assert.equal(first.transport.isOwnedCloseRequestError(original),true);
+});
+for(const [mode,code]of [['remote','REMOTE_REJECTED'],['malformed','PROTOCOL'],['exit','DISCONNECTED'],['timeout','TIMEOUT']]as const)
+test('later deliberate close cannot relabel the actual '+mode+' request failure',{timeout:10000},async t=>{
+  const f=await requestFixture(t,mode),original=await f.request();assert.ok(original instanceof CodexClientError);assert.equal(original.code,code);
+  assert.equal(f.transport.isOwnedCloseRequestError(original),false);await f.transport.close();assert.equal(f.transport.isOwnedCloseRequestError(original),false);
+});
+test('an ordinary stop reason is not deliberate-close request provenance',{timeout:10000},async t=>{
+  const f=await requestFixture(t),pending=f.request();await f.entered;
+  f.transport.stop(new CodexClientError('DISCONNECTED','Local client disconnected.'));
+  const original=await pending;assert.equal(f.transport.isOwnedCloseRequestError(original),false);await f.transport.close();
 });

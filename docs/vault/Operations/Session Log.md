@@ -13,6 +13,8 @@ Inspected installation metadata and the plugin file without opening Studio: acti
 
 Prepared the connected adoption work-lifetime implementation for the existing validation ref. It preserves 41 existing test declarations and adds 17 authored scenarios across work identity, held reads/commits, original Stop, known failed copy and unknown acknowledgement/persistence. Source review is complete; hosted execution remains pending. See [[Bugs/Adoption Work Lifetime]].
 
+Finished source review of deliberate-close request provenance. Original transport errors retain their identity through session preflight and the captured task owner. Only intentional Stop request interruption is benign; actual remote or physical-close failures remain. Fourteen new controlled cases cover the transport and real service/coordinator/session composition. [[Bugs/Cancellation Request Provenance]] records acceptance still required.
+
 ## 2026-10-29 · Working knowledge foundation
 
 Located the user's new Arcane Obsidian vault. Established versioned knowledge notes, ten linked delivery goals, original developer skills, a catalog of the existing product skills, templates and a Canvas map. Added a conflict-protecting committed-source sync and repository startup guidance.

@@ -119,7 +119,7 @@ export interface CodexProductState {
     state: string; round: 0 | 1; reason: string | null; reportDigest: string | null;retained?:boolean }[];
 }
 export interface CodexActionOutcome { record: CodexActionRecord; replayed: boolean; state: CodexProductState }
-export type CodexHostClient = Pick<CodexClient, 'snapshot'|'selectModel'|'startThread'|'resumeThread'|'grantThreadWrites'|'revokeThreadWrites'|'startTurn'|'interruptTurn'|'respondApproval'|'close'> & Partial<Pick<CodexClient,'steerTurn'|'readRateLimits'|'readThreadHistory'|'startManagedTask'|'continueTask'|'revokeTaskContinuation'|'taskAccountIdentity'|'openIncorporationChain'|'issueIncorporationPermit'|'continueIncorporation'>>;
+export type CodexHostClient = Pick<CodexClient, 'snapshot'|'selectModel'|'startThread'|'resumeThread'|'grantThreadWrites'|'revokeThreadWrites'|'startTurn'|'interruptTurn'|'respondApproval'|'close'> & Partial<Pick<CodexClient,'steerTurn'|'readRateLimits'|'readThreadHistory'|'startManagedTask'|'continueTask'|'revokeTaskContinuation'|'taskAccountIdentity'|'openIncorporationChain'|'issueIncorporationPermit'|'continueIncorporation'|'isOwnedCloseRequestError'>>;
 export interface CodexServiceOptions {
   directory: string; projectPath: string;
   /** Parent-controlled client factory. Tests use a labelled fixture; never accept it from HTTP input. */
@@ -581,7 +581,8 @@ export function createCodexService(options: CodexServiceOptions) {
                       if(allowAssets)ownedContext.nextIntent={connectionId:snapshot.connectionId,threadId:thread.threadId,sessionId:thread.sessionId,operationId:null};
                       try {await owned.continueTask!({continuation,text:repairPrompt(report)});}
                       finally {ownedContext.nextIntent=null;}
-                    },cancel:async()=>{ownedContext.nextIntent=null;
+                    },isOwnedCloseRequestError:error=>owned.isOwnedCloseRequestError?.(error)===true,
+                    cancel:async()=>{ownedContext.nextIntent=null;
                       try{ownedContext.handle?.cancelWork('incarnation');}
                       finally{try{retireAssets(ownedContext);}finally{
                         if(client===owned&&!busy){lastSnapshot=owned.snapshot();client=null;currentAssets=null;}await owned.close();}}

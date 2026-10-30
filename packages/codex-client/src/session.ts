@@ -196,6 +196,7 @@ export class CodexSession {
   #historyRead: ReturnType<typeof readHistoryProcess> | null = null;
   #processSpec: InternalProcess;
   #transport: JsonlTransport;
+  readonly #ownedCloseRequestErrors = new WeakSet<object>();
   #ready = false;
   #initializing = false;
   #account: Account | null = null;
@@ -594,9 +595,12 @@ export class CodexSession {
       } catch (error) {
         this.#invalidateIsolation(error);
         // A dispatched metadata request is not a dispatched turn. The host persists this distinction.
-        throw error instanceof CodexClientError
+        const refused = error instanceof CodexClientError
           ? new CodexClientError(error.code, error.message, false, error.remoteCode)
           : new CodexClientError('MCP_ISOLATION', 'Native isolation could not be verified. No turn was sent.');
+        // Preserve provenance only across this exact host-created projection.
+        if (this.#transport.isOwnedCloseRequestError(error)) this.#ownedCloseRequestErrors.add(refused);
+        throw refused;
       }
       finally { this.#turnPreflight = null; }
     }
@@ -736,6 +740,11 @@ export class CodexSession {
     }
     if (action.decision === 'accept' && !this.#canAccept(pending)) fail('WRITE_GRANT_REQUIRED', 'Accept requires an explicit thread write grant and an eligible local approval.');
     this.#removeApproval(pending, action.decision);
+  }
+  /** Private host observation, never a code/message or physical-closure claim. */
+  isOwnedCloseRequestError(error: unknown): boolean {
+    return this.#transport.isOwnedCloseRequestError(error) ||
+      typeof error === 'object' && error !== null && this.#ownedCloseRequestErrors.has(error);
   }
   async close(): Promise<void> {
     this.revokeTaskContinuation();
