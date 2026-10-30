@@ -218,12 +218,16 @@ export function createAssetConversationHost(options: AssetConversationHostOption
     async adoptNative(actor: NativeAssetActor,input:unknown):Promise<NativeAssetConversationStartResult> {
       const conversation=captured(actor,'mutate'),request=parseAdoptGlbInput(input);
       page(conversation,{limit:1});if(!adoptNative)fail('NATIVE_UNAVAILABLE');
-      let active=true,attempted=false,admitted=false,witnessed=false,uncertain=false;
+      const work=acquireNativeAssetWork(actor,'generation');
+      let active=true,attempted=false,admitted=false,witnessed=false,uncertain=false,returnedObserved=false;
+      let admissionRefused=false,admissionFailure:unknown;
       let id:string|null=null,association:'bound'|'unknown'='unknown';
       const admission:AssetStartAdmission=Object.freeze({
+        signal:work.signal,work,
         beforeCreate():void {
-          if(!active||attempted||witnessed)fail('ADMISSION');attempted=true;
-          assertNativeAssetActor(actor,'mutate');page(conversation,{limit:1});admitted=true;
+          if(!active||attempted||witnessed){uncertain=true;fail('ADMISSION');}attempted=true;
+          try{assertNativeAssetActor(actor,'mutate');page(conversation,{limit:1});admitted=true;}
+          catch(error){admissionRefused=true;admissionFailure=error;throw error;}
         },
         created(value:string):void {
           if(!active||witnessed){uncertain=true;fail('ADMISSION');}witnessed=true;
@@ -233,14 +237,17 @@ export function createAssetConversationHost(options: AssetConversationHostOption
         },
       });
       try{
-        const returned=jobId(await adoptNative(request,actor,admission));
+        const raw=await work.run(()=>adoptNative(request,actor,admission));returnedObserved=true;
+        const returned=jobId(raw);
         if(!witnessed){id=returned;uncertain=true;}else if(id!==returned)uncertain=true;
       }catch(error){
+        if(!witnessed&&!admitted&&admissionRefused)throw admissionFailure;
         // Actual service guarantees all ordinary-file/GLB preflight precedes
         // beforeCreate. A refusal before that observed boundary creates no job.
-        if(!attempted&&!witnessed)throw error;
+        // A malformed returned ACK cannot prove that no job was created.
+        if(!attempted&&!witnessed&&!returnedObserved)throw error;
         uncertain=true;
-      }finally{active=false;}
+      }finally{active=false;work.finish(uncertain?'unresolved':'closed');}
       return {projectId,projectPath,jobId:id,association:uncertain?'unknown':association,conversation:{...conversation},creation:uncertain?'unknown':'created',retry:false};
     },
     async convertNative(actor: NativeAssetActor,input:unknown):Promise<NativeAssetConversationStartResult> {

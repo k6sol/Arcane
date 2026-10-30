@@ -24,7 +24,7 @@ import { inspectPng, readJson, record, sha256 } from '../../../packages/asset-pi
 import { createStudioImportManifestAuthority, snapshotStudioImportSelection, snapshotConvertedStudioImportBaseline, CONVERTED_STUDIO_IMPORT_FILE_IDS, STUDIO_IMPORT_LIMITS, type PreparedStudioImport, type StudioImportBaseline, type GeneratedStudioImportBaselineV1 } from '../../../packages/asset-pipeline/src/studio-import-manifest.js';
 import { adaptCompletedConvertedStudioImport, type ConvertedImportRetainedPath } from './converted-asset-import-adapter.js';
 import { adaptCompletedStudioImport, assertStudioImportJobScope, type StudioImportHostOptions, type StudioImportPreparationAttempt } from './asset-import-adapter.js';
-import { assertNativeAssetActor, nativeAssetActorScope, acquireNativeAssetWork, assertNativeAssetWorkLease, type NativeAssetActor, type NativeAssetWorkLease } from './native-asset-authority.js';
+import { assertNativeAssetActor, nativeAssetActorScope, nativeAssetOperationSignal, acquireNativeAssetWork, assertNativeAssetWorkLease, type NativeAssetActor, type NativeAssetWorkLease } from './native-asset-authority.js';
 import { ConversationWorkStore } from '../../../packages/storage/src/conversation-work-store.js';
 import { decodeStudioImportPayload, type StudioImportPayload } from '../../../packages/asset-pipeline/src/studio-import-payload.js';
 import { createStudioImportTransfer, type StudioImportTransfer } from '../../../packages/asset-pipeline/src/studio-import-transfer.js';
@@ -964,8 +964,12 @@ export async function createAssetService(options: AssetServiceOptions) {
      * request JSON carries only a name and project-relative .glb path. */
     adoptProjectGlb(input: unknown, actor: NativeAssetActor, admission: AssetStartAdmission): Promise<GeneratedOrAdoptedAssetJobRecord> {
       ensureOpen();
-      const source = parseAdoptGlbInput(input), associations = importHost?.workAssociations;
+      const source = parseAdoptGlbInput(input), associations = importHost?.workAssociations,work=admission?.work;
+      if(!work)throw new ArcaneError('ADMISSION_WORK','Adoption requires the original native work lifetime.');
+      assertNativeAssetWorkLease(work);
+      if(admission.signal!==work.signal)throw new ArcaneError('ADMISSION_WORK','Adoption requires the original native work signal.');
       assertNativeAssetActor(actor,'mutate');
+      if(work.signal!==nativeAssetOperationSignal(actor))throw new ArcaneError('ADMISSION_WORK','Adoption work must belong to the original native operation.');
       const original = nativeAssetActorScope(actor);
       if (!(associations instanceof ConversationWorkStore) || associations.projectPath !== projectPath
         || original.projectPath !== projectPath || original.projectId !== associations.projectId
@@ -973,15 +977,19 @@ export async function createAssetService(options: AssetServiceOptions) {
       const conversation=snapshotAdoptedGlbConversation(original.conversation);
       if (adoption || probeActive || active.size || resolution || admitting || retentionOperation) throw new AssetError('BUSY','An asset operation or retained-history change is already running.');
       const end = Date.now() + ADOPTED_GLB_LIMITS.deadlineMs;
+      let scopeFailed=false;
       const guard = () => {
-        ensureOpen(); assertNativeAssetActor(actor,'mutate');
-        if (Date.now() >= end || !isDeepStrictEqual(nativeAssetActorScope(actor),original)
-          || associations.projectPath !== projectPath || associations.projectId !== original.projectId) throw new ArcaneError('ASSET_ADOPT_SCOPE','Original adoption scope expired or changed.');
-        associations.list(original.conversation,'asset-job',{limit:1});
+        try{
+          ensureOpen(); assertNativeAssetActor(actor,'mutate');
+          if (Date.now() >= end || !isDeepStrictEqual(nativeAssetActorScope(actor),original)
+            || associations.projectPath !== projectPath || associations.projectId !== original.projectId) throw new ArcaneError('ASSET_ADOPT_SCOPE','Original adoption scope expired or changed.');
+          associations.list(original.conversation,'asset-job',{limit:1});
+        }catch(error){scopeFailed=true;throw error;}
       };
       const wait = async <T>(p:Promise<T>):Promise<T> => {const value=await p;guard();return value;};
       const run = async ():Promise<GeneratedOrAdoptedAssetJobRecord> => {
         let job:GeneratedOrAdoptedAssetJobRecord|null=null;
+        let allocationAttempted=false,creationConfirmed=false;
         try {
           await wait(flushed());
           await ensureHistoryRoom(guard);
@@ -997,7 +1005,7 @@ export async function createAssetService(options: AssetServiceOptions) {
           // Publish a discoverable job only AFTER its first fsynced journal.
           // A crash before publication leaves owned staging evidence, not a
           // matching journal-less directory that prevents all history reopening.
-          guard();await wait(mkdir(staging));
+          guard();allocationAttempted=true;await wait(mkdir(staging));
           await wait(atomicAssetJson(staging,'job.json',JSON.stringify(initial)+'\n'));
           guard();await rename(staging,directory);
           job=initial;
@@ -1005,6 +1013,7 @@ export async function createAssetService(options: AssetServiceOptions) {
           // Publication FACT: bind the original conversation once even if the
           // actor retired while rename yielded. Never rebind an unknown ACK.
           if(admission.created(jobId)!==undefined) throw new ArcaneError('ASSET_ADOPT_ADMISSION','Synchronous void creation witness required.');
+          creationConfirmed=true;
           guard();await wait(noLinks(directory));
           const requestBytes=Buffer.from(JSON.stringify(request)+'\n');
           guard();await wait(writeFile(artifactPath(directory,'asset.glb'),owned.bytes,{flag:'wx'}));
@@ -1027,15 +1036,23 @@ export async function createAssetService(options: AssetServiceOptions) {
           // returns. No new operation or original source mutation follows.
           persist();await flushed();return structuredClone(job);
         } catch(error) {
-          if(!job) throw error;
+          if(!job){if(allocationAttempted)work.finish('unresolved');throw error;}
+          // A known failed job may close after its exact attribution and failed
+          // journal commit. Unknown publication/ownership/commit remains held.
+          // These are file-operation facts, never worker or engine proof.
+          if(!scopeFailed)try{guard();}catch{/* Record the original failure under the same retained job. */}
           job.state='failed';job.stage='complete';job.manifestAvailable=false;job.manifestPath=null;
           job.finishedAt=new Date().toISOString();job.updatedAt=job.finishedAt;
           job.error={code:'ASSET_ADOPT_INCOMPLETE',message:'Managed adoption is incomplete or acknowledgement unknown; inspect this original job without replay.'};
-          await atomicAssetJson(job.directory,'job.json',JSON.stringify(job)+'\n');
-          persist();await flushed();return structuredClone(job);
+          try{
+            await atomicAssetJson(job.directory,'job.json',JSON.stringify(job)+'\n');
+            persist();await flushed();
+          }catch(failure){work.finish('unresolved');throw failure;}
+          if(!creationConfirmed||scopeFailed)work.finish('unresolved');
+          return structuredClone(job);
         }
       };
-      const task=run();adoption=task;
+      const task=work.run(run);adoption=task;
       return task.finally(()=>{if(adoption===task) adoption=null;});
     },
     /** Native-only conversion of an exact already managed adopted parent. Public

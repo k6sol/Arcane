@@ -22,7 +22,7 @@ Depends on: 1. Owner: task/runtime integration.
 
 ## Evidence
 
-30 October: original adoption work can escape task accounting, and deliberate client closure can be misclassified as a cleanup failure during repair. Both source-backed fixes are being finished against current main with original file/transport and held-operation regressions. No whole-goal or native acceptance claim yet.
+30 October: [[Bugs/Adoption Work Lifetime]] has a connected original host/service implementation with held file-read, publication, persistence and Stop-after-registry-close cases prepared for hosted validation. Deliberate client-close provenance is still being completed separately. No whole-goal or native acceptance claim yet.
 
 ## Next action
 

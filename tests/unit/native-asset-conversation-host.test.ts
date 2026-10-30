@@ -191,6 +191,40 @@ test('closed storage rejects native creation and reads before service dispatch',
   assert.equal(f.nativeStarts, 0);
 });
 
+for(const returned of ['unwitnessed-adoption',''])test('unwitnessed adoption ACK retains its original lease without attribution: '+returned,{timeout:10000},async t=>{
+  const f=fixture(t),capture=f.issue();
+  const host=createAssetConversationHost({...f.options(),adoptNative:async(_input,_actor,admission)=>{
+    assert.ok(admission.work);assert.equal(admission.signal,admission.work.signal);return returned;
+  }});
+  const result=await host.adoptNative(capture.actor,{name:'controlled-adoption',path:'source.glb'});
+  unknown(result,returned||null);assert.deepEqual(f.store.list(NATIVE,'asset-job').items,[]);
+  capture.handle.retire();capture.handle.transportClosed();assert.equal(capture.handle.status().released,false);
+  assert.equal(f.nativeStarts,0);assert.equal(f.observations,0);
+});
+
+test('observed original adoption admission refusal settles its no-allocation lifetime after retirement',{timeout:10000},async t=>{
+  const f=fixture(t),capture=f.issue();let entered!:()=>void,release!:()=>void;
+  const started=new Promise<void>(resolve=>{entered=resolve;}),held=new Promise<void>(resolve=>{release=resolve;});t.after(()=>release());
+  const host=createAssetConversationHost({...f.options(),adoptNative:async(_input,_actor,admission)=>{
+    entered();await held;admission.beforeCreate();return assert.fail('Retired original admission cannot allocate.');
+  }});
+  const adoption=host.adoptNative(capture.actor,{name:'controlled-adoption',path:'source.glb'});void adoption.catch(()=>{});await started;
+  capture.handle.retire();capture.handle.transportClosed();assert.equal(capture.handle.status().released,false);
+  release();await assert.rejects(adoption,code('NATIVE_ASSET_AUTHORITY'));assert.equal(capture.handle.status().released,true);
+  assert.deepEqual(f.store.list(NATIVE,'asset-job').items,[]);assert.equal(f.nativeStarts,0);assert.equal(f.observations,0);
+});
+
+for(const failure of [Error('original admission refusal'),undefined])test('original adoption admission error is preserved without inventing uncertain creation: '+String(failure),{timeout:10000},async t=>{
+  const f=fixture(t),capture=f.issue(),actual=f.store.list.bind(f.store);let reads=0,created=0;
+  t.mock.method(f.store,'list',(...args:Parameters<typeof f.store.list>)=>{if(++reads===2)throw failure;return actual(...args);});
+  const host=createAssetConversationHost({...f.options(),adoptNative:async(_input,_actor,admission)=>{
+    admission.beforeCreate();created++;return assert.fail('Original admission refused before allocation.');
+  }});
+  await assert.rejects(host.adoptNative(capture.actor,{name:'controlled-adoption',path:'source.glb'}),error=>Object.is(error,failure));
+  assert.equal(reads,2);assert.equal(created,0);capture.handle.retire();capture.handle.transportClosed();assert.equal(capture.handle.status().released,true);
+  assert.deepEqual(f.store.list(NATIVE,'asset-job').items,[]);assert.equal(f.nativeStarts,0);assert.equal(f.observations,0);
+});
+
 for (const change of ['revoke', 'regrant', 'ended', 'new-window', 'retire', 'close'] as const) {
   test('creation-time admission refuses queued capture after ' + change, async t => {
     const f = fixture(t), capture = f.issue(); let release!: () => void, creations = 0;

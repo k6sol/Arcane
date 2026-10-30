@@ -10,7 +10,7 @@ import {tmpdir} from 'node:os';
 import {join,relative,isAbsolute,resolve,sep,basename} from 'node:path';
 import {createAssetService,type AssetService} from '../../apps/daemon/src/asset-service.js';
 import {createAssetConversationHost} from '../../apps/daemon/src/asset-conversation-host.js';
-import {createNativeAssetRegistry,type NativeAssetActor} from '../../apps/daemon/src/native-asset-authority.js';
+import {createNativeAssetRegistry,acquireNativeAssetWork,type NativeAssetActor} from '../../apps/daemon/src/native-asset-authority.js';
 import {nativeAssetRoutes} from '../../apps/daemon/src/native-asset-routes.js';
 import {assetRoutes} from '../../apps/daemon/src/asset-routes.js';
 import {ConversationWorkStore} from '../../packages/storage/src/conversation-work-store.js';
@@ -407,12 +407,13 @@ test('native-only ingress rejects human/global bearers, authority fields and URL
 });
 
 test('forged/proxied actors and retired original native captures cannot copy or bind',async t=>{
- const f=await nativeFixture(t);let effects=0,reads=0;const admission={beforeCreate(){effects++;},created(){effects++;}};
+ const f=await nativeFixture(t);let effects=0,reads=0;const original=f.actor(),work=acquireNativeAssetWork(original,'generation');
+ const admission=Object.freeze({signal:work.signal,work,beforeCreate(){effects++;},created(){effects++;}});
  const getter=Object.defineProperty({},'kind',{get(){reads++;throw Error('must not read');}});
  for(const actor of [{kind:'native-asset-actor'},getter,new Proxy(f.actor(),{get(){reads++;throw Error('must not read');}})])
   await assert.rejects(async()=>f.service.adoptProjectGlb({name:'owned',path:'exports/owned.glb'},actor as NativeAssetActor,admission));
- const original=f.actor(),pending=f.service.adoptProjectGlb({name:'owned',path:'exports/owned.glb'},original,admission);f.incarnation.retire();
- await assert.rejects(pending);assert.equal(effects,0);assert.equal(reads,0);assert.equal(f.service.jobs().length,0);
+ const pending=f.service.adoptProjectGlb({name:'owned',path:'exports/owned.glb'},original,admission);f.incarnation.retire();
+ try{await assert.rejects(pending);}finally{work.finish('closed');}assert.equal(effects,0);assert.equal(reads,0);assert.equal(f.service.jobs().length,0);
 });
 
 test('non-GLB, external URI and byte/node/image budget violations reject before managed allocation',async t=>{
