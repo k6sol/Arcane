@@ -106,11 +106,15 @@ jobs:
           PYTHONDONTWRITEBYTECODE: '1'
           PYTHONUTF8: '1'
         run: python tests/unit/tree_structure_review_test.py
-      - name: Verify branch junction UV orientation fallback
+      - name: Verify UV orientation and deep-chart quality
         env:
           PYTHONDONTWRITEBYTECODE: '1'
           PYTHONUTF8: '1'
-        run: python tests/unit/uv_engine_test.py SeamSelection.test_branch_junction_fallback_never_returns_folded_charts
+        run: >-
+          python tests/unit/uv_engine_test.py
+          SeamSelection.test_branch_junction_fallback_never_returns_folded_charts
+          SeamSelection.test_deep_branch_chart_keeps_its_distortion_target
+          SeamSelection.test_rejected_charts_have_bounded_recursion_on_skewed_geometry
       - name: Verify bounded native tree failure evidence
         run: node --test tests/native/tree-structure-evidence.test.mjs
       - name: Verify branch budgets and emitted foliage attachments

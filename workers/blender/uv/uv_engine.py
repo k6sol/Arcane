@@ -1199,7 +1199,8 @@ def _freeform(topo, chart, up, view, depth, max_angle, max_spread):
             uvs, distortion, spread = r_uvs, r_distortion, r_spread
     if flipped:
         return None
-    if (distortion > max_angle or spread > max_spread) and depth < 5 and len(chart.faces) > 12:
+    # Depth does not make a collapsed map usable; keep the same quality target.
+    if (distortion > max_angle or spread > max_spread) and len(chart.faces) > 12:
         return None
     uvs = to_metres(topo, chart.faces, uvs)
     uvs, locked = orient_up(topo, chart.faces, uvs, up)
@@ -1210,8 +1211,10 @@ def _split(topo, faces, up, view, depth, cuts, max_angle, max_spread):
     parts = cluster_split(topo, faces, up, view) if depth < 2 else []
     if len(parts) < 2:
         parts = bisect_faces(topo, faces)
-    if len(parts) < 2:
-        # Coincident or symmetric centroids can defeat the geometric split.
+    skewed = depth >= 5 and any(len(part) * 4 > len(faces) * 3 for part in parts)
+    if len(parts) < 2 or skewed:
+        # Preserve useful geometric cuts. Deep skewed cuts and coincident centroids
+        # use balanced halves, bounding stack growth without accepting bad UVs.
         # Keep cutting the rejected chart instead of projecting folded faces.
         ordered = sorted(faces)
         if len(ordered) <= 1:

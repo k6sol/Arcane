@@ -3,8 +3,10 @@ on synthetic meshes, plus the natural-finish procedural stage. Pure Python (nump
 import importlib.util
 import json
 import math
+import struct
 import sys
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 sys.dont_write_bytecode = True
@@ -62,6 +64,45 @@ def seam_edges(faces, uvs):
 
 
 class SeamSelection(unittest.TestCase):
+    def test_rejected_charts_have_bounded_recursion_on_skewed_geometry(self):
+        data = json.loads((ROOT / 'tests/fixtures/uv/tapered-branch-chart.json').read_text())
+        topo = E.Topology(data['vertices'], data['faces'])
+        original, depths = E.parameterize, []
+
+        def observed(*args, **kwargs):
+            depths.append(kwargs.get('depth', args[4] if len(args) > 4 else 0))
+            return original(*args, **kwargs)
+
+        # Worst-case valid centroid partition: one face against every other face.
+        # Reject nonplanar solver candidates to exercise the full refinement budget.
+        with patch.object(E, 'bisect_faces', side_effect=lambda _topo, faces: [faces[:1], faces[1:]]), \
+             patch.object(E, '_freeform', return_value=None), \
+             patch.object(E, 'planar_spread', return_value=((0, 0, 1), 180)), \
+             patch.object(E, 'parameterize', side_effect=observed):
+            charts = E.parameterize(topo, list(range(len(data['faces']))), E.UP, E.VIEW, depth=5)
+        self.assertLessEqual(max(depths), 5 + math.ceil(math.log2(len(data['faces']))))
+        self.assertEqual(sorted(face for chart in charts for face in chart.faces), list(range(len(data['faces']))))
+
+    def test_deep_branch_chart_keeps_its_distortion_target(self):
+        data = json.loads((ROOT / 'tests/fixtures/uv/tapered-branch-chart.json').read_text())
+        topo = E.Topology(data['vertices'], data['faces'])
+        charts = E.parameterize(topo, list(range(len(data['faces']))), E.UP, E.VIEW, depth=5)
+        self.assertEqual(sorted(face for chart in charts for face in chart.faces), list(range(len(data['faces']))))
+        for chart in charts:
+            folded, distortion, spread = E.chart_quality(topo, chart.faces, chart.uvs)
+            self.assertEqual(folded, 0)
+            if len(chart.faces) > 12:
+                self.assertLessEqual(distortion, .22)
+                self.assertLessEqual(spread, 3.0)
+        mapped, _ = E.tile_layout(topo, charts, .9)
+        stored = [tuple(tuple(struct.unpack('f', struct.pack('f', value))[0] for value in point)
+                        for point in mapped[face]) for face in range(len(data['faces']))]
+        quality = M.report(data['vertices'], data['faces'], stored, 'periodic', 512)
+        self.assertEqual(quality['foldedFaces'], 0)
+        self.assertEqual(quality['mirroredFaces'], 0)
+        self.assertEqual([tuple(point) for point in data['vertices']], topo.vertices)
+        self.assertEqual([tuple(face) for face in data['faces']], topo.faces)
+
     def test_branch_junction_fallback_never_returns_folded_charts(self):
         # A retained boolean branch junction cannot be split by its centroid plane.
         # The former last-resort projection returned four reversed triangles.
