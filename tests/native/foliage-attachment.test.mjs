@@ -53,9 +53,20 @@ function originalTextures(bytes) {
       '        marks.append((0.0, "twig", (painted, widths)))',
     ], ['        marks.append((0.0, "twig", (points, widths)))']],
   ];
+  // Preserve the same complete reviewed foliage control. The independent
+  // boulder-only addition is absent from that original module and never runs
+  // on these leaf patterns; remove only its exact reviewed fragments too.
+  replacements.push([
+    ['def _weathered_boulder_joints(np, crack, medium):',
+      '    """Interrupt broad joints with existing world-space weathering; consume no randomness."""',
+      '    return crack * _smooth(np, .46, .60, medium)', '', '', ''], []
+  ], [
+    ['    if form == "boulder":',
+      '        crack = _weathered_boulder_joints(np, crack, medium)', ''], []
+  ]);
   for (const [after, before] of replacements) {
     const fragment = after.join(newline);
-    assert.equal(text.split(fragment).length, 2, 'Original inverse requires one exact reviewed paint edit.');
+    assert.equal(text.split(fragment).length, 2, 'Original inverse requires one exact reviewed source fragment.');
     text = text.replace(fragment, before.join(newline));
   }
   const original = Buffer.from(text, 'utf8');

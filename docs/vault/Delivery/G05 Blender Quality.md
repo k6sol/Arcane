@@ -17,10 +17,12 @@ Depends on: 1; coordinate previews with 2 and job ownership with 4. Owner: asset
 
 - [ ] Required behavior implemented against current source.
 - [ ] Each outcome above verified at its stated scope.
-- [ ] Evidence and remaining limitations recorded below.
+- [x] Evidence and remaining limitations recorded below.
 - [ ] Relevant regression checks passed for the published revision.
 
 ## Evidence
+
+[[Bugs/Boulder Joint Weathering]] records a narrow boulder-only material improvement with seven passing controls inside actual Blender NumPy and two original complete local pipeline jobs. All six original workers close; exported geometry/normals/tangents/UV/collision bytes and measured UV reports remain exact, while both reviewed views change. Overall rock realism/form quality and the existing UV warning remain unaccepted. Fresh pinned native/hosted delivery is pending; this does not complete G05.
 
 [[Bugs/Original Asset Authoring]] corrects connected guidance that overstated bounded generators and omitted the existing native authoring route. Two SDK/MCP regressions are authored; hosted validation and actual generated geometry/rendered quality remain pending. This is not model training or whole-goal completion. [[Bugs/Foliage Card Attachment]] also corrects an actual card-base displacement and prepares 39 mandatory real-Blender representation cases, save/reopen, contact measurement and two neutral renders. Native execution and full-tree quality remain pending.
 

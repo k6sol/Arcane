@@ -1083,6 +1083,11 @@ class _Field:
         return f1 / density, f2 / density
 
 
+def _weathered_boulder_joints(np, crack, medium):
+    """Interrupt broad joints with existing world-space weathering; consume no randomness."""
+    return crack * _smooth(np, .46, .60, medium)
+
+
 def _rock_surface(np, rng, color, size, form, extent, moss, bake):
     """Natural rock texture baked over the rock's unique UV charts (see _rasterise): world-space
     tone, iron staining, mineral grain, joints and hairline cracks, irregular strata on outcrops,
@@ -1129,6 +1134,8 @@ def _rock_surface(np, rng, color, size, form, extent, moss, bake):
     f1, f2 = field.worley(1.3 if outcrop else 2.0, warp * (np.array([1.0, 1.0, 1.6]) if outcrop else 1.0))
     openness = _smooth(np, .5, .68, field.fbm(1.3, 2))
     crack = (1 - _smooth(np, 0, np.maximum(.012, 1.3 * texel), f2 - f1)) * openness
+    if form == "boulder":
+        crack = _weathered_boulder_joints(np, crack, medium)
     hair = 0.0
     if (field.fade(6.0) > 0).any():
         h1, h2 = field.worley(6.0, warp)

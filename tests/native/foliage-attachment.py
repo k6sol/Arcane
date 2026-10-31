@@ -187,7 +187,8 @@ def alpha_probes(directory, args, failures):
     baseline_path = directory / "baseline-textures.py"
     if baseline_path.resolve(strict=True).parent != directory or baseline_path.is_symlink():
         raise RuntimeError("Original control is outside owned native data")
-    # Complete current-layout module with only the two basal-paint edits reversed.
+    # Complete reviewed original foliage module: current tree layout with the
+    # two basal-paint edits reversed, excluding independent boulder weathering.
     if args.baseline_sha256 not in ("b869dc8be0f63281c3ca41c87e0acd775a08b47b3f623639fa0358c975bbd6e3",
                                   "797ea1d251d1b936b0c3d700724eb7a44fd857613c0e13b020005bb2d79e26f4"):
         raise RuntimeError("Unreviewed full original control")
