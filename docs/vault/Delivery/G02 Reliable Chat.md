@@ -30,6 +30,8 @@ Scoped model-switch correction: [[Bugs/Model Selection During Verification]] kee
 
 ## Evidence
 
+Actual native e8139e1 evidence: [[Sessions/2026-10-31 Native Chat and Permissions]] verifies one fresh GPT-6.1 Sol low reply through production HTTP/CLI/MCP, required-tool isolation, observed write/asset grants, exact original identity and transport cleanup. No tools, file changes or Studio operations occur. This is separate from the pending loaded customer-window journey, subsequent Send and automatic planning; the full goal stays open.
+
 Scoped evidence: installed fa7d730 passes all seven hosted checks and one actual native Sol6.1low startup conversation. Saved login recovered automatically after reviewed old connection notice, the original receipt stayed unknown, and one fresh prompt/reply remained visible without tools or old-prompt replay.194 focused chat/sidebar cases and39 diagnostics cases pass at their recorded scopes. See [[Bugs/Restart and Empty Chats]]. Full cancellation/model/provider/preview/restart coverage and first-Send empty-row correlation remain open; no whole-goal completion is claimed.
 
 ## Next action

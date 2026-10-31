@@ -11,12 +11,16 @@ Await the current user readiness reply before replacing the open old447 window. 
 
 ## Completed operations: do not replay
 
+- Runtimee8139e1 actual one-turn native journey is completed: four original ACKs, exact GPT-6.1 Sol low greeting, verified required tools, observed automatic grants and original closed custody lease. Source/dist hashes remain unchanged and no Studio/tool/file action occurs. Preserve the exclusive attempt and read its receipts; do not execute its prepared helper again. See [[Sessions/2026-10-31 Native Chat and Permissions]].
+
 - Runtime sourcecdda8e4 passes all seven original jobs41190423880, including packaged Windows startup/shutdown. Main's later265e9db commit records metadata evidence only; packaging remains bound to runtimecdda.
 - Exact archive digests, closed payload/source receipts, extracted files, installer kit and stable launcher compatibility verify. Matching plugin canonical-source verification passes without installation.
 - The original inactive-directory preservation, stock installation and independent4673-file integrity verification all completed successfully. Original exits and both EOFs were observed. No file was deleted; all other recorded releases were preserved. No lock/staging remains. Read the private receipts instead of rerunning scripts.
 - Actual native status and metadata checks are exclusive completed attempts. The saved subscription is recognized and one ready Connect succeeds without a thread/turn. Its original physical close is durably recorded. Do not replay these checks. Configured-thread isolation and actual loaded customer chat remain separate.
 
 ## After the updated window opens
+
+Next actual-provider acceptance should be a distinct, bounded scenario with new ownership, not a repeat of the finished greeting or metadata check. An isolated asset-only MCP tool call could verify actual approval/Blender dispatch while keeping scene operations prohibited; prepare and review its exact capability, resource and cleanup boundaries first. The greeting's permission bits and required-tool attestation do not prove an asset tool ran. Continue original exact-source hosted/package checks and preserve the pending customer-window readiness boundary.
 
 Latest priority: observe original hosted/component jobs for the signed Windows task-path follow-up and read-group source. The former local timeout now passes in 14,395.5174 ms at its original 20-second limit, within a frozen 156-case selection with zero skips/cancellations. [[Bugs/Windows Task Path Checks]] records the CPU diagnosis, exact unchanged guards and acceptance boundary. Do not repeat the finished profiler or native metadata checks; proceed toward exact-source packaged/customer acceptance. Historical timing and failed intermediate attempts below remain retained evidence, not current failures.
 
