@@ -1,5 +1,6 @@
 /// <reference lib="dom" />
 import {ConversationLibrary,type ConversationLibrarySnapshot,type ConversationProvider,type LibraryConversation,type LibraryTranscript,type LibraryDraftSource} from './conversation-library.js';
+import {USER_ERRORS,userErrorText} from './user-errors.js';
 type BeforeMessageSubmit=(draft:string)=>string|Promise<string>;
 export interface SharedConversationSource {projectPath:string;localId:string}
 export interface SharedConversationPeer {
@@ -134,7 +135,7 @@ export class SharedConversations {
     const current=this.source(provider);
     if(this.stopped||this.suspended||this.options.provider()!==provider||navigation!==this.navigationRevision||revision!==(this.sourceRevisions.get(provider)??0)||JSON.stringify(source)!==JSON.stringify(current))throw Error('Wait for this conversation to finish switching models.');
     if(!this.library)return draft;
-    const exact=this.draftSource(provider,current);if(!exact)throw Error('Wait for this conversation’s project and draft to finish loading.');
+    const exact=this.draftSource(provider,current);if(!exact)throw Error(userErrorText(USER_ERRORS[423])+' Your draft is retained.');
     this.observe();
     if(this.peer(provider)?.isDraftConversation()===true&&!this.library.draftConversation(exact)){this.library.newConversation(exact);this.persist();}
     this.observe();const library=this.library,rowId=library.active()?.id??null,prepared=library.contextFor(provider,draft);

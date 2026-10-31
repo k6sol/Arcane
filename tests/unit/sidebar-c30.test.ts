@@ -63,7 +63,7 @@ test('Edge: folder tree, folder menu, Show all and the footer menu use the exist
   const server = createServer((request, response) => { void (async () => {
     const path = request.url ?? '', name = /^\/([a-z-]+)\.js$/.exec(path)?.[1];
     const body = path === '/studio' ? page_ : path === '/studio.css' ? css : path === '/fixture.js' ? fixture
-      : name && ['shared-conversations', 'conversation-library', 'workspace-shell'].includes(name) ? await readFile(join(build, 'apps/desktop/src', name + '.js'), 'utf8') : null;
+      : name && ['shared-conversations', 'conversation-library', 'workspace-shell', 'user-errors'].includes(name) ? await readFile(join(build, 'apps/desktop/src', name + '.js'), 'utf8') : null;
     response.writeHead(body === null ? 404 : 200, { 'content-type': path === '/studio' ? 'text/html' : path === '/studio.css' ? 'text/css' : 'text/javascript' }); response.end(body ?? '');
   })(); });
   await new Promise<void>(done => server.listen(0, '127.0.0.1', done));

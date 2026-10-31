@@ -1,8 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { win32 } from 'node:path';
+import { win32, posix } from 'node:path';
 import { EventEmitter } from 'node:events';
+import { createHash } from 'node:crypto';
+import { types } from 'node:util';
 import { stripTypeScriptTypes } from 'node:module';
 import vm from 'node:vm';
 import { REQUIRED_SMOKE_CHECKS, smokeChecksComplete } from '../../scripts/check-windows-executable.mjs';
@@ -162,6 +164,193 @@ function windowsPolicy(fs = filesystemFixture()) {
   return module.exports;
 }
 const policy = windowsPolicy();
+
+/** Actual startup/session/IPC code over an in-memory filesystem and an owned ready emitter.
+ * This proves identity propagation, not a real Electron/native-process or encryption round trip. */
+function canonicalStartupFixture({ platform = 'win32', duringValidation } = {}) {
+  const paths = platform === 'win32' ? win32 : posix;
+  const project = platform === 'win32' ? 'C:\\Projects\\CaseProject' : '/projects/CaseProject';
+  const userRoot = platform === 'win32' ? 'C:\\Profile' : '/profile';
+  const productRoot = platform === 'win32' ? 'C:\\Product' : '/product';
+  const index = path => platform === 'win32' ? paths.resolve(path).toLowerCase() : paths.resolve(path);
+  const entries = new Map(), descriptors = new Map(), events = [], handlers = new Map(), encryptedPlaintexts = new Map();
+  let nextIdentity = 1n, nextDescriptor = 10, validationChanged = false;
+  const absent = () => Object.assign(new Error('Controlled startup path absent.'), { code: 'ENOENT' });
+  const get = path => { const value = entries.get(index(path)); if (!value) throw absent(); return value; };
+  const put = (path, kind = 'directory', bytes = Buffer.alloc(0)) => {
+    const value = { path: paths.resolve(path), physical: paths.resolve(path), kind, bytes, dev: 1n, ino: nextIdentity++, mode: kind === 'directory' ? 0o40700n : 0o100600n, nlink: 1n, mtimeNs: 1n, ctimeNs: 1n };
+    entries.set(index(path), value); return value;
+  };
+  const ensure = path => {
+    const missing = []; let current = paths.resolve(path);
+    while (!entries.has(index(current))) { missing.push(current); const parent = paths.dirname(current); if (parent === current) break; current = parent; }
+    for (const directory of missing.reverse()) put(directory);
+  };
+  for (const path of [project, userRoot, productRoot]) ensure(path);
+  const entryPath = paths.join(productRoot, 'dist/apps/daemon/src/product-main.js');
+  ensure(paths.dirname(entryPath)); put(entryPath, 'file');
+  const stat = (path, options = {}) => {
+    const value = typeof path === 'number' ? descriptors.get(path) : get(path); assert.ok(value, 'Only owned synthetic file handles are used.');
+    const number = value => options.bigint ? value : Number(value);
+    return { ...Object.fromEntries(['dev', 'ino', 'mode', 'nlink', 'mtimeNs', 'ctimeNs'].map(name => [name, number(value[name])])), size: number(BigInt(value.bytes.length)),
+      isDirectory: () => value.kind === 'directory', isFile: () => value.kind === 'file', isSymbolicLink: () => value.kind === 'link' };
+  };
+  const filesystem = {
+    constants: { O_RDONLY: 0, O_NOFOLLOW: 0 }, lstatSync: stat, fstatSync: stat, realpathSync: path => get(path).physical,
+    openSync(path, flags) {
+      let value;
+      if (flags === 'wx' || flags === 'wx+') { assert.equal(entries.has(index(path)), false); value = put(path, 'file'); }
+      else { assert.equal(flags, 0); value = get(path); }
+      const descriptor = nextDescriptor++; descriptors.set(descriptor, value); return descriptor;
+    },
+    readSync(descriptor, buffer, offset, length, position) {
+      const value = descriptors.get(descriptor); assert.ok(value); return value.bytes.copy(buffer, offset, position, position + length);
+    },
+    writeFileSync(descriptor, bytes) { const value = descriptors.get(descriptor); assert.ok(value); value.bytes = Buffer.from(bytes); value.mtimeNs++; value.ctimeNs++; },
+    writeSync(descriptor, bytes) { const value = descriptors.get(descriptor); assert.ok(value); value.bytes = Buffer.concat([value.bytes, Buffer.from(bytes)]); value.mtimeNs++; value.ctimeNs++; },
+    fsyncSync(descriptor) { assert.ok(descriptors.has(descriptor)); },
+    closeSync(descriptor) { assert.equal(descriptors.delete(descriptor), true); },
+  };
+  const asynchronous = {
+    async lstat(path) {
+      const before = stat(path); await Promise.resolve();
+      if (!validationChanged && index(path) === index(project)) {
+        validationChanged = true; duringValidation?.({ get, project, paths });
+      }
+      return before;
+    },
+    async realpath(path) { return get(path).physical; },
+  };
+  const policyModule = { exports: {} };
+  vm.runInNewContext(policySource, { module: policyModule, URL, Buffer, process: { platform }, require(name) {
+    if (name === 'node:path') return paths;
+    if (name === 'node:fs/promises') return asynchronous;
+    if (name === 'node:fs') return filesystem;
+    assert.fail('Unexpected controlled policy dependency: ' + name);
+  } }, { filename: 'canonical-startup-policy.cjs' });
+  const owned = new EventEmitter(); Object.assign(owned, { exitCode: null, signalCode: null, stderr: new EventEmitter() });
+  const frame = { url: origin + '/studio' }, contents = { mainFrame: frame, isDestroyed: () => false };
+  const window = { webContents: contents, isDestroyed: () => false }, event = { sender: contents, senderFrame: frame };
+  const managedUrl = 'data:text/javascript,' + encodeURIComponent('export function managedCodeVerificationConfiguration(options){return {environment:{ARCANE_FIXTURE_PROJECT:options.project.projectPath},settingsHash:"' + 'f'.repeat(64) + '"};}');
+  let preferenceExports;
+  const context = vm.createContext({ process: { platform, env: {} }, fs: filesystem, Buffer, URL, createHash,
+    join: paths.join, resolve: paths.resolve, userRoot, productRoot, nodeExecutable: paths.join(productRoot, 'owned-node'),
+    child: null, origin: '', token: '', projectPath: null, projectSession: null, nativeHandoff: null, providerSetup: null,
+    workspacePreferences: null, conversationLibrary: null, runtimeRecovery: null, closing: false, switching: false, smoke: false,
+    policy: policyModule.exports, performance: { now: () => 1 }, started: 0, daemonReadyMs: null,
+    setTimeout, clearTimeout, console: { warn() { assert.fail('Healthy controlled startup has no warning.'); } }, window,
+    codeVerification: {}, attachDiagnosticChild(child) { assert.equal(child, owned); }, recordStartupDiagnostic() { assert.fail('Healthy startup must not report failure.'); },
+    runtimeStopped() { assert.fail('No real child is launched or stopped.'); },
+    async ownedDirectory(path) { events.push({ kind: 'directory', path }); ensure(path); return path; },
+    spawn(executable, argv, options) { events.push({ kind: 'spawn', executable, argv, options }); queueMicrotask(() => owned.emit('message', { type: 'arcane-ready', protocolVersion: 1, origin, token })); return owned; },
+    async startAppAssets(child, session) { assert.equal(child, owned); events.push({ kind: 'app-assets', session }); },
+    safeStorage: { isEncryptionAvailable: () => true, encryptString() { assert.fail('Read-only fixture never encrypts.'); }, decryptString(bytes) {
+      const plaintext = encryptedPlaintexts.get(bytes.toString('base64')); assert.ok(plaintext, 'Only the two owned safeStorage TEST DOUBLE records decrypt.'); return plaintext;
+    } },
+    ipcMain: { handle(channel, handler) { assert.equal(handlers.has(channel), false); handlers.set(channel, handler); } },
+    require(name) {
+      if (name === 'node:url') return { pathToFileURL(path) { assert.equal(path, paths.join(productRoot, 'scripts/managed-luau-compiler.mjs')); return { href: managedUrl }; } };
+      if (name === './workspace-preferences.cjs') { assert.ok(preferenceExports); return preferenceExports; }
+      if (name === './native-handoff-host.cjs') return { createNativeHandoffHost(options) { events.push({ kind: 'handoff', options }); return Object.freeze({}); } };
+      assert.fail('Unexpected controlled startup dependency: ' + name);
+    },
+  });
+  const begin = mainSource.indexOf('async function canonicalProjectPath('), end = mainSource.indexOf('\nfunction installClipboardForWindow(', begin);
+  assert.ok(begin > 0 && end > begin, 'Extract the complete actual canonicalization/startDaemon boundary.');
+  // The one dynamic import resolves only to fixed local data, never the filesystem or a provider.
+  vm.runInContext(mainSource.slice(begin, end), context, { filename: 'canonical-startup-main.cjs', importModuleDynamically: vm.constants.USE_MAIN_CONTEXT_DEFAULT_LOADER });
+  const readPreferences = async (previousProject) => {
+    assert.equal(platform, 'win32');
+    const stored = [];
+    if (previousProject !== undefined) {
+      const { projectId, stateRoot } = context.projectSession;
+      for (const [record, filename, preferences] of [
+        [null, 'workspace-preferences.v1.json', { version: 1, projectPath: previousProject, provider: 'codex', tabs: [], activeTabId: null }],
+        ['library', 'conversation-library.v1.json', { version: 1, projectPath: previousProject, activeId: null, folders: [], conversations: [] }],
+      ]) {
+        const ciphertext = Buffer.from('owned safeStorage TEST DOUBLE ' + filename).toString('base64');
+        encryptedPlaintexts.set(ciphertext, JSON.stringify({ version: 1, projectId, ...(record ? { record } : {}), preferences }));
+        const node = put(paths.join(stateRoot, filename), 'file', Buffer.from(JSON.stringify({ version: 1, ciphertext }) + '\n'));
+        stored.push({ node, bytes: Buffer.from(node.bytes), ino: node.ino });
+      }
+    }
+    const module = { exports: {} }, hostContext = vm.createContext({ module, Buffer, URL, process: { platform }, require(name) {
+      if (name === 'node:fs') return filesystem;
+      if (name === 'node:path') return paths;
+      if (name === 'node:crypto') return { createHash, randomUUID() { assert.fail('Read-only preferences must not allocate a write.'); } };
+      if (name === 'node:util') return { types };
+      if (name === './policy.cjs') return policyModule.exports;
+      assert.fail('Unexpected preference dependency: ' + name);
+    } });
+    vm.runInContext(source('apps/desktop/electron/workspace-preferences.cjs'), hostContext, { filename: 'canonical-startup-preferences.cjs' });
+    preferenceExports = module.exports;
+    for (const name of ['workspacePreferences', 'conversationLibrary']) {
+      const start = mainSource.indexOf(name + " = require('./workspace-preferences.cjs').createWorkspacePreferences(");
+      const finish = mainSource.indexOf(name + '.installIpc(ipcMain);', start) + (name + '.installIpc(ipcMain);').length;
+      assert.ok(start > 0 && finish > start, 'Execute the actual ' + name + ' session accessor.');
+      vm.runInContext(mainSource.slice(start, finish), context, { filename: 'canonical-startup-preference-wiring.cjs' });
+    }
+    let exposed; const calls = [];
+    const preloadContext = vm.createContext({ TextEncoder, require(name) {
+      assert.equal(name, 'electron');
+      return { contextBridge: { exposeInMainWorld(name, value) { assert.equal(name, 'arcaneDesktop'); exposed = value; } }, ipcRenderer: { async invoke(channel, ...args) {
+        assert.ok(['arcane:workspace-preferences-read', 'arcane:conversation-library-read'].includes(channel)); assert.equal(args.length, 0); calls.push(channel);
+        const reply = await handlers.get(channel)(event); preloadContext.serializedReply = JSON.stringify(reply);
+        return vm.runInContext('JSON.parse(serializedReply)', preloadContext);
+      } } };
+    } });
+    vm.runInContext(preloadSource, preloadContext, { filename: 'canonical-startup-preload.cjs' });
+    const workspace = await exposed.workspacePreferences.read(), library = await exposed.conversationLibrary.read();
+    for (const { node, bytes, ino } of stored) { assert.equal(node.ino, ino); assert.ok(node.bytes.equals(bytes), 'Reading a case-spelled historical record never rewrites its ciphertext.'); }
+    return { workspace: JSON.parse(JSON.stringify(workspace)), library: JSON.parse(JSON.stringify(library)), calls };
+  };
+  return { context, project, userRoot, events, get, put, readPreferences,
+    start(input = project) { context.requestedProject = input; return vm.runInContext('startDaemon(requestedProject)', context); },
+    close() { owned.stderr.emit('close'); assert.equal(descriptors.size, 0, 'All synthetic diagnostic/metadata handles close.'); } };
+}
+
+test('canonical host startup shares one physical Windows project across daemon, preference accessor and preload IPC', { timeout: 5000 }, async t => {
+  const results = [];
+  for (const requested of ['c:\\projects\\caseproject', 'C:\\PROJECTS\\CASEPROJECT']) {
+    const f = canonicalStartupFixture(); t.after(() => f.close()); await f.start(requested);
+    const expectedKey = createHash('sha256').update(f.project.toLowerCase()).digest('hex'), session = f.context.projectSession;
+    const spawn = f.events.find(event => event.kind === 'spawn'); assert.ok(spawn);
+    assert.equal(spawn.options.env.ARCANE_PROJECT, f.project); assert.equal(spawn.options.env.ARCANE_FIXTURE_PROJECT, f.project);
+    assert.equal(session.projectPath, f.project); assert.equal(f.context.projectPath, f.project); assert.equal(session.projectId, expectedKey);
+    assert.equal(session.stateRoot, win32.join(f.userRoot, 'runtime', 'projects', expectedKey));
+    assert.equal(f.events.filter(event => event.kind === 'spawn').length, 1); assert.equal(spawn.options.shell, false); assert.equal(spawn.options.windowsHide, true);
+    assert.equal(f.events.find(event => event.kind === 'app-assets').session, session);
+    assert.equal(f.events.find(event => event.kind === 'handoff').options.getSession().projectPath, f.project);
+    const preferences = await f.readPreferences(requested);
+    assert.deepEqual(preferences.workspace, { available: true, preferences: { version: 1, projectPath: f.project, provider: 'codex', activeTabId: null, tabs: [] } });
+    assert.deepEqual(preferences.library, { available: true, projectPath: f.project, preferences: { version: 1, projectPath: f.project, activeId: null, folders: [], conversations: [] } });
+    assert.deepEqual(preferences.calls, ['arcane:workspace-preferences-read', 'arcane:conversation-library-read']);
+    results.push({ projectPath: session.projectPath, projectId: session.projectId, stateRoot: session.stateRoot });
+  }
+  assert.deepEqual(results[0], results[1], 'Case aliases never create a second project/state identity.');
+});
+
+for (const change of ['redirect', 'ancestor-identity', 'physical-spelling']) test('canonical host startup refuses ' + change + ' across asynchronous path validation before allocation or spawn', { timeout: 5000 }, async t => {
+  const f = canonicalStartupFixture({ duringValidation({ get, project, paths }) {
+    if (change === 'redirect') get(project).physical = 'C:\\OtherProject';
+    else if (change === 'ancestor-identity') get(paths.dirname(project)).ino++;
+    else get(project).physical = 'c:\\projects\\CASEPROJECT';
+  } }); t.after(() => f.close());
+  await assert.rejects(f.start('c:\\projects\\caseproject'));
+  assert.deepEqual(f.events, [], 'No state directory, provider configuration, app assets or child is allocated.');
+  assert.equal(f.context.child, null); assert.equal(f.context.projectSession, null); assert.equal(f.context.origin, '');
+});
+
+test('canonical host startup preserves POSIX exact spelling rather than accepting Windows case aliases', { timeout: 5000 }, async t => {
+  const good = canonicalStartupFixture({ platform: 'linux' }); t.after(() => good.close()); await good.start();
+  assert.equal(good.context.projectSession.projectPath, good.project);
+  assert.equal(good.context.projectSession.projectId, createHash('sha256').update(good.project).digest('hex'));
+  assert.equal(good.events.find(event => event.kind === 'spawn').options.env.ARCANE_PROJECT, good.project);
+  const wrong = canonicalStartupFixture({ platform: 'linux' }); t.after(() => wrong.close());
+  wrong.put('/projects/caseproject').physical = wrong.project;
+  await assert.rejects(wrong.start('/projects/caseproject'));
+  assert.deepEqual(wrong.events, []); assert.equal(wrong.context.projectSession, null);
+});
 
 function productServiceFixture({ closeFailAt } = {}) {
   const directory = 'C:\\UserData\\runtime\\projects\\fixture', cwd = 'C:\\Arcane\\resources\\product', projectPath = 'C:\\Project';

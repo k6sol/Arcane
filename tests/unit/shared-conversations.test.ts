@@ -6,10 +6,10 @@ const project='C:/Project';
 class Peer implements SharedConversationPeer {
   localId:string;
   private drafts=new Map<string,string>();
-  value:LibraryTranscript;hook:((draft:string)=>string|Promise<string>)|null=null;listeners=new Set<()=>void>();opens:string[]=[];refuse=false;notice='';draft=false;unsent='';newCalls=0;newChatGate:Promise<void>|null=null;
+  value:LibraryTranscript;hook:((draft:string)=>string|Promise<string>)|null=null;listeners=new Set<()=>void>();opens:string[]=[];refuse=false;notice='';draft=false;sourceAvailable=true;unsent='';newCalls=0;newChatGate:Promise<void>|null=null;
   constructor(provider:'codex'|'claude',conversationId:string|null){this.localId=provider+'-local';this.value={provider,projectPath:project,conversationId,sessionId:null,messages:[]};this.draft=conversationId===null;}
   recordedTranscript(){return structuredClone(this.value);}
-  conversationSource(){return this.value.projectPath?{projectPath:this.value.projectPath,localId:this.localId}:null;}
+  conversationSource(){return this.sourceAvailable&&this.value.projectPath?{projectPath:this.value.projectPath,localId:this.localId}:null;}
   isDraftConversation(){return this.draft;}
   subscribeTranscriptChange(f:()=>void){this.listeners.add(f);return()=>{this.listeners.delete(f);};}
   setBeforeMessageSubmit(h:Peer['hook']){this.hook=h;}
@@ -81,6 +81,31 @@ test('starting an unrelated new draft does not inherit previous shared context',
   const library=new ConversationLibrary(project);library.observe({provider:'codex',projectPath:project,conversationId:'thread-1',sessionId:null,messages:[{id:'old',role:'user',text:'Old task',at:null,model:null}]});library.observe({provider:'claude',projectPath:project,conversationId:'claude-shared',sessionId:null,messages:[{id:'other',role:'user',text:'Another provider reply',at:null,model:null}]},true);
   const f=fixture(library.snapshot());t.after(()=>f.controller.cleanup());await settle();await f.codex.newChat();
   assert.equal(await f.codex.hook!('A separate task'),'A separate task');await f.controller.prepareForRestart();assert.equal(f.saved()!.conversations.length,2);
+});
+test('an unavailable new-draft source retains its text and reports saved-state failure until its exact identity recovers',async t=>{
+  const library=new ConversationLibrary(project);library.observe({provider:'codex',projectPath:project,conversationId:'thread-1',sessionId:null,messages:[{id:'old',role:'user',text:'Keep the previous folder task',at:null,model:null}]});
+  const folder=library.createFolder('Earlier project work');library.move(library.active()!.id,folder);
+  const f=fixture(library.snapshot());t.after(()=>f.controller.cleanup());await settle();await f.controller.prepareForRestart();const original=structuredClone(f.saved()!);
+  f.codex.sourceAvailable=false;await f.codex.newChat();const localId=f.codex.localId;f.codex.unsent='A separate first message';
+  await assert.rejects(async()=>await f.codex.hook!(f.codex.unsent),/Error 423.*Saved state unavailable.*draft is retained/);
+  await f.controller.prepareForRestart();assert.deepEqual(f.saved(),original);assert.equal(f.codex.unsent,'A separate first message');assert.equal(f.codex.localId,localId);
+  assert.deepEqual(f.codex.opens,[]);assert.deepEqual(f.claude.opens,[]);assert.deepEqual(f.providerRequests,[]);
+  // A real provider recovery may expose the SAME local draft. The next explicit
+  // Send checkpoints its actual link; no failed request or new-chat gesture is replayed.
+  f.codex.sourceAvailable=true;for(const listener of f.codex.listeners)listener();await settle();
+  let release!:()=>void;f.setSaveGate(new Promise(resolve=>{release=resolve;}));t.after(()=>release());
+  let returned=false;const sending=Promise.resolve(f.codex.hook!(f.codex.unsent)).then(value=>{returned=true;return value;});await settle();assert.equal(returned,false);
+  release();assert.equal(await sending,'A separate first message');const saved=f.saved()!,linked=saved.conversations.find(row=>row.id===saved.activeId)!;
+  assert.equal(linked.folderId,null);assert.deepEqual(linked.messages,[]);assert.deepEqual(linked.bindings,[]);assert.deepEqual(saved.draftLinks,[{provider:'codex',localId,libraryId:linked.id}]);
+  assert.equal(saved.conversations.length,2);assert.deepEqual(saved.conversations.find(row=>row.id===original.activeId),original.conversations[0]);assert.equal(f.codex.newCalls,1);assert.equal(f.codex.unsent,'A separate first message');
+});
+test('the shared Send hook still refuses foreign or case-aliased renderer projects without borrowing folder context',async t=>{
+  for(const foreign of ['C:/OtherProject','c:/project']){
+    const f=fixture();t.after(()=>f.controller.cleanup());await settle();await f.controller.prepareForRestart();const original=structuredClone(f.saved()!);
+    await f.codex.newChat();f.codex.value.projectPath=foreign;f.codex.unsent='Keep this project-specific draft';for(const listener of f.codex.listeners)listener();await settle();
+    await assert.rejects(async()=>await f.codex.hook!(f.codex.unsent),/Error 423.*draft is retained/);await f.controller.prepareForRestart();
+    assert.deepEqual(f.saved(),original);assert.equal(f.codex.unsent,'Keep this project-specific draft');assert.deepEqual(f.codex.opens,[]);assert.deepEqual(f.claude.opens,[]);assert.deepEqual(f.providerRequests,[]);
+  }
 });
 test('failed history persistence stays pending and an explicit retry checkpoints the same saved messages',async t=>{
   const f=fixture();t.after(()=>f.controller.cleanup());await settle();f.setFail(true);await assert.rejects(f.controller.prepareForRestart(),/could not be saved/);assert.equal(f.saved(),null);

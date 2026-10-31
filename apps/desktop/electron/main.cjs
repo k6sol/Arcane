@@ -471,8 +471,31 @@ async function stopDaemon() {
   }
   return clean && assetClean;
 }
+/** One exact project spelling for the host, daemon and encrypted preferences.
+ * Case aliases on Windows identify the same checked directory, never another root. */
+async function canonicalProjectPath(project) {
+  const requested = policy.localPath(project), chain = [];
+  const samePath = (a, b) => process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
+  const changed = () => { throw new Error('The selected project changed while its identity was being checked. No local runtime was started.'); };
+  let current = requested;
+  for (;;) {
+    if (chain.length >= 64) changed();
+    const stat = fs.lstatSync(current, { bigint: true }), physical = fs.realpathSync(current);
+    if (!stat.isDirectory() || stat.isSymbolicLink() || !samePath(physical, current)) changed();
+    chain.push({ path: current, stat, physical });
+    const parent = resolve(current, '..'); if (parent === current) break; current = parent;
+  }
+  const validated = await policy.directPath(requested), canonical = fs.realpathSync(validated);
+  if (validated !== requested || !samePath(canonical, requested)) changed();
+  for (const node of chain) {
+    const stat = fs.lstatSync(node.path, { bigint: true });
+    if (!stat.isDirectory() || stat.isSymbolicLink() || ['dev', 'ino', 'mode', 'nlink'].some(name => stat[name] !== node.stat[name]) ||
+        fs.realpathSync(node.path) !== node.physical) changed();
+  }
+  return canonical;
+}
 async function startDaemon(project) {
-  const canonical = await policy.directPath(project);
+  const canonical = await canonicalProjectPath(project);
   const key = createHash('sha256').update(process.platform === 'win32' ? canonical.toLowerCase() : canonical).digest('hex');
   const stateRoot = await ownedDirectory(join(userRoot, 'runtime', 'projects', key));
   const env = policy.daemonEnvironment(process.env, { productRoot, stateRoot, projectPath: canonical });
