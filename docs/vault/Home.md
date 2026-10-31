@@ -15,7 +15,7 @@ tags: [arcane, dashboard]
 
 The [[Delivery/Goal Board|ten urgent goals]] track the path to a dependable customer release. Open a goal for its outcome, dependencies and acceptance criteria. Check it off only after recording evidence.
 
-Latest installed runtime is `b3f9f3f`, with the caption-safe restart control and incremental tree changes. Its original nine jobs passed and installation closed successfully. A later automatic main Windows browser lane failed; that evidence remains open. Saved-chat loading, per-task model-source consent and a floating-bar model selector are being integrated and require fresh combined verification. See [[Sessions/2026-10-31 Chat Navigation and Model Selection]] and [[Delivery/Goal Board]].
+Latest installed runtime is `b3f9f3f`. Signed candidate code `89e6824` adds prompt saved-history display, restart joining the original navigation, an in-bar Pyx model/reasoning selector and durable review of one exact historical connection notice. Local verification is complete at its recorded scopes; fresh hosted/package acceptance and installation remain. Original failures and model-art limitations are retained. See [[Sessions/2026-10-31 Chat Navigation and Model Selection]] and [[Delivery/Goal Board]].
 
 ## Build with knowledge
 

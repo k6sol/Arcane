@@ -44,3 +44,7 @@ Delivery checkpoint:5d81794 passes seven original hosted jobs and is selected in
 See [[Sessions/2026-10-31 Chat Navigation and Model Selection]]. No whole-goal completion is claimed.
 
 Combined local integration:649-source strict compilation and663/663 focused cases pass with no skips. Fresh hosted/package/customer acceptance and the newly reported repeated startup-notice fix remain open.
+
+- [x] One exact finished unbound startup notice can be durably reviewed without rewriting its unknown journal row. Controlled SQLite/HTTP/Edge reopen, stale/ABA, live-owner and save-fault cases pass at4029993.
+- [x] Final onboarding guards receive a witnessed trusted click after controller refresh while retaining all original assertions and the30-second limit at89e6824.
+- [ ] Fresh hosted/package delivery and loaded customer review/restart journey.
