@@ -25,6 +25,10 @@ A separate read-only aggregate audit of existing customer metadata fits the new 
 
 ## Remaining work
 
+Original hosted workflow41189224687 on4d4b24b retained failures in three draft-recovery assertions on Linux and Windows: those expected the former global historical block. The revised connected expectations preserve actual SQLite receipts, held draft/queue acknowledgements and zero automatic native requests while allowing the new host quarantine. Linux additionally exposed a cleanup fixture whose1250ms delay was not proof that the later Play heartbeat expired. It now observes that exact proof's actual expiry, without widening run, SDK, cleanup or case deadlines or changing production behavior.
+
+The follow-up passes658-source compilation and131 focused cases with zero skips. Source/compiled snapshots show only the two test files and their compiled outputs changed from the435-case checkpoint; all production inputs remain identical. One intermediate130-pass/one-checkpoint-read assertion failure is retained: quarantined history follows the ordinary idle save path rather than the old unconfirmed-connect exception's extra reads. Dedicated no-recovery-metadata checkpoint guards remain unchanged. New exact-source hosted/package acceptance is still required; no failed candidate was installed.
+
 Exact candidate hosted/package delivery and authenticated customer acceptance remain separate. Do not force-close the old running window, automate account authentication or operate Studio. Old interrupted threads remain preserved and blocked from continuation; seamless historical task recovery is not complete. All ten whole-product goals remain open.
 
 [[Architecture/Native Session Custody]] · [[Architecture/Error References]] · [[Operations/Current State]] · [[Delivery/G04 Task Lifetimes]]

@@ -222,9 +222,21 @@ describe('createStudioTestService: SDK/store/ledger fixture integration', { conc
   }
   for (const heartbeat of [false, true]) serviceCase(`real cleanup tail requires a current authenticated heartbeat: ${heartbeat ? 'refreshed proof' : 'expired proof stays fenced'}`, async sub => {
     const f = await fixture(sub, { heartbeat }), job = await f.prepare();
-    let delayed = false;
+    let delayed = false, expiredAtWitness = false;
     f.hooks.witness = async value => {
-      if (!delayed && f.status(job).review.phase === 'stopping') { delayed = true; await new Promise(resolve => setTimeout(resolve, 1250)); }
+      if (!delayed && f.status(job).review.phase === 'stopping') {
+        delayed = true;
+        const entered = performance.now(), original = f.store.session(f.pair.sessionId).proof!;
+        await new Promise(resolve => setTimeout(resolve, 1250));
+        if (!heartbeat) {
+          // The five-second run starts before admission and Play's real poll.
+          // Anchor expiry to that exact proof, within the original SDK witness
+          // budget, rather than assuming the cleanup delay crossed its TTL.
+          await until(() => Date.parse(original.expiresAt) <= Date.now(), Math.max(0, 5000 - (performance.now() - entered)));
+          assert.deepEqual(f.store.session(f.pair.sessionId).proof, original, 'No authenticated poll refreshed the captured proof.');
+          expiredAtWitness = true;
+        }
+      }
       return value;
     };
     await f.service.humanControl.approve(approval(job), () => {});
@@ -246,7 +258,7 @@ describe('createStudioTestService: SDK/store/ledger fixture integration', { conc
     const proof = f.store.session(f.pair.sessionId).proof!;
     assert.equal(Date.parse(proof.expiresAt) - Date.parse(proof.observedAt), 6000);
     if (heartbeat) { assert.ok(f.heartbeats() > 0); assert.equal(proof.playEpoch, 22); assert.equal(f.scene('tail-released-scene').state, 'queued'); }
-    else { assert.equal(f.heartbeats(), 0); assert.ok(Date.parse(proof.expiresAt) <= Date.now()); assert.throws(() => f.scene('tail-fenced-scene'), { code: 'BUSY' }); }
+    else { assert.equal(expiredAtWitness, true); assert.equal(f.heartbeats(), 0); assert.ok(Date.parse(proof.expiresAt) <= Date.now()); assert.throws(() => f.scene('tail-fenced-scene'), { code: 'BUSY' }); }
   });
   serviceCase('prepare needs approval without effects; model port cannot approve and trusted guard must pass', async sub => {
     const f = await fixture(sub);

@@ -384,20 +384,21 @@ test('finished unknown connect survives actual journal reopen and restart checkp
   // Reattaching a native bridge preserves the original local rows over its empty
   // snapshot, so this checkpoint genuinely has an unacknowledged queue write.
   await chat.setQueuePersistence({version:1,read:async()=>({available:true,projectPath:root,rows:[]}),save:async value=>{queueEntered.resolve();await queueRelease.promise;queueWrites.push(structuredClone(value));return {saved:true};}});
-  assert.equal(doc.getElementById('codex-unknown').hidden,false);assert.match(doc.getElementById('codex-unknown-requests').textContent,new RegExp(requestId));
-  await chat.connectForSavedLogin();assert.equal(posts.length,0,'Saved-login metadata must not retry the retained connect.');
+  assert.equal(doc.getElementById('codex-unknown').hidden,true,'Backend-quarantined history does not block a fresh connection.');
+  assert.ok(service.state().nativeRecovery!.historicalActionIds.includes(requestId));
+  assert.equal(doc.getElementById('codex-connect').disabled,false);assert.equal(posts.length,0,'Hydration never retries the retained connect.');
   holdDraft=true;const input=doc.getElementById('codex-composer');input.value='  Exact newest draft\n\n';input.dispatchEvent(new Event('input'));
   const readsBefore=reads;let finished=false;const checkpoint=chat.prepareForRestart().then(()=>{finished=true;});
   await Promise.race([queueEntered.promise,checkpoint.then(()=>assert.fail('Checkpoint ended before the held queue ACK.'))]);assert.equal(finished,false,'The encrypted queue ACK remains required.');queueRelease.resolve();
   await Promise.race([draftEntered.promise,checkpoint.then(()=>assert.fail('Checkpoint ended before the held draft ACK.'))]);assert.equal(finished,false,'The newest native draft ACK remains required.');draftRelease.resolve();await checkpoint;
-  assert.ok(reads>=readsBefore+2,'Fresh state is checked before and after awaited persistence.');
+  assert.equal(reads,readsBefore,'Host-quarantined history uses the ordinary idle checkpoint; queue and draft acknowledgements remain mandatory.');
   assert.equal(writes.at(-1)!.tabs[0]!.draft,input.value);assert.deepEqual(queueWrites.at(-1)!.rows,[queued]);
-  assert.equal(chat.currentStateView().preferencesSaved,true);assert.equal(doc.getElementById('codex-unknown').hidden,false);
+  assert.equal(chat.currentStateView().preferencesSaved,true);assert.equal(doc.getElementById('codex-unknown').hidden,true);
   assert.deepEqual(service.state().actions[0],retained,'Saving drafts never changes the unknown action receipt.');
   const restoredDoc=new DocumentFixture(),restored=new CodexChat(restoredDoc.asDocument(),api);chats.push(restored);
   await restored.start();await restored.enableChatTabs({preferences:{read:async()=>writes.at(-1)!,save:async()=>{}}});
-  assert.equal(restoredDoc.getElementById('codex-composer').value,input.value);assert.equal(restoredDoc.getElementById('codex-unknown').hidden,false);
-  assert.match(restoredDoc.getElementById('codex-unknown-requests').textContent,new RegExp(requestId));await restored.connectForSavedLogin();
+  assert.equal(restoredDoc.getElementById('codex-composer').value,input.value);assert.equal(restoredDoc.getElementById('codex-unknown').hidden,true);
+  assert.deepEqual(restored.currentStateView().state!.actions[0],retained);assert.equal(restoredDoc.getElementById('codex-connect').disabled,false);
   assert.equal(posts.length,0);assert.equal(factoryCalls,1,'Only the original controlled connection attempt existed.');
 });
 
@@ -416,8 +417,12 @@ test('explicit durable review survives actual SQLite reopen while its unknown ac
     assert.equal(path,'/v1/codex/action');const outcome=await service.action(input);return Response.json(outcome,{status:outcome.record.state==='acknowledged'?200:outcome.record.state==='rejected'?409:202});
   });
   const doc=new DocumentFixture(),chat=new CodexChat(doc.asDocument(),api);chats.push(chat);await chat.start();doc.getElementById('codex-composer').value='Retain this exact draft';
-  assert.equal(doc.getElementById('codex-unknown').hidden,false);await chat.connectForSavedLogin();assert.equal(requests.length,0);
-  doc.getElementById('codex-acknowledge').dispatchEvent(new Event('click'));await settle();assert.equal(doc.getElementById('codex-unknown').hidden,true);assert.deepEqual(service.state().actions,[retained]);assert.equal(requests.length,1);assert.equal(requests[0]!.path,'/v1/codex/review-connect');
+  assert.equal(doc.getElementById('codex-unknown').hidden,true);assert.equal(requests.length,0,'Hydrating quarantined history does not connect or acknowledge it.');
+  // Explicit metadata review remains durable even when quarantine makes the old
+  // receipt nonblocking. It never settles the original unknown native outcome.
+  const candidate=service.state().connectNotices![0]!;
+  await api.reviewConnectNotice({projectPath:root,requestId:candidate.requestId,receiptFingerprint:candidate.receiptFingerprint});await chat.refresh();
+  assert.equal(doc.getElementById('codex-unknown').hidden,true);assert.deepEqual(service.state().actions,[retained]);assert.equal(requests.length,1);assert.equal(requests[0]!.path,'/v1/codex/review-connect');
   assert.equal(doc.getElementById('codex-composer').value,'Retain this exact draft');const marker=structuredClone(service.state().connectNotices![0]!);assert.ok(marker.reviewedAt);chat.stop();await service.close();
   service=createCodexService({directory,projectPath:root,connect:async()=>{factoryCalls++;throw new CodexClientError('BINARY_MISSING','Controlled later connection refusal.');}});
   const restoredDoc=new DocumentFixture(),restored=new CodexChat(restoredDoc.asDocument(),api);chats.push(restored);await restored.start();assert.equal(restoredDoc.getElementById('codex-unknown').hidden,true);assert.deepEqual(service.state().actions,[retained]);assert.deepEqual(service.state().connectNotices,[marker]);assert.equal(requests.length,1,'Reopening does not send a native action or repeat review.');
@@ -580,7 +585,7 @@ test('a new uncertain connect arriving during an ordinary held draft save cannot
   assert.deepEqual(observed.actions,[record]);assert.equal(posts,0);
 });
 
-test('real journal reopen restores nonconnect uncertainty once and never retries a recovered pending turn',async t=>{
+test('real journal reopen quarantines nonconnect uncertainty without retrying or hiding its durable records',async t=>{
   // Constructed action metadata in the actual journal, not native/provider evidence.
   const root=await realpath(await mkdtemp(join(tmpdir(),'arcane-unconfirmed-journal-'))),directory=join(root,'journal');
   let opened:ReturnType<typeof createCodexService>|null=null;const chats:CodexChat[]=[];let connections=0;
@@ -604,12 +609,15 @@ test('real journal reopen restores nonconnect uncertainty once and never retries
   for(const record of records.filter(record=>record!==pending))assert.deepEqual(expected.find(row=>row.requestId===record.requestId),record);
   let posts=0;const api=new CodexChatApi(TOKEN,async(_input,init)=>{if(init?.method==='POST'){posts++;assert.fail('Hydrated uncertainty cannot be acknowledged or replayed automatically.');}return Response.json({state:service.state()});});
   const doc=new DocumentFixture(),chat=new CodexChat(doc.asDocument(),api);chats.push(chat);await chat.start();
-  assert.equal(chat.currentStateView().state!.snapshot,null);for(const record of records)assert.match(doc.getElementById('codex-unknown-requests').textContent,new RegExp(record.requestId));
-  await chat.connectForSavedLogin();await assert.rejects(chat.prepareForRestart(),/Finish or stop/);assert.equal(posts,0);assert.equal(connections,0);
-  assert.equal(doc.getElementById('codex-acknowledge').disabled,false);doc.getElementById('codex-acknowledge').dispatchEvent(new Event('click'));
-  assert.equal(doc.getElementById('codex-unknown').hidden,true);await chat.refresh();assert.equal(doc.getElementById('codex-unknown').hidden,true,'Explicitly reviewed rows do not return on the next GET.');
-  const nextDoc=new DocumentFixture(),next=new CodexChat(nextDoc.asDocument(),api);chats.push(next);await next.start();await next.connectForSavedLogin();
-  assert.equal(nextDoc.getElementById('codex-unknown').hidden,false,'A new window still sees original durable unknown receipts.');
-  for(const record of records)assert.match(nextDoc.getElementById('codex-unknown-requests').textContent,new RegExp(record.requestId));
-  assert.equal(posts,0);assert.equal(connections,0);assert.deepEqual(service.state().actions,expected,'Review is local presentation and never rewrites the journal.');
+  assert.equal(chat.currentStateView().state!.snapshot,null);for(const record of records){
+    assert.ok(service.state().nativeRecovery!.historicalActionIds.includes(record.requestId));
+    assert.deepEqual(chat.currentStateView().state!.actions.find(row=>row.requestId===record.requestId),expected.find(row=>row.requestId===record.requestId));
+  }
+  assert.equal(doc.getElementById('codex-unknown').hidden,true);assert.equal(doc.getElementById('codex-connect').disabled,false);
+  await chat.prepareForRestart();assert.equal(posts,0);assert.equal(connections,0);
+  await chat.refresh();assert.equal(doc.getElementById('codex-unknown').hidden,true,'The same host quarantine remains effective without acknowledging outcomes.');
+  const nextDoc=new DocumentFixture(),next=new CodexChat(nextDoc.asDocument(),api);chats.push(next);await next.start();
+  assert.equal(nextDoc.getElementById('codex-unknown').hidden,true);assert.equal(nextDoc.getElementById('codex-connect').disabled,false);
+  assert.deepEqual(next.currentStateView().state!.actions,expected,'A new window still exposes every durable unknown receipt in recorded state.');
+  assert.equal(posts,0);assert.equal(connections,0);assert.deepEqual(service.state().actions,expected,'Quarantine never rewrites or acknowledges the journal.');
 });
