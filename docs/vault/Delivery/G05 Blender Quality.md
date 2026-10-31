@@ -22,6 +22,8 @@ Depends on: 1; coordinate previews with 2 and job ownership with 4. Owner: asset
 
 ## Evidence
 
+[[Bugs/UV Chart Fallback]] fixes unchecked folded projections with a real retained junction regression and22 passing local UV cases. Same-mesh double-precision folds are removed; five float32 failures remain, and the replacement is not adopted. Fresh original hosted/native checks and artistic acceptance remain open. Original authored bark scale/density warnings are a separate unresolved defect.
+
 [[Sessions/2026-10-31 Native Asset Dispatch]] verifies actual native-to-Blender oak generation at normal production settings. All three original renders were inspected. The generation is technically validated, but artistic acceptance remains open: sparse/clumped canopy, angular smaller branches and bark striations. The exact retained bark UV report flags angle distortion0.594, P95 2.3, stretched share0.0691 and densityCV0.726. These measured warnings are the next concrete quality investigation, not grounds to relax validation or mark this goal complete.
 
 [[Bugs/Boulder Joint Weathering]] records a narrow boulder-only material improvement with seven passing controls inside actual Blender NumPy and two original complete local pipeline jobs. All six original workers close; exported geometry/normals/tangents/UV/collision bytes and measured UV reports remain exact, while both reviewed views change. Overall rock realism/form quality and the existing UV warning remain unaccepted. Fresh pinned native/hosted delivery is pending; this does not complete G05.

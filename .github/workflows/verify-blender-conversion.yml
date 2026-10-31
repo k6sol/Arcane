@@ -13,6 +13,8 @@ on:
       - 'scripts/compile-product.mjs'
       - 'tests/native/**'
       - 'tests/unit/tree_structure_review_test.py'
+      - 'tests/unit/uv_engine_test.py'
+      - 'tests/fixtures/uv/**'
       - 'tests/unit/rock_joints_test.py'
       - 'tests/unit/tree_station_fidelity_test.py'
       - 'tests/unit/tree_budget_allocation_test.py'
@@ -33,6 +35,8 @@ on:
       - 'scripts/compile-product.mjs'
       - 'tests/native/**'
       - 'tests/unit/tree_structure_review_test.py'
+      - 'tests/unit/uv_engine_test.py'
+      - 'tests/fixtures/uv/**'
       - 'tests/unit/rock_joints_test.py'
       - 'tests/unit/tree_station_fidelity_test.py'
       - 'tests/unit/tree_budget_allocation_test.py'
@@ -102,6 +106,11 @@ jobs:
           PYTHONDONTWRITEBYTECODE: '1'
           PYTHONUTF8: '1'
         run: python tests/unit/tree_structure_review_test.py
+      - name: Verify branch junction UV orientation fallback
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+          PYTHONUTF8: '1'
+        run: python tests/unit/uv_engine_test.py SeamSelection.test_branch_junction_fallback_never_returns_folded_charts
       - name: Verify bounded native tree failure evidence
         run: node --test tests/native/tree-structure-evidence.test.mjs
       - name: Verify branch budgets and emitted foliage attachments

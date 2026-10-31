@@ -1,6 +1,7 @@
 """General UV engine contract (workers/blender/uv): seams, density, packing, tile mode and metrics
 on synthetic meshes, plus the natural-finish procedural stage. Pure Python (numpy optional), no bpy."""
 import importlib.util
+import json
 import math
 import sys
 import unittest
@@ -61,6 +62,18 @@ def seam_edges(faces, uvs):
 
 
 class SeamSelection(unittest.TestCase):
+    def test_branch_junction_fallback_never_returns_folded_charts(self):
+        # A retained boolean branch junction cannot be split by its centroid plane.
+        # The former last-resort projection returned four reversed triangles.
+        data = json.loads((ROOT / 'tests/fixtures/uv/branch-junction.json').read_text())
+        topo = E.Topology(data['vertices'], data['faces'])
+        charts = E._split(topo, list(range(len(data['faces']))), E.UP, E.VIEW, 5, frozenset(), .22, 3.0)
+        self.assertEqual(sorted(face for chart in charts for face in chart.faces), list(range(len(data['faces']))))
+        for chart in charts:
+            self.assertEqual(E.chart_quality(topo, chart.faces, chart.uvs)[0], 0)
+        self.assertEqual([tuple(point) for point in data['vertices']], topo.vertices)
+        self.assertEqual([tuple(face) for face in data['faces']], topo.faces)
+
     def test_cube_seams_follow_every_feature_edge(self):
         v, f = cube()
         result = E.unwrap(v, f)

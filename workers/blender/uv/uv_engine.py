@@ -1197,12 +1197,10 @@ def _freeform(topo, chart, up, view, depth, max_angle, max_spread):
         r_flipped, r_distortion, r_spread = chart_quality(topo, chart.faces, r_uvs)
         if not r_flipped and r_distortion + math.log(r_spread) < distortion + math.log(spread):
             uvs, distortion, spread = r_uvs, r_distortion, r_spread
-    if flipped and len(chart.faces) > 2:
+    if flipped:
         return None
     if (distortion > max_angle or spread > max_spread) and depth < 5 and len(chart.faces) > 12:
         return None
-    if flipped:
-        uvs = chart_from_points(chart, initial)
     uvs = to_metres(topo, chart.faces, uvs)
     uvs, locked = orient_up(topo, chart.faces, uvs, up)
     return [Chart(chart.faces, uvs, "freeform", locked)]
@@ -1213,11 +1211,13 @@ def _split(topo, faces, up, view, depth, cuts, max_angle, max_spread):
     if len(parts) < 2:
         parts = bisect_faces(topo, faces)
     if len(parts) < 2:
-        # Last resort: planar projection of each face group (never fails, may distort).
-        chart = ChartMesh(topo, faces, cuts)
-        normal, _ = planar_spread(topo, faces)
-        uvs = to_metres(topo, faces, chart_from_points(chart, project_chart(topo, chart, normal, up)))
-        return [Chart(faces, uvs, "freeform", False)]
+        # Coincident or symmetric centroids can defeat the geometric split.
+        # Keep cutting the rejected chart instead of projecting folded faces.
+        ordered = sorted(faces)
+        if len(ordered) <= 1:
+            return parameterize(topo, ordered, up, view, depth + 1, cuts, max_angle, max_spread)
+        middle = len(ordered) // 2
+        parts = [ordered[:middle], ordered[middle:]]
     out = []
     for part in parts:
         out += parameterize(topo, part, up, view, depth + 1, frozenset(), max_angle, max_spread)
