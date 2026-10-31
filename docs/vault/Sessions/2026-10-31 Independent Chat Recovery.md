@@ -23,8 +23,6 @@ The first targeted run retained96 passes and three reported failures: one corrup
 
 A separate read-only aggregate audit of existing customer metadata fits the new native-owner bound. It changes no journal and starts no provider. This is admission evidence, not authenticated customer login or closure of old effects.
 
-## Remaining work
-
 ## Actual native metadata verification
 
 Published runtimecdda8e4 also passes a status-only inspection through the production provider setup host and actual vendor CLI. Its saved account is recognized as subscription-authenticated; no browser login, terminal handoff or model request is started. The owner context is controlled, so this is native status evidence rather than an actual desktop click.
@@ -34,6 +32,8 @@ A separate isolated-project smoke uses the real CLI, production service, authent
 The snapshot reports `arcane-only-pending`, correctly reflecting that no configured thread has verified runtime tools. Actual thread execution, saved-history behavior in the loaded customer desktop and Studio acceptance remain separate. The exclusive attempt and its safe aggregate receipts remain private; no customer journal or credential was rewritten.
 
 ## Delivery still pending
+
+Subsequent delivery is now installed and independently verified; see [[Sessions/2026-10-31 Verified Chat Recovery Delivery]]. The open window still runs old447 pending user readiness. The following paragraphs retain the original failure/correction evidence rather than claiming those failed candidates were installed.
 
 Original hosted workflow41189224687 on4d4b24b retained failures in three draft-recovery assertions on Linux and Windows: those expected the former global historical block. The revised connected expectations preserve actual SQLite receipts, held draft/queue acknowledgements and zero automatic native requests while allowing the new host quarantine. Linux additionally exposed a cleanup fixture whose1250ms delay was not proof that the later Play heartbeat expired. It now observes that exact proof's actual expiry, without widening run, SDK, cleanup or case deadlines or changing production behavior.
 

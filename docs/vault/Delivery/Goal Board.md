@@ -22,7 +22,7 @@ Check a goal off only when its acceptance criteria pass and its evidence is reco
 
 ## Execution
 
-Current functional checkpoint: [[Sessions/2026-10-31 Browser Sign-in and Error References]] covers direct sign-in and readable, stable error notifications. Exact hosted delivery and installed integrity verification pass atff18a9d. Loaded customer acceptance and legacy unknown-task recovery remain outstanding; whole-goal checkboxes stay open.
+Current functional checkpoint: selected desktopcdda8e4 combines direct sign-in, stable numbered errors and bounded independent chat recovery. All seven original hosted jobs and4673-file installed integrity verification pass. Actual native metadata Connect also succeeds with the saved subscription, without a thread/model turn. The open window is still old447; loaded customer acceptance, historical continuations and broader product acceptance remain outstanding. Whole-goal checkboxes stay open. See [[Sessions/2026-10-31 Verified Chat Recovery Delivery]].
 
 Start with G01. Work in parallel on chat/session reliability, asset/plugin integration and task/runtime correctness once the baseline is clear. Diagnostics accompanies all three. Accounts and billing are a public-launch requirement, not a reason to delay usable local development.
 
