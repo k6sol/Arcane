@@ -15,7 +15,7 @@ tags: [arcane, dashboard]
 
 The [[Delivery/Goal Board|ten urgent goals]] track the path to a dependable customer release. Open a goal for its outcome, dependencies and acceptance criteria. Check it off only after recording evidence.
 
-Latest installed runtime is `b3f9f3f`. SSH-verified runtime `279bc87` adds prompt saved-history display, restart joining the original navigation, an in-bar Pyx model/reasoning selector and durable review of one exact historical connection notice. All seven hosted test/package jobs pass and the downloaded package is authenticated. Installation reached a known-closed `RETENTION` refusal at32 releases; the preservation experiment was restored without deleting files or changing the installation record. Supported capacity recovery and the authorized reopening remain pending. Original failures and model-art limitations are retained. See [[Sessions/2026-10-31 Chat Navigation and Model Selection]] and [[Delivery/Goal Board]].
+Latest installed and reopened runtime is SSH-verified `4472706`, combining responsive saved chats, in-bar model/reasoning selection, durable startup-notice review, provider failure reports and explicit inactive release-slot recovery. All seven original hosted jobs pass. The authenticated package installed with observed exit zero, both pipe EOFs and exact replacement proof; an independent stock verifier checked all4664 payload files. The actual window uses the new selected executable. Its historical unconfirmed ChatGPT notice still has review disabled, so functional customer chat acceptance remains open. The older279 `RETENTION` attempt and full restoration remain recorded. See [[Sessions/2026-10-31 Chat Navigation and Model Selection]] and [[Delivery/Goal Board]].
 
 ## Build with knowledge
 
