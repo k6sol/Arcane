@@ -304,7 +304,7 @@ test('a held review body cannot borrow idle ownership after a new exact native c
   const log=await readFile(join(f.directory,'receipt-2.jsonl'),'utf8');assert.equal(log.includes('turn/start'),false);assert.equal(log.includes('thread/start'),false);
 });
 
-test('persisted unknown task ownership blocks reviewing an otherwise exact unbound connection notice',async t=>{
+test('quarantined historical task ownership permits metadata-only review without resuming old work',async t=>{
   const f=await connectNoticeFixture(t);await f.lab.close();
   const tasks=new ChatTaskStore({directory:join(f.directory,'chat-tasks'),projectPath:ROOT});
   const task=tasks.create({id:randomUUID(),provider:'codex',threadId:'retained-original-thread',sessionId:null,connectionId:randomUUID(),incarnationId:randomUUID(),model:'fixture-sol',effort:'low',
@@ -312,18 +312,20 @@ test('persisted unknown task ownership blocks reviewing an otherwise exact unbou
   const registry=createNativeAssetRegistry({projectPath:ROOT});let starts=0;
   const reopened=createCodexService({directory:f.directory,projectPath:ROOT,assetRegistry:registry,connect:async()=>{starts++;throw new Error('Review must not resume original work.');}});
   try{
-    assert.throws(()=>reopened.reviewConnectNotice(f.input),(error:unknown)=>error instanceof CodexClientError&&error.code==='BUSY');
-    assert.equal(reopened.state().connectNotices![0]!.reviewedAt,null);assert.deepEqual(reopened.state().actions,[f.original.record]);assert.equal(starts,0);
+    reopened.reviewConnectNotice(f.input);
+    assert.ok(reopened.state().connectNotices![0]!.reviewedAt);assert.deepEqual(reopened.state().actions,[f.original.record]);assert.equal(starts,0);
+    assert.equal(reopened.state().nativeRecovery!.legacyTasks,1);
+    assert.ok(reopened.state().nativeRecovery!.historicalTaskIds.includes(task.id));
   }finally{await reopened.close();registry.close();}
   const check=new ChatTaskStore({directory:join(f.directory,'chat-tasks'),projectPath:ROOT});try{assert.equal(check.get(task.id).state,'unknown');}finally{check.close();}
 });
 
 test('v3 notice migration preserves original actions and a future journal is refused before mutable setup',async t=>{
   const f=await connectNoticeFixture(t);await f.lab.close();const path=join(f.directory,'codex-actions.sqlite');
-  const legacy=new DatabaseSync(path);legacy.exec('DROP TABLE native_session_custody; DROP TABLE reviewed_connect_notices; PRAGMA user_version=3;');legacy.close();
+  const legacy=new DatabaseSync(path);legacy.exec('DROP TABLE native_session_requests; DROP TABLE native_session_custody; DROP TABLE reviewed_connect_notices; PRAGMA user_version=3;');legacy.close();
   let starts=0;const migrated=createCodexService({directory:f.directory,projectPath:ROOT,connect:async()=>{starts++;throw new Error('Migration cannot connect.');}});
   try{assert.deepEqual(migrated.state().actions,[f.original.record]);assert.deepEqual(migrated.state().connectNotices,[f.candidate]);assert.equal(starts,0);}finally{await migrated.close();}
-  const future=new DatabaseSync(path);assert.equal((future.prepare('PRAGMA user_version').get() as {user_version:number}).user_version,5);future.exec('PRAGMA user_version=6;');future.close();
+  const future=new DatabaseSync(path);assert.equal((future.prepare('PRAGMA user_version').get() as {user_version:number}).user_version,6);future.exec('PRAGMA user_version=7;');future.close();
   const before=await readFile(path);assert.throws(()=>createCodexService({directory:f.directory,projectPath:ROOT,connect:async()=>{starts++;throw new Error('Future journal cannot connect.');}}),
     (error:unknown)=>error instanceof CodexClientError&&error.code==='MIGRATION');assert.deepEqual(await readFile(path),before);assert.equal(starts,0);
 });

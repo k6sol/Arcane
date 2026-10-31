@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual, types } from 'node:util';
 import type { WorkTaskBinding } from '../../../packages/storage/src/work-store.js';
 import { z } from 'zod';
-import { ChatTaskStore, ChatTaskProposalLimitError, CHAT_TASK_PROPOSAL_LIMITS, type ChatTaskPlanRecord, type ChatTaskPlanReason, type ChatTaskProposalReason, type ChatTaskProposalRecord, type ChatTaskProposalResult, type ChatTaskRecord } from '../../../packages/storage/src/chat-task-store.js';
+import { ChatTaskStore, ChatTaskProposalLimitError, CHAT_TASK_PROPOSAL_LIMITS, type ChatTaskPlanRecord, type ChatTaskPlanReason, type ChatTaskProposalReason, type ChatTaskProposalRecord, type ChatTaskProposalResult, type ChatTaskRecord, type ChatTaskProposalWorkerReservation } from '../../../packages/storage/src/chat-task-store.js';
 import { startChatTaskPlan, CHAT_TASK_PLAN_WORKER_CONCURRENCY } from './chat-task-plan-runner.js';
 import type { Snapshot } from '../../../packages/codex-client/src/types.js';
 import type { StudioTestTaskCancellation, StudioTestTaskOrigin, StudioTestTaskPort, StudioTestTaskPrepared,
@@ -47,15 +47,37 @@ export interface ChatTaskProposalWorkerInput {
 }
 export type ChatTaskProposalFactory = (input: ChatTaskProposalWorkerInput) => Promise<ChatTaskProposalWorker>;
 export const CHAT_TASK_PROPOSAL_CONCURRENCY = Object.freeze({ perTask: 1, total: 2 });
+export interface ChatTaskProposalIdentity { readonly projectId:string; readonly proposalId:string }
+function proposalBudgetKey(value:ChatTaskProposalIdentity):string {
+  if(!value||typeof value!=='object'||types.isProxy(value)||![Object.prototype,null].includes(Object.getPrototypeOf(value))||
+    Reflect.ownKeys(value).length!==2||!['projectId','proposalId'].every(key=>{const field=Object.getOwnPropertyDescriptor(value,key);return !!field&&Object.hasOwn(field,'value');}))
+    throw new ChatTaskProposalError('ARGUMENTS','Expected one original proposal budget identity.');
+  if(typeof value.projectId!=='string'||!/^[a-f0-9]{64}(?![\s\S])/.test(value.projectId)||!z.string().uuid().safeParse(value.proposalId).success)
+    throw new ChatTaskProposalError('ARGUMENTS','Expected one original proposal budget identity.');
+  return value.projectId+':'+value.proposalId;
+}
 /** Bounded worker admission shared by every coordinator that uses it. Slots whose
  * closure was never confirmed stay quarantined for the budget lifetime; this is an
  * admission rule, not evidence of descendant-process containment. */
 export class ChatTaskProposalBudget {
-  #inFlight = 0; #unsafe = 0;
-  available(): boolean { return this.#inFlight + this.#unsafe < CHAT_TASK_PROPOSAL_CONCURRENCY.total; }
-  acquire(): void { if (!this.available()) throw new ChatTaskProposalError('BUSY', 'Wait for the current proposal to finish.'); this.#inFlight++; }
-  release(closed: boolean): void { this.#inFlight--; if (!closed) this.#unsafe++; }
-  get quarantined(): number { return this.#unsafe; }
+  readonly #inFlight=new Set<string|symbol>();readonly #unsafe=new Set<string|symbol>();readonly #anonymous:symbol[]=[];
+  available(): boolean {let used=this.#unsafe.size;for(const key of this.#inFlight)if(!this.#unsafe.has(key))used++;return used<CHAT_TASK_PROPOSAL_CONCURRENCY.total;}
+  acquire(identity?:ChatTaskProposalIdentity):void {
+    const key=identity===undefined?Symbol('legacy-proposal-budget'):proposalBudgetKey(identity);
+    if(!this.available()||this.#inFlight.has(key)||this.#unsafe.has(key))throw new ChatTaskProposalError('BUSY','Wait for the current proposal to finish.');
+    this.#inFlight.add(key);if(typeof key==='symbol')this.#anonymous.push(key);
+  }
+  release(closed:boolean,identity?:ChatTaskProposalIdentity):void {
+    if(typeof closed!=='boolean')throw new ChatTaskProposalError('ARGUMENTS','Proposal closure must be observed explicitly.');
+    const key=identity===undefined?this.#anonymous[0]:proposalBudgetKey(identity);
+    if(key===undefined||!this.#inFlight.delete(key))throw new ChatTaskProposalError('TASK_SCOPE','No original proposal owns this budget slot.');
+    if(identity===undefined)this.#anonymous.shift();if(closed)this.#unsafe.delete(key);else this.#unsafe.add(key);
+  }
+  /** Host-only recovery debt. Repeated construction cannot charge an original twice. */
+  reserveUnsafe(identities:readonly ChatTaskProposalIdentity[]):void {
+    const keys=identities.map(proposalBudgetKey);for(const key of keys)this.#unsafe.add(key);
+  }
+  get quarantined(): number { return this.#unsafe.size; }
 }
 /** Process-wide default: survives coordinator and project replacement. */
 const PROCESS_PROPOSAL_BUDGET = new ChatTaskProposalBudget();
@@ -144,6 +166,9 @@ export class ChatTaskCoordinator {
   readonly #work = new WeakMap<object,TaskWorkRecord>();
   readonly #completions = new WeakSet<Promise<void>>();
   readonly #charged = new Set<TaskWorkRecord>();
+  readonly #historicalTaskIds:Set<string>;
+  readonly #historicalProposalIds:Set<string>;
+  #recoveryReservations:{taskIds:readonly string[];proposalIds:readonly string[]}|null=null;
   #closing: Promise<void>|null=null;
   #cancellation: StudioTestTaskCancellation | null = null;
   #closed = false;
@@ -155,6 +180,10 @@ export class ChatTaskCoordinator {
     this.#budget = options.proposalBudget ?? PROCESS_PROPOSAL_BUDGET;
     if (!(this.#budget instanceof ChatTaskProposalBudget)) throw new Error('Expected an owned proposal budget.');
     this.#store = new ChatTaskStore({ directory: options.directory, projectPath: options.projectPath });
+    try{
+      this.#historicalTaskIds=new Set(this.#store.list().map(task=>task.id));
+      this.#historicalProposalIds=new Set(this.#store.unclosedProposalIds());
+    }catch(error){try{this.#store.close();}catch{/* Preserve the original recovery observation fault. */}throw error;}
     this.playtests = Object.freeze({ capture: (actorId: string) => this.#capture(actorId),
       assert: (origin: StudioTestTaskOrigin) => { this.#assert(origin); },
       registerWork: (origin: StudioTestTaskOrigin, registration: StudioTestTaskWorkRegistration) => this.#registerWork(origin,registration),
@@ -170,6 +199,24 @@ export class ChatTaskCoordinator {
   available(): boolean { return !this.#closed && !this.#fenced && this.#cancellation !== null; }
   configured():boolean{return this.#cancellation!==null;}
   list(): ChatTaskRecord[] { return this.#store.list(); }
+  recoveryState():{tasks:ChatTaskRecord[];unclosedProposalIds:readonly string[]}{return {tasks:this.#store.list(),unclosedProposalIds:this.#store.unclosedProposalIds()};}
+  recoveryTaskFingerprints():readonly {id:string;fingerprint:string}[]{return this.#store.recoveryTaskFingerprints();}
+  /** Installed by original host composition before new owners, never by action/tool JSON. */
+  installRecoveryReservations(input:{taskIds:readonly string[];proposalIds:readonly string[]}):void {
+    if(!input||typeof input!=='object'||types.isProxy(input)||![Object.prototype,null].includes(Object.getPrototypeOf(input))||Reflect.ownKeys(input).length!==2||
+      !['taskIds','proposalIds'].every(key=>{const field=Object.getOwnPropertyDescriptor(input,key);return !!field&&Object.hasOwn(field,'value');}))throw new Error('Expected exact historical recovery reservations.');
+    const ids=(value:readonly string[],maximum:number):readonly string[]=>{
+      if(!Array.isArray(value)||types.isProxy(value)||Object.getPrototypeOf(value)!==Array.prototype||value.length>maximum||Reflect.ownKeys(value).length!==value.length+1)throw new Error('Recovery reservations must be bounded original ID arrays.');
+      const result:string[]=[];
+      for(let index=0;index<value.length;index++){const field=Object.getOwnPropertyDescriptor(value,index);if(!field||!Object.hasOwn(field,'value')||!z.string().uuid().safeParse(field.value).success)throw new Error('Recovery reservations require exact existing IDs.');result.push(field.value as string);}
+      if(new Set(result).size!==result.length)throw new Error('Recovery reservations cannot repeat IDs.');return Object.freeze(result.sort());
+    };
+    const taskIds=ids(input.taskIds,256),proposalIds=ids(input.proposalIds,CHAT_TASK_PROPOSAL_LIMITS.total);
+    if(this.#recoveryReservations){if(!isDeepStrictEqual(this.#recoveryReservations,{taskIds,proposalIds}))throw new Error('Recovery reservations were already installed.');return;}
+    if(this.#closed||this.#fenced||this.#owners.size||taskIds.some(id=>!this.#historicalTaskIds.has(id))||proposalIds.some(id=>!this.#historicalProposalIds.has(id)))throw new Error('Recovery reservations must name original historical records before new work.');
+    this.#budget.reserveUnsafe(proposalIds.map(proposalId=>Object.freeze({projectId:this.#store.projectId,proposalId})));
+    this.#recoveryReservations=Object.freeze({taskIds,proposalIds});
+  }
   summaries() { return this.#store.summaries(); }
   owns(id: string): boolean { return this.#owners.has(id); }
   belongs(id:string,threadId:string,sessionId:string|null):boolean{const origin=this.#owners.get(id)?.origin;return origin?.threadId===threadId&&origin.sessionId===sessionId;}
@@ -185,7 +232,7 @@ export class ChatTaskCoordinator {
     const failed=results.find(result=>result.status==='rejected');if(failed?.status==='rejected')throw failed.reason;
   }
   begin(input: { id: string; actorId: string; snapshot: Snapshot; allowWorkspaceWrites: boolean; allowAssets: boolean; owner: ChatTaskOwner; accountIdentity?: string }): StudioTestTaskOrigin {
-    if (!this.available() || this.#actors.has(input.actorId) || this.#owners.size >= 128) throw new Error('A fresh task incarnation is required.');
+    if (!this.available() || this.#actors.has(input.actorId) || this.#owners.size+(this.#recoveryReservations?.taskIds.length??0) >= 128) throw new Error('A fresh task incarnation is required.');
     if (input.accountIdentity !== undefined && (typeof input.accountIdentity !== 'string' || !PROPOSAL_ACCOUNT.test(input.accountIdentity))) throw new Error('Task account identity is not exact.');
     const thread = input.snapshot.thread;
     if (!thread?.configured || !input.snapshot.connected || !input.snapshot.ready || input.snapshot.mcpIsolation !== 'arcane-only-verified' ||
@@ -699,12 +746,23 @@ export class ChatTaskCoordinator {
         accountIdentity: entry.accountIdentity!, ports: Object.freeze({ signal: owner.signal, assertActive: owner.assertActive,
           waitForInitial: async () => { owner.assertActive(); await native.waitForInitial(); owner.assertActive(); },
           propose: async (record: ChatTaskProposalRecord, text: string) => {
-            owner.assertActive();
-            if (entry.proposal || entry.planProposals.size >= CHAT_TASK_PLAN_WORKER_CONCURRENCY || !this.#budget.available()) { this.#store.settleProposal(record.id, { state: 'failed', reason: 'worker_failed_before_dispatch' }); return; }
-            this.#budget.acquire();
+            const reservation=this.#store.reserveProposalWorker(record.id);
+            try{owner.assertActive();}catch(error){
+              try{this.#store.recordProposalWorkerNotAllocated(reservation);}catch(markerError){this.#trackJoin(entry,NativePromise.reject<void>(markerError));}
+              throw error;
+            }
+            if (entry.proposal || entry.planProposals.size >= CHAT_TASK_PLAN_WORKER_CONCURRENCY || !this.#budget.available()) {
+              // The known no-factory outcome is independent of durable closure.
+              // Keep a marker fault observable without inventing dispatch uncertainty.
+              try{this.#store.recordProposalWorkerNotAllocated(reservation);}catch(error){this.#trackJoin(entry,NativePromise.reject<void>(error));}
+              try{this.#store.settleProposal(record.id, { state: 'failed', reason: 'worker_failed_before_dispatch' });}
+              catch(error){this.#trackJoin(entry,NativePromise.reject<void>(error));throw error;}
+              return;
+            }
+            this.#budget.acquire({projectId:this.#store.projectId,proposalId:record.id});
             const task = this.#store.get(input.taskId), workerInput = Object.freeze({ accountIdentity: entry.accountIdentity!,
               selection: Object.freeze({ model: task.model, effort: task.effort }), owner });
-            const tracked = this.#runProposal(entry, record, text, input.factory, workerInput).finally(() => {
+            const tracked = this.#runProposal(entry, record, text, input.factory, workerInput,reservation).finally(() => {
               entry.planProposals.delete(tracked); this.#pending.delete(tracked);
             });
             this.#trackJoin(entry,tracked);
@@ -759,29 +817,33 @@ export class ChatTaskCoordinator {
       throw new ChatTaskProposalError('BUSY', 'Wait for the current proposal to finish.');
     if (this.#store.proposals(input.taskId).length >= CHAT_TASK_PROPOSAL_LIMITS.perTask) throw new ChatTaskProposalError('BUSY', 'This task has no proposal capacity left.');
     const task = this.#store.get(input.taskId);
-    let record: ChatTaskProposalRecord;
-    try { record = this.#store.reserveProposal({ id: randomUUID(), taskId: input.taskId, requestId: input.requestId, promptSha256, promptBytes }); }
+    let record: ChatTaskProposalRecord,reservation:ChatTaskProposalWorkerReservation;
+    try { record = this.#store.reserveProposal({ id: randomUUID(), taskId: input.taskId, requestId: input.requestId, promptSha256, promptBytes });reservation=this.#store.reserveProposalWorker(record.id); }
     catch { throw new ChatTaskProposalError('JOURNAL_FAILURE', 'The proposal attempt could not be reserved. No worker was started.'); }
-    this.#budget.acquire();
+    this.#budget.acquire({projectId:this.#store.projectId,proposalId:record.id});
     const workerInput: ChatTaskProposalWorkerInput = Object.freeze({ accountIdentity: entry.accountIdentity,
       selection: Object.freeze({ model: task.model, effort: task.effort }), owner: this.#proposalOwner(entry) });
-    const running=this.#runProposal(entry,record,input.text,input.factory,workerInput);this.#trackJoin(entry,running);
+    const running=this.#runProposal(entry,record,input.text,input.factory,workerInput,reservation);this.#trackJoin(entry,running);
     const tracked: Promise<void> = running.catch(() => {})
       .finally(() => { if (entry.proposal === tracked) entry.proposal = null; this.#pending.delete(tracked); });
     entry.proposal = tracked; this.#pending.add(tracked);
     return record;
   }
-  async #runProposal(entry: OwnedTask, record: ChatTaskProposalRecord, text: string, factory: ChatTaskProposalFactory, input: ChatTaskProposalWorkerInput): Promise<void> {
+  async #runProposal(entry: OwnedTask, record: ChatTaskProposalRecord, text: string, factory: ChatTaskProposalFactory, input: ChatTaskProposalWorkerInput,reservation:ChatTaskProposalWorkerReservation): Promise<void> {
     type Outcome = { state: 'proposed'; result: ChatTaskProposalResult } | { state: 'failed' | 'unknown'; reason: ChatTaskProposalReason };
-    let closed = true;
+    let closed = false,durableClosed=false;
     let closeFailed=false,closeFailure:unknown;
     const keepClose=(error:unknown)=>{if(!closeFailed){closeFailed=true;closeFailure=error;}};
     const retired = () => entry.controller.signal.aborted || entry.revoked || this.#closed || this.#fenced;
     const outcome = await (async (): Promise<Outcome> => {
       await Promise.resolve(); // Never spawn inside the reserving call stack.
-      try { input.owner.assertActive(); } catch { return { state: 'failed', reason: 'parent_retired' }; }
+      try { input.owner.assertActive(); } catch {
+        try{this.#store.recordProposalWorkerNotAllocated(reservation);}catch(error){keepClose(error);}
+        const proof=this.#store.proposalWorkerClosure(reservation);closed=proof.settled;durableClosed=proof.durable;
+        return { state: 'failed', reason: 'parent_retired' };
+      }
       let worker: ChatTaskProposalWorker;
-      try { worker = await factory(input); }
+      try { worker = await this.#store.invokeProposalWorker(reservation,()=>factory(input)); }
       catch (error) {
         if (errorCode(error) === 'PROCESS_EXIT_UNCONFIRMED') { closed = false;keepClose(error);return { state: 'failed', reason: 'worker_close_unconfirmed' }; }
         if (retired() || errorCode(error) === 'PARENT_SCOPE') return { state: 'failed', reason: 'parent_retired' };
@@ -791,8 +853,15 @@ export class ChatTaskCoordinator {
       try { input.owner.assertActive(); dispatched = true; value = await worker.propose(text); }
       catch (error) { threw = true; failure = error; }
       if (errorCode(failure) === 'PROCESS_EXIT_UNCONFIRMED') {closed = false;keepClose(failure);}
-      // propose() closes its own worker; this joins that retained closure and reports it.
-      try { const closing=worker.close();this.#trackJoin(entry,closing);await closing; } catch(error) { closed = false;keepClose(error); }
+      // Join the captured original close independently of result or journal state.
+      // Only the store-issued reservation can certify that close durably.
+      let closeRejected=false;
+      try { const closing=this.#store.closeProposalWorker(reservation);try{this.#trackJoin(entry,closing);}catch(error){keepClose(error);}await closing; }
+      catch(error) { closeRejected=true;keepClose(error); }
+      const proof=this.#store.proposalWorkerClosure(reservation);durableClosed=proof.durable;
+      closed=proof.settled&&errorCode(failure)!=='PROCESS_EXIT_UNCONFIRMED';
+      // A metadata-only write failure does not invent a physical worker failure.
+      if(closeRejected&&!proof.settled)closed=false;
       if (!closed) return { state: dispatched ? 'unknown' : 'failed', reason: 'worker_close_unconfirmed' };
       if (!dispatched) return { state: 'failed', reason: 'parent_retired' };
       if (threw) return errorCode(failure) === 'PROPOSAL_OUTPUT' ? { state: 'failed', reason: 'output_rejected' }
@@ -811,7 +880,7 @@ export class ChatTaskCoordinator {
       }
     } catch { /* Remains reserved; restart records unknown and never replays it. */ }
     finally {
-      try{this.#budget.release(closed);}catch(error){
+      try{this.#budget.release(durableClosed,{projectId:this.#store.projectId,proposalId:record.id});}catch(error){
         if(!closeFailed)throw error;
         // Keep the later budget fault observable, without replacing the
         // original owned worker's earlier close/allocation failure.

@@ -14,12 +14,14 @@ const TABLE=`CREATE TABLE native_session_custody(
     OR (state='closed' AND closed_at IS NOT NULL AND close_proof IS NOT NULL)),
   CHECK(close_proof IS NULL OR close_proof!='factory-cleanup' OR connection_id IS NULL)
 ) STRICT`;
+const REQUESTS=`CREATE TABLE native_session_requests(request_id TEXT PRIMARY KEY,lease_id TEXT NOT NULL REFERENCES native_session_custody(id),kind TEXT NOT NULL CHECK(kind IN ('allocated','reused'))) STRICT`;
 const row=z.strictObject({id:z.string().uuid(),connection_id:z.string().uuid().nullable(),allocated:z.union([z.literal(0),z.literal(1)]),
   writes_possible:z.union([z.literal(0),z.literal(1)]),state:z.enum(['reserved','bound','closed']),
   created_at:z.string().datetime(),closed_at:z.string().datetime().nullable(),close_proof:z.enum(['factory-cleanup','owned-transport']).nullable()});
 type Row=z.infer<typeof row>;
 type Client={close():Promise<void>};
 type Binding={id:string;connectionId:string;recorded:boolean;close:()=>Promise<void>;completion:Promise<void>|null};
+export interface NativeSessionLeaseView {readonly id:string;readonly connectionId:string|null;readonly requestId:string|null;readonly requestIds?:readonly string[];readonly state:'reserved'|'bound'|'closed'}
 const normalize=(sql:string)=>sql.replace(/\s+/g,' ').trim().replace(/;$/,'');
 function fail(message:string):never{throw new CodexClientError('JOURNAL_FAILURE',message);}
 
@@ -30,6 +32,7 @@ export class NativeSessionCustody {
   readonly #bindings=new WeakMap<object,Binding>();
   #faulted=false;
   #firstFailure:CodexClientError|null=null;
+  #requests=false;
   get faulted():boolean{return this.#faulted;}
   get firstFailure():CodexClientError|null{return this.#firstFailure;}
   #guard<T>(operation:()=>T):T{try{return operation();}catch(error){
@@ -47,6 +50,38 @@ export class NativeSessionCustody {
     if(rows.length>4096)fail('Native session custody exceeds its retained bound.');
     for(const value of rows)this.#parse(value);
   }
+  /** Host migration transaction only; v6 preflight requires this table to exist. */
+  initializeRequests(requireExisting=false):void{
+    const schema=this.#db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='native_session_requests'").get()as{sql:string}|undefined;
+    if(!schema&&requireExisting)fail('Native request custody is missing from this journal version.');
+    if(schema&&normalize(schema.sql)!==normalize(REQUESTS))fail('Native request custody schema requires inspection.');
+    if(!schema)this.#db.exec(REQUESTS);
+    const mappings=this.#db.prepare('SELECT r.request_id,r.lease_id,r.kind,c.id AS found FROM native_session_requests r LEFT JOIN native_session_custody c ON c.id=r.lease_id LIMIT 4097').all();
+    if(mappings.length>4096)fail('Native request custody exceeds its retained bound.');
+    const allocated=new Set<string>();
+    for(const mapping of mappings){
+      if(!z.string().uuid().safeParse(mapping.request_id).success||!z.string().uuid().safeParse(mapping.lease_id).success||mapping.found!==mapping.lease_id||!['allocated','reused'].includes(String(mapping.kind)))fail('Native request custody binding is invalid.');
+      if(mapping.kind==='allocated'){if(allocated.has(String(mapping.lease_id)))fail('Native allocation custody is ambiguous.');allocated.add(String(mapping.lease_id));}
+    }
+    this.#requests=true;
+  }
+  snapshot():readonly NativeSessionLeaseView[]{
+    return this.#guard(()=>{
+      const values=this.#db.prepare('SELECT * FROM native_session_custody LIMIT 4097').all();
+      if(values.length>4096)fail('Native session custody exceeds its retained bound.');
+      const mappings=new Map<string,{requestId:string|null;requestIds:string[]}>();let count=0;
+      if(this.#requests)for(const value of this.#db.prepare('SELECT request_id,lease_id,kind FROM native_session_requests LIMIT 4097').all()){
+        if(++count>4096||!z.string().uuid().safeParse(value.request_id).success||!z.string().uuid().safeParse(value.lease_id).success||!['allocated','reused'].includes(String(value.kind)))fail('Native request custody is invalid.');
+        const mapping=mappings.get(String(value.lease_id))??{requestId:null,requestIds:[]};
+        if(value.kind==='allocated'){if(mapping.requestId!==null)fail('Native allocation custody is ambiguous.');mapping.requestId=String(value.request_id);}
+        else mapping.requestIds.push(String(value.request_id));
+        mappings.set(String(value.lease_id),mapping);
+      }
+      const result=values.map(value=>{const v=this.#parse(value),mapping=mappings.get(v.id);mappings.delete(v.id);return Object.freeze({id:v.id,connectionId:v.connection_id,requestId:mapping?.requestId??null,state:v.state,...(mapping?.requestIds.length?{requestIds:Object.freeze(mapping.requestIds.sort())}:{})});});
+      if(mappings.size)fail('Native request custody lost its original lease.');
+      return Object.freeze(result);
+    });
+  }
   #parse(value:unknown):Row{
     const parsed=row.safeParse(value);if(!parsed.success)return fail('Native session custody is invalid.');
     const v=parsed.data;
@@ -63,12 +98,21 @@ export class NativeSessionCustody {
   }
   /** Reserve before invoking even an async factory. Failed injected factories
    * without the actual low-level witness remain reserved across reopen. */
-  async open<T extends Client>(factory:(lifecycle:NativeConnectionLifecycle)=>Promise<T>,connectionId:(client:T)=>string):Promise<T>{
+  async open<T extends Client>(factory:(lifecycle:NativeConnectionLifecycle)=>Promise<T>,connectionId:(client:T)=>string,requestId?:string):Promise<T>{
     if(this.#faulted)fail('Native session custody requires inspection before new allocation.');
     const count=this.#guard(()=>Number((this.#db.prepare('SELECT count(*) AS n FROM native_session_custody').get() as {n:number}).n));
     if(count>=4096)throw new CodexClientError('JOURNAL_LIMIT','Native session custody is full. No new process was started.');
+    if(requestId!==undefined&&(!this.#requests||!z.string().uuid().safeParse(requestId).success))fail('Native allocation requires initialized exact request custody.');
     const id=randomUUID();
-    this.#guard(()=>this.#db.prepare("INSERT INTO native_session_custody VALUES(?,NULL,0,0,'reserved',?,NULL,NULL)").run(id,new Date().toISOString()));
+    this.#guard(()=>{
+      this.#db.exec('SAVEPOINT native_session_reservation');
+      try{
+        if(requestId!==undefined&&Number((this.#db.prepare('SELECT count(*) AS n FROM native_session_requests').get()as{n:number}).n)>=4096)throw new CodexClientError('JOURNAL_LIMIT','Native request custody is full. No process was started.');
+        this.#db.prepare("INSERT INTO native_session_custody VALUES(?,NULL,0,0,'reserved',?,NULL,NULL)").run(id,new Date().toISOString());
+        if(requestId!==undefined)this.#db.prepare("INSERT INTO native_session_requests VALUES(?,?,'allocated')").run(requestId,id);
+        this.#db.exec('RELEASE native_session_reservation');
+      }catch(error){try{this.#db.exec('ROLLBACK TO native_session_reservation;RELEASE native_session_reservation');}catch{/* Retain the original reserve failure. */}throw error;}
+    });
     let active=true,factoryClosed=false;
     const lifecycle:NativeConnectionLifecycle=Object.freeze({
       beforeProcessAllocation:()=>{
@@ -96,6 +140,20 @@ export class NativeSessionCustody {
       binding.recorded=true;
     }catch(error){try{await this.close(owned);}catch{/* Preserve the binding failure; custody stays held if close/save failed. */}throw error;}
     return owned;
+  }
+  /** Exact current human turn can reuse its original connected owner without
+   * pretending that the turn allocated another factory or proving closure. */
+  bindRequest(owned:object,requestId:string):void{
+    if(!this.#requests||!z.string().uuid().safeParse(requestId).success||this.#faulted)fail('Native turn request custody is unavailable.');
+    const binding=this.#bindings.get(owned);if(!binding||binding.completion||!binding.recorded)fail('Native turn request requires its original bound owner.');
+    this.#guard(()=>{
+      const current=this.#read(binding.id);if(current.state!=='bound'||current.connection_id!==binding.connectionId)fail('Native turn request custody changed.');
+      const prior=this.#db.prepare('SELECT lease_id FROM native_session_requests WHERE request_id=?').get(requestId);
+      if(prior){if(prior.lease_id!==binding.id)fail('Native request already belongs to another owner.');return;}
+      const count=Number((this.#db.prepare('SELECT count(*) AS n FROM native_session_requests').get()as{n:number}).n);
+      if(count>=4096)throw new CodexClientError('JOURNAL_LIMIT','Native request custody is full. No turn was dispatched.');
+      this.#db.prepare("INSERT INTO native_session_requests VALUES(?,?,'reused')").run(requestId,binding.id);
+    });
   }
   /** Call before every effective workspace-write escalation, not after ACK. */
   writesPossible(owned:object):void{

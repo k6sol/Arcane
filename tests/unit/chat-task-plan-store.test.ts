@@ -21,6 +21,7 @@ const V1 = [
 const PROPOSALS = 'CREATE TABLE chat_task_proposals(id TEXT PRIMARY KEY,task_id TEXT NOT NULL,request_id TEXT NOT NULL UNIQUE,payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB))<=98304)) STRICT';
 const PLANS = 'CREATE TABLE chat_task_plans(id TEXT PRIMARY KEY,task_id TEXT NOT NULL UNIQUE,payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB))<=8192)) STRICT';
 const STEPS = 'CREATE TABLE chat_task_plan_steps(id TEXT PRIMARY KEY,plan_id TEXT NOT NULL,step_key TEXT NOT NULL,seq INTEGER NOT NULL,payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB))<=8192),UNIQUE(plan_id,step_key),UNIQUE(plan_id,seq)) STRICT';
+const CLOSURES = 'CREATE TABLE chat_task_proposal_worker_closures(proposal_id TEXT PRIMARY KEY,payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB))<=32768)) STRICT';
 
 async function fixture(t: test.TestContext) {
   const base = await realpath(tmpdir()), root = await realpath(await mkdtemp(join(base, 'arcane-plan-store-'))), project = join(root, 'project'), directory = join(root, 'state');
@@ -68,19 +69,19 @@ function schema(file: string) { const db = new DatabaseSync(sqliteTransportPath(
   return { version: Number((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version),
     sql: (db.prepare("SELECT sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'").all() as { sql: string }[]).map(row => row.sql).sort() }; } finally { db.close(); } }
 
-test('v1, v2 and v3 journals migrate to v4 with tasks and proposals preserved', async t => {
-  for (const version of [1, 2, 3]) await t.test('v' + version, async st => {
+test('v1, v2, v3 and v4 journals migrate to v5 with tasks and proposals preserved', async t => {
+  for (const version of [1, 2, 3, 4]) await t.test('v' + version, async st => {
     const f = await fixture(st), kept = fullTask(f.project, 'verified');
-    v1Journal(f.file, f.project, [kept], version === 3 ? [PROPOSALS, PLANS, STEPS] : version === 2 ? [PROPOSALS] : [], version);
+    v1Journal(f.file, f.project, [kept], version >= 3 ? [PROPOSALS, PLANS, STEPS] : version === 2 ? [PROPOSALS] : [], version);
     const store = f.open();
     assert.deepEqual(store.get(kept.id), kept); assert.equal(store.plan(kept.id), null); store.close();
-    const after = schema(f.file); assert.equal(after.version, 4); assert.deepEqual(after.sql, [...V1, PROPOSALS, PLANS, STEPS].sort());
+    const after = schema(f.file); assert.equal(after.version, 5); assert.deepEqual(after.sql, [...V1, PROPOSALS, PLANS, STEPS, CLOSURES].sort());
   });
 });
 
 test('newer, foreign, corrupt and inconsistent plan state is refused byte-intact', async t => {
   const cases: [string, (f: Awaited<ReturnType<typeof fixture>>) => void, RegExp][] = [
-    ['v5 newer', f => { const db = new DatabaseSync(sqliteTransportPath(f.file)); db.exec('PRAGMA user_version=5;CREATE TABLE future_state(id INTEGER PRIMARY KEY)'); db.close(); }, /newer/],
+    ['v6 newer', f => { const db = new DatabaseSync(sqliteTransportPath(f.file)); db.exec('PRAGMA user_version=6;CREATE TABLE future_state(id INTEGER PRIMARY KEY)'); db.close(); }, /newer/],
     ['v3 with a foreign table', f => { v1Journal(f.file, f.project, [], [PROPOSALS, PLANS, STEPS, 'CREATE TABLE extra(id INTEGER PRIMARY KEY)'], 3); }, /schema or project/],
     ['v3 missing the step table', f => { v1Journal(f.file, f.project, [], [PROPOSALS, PLANS], 3); }, /schema or project/],
     ['plan row for an unknown task', f => { v1Journal(f.file, f.project, [], [PROPOSALS, PLANS, STEPS], 3); const db = new DatabaseSync(sqliteTransportPath(f.file)); const id = randomUUID(), taskId = randomUUID();
@@ -329,7 +330,7 @@ test('v3 completed late-review plans migrate with their original payload bytes a
     const legacy = JSON.parse(row.payload) as Record<string, unknown>; delete legacy.inputSha256;
     db.prepare('UPDATE chat_task_plan_steps SET payload=? WHERE id=?').run(JSON.stringify(legacy), row.id);
   }
-  db.exec('PRAGMA user_version=3'); const before = db.prepare('SELECT id,payload FROM chat_task_plan_steps ORDER BY seq').all(); db.close();
+  db.exec('DROP TABLE chat_task_proposal_worker_closures;PRAGMA user_version=3'); const before = db.prepare('SELECT id,payload FROM chat_task_plan_steps ORDER BY seq').all(); db.close();
   const reopened = f.open(); assert.equal(reopened.plan(h.task.id)!.state, 'awaiting_review');
   assert.ok(reopened.planSteps(h.plan.id).every(step => step.inputSha256 === null)); reopened.close();
   const check = new DatabaseSync(sqliteTransportPath(f.file)); try { assert.deepEqual(check.prepare('SELECT id,payload FROM chat_task_plan_steps ORDER BY seq').all(), before); }

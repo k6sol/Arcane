@@ -10,7 +10,7 @@ import { ChatTaskStore, ChatTaskProposalLimitError, CHAT_TASK_PROPOSAL_LIMITS, t
 import { sqliteTransportPath } from '../../packages/storage/src/sqlite-path.js';
 import { workflowProjectIdentity } from '../../packages/storage/src/workflow-store.js';
 import { ChatTaskCoordinator, ChatTaskProposalBudget, ChatTaskProposalError, type ChatTaskOwner, type ChatTaskProposalFactory,
-  type ChatTaskProposalWorkerInput } from '../../apps/daemon/src/chat-task-coordinator.js';
+  type ChatTaskProposalWorkerInput, type ChatTaskProposalIdentity } from '../../apps/daemon/src/chat-task-coordinator.js';
 import type { Snapshot } from '../../packages/codex-client/src/types.js';
 import type { StudioTestTaskOrigin } from '../../packages/protocol/src/chat-task-playtest.js';
 
@@ -27,6 +27,7 @@ const V1 = [
 const PLAN_TABLES = ['CREATE TABLE chat_task_plans(id TEXT PRIMARY KEY,task_id TEXT NOT NULL UNIQUE,payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB))<=8192)) STRICT',
   'CREATE TABLE chat_task_plan_steps(id TEXT PRIMARY KEY,plan_id TEXT NOT NULL,step_key TEXT NOT NULL,seq INTEGER NOT NULL,payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB))<=8192),UNIQUE(plan_id,step_key),UNIQUE(plan_id,seq)) STRICT'];
 const V2 = [...V1, 'CREATE TABLE chat_task_proposals(id TEXT PRIMARY KEY,task_id TEXT NOT NULL,request_id TEXT NOT NULL UNIQUE,payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB))<=98304)) STRICT'];
+const WORKER_CLOSURES='CREATE TABLE chat_task_proposal_worker_closures(proposal_id TEXT PRIMARY KEY,payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB))<=32768)) STRICT';
 
 async function fixture(t: test.TestContext) {
   const boundary = await realpath(tmpdir()), root = await realpath(await mkdtemp(join(boundary, 'arcane-task-proposal-'))), project = join(root, 'project'), directory = join(root, 'state');
@@ -71,7 +72,7 @@ test('v1 journal migrates to v2 only after exact validation and retains task pay
     assert.equal(store.get(active.id).state, 'unknown'); assert.equal(store.get(active.id).reason, 'daemon_restarted_no_replay');
     assert.deepEqual(store.proposals(kept.id), []);
   } finally { store.close(); }
-  const after = schema(f.file); assert.equal(after.version, 4); assert.deepEqual(after.sql, [...V2, PLAN_TABLES[0], PLAN_TABLES[1]].sort());
+  const after = schema(f.file); assert.equal(after.version, 5); assert.deepEqual(after.sql, [...V2, PLAN_TABLES[0], PLAN_TABLES[1],WORKER_CLOSURES].sort());
   const db = new DatabaseSync(sqliteTransportPath(f.file));
   try { assert.equal((db.prepare('SELECT payload FROM chat_tasks WHERE id=?').get(kept.id) as { payload: string }).payload, JSON.stringify(kept)); } finally { db.close(); }
 });
@@ -84,7 +85,7 @@ test('corrupt, foreign, wrong-project and live-owned journals are refused byte-i
     ['v1 for another project', f => { v1Journal(f.file, f.project, [], { projectId: 'e'.repeat(64), projectPath: f.root }); }, /schema or project/],
     ['v1 with an extra table', f => { v1Journal(f.file, f.project, []); const db = new DatabaseSync(sqliteTransportPath(f.file)); db.exec('CREATE TABLE extra(id INTEGER PRIMARY KEY)'); db.close(); }, /schema or project/],
     ['v1 with a live owner', f => { v1Journal(f.file, f.project, []); const db = new DatabaseSync(sqliteTransportPath(f.file)); db.prepare('INSERT INTO chat_task_owner VALUES(1,?,?)').run(process.pid, 'foreign'); db.close(); }, /live owner/],
-    ['v5 journal', f => { const db = new DatabaseSync(sqliteTransportPath(f.file)); db.exec('PRAGMA user_version=5;CREATE TABLE future_state(id INTEGER PRIMARY KEY)'); db.close(); }, /newer/],
+    ['v6 journal', f => { const db = new DatabaseSync(sqliteTransportPath(f.file)); db.exec('PRAGMA user_version=6;CREATE TABLE future_state(id INTEGER PRIMARY KEY)'); db.close(); }, /newer/],
   ];
   for (const [name, prepare, expected] of cases) await t.test(name, async st => {
     const f = await fixture(st); prepare(f); const before = await inventory(f);
@@ -168,8 +169,8 @@ function snapshotFor(live: { connectionId: string; threadId: string; sessionId: 
     account: { auth: 'subscription' }, models: [], selection: { model: live.model, effort: live.effort }, operations: [], approvals: [], events: [], droppedEvents: 0, lastEventSeq: 0, failureCode: null,
     thread: { configured: true, threadId: live.threadId, sessionId: live.sessionId, selection: { model: live.model, effort: live.effort }, turnStatus: 'inProgress', turnId: null, writeGranted: false } } as unknown as Snapshot;
 }
-async function coordinatorFixture(t: test.TestContext) {
-  const f = await fixture(t), coordinator = new ChatTaskCoordinator({ directory: f.directory, projectPath: f.project, proposalBudget: new ChatTaskProposalBudget() });
+async function coordinatorFixture(t: test.TestContext,budget=new ChatTaskProposalBudget()) {
+  const f = await fixture(t), coordinator = new ChatTaskCoordinator({ directory: f.directory, projectPath: f.project, proposalBudget: budget });
   coordinator.attachCancellation(Object.freeze({ async cancelExact() {}, async revalidateExact() { return 'current' as const; } }));
   let expectedClose:{value:unknown}|null=null;
   f.closers.push(async()=>{
@@ -187,7 +188,7 @@ async function coordinatorFixture(t: test.TestContext) {
       ...(options.account === null ? {} : { accountIdentity: options.account ?? ACCOUNT }) });
     return { id, live, events, owner };
   };
-  return { ...f, coordinator, own, signals, expectClose:(value:unknown)=>{expectedClose={value};} };
+  return { ...f, coordinator, own, signals,budget, expectClose:(value:unknown)=>{expectedClose={value};} };
 }
 type Plan = { factory?: (input: ChatTaskProposalWorkerInput) => Promise<void> | void; propose?: (text: string, input: ChatTaskProposalWorkerInput) => Promise<unknown>; close?: () => Promise<void> };
 function workers(signals: AbortSignal[], plan: Plan = {}) {
@@ -206,6 +207,130 @@ async function settled(coordinator: ChatTaskCoordinator, taskId: string, id: str
   for (;;) { const value = coordinator.proposals(taskId).find(entry => entry.id === id)!; if (value.state !== 'reserved') return value; assert.ok(Date.now() < end, 'proposal settled'); await delay(5); }
 }
 
+function recoveryParent(coordinator:ChatTaskCoordinator){
+  const id=randomUUID(),live={connectionId:randomUUID(),threadId:'fresh:'+id,sessionId:null,model:'fixture',effort:'low'},events:string[]=[];
+  const owner:ChatTaskOwner={snapshot:()=>snapshotFor(live),repair:async()=>{},revoke:()=>{events.push('revoke');},cancel:async()=>{events.push('cancel');},accountIdentity:()=>ACCOUNT};
+  coordinator.begin({id,actorId:'fresh-actor-'+id,snapshot:owner.snapshot(),allowWorkspaceWrites:false,allowAssets:false,accountIdentity:ACCOUNT,owner});
+  return{id,events};
+}
+
+test('proposal budget deduplicates original unsafe identity across active release and later project reconstruction',()=>{
+  const budget=new ChatTaskProposalBudget(),a={projectId:'a'.repeat(64),proposalId:randomUUID()},b={projectId:a.projectId,proposalId:randomUUID()};
+  budget.acquire(a);budget.reserveUnsafe([a,a]);assert.equal(budget.quarantined,1);assert.equal(budget.available(),true,'One original in-flight/unsafe worker occupies one category slot.');
+  budget.acquire(b);assert.equal(budget.available(),false);budget.release(false,a);assert.equal(budget.quarantined,1);
+  budget.reserveUnsafe([a]);budget.release(true,b);assert.equal(budget.available(),true);assert.equal(budget.quarantined,1);
+  assert.throws(()=>budget.release(false,a),/No original proposal/);assert.equal(budget.quarantined,1);
+  budget.reserveUnsafe([{projectId:'b'.repeat(64),proposalId:a.proposalId}]);assert.equal(budget.quarantined,2);assert.equal(budget.available(),false,'A different original project is a different worker.');
+  assert.throws(()=>budget.acquire(b),error=>error instanceof ChatTaskProposalError&&error.code==='BUSY');
+});
+
+test('historical task reservations retain the128-owner cap while two proposal debts leave fresh native task admission available',{timeout:30000},async t=>{
+  const f=await fixture(t),store=new ChatTaskStore({directory:f.directory,projectPath:f.project}),old=Array.from({length:127},()=>store.create(task('cancelled')));
+  const proposals=[store.reserveProposal(reservation(old[0]!.id)),store.reserveProposal(reservation(old[1]!.id))];
+  store.settleProposal(proposals[0]!.id,{state:'proposed',result:result()});store.settleProposal(proposals[1]!.id,{state:'failed',reason:'worker_unavailable'});store.close();
+  const budget=new ChatTaskProposalBudget(),coordinator=new ChatTaskCoordinator({directory:f.directory,projectPath:f.project,proposalBudget:budget});
+  f.closers.push(()=>coordinator.close());coordinator.attachCancellation(Object.freeze({async cancelExact(){},async revalidateExact(){return 'current' as const;}}));
+  const recovery=coordinator.recoveryState();assert.equal(recovery.tasks.length,127);assert.deepEqual([...recovery.unclosedProposalIds].sort(),proposals.map(item=>item.id).sort(),'Historical terminal labels do not prove closure.');
+  const raw=new DatabaseSync(sqliteTransportPath(f.file),{readOnly:true});let expected:{id:string;fingerprint:string}[];
+  try{expected=(raw.prepare('SELECT id,payload FROM chat_tasks ORDER BY rowid').all() as {id:string;payload:string}[]).map(row=>({id:row.id,fingerprint:sha(row.id+'\0'+row.payload)}));}finally{raw.close();}
+  assert.deepEqual(coordinator.recoveryTaskFingerprints(),expected!);
+  const input={taskIds:old.map(item=>item.id),proposalIds:proposals.map(item=>item.id)};coordinator.installRecoveryReservations(input);
+  assert.equal(budget.quarantined,2);assert.equal(budget.available(),false);
+  coordinator.installRecoveryReservations({taskIds:[...input.taskIds].reverse(),proposalIds:[...input.proposalIds].reverse()});
+  const fresh=recoveryParent(coordinator);assert.equal(coordinator.owns(fresh.id),true,'Proposal category debt cannot block an ordinary fresh native task.');
+  input.taskIds.length=0;input.proposalIds.length=0;
+  assert.throws(()=>recoveryParent(coordinator),/fresh task incarnation/,'Detached reservations still count with the fresh owner toward128.');
+  const w=workers([]);assert.throws(()=>coordinator.startProposal({taskId:fresh.id,requestId:randomUUID(),text:'x',factory:w.factory}),error=>error instanceof ChatTaskProposalError&&error.code==='BUSY');assert.equal(w.calls.length,0);
+  assert.throws(()=>coordinator.installRecoveryReservations({taskIds:[],proposalIds:[]}),/already installed/);assert.deepEqual(fresh.events,[]);
+  await coordinator.close();
+  const again=new ChatTaskCoordinator({directory:f.directory,projectPath:f.project,proposalBudget:budget});f.closers.push(()=>again.close());
+  again.installRecoveryReservations({taskIds:old.map(item=>item.id),proposalIds:proposals.map(item=>item.id)});assert.equal(budget.quarantined,2,'Repeated service construction does not double-charge the same original proposals.');
+});
+
+test('recovery installation rejects foreign, closed, duplicate and accessor IDs before changing any reservation',{timeout:15000},async t=>{
+  const f=await fixture(t),store=new ChatTaskStore({directory:f.directory,projectPath:f.project}),old=store.create(task('cancelled')),lost=store.reserveProposal(reservation(old.id)),closed=store.reserveProposal(reservation(old.id));
+  store.recordProposalWorkerNotAllocated(store.reserveProposalWorker(closed.id));store.settleProposal(closed.id,{state:'failed',reason:'parent_retired'});store.close();
+  const budget=new ChatTaskProposalBudget(),coordinator=new ChatTaskCoordinator({directory:f.directory,projectPath:f.project,proposalBudget:budget});f.closers.push(()=>coordinator.close());
+  coordinator.attachCancellation(Object.freeze({async cancelExact(){},async revalidateExact(){return 'current' as const;}}));
+  let reads=0;const getter={proposalIds:[lost.id]};Object.defineProperty(getter,'taskIds',{enumerable:true,get(){reads++;return[old.id];}});
+  const sparse=Array<string>(1),arrayGetter=[] as string[];Object.defineProperty(arrayGetter,0,{get(){reads++;return old.id;},enumerable:true});
+  for(const input of [{taskIds:[randomUUID()],proposalIds:[lost.id]},{taskIds:[old.id],proposalIds:[randomUUID()]},{taskIds:[old.id],proposalIds:[closed.id]},
+    {taskIds:[old.id,old.id],proposalIds:[]},{taskIds:[],proposalIds:[lost.id,lost.id]},getter,{taskIds:sparse,proposalIds:[]},{taskIds:arrayGetter,proposalIds:[]}]){
+    assert.throws(()=>coordinator.installRecoveryReservations(input as {taskIds:string[];proposalIds:string[]}));assert.equal(budget.quarantined,0);
+  }
+  assert.equal(reads,0);assert.deepEqual(coordinator.recoveryState().unclosedProposalIds,[lost.id]);
+  const fresh=recoveryParent(coordinator);assert.throws(()=>coordinator.installRecoveryReservations({taskIds:[old.id],proposalIds:[lost.id]}),/before new work/);
+  assert.equal(budget.quarantined,0);assert.equal(coordinator.owns(fresh.id),true);assert.deepEqual(fresh.events,[]);
+});
+
+test('same original runtime close debt is not charged again after reopen and does not block a new parent',{timeout:15000},async t=>{
+  const budget=new ChatTaskProposalBudget(),f=await coordinatorFixture(t,budget),parent=f.own(),original=false;f.expectClose(original);
+  const w=workers(f.signals,{close:async()=>{throw original;}}),record=f.coordinator.startProposal({taskId:parent.id,requestId:randomUUID(),text:'x',factory:w.factory});
+  assert.equal((await settled(f.coordinator,parent.id,record.id)).reason,'worker_close_unconfirmed');await f.coordinator.drain();assert.equal(budget.quarantined,1);
+  await assert.rejects(f.coordinator.close(),error=>Object.is(error,original));
+  const reopened=new ChatTaskCoordinator({directory:f.directory,projectPath:f.project,proposalBudget:budget});f.closers.push(()=>reopened.close());
+  reopened.attachCancellation(Object.freeze({async cancelExact(){},async revalidateExact(){return 'current' as const;}}));
+  reopened.installRecoveryReservations({taskIds:[parent.id],proposalIds:[record.id]});assert.equal(budget.quarantined,1);
+  const fresh=recoveryParent(reopened),next=workers([]),proposal=reopened.startProposal({taskId:fresh.id,requestId:randomUUID(),text:'x',factory:next.factory});
+  assert.equal((await settled(reopened,fresh.id,proposal.id)).state,'proposed');assert.equal(next.calls.length,1);assert.equal(budget.quarantined,1);
+  assert.deepEqual(reopened.recoveryState().unclosedProposalIds,[record.id],'A confirmed new worker close is independent of the old unknown result.');
+});
+
+test('retirement before invoking the original factory records exact no-allocation closure',{timeout:15000},async t=>{
+  const f=await coordinatorFixture(t),parent=f.own(),w=workers(f.signals),record=f.coordinator.startProposal({taskId:parent.id,requestId:randomUUID(),text:'x',factory:w.factory});
+  await f.coordinator.cancel(parent.id,'human_stop');await f.coordinator.drain();assert.equal(w.calls.length,0);
+  assert.equal(f.coordinator.proposals(parent.id).find(item=>item.id===record.id)!.reason,'parent_retired');assert.equal(f.budget.quarantined,0);
+  assert.equal(f.coordinator.recoveryState().unclosedProposalIds.includes(record.id),false);
+});
+
+test('automatic plan workers refused by legacy category debt record no-allocation instead of creating more recovery debt',{timeout:15000},async t=>{
+  const f=await fixture(t),store=new ChatTaskStore({directory:f.directory,projectPath:f.project}),old=store.create(task('cancelled'));
+  const debts=[store.reserveProposal(reservation(old.id)),store.reserveProposal(reservation(old.id))];store.close();
+  const budget=new ChatTaskProposalBudget(),coordinator=new ChatTaskCoordinator({directory:f.directory,projectPath:f.project,proposalBudget:budget});f.closers.push(()=>coordinator.close());
+  coordinator.attachCancellation(Object.freeze({async cancelExact(){},async revalidateExact(){return 'current' as const;}}));coordinator.installRecoveryReservations({taskIds:[old.id],proposalIds:debts.map(item=>item.id)});
+  const id=randomUUID(),live={connectionId:randomUUID(),threadId:'fresh-plan-parent',sessionId:null,model:'fixture',effort:'low'},snapshot=snapshotFor(live);
+  snapshot.thread!.turnStatus='completed';snapshot.thread!.turnId='initial-turn';snapshot.operations=[{operationId:'initial-operation',method:'turn/start',requestId:1,threadId:live.threadId,turnId:'initial-turn',state:'acknowledged',errorCode:null}];
+  let initial=0,factories=0,parents=0,evidence=0;
+  const owner:ChatTaskOwner={snapshot:()=>snapshot,accountIdentity:()=>ACCOUNT,revoke(){},async cancel(){},async repair(){},
+    plan(){return{async waitForInitial(){initial++;},async incorporate(){parents++;return 'completed' as const;}};}};
+  coordinator.begin({id,actorId:'fresh-plan-actor',snapshot,allowWorkspaceWrites:false,allowAssets:false,accountIdentity:ACCOUNT,owner});coordinator.dispatched(id,'initial-operation');coordinator.acknowledged(id);
+  const plan=coordinator.startPlan({taskId:id,objective:'A fresh owned task',inputSha256:sha('A fresh owned task'),factory:async()=>{factories++;assert.fail('Legacy debt must refuse before the factory.');},evidence:async()=>{evidence++;return{runId:randomUUID()};}});
+  await coordinator.drain();assert.equal(initial,1);assert.equal(factories,0);assert.equal(parents,0);assert.equal(evidence,0);
+  assert.equal(coordinator.plan(id)!.id,plan.id);assert.equal(coordinator.plan(id)!.reason,'no_usable_proposals');
+  const refused=coordinator.proposals(id);assert.equal(refused.length,3);assert.ok(refused.every(item=>item.state==='failed'&&item.reason==='worker_failed_before_dispatch'));
+  assert.deepEqual([...coordinator.recoveryState().unclosedProposalIds].sort(),debts.map(item=>item.id).sort(),'All three skipped workers have exact durable no-allocation markers.');assert.equal(budget.quarantined,2);
+});
+
+test('a post-construction recovery read fault closes the original Store and preserves even a falsy first fault',{timeout:10000},async t=>{
+  const f=await fixture(t),store=new ChatTaskStore({directory:f.directory,projectPath:f.project}),old=store.create(task('cancelled'));store.close();
+  const original=false,stub=t.mock.method(ChatTaskStore.prototype,'unclosedProposalIds',()=>{throw original;});
+  try{assert.throws(()=>new ChatTaskCoordinator({directory:f.directory,projectPath:f.project,proposalBudget:new ChatTaskProposalBudget()}),error=>Object.is(error,original));}finally{stub.mock.restore();}
+  const reopened=new ChatTaskStore({directory:f.directory,projectPath:f.project});try{assert.deepEqual(reopened.get(old.id),old);}finally{reopened.close();}
+});
+
+test('automatic no-allocation marker refusal preserves the known outcome and exact falsy closure fault',{timeout:15000},async t=>{
+  const f=await fixture(t),store=new ChatTaskStore({directory:f.directory,projectPath:f.project}),old=store.create(task('cancelled'));
+  const debts=[store.reserveProposal(reservation(old.id)),store.reserveProposal(reservation(old.id))];store.close();
+  const budget=new ChatTaskProposalBudget(),coordinator=new ChatTaskCoordinator({directory:f.directory,projectPath:f.project,proposalBudget:budget}),original=false;
+  f.closers.push(async()=>{await assert.rejects(coordinator.close(),error=>Object.is(error,original));});
+  coordinator.attachCancellation(Object.freeze({async cancelExact(){},async revalidateExact(){return 'current' as const;}}));coordinator.installRecoveryReservations({taskIds:[old.id],proposalIds:debts.map(item=>item.id)});
+  const id=randomUUID(),live={connectionId:randomUUID(),threadId:'marker-refusal-parent',sessionId:null,model:'fixture',effort:'low'},snapshot=snapshotFor(live);
+  snapshot.thread!.turnStatus='completed';snapshot.thread!.turnId='initial-turn';snapshot.operations=[{operationId:'initial-operation',method:'turn/start',requestId:1,threadId:live.threadId,turnId:'initial-turn',state:'acknowledged',errorCode:null}];
+  let factories=0,parents=0,evidence=0;
+  const owner:ChatTaskOwner={snapshot:()=>snapshot,accountIdentity:()=>ACCOUNT,revoke(){},async cancel(){},async repair(){},
+    plan(){return{async waitForInitial(){},async incorporate(){parents++;return 'completed' as const;}};}};
+  coordinator.begin({id,actorId:'marker-refusal-actor',snapshot,allowWorkspaceWrites:false,allowAssets:false,accountIdentity:ACCOUNT,owner});coordinator.dispatched(id,'initial-operation');coordinator.acknowledged(id);
+  const marker=t.mock.method(ChatTaskStore.prototype,'recordProposalWorkerNotAllocated',()=>{throw original;});
+  try{
+    coordinator.startPlan({taskId:id,objective:'No factory was invoked',inputSha256:sha('No factory was invoked'),factory:async()=>{factories++;assert.fail('Full proposal debt refuses before the factory.');},evidence:async()=>{evidence++;return{runId:randomUUID()};}});
+    await coordinator.drain();assert.equal(marker.mock.callCount(),3);
+  }finally{marker.mock.restore();}
+  assert.equal(factories,0);assert.equal(parents,0);assert.equal(evidence,0);assert.equal(coordinator.plan(id)!.reason,'no_usable_proposals');
+  const refused=coordinator.proposals(id);assert.equal(refused.length,3);assert.ok(refused.every(item=>item.state==='failed'&&item.reason==='worker_failed_before_dispatch'));
+  assert.deepEqual([...coordinator.recoveryState().unclosedProposalIds].sort(),[...debts,...refused].map(item=>item.id).sort(),'Failed metadata writes never certify closure.');assert.equal(budget.quarantined,2);
+  await assert.rejects(coordinator.close(),error=>Object.is(error,original));await assert.rejects(coordinator.close(),error=>Object.is(error,original));
+});
+
 test('happy path reserves durably before the factory and records display-only output', async t => {
   const f = await coordinatorFixture(t), parent = f.own(), w = workers(f.signals), requestId = randomUUID();
   const text = 'Suggest one change. {"tool":"arcane.write","args":{"path":"x"}}';
@@ -213,6 +338,7 @@ test('happy path reserves durably before the factory and records display-only ou
   assert.equal(reserved.state, 'reserved'); assert.equal(w.calls.length, 0, 'factory never runs inside the reserving call');
   assert.equal(f.coordinator.proposalByRequest(requestId)!.id, reserved.id, 'durable before any worker exists');
   const value = await settled(f.coordinator, parent.id, reserved.id);
+  assert.equal(f.coordinator.recoveryState().unclosedProposalIds.includes(reserved.id),false,'Only the joined original worker close supplies durable closure.');
   assert.equal(value.state, 'proposed'); assert.equal(value.result!.text, 'Proposal: rename one part.'); assert.equal(value.result!.textSha256, sha('Proposal: rename one part.'));
   assert.equal(value.promptSha256, sha(text)); assert.deepEqual(w.proposed, [text]); assert.ok(w.closes >= 1);
   const input = w.calls[0]!;
@@ -235,13 +361,15 @@ test('reservation fault starts no worker and leaves no attempt', async t => {
 });
 
 test('factory failures are failed, never replayed; unconfirmed closure keeps the slot occupied', async t => {
-  const f = await coordinatorFixture(t);
   const outcomes: [string, string][] = [['GENERIC', 'worker_failed_before_dispatch'], ['CLI_MISSING', 'worker_unavailable'], ['PROCESS_PATH', 'worker_unavailable']];
   for (const [code, reason] of outcomes) {
+    const f=await coordinatorFixture(t);
     const parent = f.own(), w = workers(f.signals, { factory: () => { throw coded(code); } });
     const value = await settled(f.coordinator, parent.id, f.coordinator.startProposal({ taskId: parent.id, requestId: randomUUID(), text: 'x', factory: w.factory }).id);
     assert.equal(value.state, 'failed'); assert.equal(value.reason, reason); assert.equal(w.proposed.length, 0);
+    assert.ok(f.coordinator.recoveryState().unclosedProposalIds.includes(value.id),'A factory error code is not original worker closure evidence.');assert.equal(f.budget.quarantined,1);
   }
+  const f=await coordinatorFixture(t);
   const unconfirmed=coded('PROCESS_EXIT_UNCONFIRMED');f.expectClose(unconfirmed);
   for (let slot = 0; slot < 2; slot++) {
     const parent = f.own(), w = workers(f.signals, { factory: () => { throw unconfirmed; } });
@@ -392,16 +520,19 @@ test('legacy owners, unowned tasks, restarted tasks and invalid prompts gain no 
   assert.equal(w.calls.length, 0);
 });
 
-test('settlement journal fault leaves the attempt reserved, frees the confirmed slot and restart records unknown', async t => {
+test('locked proposal journal retains the unconfirmed marker debt, original fault and restart unknown without replay', async t => {
   const f = await coordinatorFixture(t), parent = f.own(); let release!: () => void; const gate = new Promise<void>(resolve => { release = resolve; });
   const w = workers(f.signals, { propose: async () => { await gate; return { threadId: 't', sessionId: null, turnId: 'u', text: 'lost', status: 'proposed' }; } });
   const reserved = f.coordinator.startProposal({ taskId: parent.id, requestId: randomUUID(), text: 'x', factory: w.factory });
   await delay(10); const lock = new DatabaseSync(sqliteTransportPath(f.file)); lock.exec('BEGIN IMMEDIATE');
   try { release(); await f.coordinator.drain(); } finally { lock.exec('ROLLBACK'); lock.close(); }
   assert.equal(f.coordinator.proposals(parent.id)[0]!.state, 'reserved');
+  assert.equal(w.closes,1);assert.equal(f.budget.quarantined,1);assert.ok(f.coordinator.recoveryState().unclosedProposalIds.includes(reserved.id));
   const other = f.own(), next = f.coordinator.startProposal({ taskId: other.id, requestId: randomUUID(), text: 'x', factory: workers(f.signals).factory });
   assert.equal((await settled(f.coordinator, other.id, next.id)).state, 'proposed');
-  await f.coordinator.close();
+  let rejected=false,original:unknown;try{await f.coordinator.close();}catch(error){rejected=true;original=error;}assert.equal(rejected,true);assert.ok(original instanceof Error);
+  assert.equal((original as NodeJS.ErrnoException).code,'ERR_SQLITE_ERROR');assert.equal((original as {errcode?:number}).errcode,5);f.expectClose(original);
+  await assert.rejects(f.coordinator.close(),error=>Object.is(error,original));
   const store = new ChatTaskStore({ directory: f.directory, projectPath: f.project });
   try { const value = store.proposals(parent.id).find(entry => entry.id === reserved.id)!; assert.equal(value.state, 'unknown'); assert.equal(value.reason, 'daemon_restarted_no_replay'); }
   finally { store.close(); }
@@ -414,8 +545,8 @@ async function cleanupFaultFixture(t: test.TestContext, faults: CleanupFaults) {
   // A trusted budget fault makes the real tracked plan-proposal promise reject
   // after its worker closed. Ordinary proposal errors are journal outcomes.
   class CleanupBudget extends ChatTaskProposalBudget {
-    override release(closed: boolean): void {
-      released.push(closed); events.push('proposal-release'); super.release(closed);
+    override release(closed: boolean,identity?:ChatTaskProposalIdentity): void {
+      released.push(closed); events.push('proposal-release'); super.release(closed,identity);
       if (faults.proposal) throw faults.proposal.value;
     }
   }

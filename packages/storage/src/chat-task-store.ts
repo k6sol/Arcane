@@ -47,8 +47,10 @@ const PROPOSALS_DDL='CREATE TABLE chat_task_proposals(id TEXT PRIMARY KEY,task_i
 const PLANS_DDL='CREATE TABLE chat_task_plans(id TEXT PRIMARY KEY,task_id TEXT NOT NULL UNIQUE,payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB))<=8192)) STRICT';
 const STEPS_DDL='CREATE TABLE chat_task_plan_steps(id TEXT PRIMARY KEY,plan_id TEXT NOT NULL,step_key TEXT NOT NULL,seq INTEGER NOT NULL,payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB))<=8192),UNIQUE(plan_id,step_key),UNIQUE(plan_id,seq)) STRICT';
 const TABLES_V2=[...TABLES_V1,PROPOSALS_DDL];
-const TABLES=[...TABLES_V2,PLANS_DDL,STEPS_DDL];
-const VERSION=4;
+const TABLES_V4=[...TABLES_V2,PLANS_DDL,STEPS_DDL];
+const PROPOSAL_CLOSURES_DDL='CREATE TABLE chat_task_proposal_worker_closures(proposal_id TEXT PRIMARY KEY,payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB))<=32768)) STRICT';
+const TABLES=[...TABLES_V4,PROPOSAL_CLOSURES_DDL];
+const VERSION=5;
 
 /** Durable host-authored plan journal. Rows record bounded identities and digests only; they carry no
  * capability, prompt text or acceptance. A plan or parent completion is never task acceptance. */
@@ -140,6 +142,18 @@ const proposalRecord=z.strictObject({id:z.string().uuid(),taskId:z.string().uuid
   promptBytes:z.number().int().min(1).max(CHAT_TASK_PROPOSAL_LIMITS.promptBytes),state:z.enum(['reserved','proposed','failed','unknown']),
   reason:z.enum(CHAT_TASK_PROPOSAL_REASONS).nullable(),result:proposalResult.nullable(),createdAt:z.string().datetime(),updatedAt:z.string().datetime()})
   .refine(r=>r.state==='proposed'?r.result!==null&&r.reason===null:r.result===null&&(r.state==='reserved'?r.reason===null:r.reason!==null));
+const proposalClosure=z.strictObject({version:z.literal(1),projectId:hash,projectPath:z.string().min(1).max(4096),
+  proposalId:z.string().uuid(),taskId:z.string().uuid(),requestId:z.string().uuid(),reservationFingerprint:hash,
+  kind:z.enum(['closed','not_allocated']),settledAt:z.string().datetime(),storeLifetimeId:z.string().uuid()});
+declare const proposalWorkerReservation:unique symbol;
+/** Original in-memory store capability, never reconstructed from a journal or request. */
+export interface ChatTaskProposalWorkerReservation {readonly [proposalWorkerReservation]:true}
+interface ProposalWorkerOwner {
+  readonly token:ChatTaskProposalWorkerReservation;readonly proposalId:string;readonly fingerprint:string;
+  invoked:boolean;closing:boolean;settled:boolean;durable:boolean;kind:'closed'|'not_allocated'|null;
+  allocation:Promise<unknown>|null;worker:{receiver:object;close:()=>Promise<void>}|null;tail:Promise<void>|null;
+  markerFailed:boolean;markerError:unknown;
+}
 const samePath=(a:string,b:string)=>process.platform==='win32'?a.toLowerCase()===b.toLowerCase():a===b;
 function directDirectories(path:string,missing=false):void{
   for(let current=path;;current=dirname(current)){
@@ -156,6 +170,9 @@ export class ChatTaskStore {
   readonly #fileIdentity:{dev:number;ino:number};
   #closed = false;
   readonly #summaries = new Map<string, ChatTaskSummary>();
+  readonly #createdProposals=new Map<string,string>();
+  readonly #proposalWorkers=new WeakMap<ChatTaskProposalWorkerReservation,ProposalWorkerOwner>();
+  readonly #proposalWorkerIds=new Map<string,ProposalWorkerOwner>();
   constructor(options: { directory: string; projectPath: string }) {
     const project = workflowProjectIdentity(options.projectPath);
     this.projectId = project.projectId; this.projectPath = project.projectPath;
@@ -171,7 +188,7 @@ export class ChatTaskStore {
     try {
       const version = Number(this.#db.prepare('PRAGMA user_version').get()!.user_version);
       if (version > VERSION) throw new Error('Task journal is newer than this build.');
-      if(version!==0&&version!==1&&version!==2&&version!==3&&version!==VERSION)throw new Error('Invalid task journal version.');
+      if(version!==0&&version!==1&&version!==2&&version!==3&&version!==4&&version!==VERSION)throw new Error('Invalid task journal version.');
       if(this.#db.prepare('PRAGMA quick_check').get()?.quick_check!=='ok')throw new Error('Task journal integrity failed.');
       if(version===0){
         if(this.#db.prepare("SELECT name FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' LIMIT 1").get()||this.#db.prepare('PRAGMA application_id').get()?.application_id!==0)throw new Error('Unversioned task journal is not empty.');
@@ -185,14 +202,14 @@ export class ChatTaskStore {
         if(meta?.project_id!==this.projectId||meta.project_path!==this.projectPath)throw new Error('Task journal schema or project changed.');
       };
       const current=Number(this.#db.prepare('PRAGMA user_version').get()!.user_version);
-      schemaFor(current===1?TABLES_V1:current===2?TABLES_V2:TABLES);
+      schemaFor(current===1?TABLES_V1:current===2?TABLES_V2:current<5?TABLES_V4:TABLES);
       // Every refusal below is read-only and precedes the first write (including the WAL header switch).
       const taskRows=()=>{
         const rows=this.#db.prepare('SELECT id,payload FROM chat_tasks ORDER BY rowid LIMIT 257').all() as {id:string;payload:string}[];
         if(rows.length>256)throw new Error('Task journal retention exceeded.');
         for(const row of rows)this.#taskRow(row);
       };
-      taskRows();if(current>=2)this.#allProposals();if(current>=3)this.#allPlanRows(current===3);
+      taskRows();if(current>=2)this.#allProposals();if(current>=3)this.#allPlanRows(current===3);if(current>=5)this.#allProposalClosures();
       const prior=this.#db.prepare('SELECT pid FROM chat_task_owner WHERE id=1').get();
       if(prior&&live(Number(prior.pid)))throw new Error('Task journal already has a live owner.');
       this.#db.exec('PRAGMA trusted_schema=OFF; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;PRAGMA journal_size_limit=8388608;');
@@ -203,9 +220,9 @@ export class ChatTaskStore {
         // Migrate only after exact validation and ownership, in the SAME transaction as the claim.
         if(current<VERSION){
           if(Number(this.#db.prepare('PRAGMA user_version').get()!.user_version)!==current)throw new Error('Task journal version changed during migration.');
-          schemaFor(current===1?TABLES_V1:current===2?TABLES_V2:TABLES);taskRows();if(current>=2)this.#allProposals();if(current===3)this.#allPlanRows(true);
+          schemaFor(current===1?TABLES_V1:current===2?TABLES_V2:TABLES_V4);taskRows();if(current>=2)this.#allProposals();if(current>=3)this.#allPlanRows(current===3);
           if(current===1)this.#db.exec(PROPOSALS_DDL);
-          if(current<3){this.#db.exec(PLANS_DDL);this.#db.exec(STEPS_DDL);}this.#db.exec(`PRAGMA user_version=${VERSION};`);
+          if(current<3){this.#db.exec(PLANS_DDL);this.#db.exec(STEPS_DDL);}this.#db.exec(PROPOSAL_CLOSURES_DDL);this.#db.exec(`PRAGMA user_version=${VERSION};`);
         }
         this.#recoverPlans(); // Restart recovery is atomic with migration and the ownership claim.
         this.#db.exec('COMMIT');claimed=true;
@@ -284,7 +301,9 @@ export class ChatTaskStore {
       if(Number((this.#db.prepare('SELECT count(*) AS n FROM chat_task_proposals WHERE task_id=?').get(input.taskId) as {n:number}).n)>=CHAT_TASK_PROPOSAL_LIMITS.perTask||
         Number((this.#db.prepare('SELECT count(*) AS n FROM chat_task_proposals').get() as {n:number}).n)>=CHAT_TASK_PROPOSAL_LIMITS.total)throw new Error('Task proposal journal is full.');
       const now=new Date().toISOString(),record:ChatTaskProposalRecord={...input,state:'reserved',reason:null,result:null,createdAt:now,updatedAt:now};
-      this.#writeProposal(record,null);this.#db.exec('COMMIT');return this.#parseProposal({id:record.id,task_id:record.taskId,request_id:record.requestId,payload:JSON.stringify(proposalRecord.parse(record))});
+      this.#writeProposal(record,null);this.#db.exec('COMMIT');
+      const saved=this.#parseProposal({id:record.id,task_id:record.taskId,request_id:record.requestId,payload:JSON.stringify(proposalRecord.parse(record))});
+      this.#createdProposals.set(saved.id,this.#proposalReservationFingerprint(saved));return saved;
     }catch(error){this.#db.exec('ROLLBACK');throw error;}
   }
   /** reserved -> proposed|failed|unknown exactly once; terminal records are immutable. */
@@ -301,6 +320,103 @@ export class ChatTaskStore {
       return this.#parseProposal({...row,payload:JSON.stringify(proposalRecord.parse(next))});
     }catch(error){this.#db.exec('ROLLBACK');throw error;}
   }
+  #proposalReservationFingerprint(proposal:ChatTaskProposalRecord):string {
+    return createHash('sha256').update(JSON.stringify({projectId:this.projectId,projectPath:this.projectPath,proposalId:proposal.id,taskId:proposal.taskId,
+      requestId:proposal.requestId,promptSha256:proposal.promptSha256,promptBytes:proposal.promptBytes,createdAt:proposal.createdAt})).digest('hex');
+  }
+  #proposalOwnerTask(proposal:ChatTaskProposalRecord):void {
+    const row=this.#db.prepare('SELECT id,payload FROM chat_tasks WHERE id=?').get(proposal.taskId) as {id:unknown;payload:unknown}|undefined;
+    if(!row||this.#taskRow(row).id!==proposal.taskId)throw new Error('Task proposal lost its original task.');
+  }
+  #allProposalClosures():Set<string> {
+    const rows=this.#db.prepare('SELECT proposal_id,payload FROM chat_task_proposal_worker_closures ORDER BY rowid LIMIT ?').all(CHAT_TASK_PROPOSAL_LIMITS.total+1) as {proposal_id:unknown;payload:unknown}[];
+    if(rows.length>CHAT_TASK_PROPOSAL_LIMITS.total)throw new Error('Task proposal closure retention exceeded.');
+    const closed=new Set<string>();
+    for(const row of rows){
+      if(typeof row.proposal_id!=='string'||typeof row.payload!=='string'||Buffer.byteLength(row.payload)>32768)throw new Error('Task proposal closure journal is corrupt.');
+      let raw:unknown;try{raw=JSON.parse(row.payload);}catch{throw new Error('Task proposal closure journal is corrupt.');}
+      const parsed=proposalClosure.safeParse(raw);if(!parsed.success)throw new Error('Task proposal closure journal is corrupt.');
+      const marker=parsed.data,proposal=this.#proposalById(marker.proposalId),task=this.#db.prepare('SELECT id,payload FROM chat_tasks WHERE id=?').get(marker.taskId) as {id:unknown;payload:unknown}|undefined;
+      if(marker.proposalId!==row.proposal_id||marker.projectId!==this.projectId||marker.projectPath!==this.projectPath||!proposal||!task||
+        proposal.taskId!==marker.taskId||proposal.requestId!==marker.requestId||this.#proposalReservationFingerprint(proposal)!==marker.reservationFingerprint||this.#taskRow(task).id!==marker.taskId)
+        throw new Error('Task proposal closure lost its exact reservation.');
+      closed.add(marker.proposalId);
+    }
+    return closed;
+  }
+  #proposalWorker(token:ChatTaskProposalWorkerReservation):ProposalWorkerOwner {
+    if(token===null||typeof token!=='object')throw new Error('An original proposal worker reservation is required.');
+    const entry=this.#proposalWorkers.get(token);if(!entry)throw new Error('An original proposal worker reservation is required.');return entry;
+  }
+  reserveProposalWorker(proposalId:string):ChatTaskProposalWorkerReservation {
+    this.#open();const fingerprint=this.#createdProposals.get(proposalId);
+    if(!fingerprint)throw new Error('Only this store lifetime can reserve its original proposal worker.');
+    const proposal=this.#proposalById(proposalId);if(!proposal||this.#proposalReservationFingerprint(proposal)!==fingerprint)throw new Error('Only this store lifetime can reserve its original proposal worker.');
+    this.#proposalOwnerTask(proposal);
+    const prior=this.#proposalWorkerIds.get(proposalId);if(prior)return prior.token;
+    if(proposal.state!=='reserved')throw new Error('Only an original reserved proposal can receive a worker reservation.');
+    const token=Object.freeze(Object.create(null)) as ChatTaskProposalWorkerReservation;
+    const entry:ProposalWorkerOwner={token,proposalId,fingerprint,invoked:false,closing:false,settled:false,durable:false,kind:null,allocation:null,worker:null,tail:null,markerFailed:false,markerError:undefined};
+    this.#proposalWorkers.set(token,entry);this.#proposalWorkerIds.set(proposalId,entry);return token;
+  }
+  async invokeProposalWorker<T extends {close():Promise<void>}>(token:ChatTaskProposalWorkerReservation,factory:()=>Promise<T>):Promise<T> {
+    const entry=this.#proposalWorker(token);this.#open();const proposal=this.#proposalById(entry.proposalId);
+    if(!proposal||this.#proposalReservationFingerprint(proposal)!==entry.fingerprint)throw new Error('Task proposal reservation changed.');
+    this.#proposalOwnerTask(proposal);
+    if(entry.invoked||entry.closing||entry.settled||typeof factory!=='function')throw new Error('Task proposal worker invocation is one-use.');
+    if(proposal.state!=='reserved')throw new Error('Only an original reserved proposal can invoke its worker.');
+    entry.invoked=true;let accepted!:(worker:T)=>void,failed!:(error:unknown)=>void;
+    const allocation=new Promise<T>((resolve,reject)=>{accepted=resolve;failed=reject;});entry.allocation=allocation;void allocation.catch(()=>{});
+    try{Promise.resolve(factory()).then(worker=>{try{
+      const close=worker.close;if(typeof close!=='function')throw new Error('Proposal worker has no original close method.');
+      entry.worker={receiver:worker,close};accepted(worker);
+    }catch(error){failed(error);}},failed);}catch(error){failed(error);}
+    return allocation;
+  }
+  #recordProposalClosure(entry:ProposalWorkerOwner,kind:'closed'|'not_allocated'):void {
+    this.#open();let began=false;
+    try{
+      this.#db.exec('BEGIN IMMEDIATE');began=true;this.#allProposalClosures();
+      const proposal=this.#proposalById(entry.proposalId);
+      if(!proposal||this.#proposalReservationFingerprint(proposal)!==entry.fingerprint)throw new Error('Task proposal reservation changed.');
+      this.#proposalOwnerTask(proposal);
+      const marker=proposalClosure.parse({version:1,projectId:this.projectId,projectPath:this.projectPath,proposalId:proposal.id,taskId:proposal.taskId,requestId:proposal.requestId,
+        reservationFingerprint:entry.fingerprint,kind,settledAt:new Date().toISOString(),storeLifetimeId:this.#owner});
+      const payload=JSON.stringify(marker);if(Buffer.byteLength(payload)>32768)throw new Error('Task proposal closure exceeds its bound.');
+      this.#db.prepare('INSERT INTO chat_task_proposal_worker_closures(proposal_id,payload) VALUES(?,?)').run(proposal.id,payload);
+      this.#db.exec('COMMIT');began=false;entry.durable=true;
+    }catch(error){if(began)try{this.#db.exec('ROLLBACK');}catch{/* Preserve the exact original marker fault, including falsy values. */}throw error;}
+  }
+  closeProposalWorker(token:ChatTaskProposalWorkerReservation):Promise<void> {
+    const entry=this.#proposalWorker(token);if(entry.tail)return entry.tail;
+    entry.closing=true;let accepted!:()=>void,failed!:(error:unknown)=>void;
+    const tail=new Promise<void>((resolve,reject)=>{accepted=resolve;failed=reject;});entry.tail=tail;void tail.catch(()=>{});
+    void(async()=>{
+      if(entry.kind==='not_allocated'){if(entry.markerFailed)throw entry.markerError;return;}
+      if(!entry.invoked||!entry.allocation)throw new Error('Record an uninvoked proposal worker as not allocated.');
+      await entry.allocation;
+      const worker=entry.worker;if(!worker)throw new Error('The original proposal worker was not captured.');
+      const completion=Reflect.apply(worker.close,worker.receiver,[]);
+      if(!types.isPromise(completion))throw new Error('Proposal worker close must return its original Promise.');
+      await completion;
+      entry.kind='closed';entry.settled=true;
+      try{this.#recordProposalClosure(entry,'closed');}catch(error){entry.markerFailed=true;entry.markerError=error;throw error;}
+    })().then(accepted,failed);
+    return tail;
+  }
+  recordProposalWorkerNotAllocated(token:ChatTaskProposalWorkerReservation):void {
+    const entry=this.#proposalWorker(token);
+    if(entry.invoked)throw new Error('An invoked proposal factory cannot prove nonallocation.');
+    if(entry.kind==='not_allocated'){if(entry.markerFailed)throw entry.markerError;return;}
+    entry.closing=true;entry.kind='not_allocated';entry.settled=true;
+    try{this.#recordProposalClosure(entry,'not_allocated');}catch(error){entry.markerFailed=true;entry.markerError=error;throw error;}
+  }
+  proposalWorkerClosure(token:ChatTaskProposalWorkerReservation):Readonly<{settled:boolean;durable:boolean}> {
+    const entry=this.#proposalWorker(token);return Object.freeze({settled:entry.settled,durable:entry.durable});
+  }
+  unclosedProposalIds():readonly string[] {
+    this.#open();const proposals=this.#allProposals(),closed=this.#allProposalClosures();return Object.freeze(proposals.filter(row=>!closed.has(row.record.id)||this.#proposalWorkerIds.get(row.record.id)?.markerFailed).map(row=>row.record.id));
+  }
   #cache(task: ChatTaskRecord): void {
     this.#summaries.set(task.id, { id: task.id, threadId: task.threadId, sessionId: task.sessionId, connectionId: task.connectionId,
       state: task.state, round: task.round, reason: task.reason, reportDigest: task.evidence.at(-1)?.reportDigest ?? null });
@@ -311,6 +427,12 @@ export class ChatTaskStore {
     const rows = this.#db.prepare('SELECT id,payload FROM chat_tasks ORDER BY rowid LIMIT 257').all() as { id: unknown; payload: unknown }[];
     if (rows.length > 256) throw new Error('Task journal retention exceeded.');
     return rows.map(row => this.#taskRow(row));
+  }
+  /** Host recovery seal: validate exact original rows, hash their raw persisted bytes, expose no payload. */
+  recoveryTaskFingerprints():readonly {id:string;fingerprint:string}[] {
+    this.#open();const rows=this.#db.prepare('SELECT id,payload FROM chat_tasks ORDER BY rowid LIMIT 257').all() as {id:unknown;payload:unknown}[];
+    if(rows.length>256)throw new Error('Task journal retention exceeded.');
+    return Object.freeze(rows.map(row=>{const task=this.#taskRow(row);return Object.freeze({id:task.id,fingerprint:createHash('sha256').update(task.id+'\0'+(row.payload as string)).digest('hex')});}));
   }
   get(id: string): ChatTaskRecord {
     this.#open();

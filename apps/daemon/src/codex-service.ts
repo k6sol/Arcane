@@ -27,6 +27,7 @@ import {codexActionFailureEvent,type FailureReporter} from './diagnostic-reporte
 import {readNativeFrameEvidence} from '../../../packages/codex-client/src/transport.js';
 import {NativeSessionCustody} from './native-session-custody.js';
 import type {NativeConnectionLifecycle} from '../../../packages/codex-client/src/types.js';
+import {createNativeRecoveryQuarantine,NativeRecoveryError,type NativeRecoveryView,type NativeRecoveryAction} from './native-recovery-quarantine.js';
 
 const uuid = z.string().uuid();
 const identifier = z.string().min(1).max(256).refine(value => !/[\x00-\x1f]/.test(value));
@@ -125,6 +126,8 @@ export interface CodexProductState {
   provider: 'codex'; use: 'personal-local'; projectPath: string;
   connecting: boolean; closing: boolean; busy: boolean; snapshot: Snapshot | null; lastSnapshot: Snapshot | null;
   nativeAssets?: { available: boolean; sealed: boolean; granted: boolean; admissionOpen: boolean };
+  /** Historical outcomes remain unchanged; this attests separate fresh admission. */
+  nativeRecovery?:NativeRecoveryView&{historicalActionIds:readonly string[];historicalTaskIds:readonly string[];blockedThreadIds:readonly string[]};
   /** Durable local Send receipts. Separate from provider-reported history; never replayed automatically. */
   submittedMessages?: SubmittedChatTranscript;
   workflowModel?: NativeWorkflowModelProof | null; actions: CodexActionRecord[]; connectNotices?: CodexConnectNotice[]; nativeHistory?: CodexHistoryState | null; nativeThreads?: CodexSavedThread[]; displayLimited?: true; nativeTools: { configured: boolean; verified: false };
@@ -184,12 +187,15 @@ export function createCodexService(options: CodexServiceOptions) {
   catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
   const db = new DatabaseSync(sqliteTransportPath(filename), { timeout: 2000, allowExtension: false });
   const version = Number((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version);
-  if (!Number.isInteger(version)||version<0||version > 5) { db.close(); throw new CodexClientError('MIGRATION', 'Native journal version is unsupported by this build.'); }
+  if (!Number.isInteger(version)||version<0||version > 6) { db.close(); throw new CodexClientError('MIGRATION', 'Native journal version is unsupported by this build.'); }
   if(version<5&&db.prepare("SELECT name FROM sqlite_master WHERE name='native_session_custody'").get()){
     db.close();throw new CodexClientError('MIGRATION','Legacy native journal contains unexpected custody metadata.');
   }
+  if(version<6&&db.prepare("SELECT name FROM sqlite_master WHERE name='native_session_requests'").get()){
+    db.close();throw new CodexClientError('MIGRATION','Legacy native journal contains unexpected request custody.');
+  }
   let existingCustody:NativeSessionCustody|undefined;
-  if(version===5)try{existingCustody=new NativeSessionCustody(db,true);}catch(error){db.close();throw error;}
+  if(version>=5)try{existingCustody=new NativeSessionCustody(db,true);if(version===6)existingCustody.initializeRequests(true);}catch(error){db.close();throw error;}
   db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
     CREATE TABLE IF NOT EXISTS actions(id TEXT PRIMARY KEY, hash TEXT NOT NULL, payload TEXT NOT NULL) STRICT;
     CREATE TABLE IF NOT EXISTS native_history(
@@ -210,7 +216,7 @@ export function createCodexService(options: CodexServiceOptions) {
     ) STRICT;
     `);
   let custody:NativeSessionCustody;
-  try{db.exec('BEGIN IMMEDIATE');custody=existingCustody??new NativeSessionCustody(db);db.exec('PRAGMA user_version=5;COMMIT;');}
+  try{db.exec('BEGIN IMMEDIATE');custody=existingCustody??new NativeSessionCustody(db);custody.initializeRequests(version===6);db.exec('PRAGMA user_version=6;COMMIT;');}
   catch(error){try{db.exec('ROLLBACK');}catch{/* Keep original migration failure. */}db.close();throw error;}
   if(version<3)db.exec(`UPDATE native_threads SET selection=(
     SELECT json_object('model',json_extract(a.payload,'$.model'),'effort',json_extract(a.payload,'$.effort'))
@@ -248,7 +254,37 @@ export function createCodexService(options: CodexServiceOptions) {
       projectInstructions: async (cwd: string) => projectMemorySection((await readProjectMemory(cwd)).text) + learnedPreferenceSection(await options.learnedContext?.().catch(() => '')) });
     }catch(error){if(!entered)try{connectionLifecycle?.failedInitializationClosed();}catch{/* Custody latches the fault; preserve the original no-start failure. */}throw error;}
   };
-  const openNative=(hooks?:NativeAssetHooks)=>custody.open(lifecycle=>factory(hooks,lifecycle),owned=>owned.snapshot().connectionId);
+  const openNative=(requestId:string,hooks?:NativeAssetHooks)=>{
+    assertRecoveryUnchanged();
+    try{recovery.assertNativeAdmission(custody.snapshot());}catch(error){throw recoveryError(error);}
+    return custody.open(lifecycle=>factory(hooks,lifecycle),owned=>owned.snapshot().connectionId,requestId);
+  };
+  function recoveryError(error:unknown):CodexClientError{
+    return new CodexClientError(error instanceof NativeRecoveryError&&error.code==='CAPACITY'?'TASK_RECOVERY_REQUIRED':'JOURNAL_FAILURE',
+      error instanceof NativeRecoveryError?error.message:'Native recovery evidence could not be verified. No new native work was admitted.');
+  }
+  function recoveryActions():NativeRecoveryAction[]{
+    const rows=db.prepare('SELECT id,hash,payload FROM actions ORDER BY rowid LIMIT 4097').all()as{id:string;hash:string;payload:string}[];
+    if(rows.length>4096)throw new CodexClientError('JOURNAL_LIMIT','Native recovery history exceeds its retained bound.');
+    return rows.map(row=>{const value=JSON.parse(row.payload)as CodexActionRecord;
+      if(!value||value.requestId!==row.id)throw new CodexClientError('JOURNAL_FAILURE','Native recovery action identity is invalid.');
+      return{id:row.id,
+      fingerprint:createHash('sha256').update(row.id+'\0'+row.hash+'\0'+row.payload).digest('hex'),action:value.action,
+      state:value.state,connectionId:value.connectionId,threadId:value.threadId,...(Object.hasOwn(value,'nextConnectionId')?{nextConnectionId:value.nextConnectionId}:{})};});
+  }
+  const historicalActions=new Set<string>(),historicalTasks=new Set<string>();
+  let recovery:ReturnType<typeof createNativeRecoveryQuarantine>;
+  try{
+    const initialActions=recoveryActions(),initialTaskState=tasks?.recoveryState(),initialTaskHashes=new Map(tasks?.recoveryTaskFingerprints().map(row=>[row.id,row.fingerprint]));
+    const initialTasks=(initialTaskState?.tasks??[]).map(task=>({id:task.id,fingerprint:initialTaskHashes.get(task.id)!,connectionId:task.connectionId,threadId:task.threadId}));
+    for(const row of initialActions)historicalActions.add(row.id);for(const row of initialTasks)historicalTasks.add(row.id);
+    recovery=createNativeRecoveryQuarantine({projectPath,actions:initialActions,tasks:initialTasks,leases:custody.snapshot(),unclosedProposalIds:initialTaskState?.unclosedProposalIds??[]});
+    tasks?.installRecoveryReservations({taskIds:recovery.legacyTaskIds,proposalIds:recovery.legacyProposalIds});
+  }catch(error){void tasks?.close().catch(()=>{});db.close();throw recoveryError(error);}
+  function assertRecoveryUnchanged():void{
+    try{recovery.assertUnchanged({actions:recoveryActions().map(({id,fingerprint})=>({id,fingerprint})),tasks:tasks?.recoveryTaskFingerprints()??[]});}
+    catch(error){throw recoveryError(error);}
+  }
   const proposalFactory: ChatTaskProposalFactory | null = options.proposalWorker ?? (options.connect ? null : async input => {
     const command = await locateNativeCli('codex');
     if (!command) throw new CodexClientError('CLI_MISSING', 'The native Codex executable is unavailable.');
@@ -415,23 +451,26 @@ export function createCodexService(options: CodexServiceOptions) {
     if (closed) throw new CodexClientError('CLOSED', 'Native workflow is closed.');
     const snapshot=client?.snapshot()??null;
     const recordedHistory=nativeHistory(), submittedScope=snapshot?.thread?.configured?snapshot.thread:recordedHistory;
+    const threads=savedThreads();
     return { provider:'codex', use:'personal-local', projectPath, connecting, closing, busy,
+      nativeRecovery:{...recovery.view(),historicalActionIds:[...historicalActions],historicalTaskIds:[...historicalTasks],blockedThreadIds:threads.filter(row=>recovery.quarantinesThread(row.threadId)).map(row=>row.threadId)},
       snapshot, lastSnapshot:lastSnapshot ? structuredClone(lastSnapshot) : null,
       ...(options.assetRegistry ? {nativeAssets:assetState(snapshot)} : {}),
       ...(tasks?.configured() ? {chatTasks:tasks.summaries().map(({id,...task})=>{const context=taskContexts.get(id);return{taskId:id,...task,retained:!!context?.ownerClient&&(!context.retired||readableNormal(context))};})} : {}),
-      ...history(), nativeHistory:recordedHistory, nativeThreads:savedThreads(), ...(submittedScope?{submittedMessages:submitted.read(submittedScope)}:{}), nativeTools:{configured:options.arcaneMcp !== undefined || options.nativeToolsConfigured === true,verified:false} };
+      ...history(), nativeHistory:recordedHistory, nativeThreads:threads, ...(submittedScope?{submittedMessages:submitted.read(submittedScope)}:{}), nativeTools:{configured:options.arcaneMcp !== undefined || options.nativeToolsConfigured === true,verified:false} };
   }
   function reviewConnectNotice(input:unknown):CodexConnectNoticeReview {
     if(closed)throw new CodexClientError('CLOSED','Native notice review is closed.');
     if(journalFault)throw new CodexClientError('JOURNAL_FAILURE','The retained native journal requires inspection.');
     if(connectReviewFault)throw new CodexClientError('REVIEW_UNCERTAIN','The connection notice review could not be confirmed. Reopen Arcane before reviewing it again.');
+    assertRecoveryUnchanged();
     const parsed=connectNoticeReviewInput.safeParse(input);
     if(!parsed.success)throw new CodexClientError('ARGUMENTS','Review requires one exact project and recorded connection fingerprint.');
     const value=parsed.data;
     if(value.projectPath!==projectPath)throw new CodexClientError('REVIEW_SCOPE','The recorded connection belongs to another project.');
     const ownsTask=tasks?.summaries().some(task=>{
       const context=taskContexts.get(task.id);
-      return !!context?.ownerClient&&(!context.retired||readableNormal(context))||['working','awaiting_verification','repair_queued','repairing','unknown'].includes(task.state);
+      return !!context?.ownerClient&&(!context.retired||readableNormal(context))||!historicalTasks.has(task.id)&&['working','awaiting_verification','repair_queued','repairing','unknown'].includes(task.state);
     });
     if(client||pendingConnect||connecting||closing||busy||ownsTask)throw new CodexClientError('BUSY','Finish or disconnect the current native owner before reviewing this old connection.');
     db.exec('BEGIN IMMEDIATE');
@@ -478,6 +517,7 @@ export function createCodexService(options: CodexServiceOptions) {
     if (closed) throw new CodexClientError('CLOSED','Native workflow is closed.');
     if(custody.faulted){try{await fenceJournalFailure();}catch{/* Shutdown retains the original close failure. */}throw new CodexClientError('JOURNAL_FAILURE','Native session custody requires inspection. No new action was sent.');}
     if (journalFault) throw new CodexClientError('JOURNAL_FAILURE','Native journal failed. Restart only after reviewing retained receipts; no action was retried.');
+    try{assertRecoveryUnchanged();}catch(error){await fencePreservingJournalFailure();throw error;}
     const parsed = codexActionInput.safeParse(input);
     if (!parsed.success) throw new CodexClientError('ARGUMENTS','Supply an exact bounded native action envelope.');
     const value = parsed.data;
@@ -529,6 +569,8 @@ export function createCodexService(options: CodexServiceOptions) {
     let taskAfterCommit: string | null = null;
     const operationMethod = ({ 'thread-start':'thread/start', 'thread-resume':'thread/resume', 'turn-start':'turn/start', 'turn-steer':'turn/steer', 'turn-interrupt':'turn/interrupt' } as Record<string,string>)[value.action] ?? null;
     try {
+      if('threadId'in value&&recovery.quarantinesThread(value.threadId)&&value.action!=='history-load')
+        throw new CodexClientError('TASK_RECOVERY_REQUIRED','This earlier chat has an interrupted owner. Its history is retained; start a new chat for independent work.');
       if(tasks?.configured()&&!tasks.available()&&!['disconnect','task-stop','turn-interrupt','revoke-writes','revoke-assets'].includes(value.action)&&!(value.action==='approval'&&value.decision!=='accept'))
         throw new CodexClientError('CLOSED','Managed task admission has been fenced. No new native work was sent.');
       if (value.action === 'connect') {
@@ -536,7 +578,7 @@ export function createCodexService(options: CodexServiceOptions) {
         connecting = true;
         try {
           const context = newAssets();
-          pendingConnect = openNative(context?.hooks);
+          pendingConnect = openNative(record.requestId,context?.hooks);
           let connected: CodexHostClient;
           try { connected = await pendingConnect;rememberClient(context,connected); } catch(error) { retireAssets(context); throw error; }
           if (closed || generation !== epoch) { retireAssets(context); await closeOwnedClient(connected); throw new CodexClientError('STALE_CONNECTION','Connection was cancelled before acknowledgement.'); }
@@ -596,7 +638,14 @@ export function createCodexService(options: CodexServiceOptions) {
             }
             case 'thread-start': {
               if (savedThreads().length >= CODEX_SAVED_THREAD_LIMIT) throw new CodexClientError('HISTORY_LIMIT','Saved chats are full; retained history was not deleted.');
-              await selected.startThread({initiatedBy:'human'}); break;
+              await selected.startThread({initiatedBy:'human'});
+              const started=selected.snapshot().thread;
+              if(started&&recovery.quarantinesThread(started.threadId)){
+                retireAssets();await closeOwnedClient(selected);
+                if(client===selected){lastSnapshot=selected.snapshot();client=null;currentAssets=null;}
+                throw new CodexClientError('TASK_RECOVERY_REQUIRED','A new native chat reused an interrupted identity. No turn was sent.',true);
+              }
+              break;
             }
             case 'thread-resume': {
               const owned = nativeHistory(value.threadId);
@@ -611,7 +660,8 @@ export function createCodexService(options: CodexServiceOptions) {
               break;
             }
             case 'history-load': {
-              const binding = nativeHistory(), current = selected.snapshot().thread;
+              const current = selected.snapshot().thread;
+              const binding = !current&&recovery.quarantinesThread(value.threadId)?nativeHistory(value.threadId):nativeHistory();
               if (!binding || binding.threadId !== value.threadId || (current && (current.threadId !== binding.threadId || (binding.sessionId !== null && current.sessionId !== binding.sessionId)))) throw new CodexClientError('HISTORY_SCOPE','Choose only the recorded current native thread for this project.');
               if (!selected.readThreadHistory) throw new CodexClientError('HISTORY_UNAVAILABLE','This native client has no public history reader.');
               const result = sanitizeHistory(await selected.readThreadHistory({ initiatedBy:'human', threadId:binding.threadId, ...(binding.sessionId === null ? {} : {sessionId:binding.sessionId}) }), binding);
@@ -680,7 +730,7 @@ export function createCodexService(options: CodexServiceOptions) {
                   const freshContext=newAssets()!;
                   let fresh:CodexHostClient|null=null;
                   try {
-                    pendingConnect=openNative(freshContext.hooks);fresh=await pendingConnect;rememberClient(freshContext,fresh);
+                    pendingConnect=openNative(record.requestId,freshContext.hooks);fresh=await pendingConnect;rememberClient(freshContext,fresh);
                     if(closed || generation!==epoch || fresh.taskAccountIdentity?.()!==identity)throw new CodexClientError('ACCOUNT_IDENTITY','Fresh task account changed or its identity is unavailable.');
                     fresh.selectModel({initiatedBy:'human',...thread.selection});
                     await fresh.resumeThread({initiatedBy:'human',threadId:thread.threadId});
@@ -700,6 +750,7 @@ export function createCodexService(options: CodexServiceOptions) {
                 }
               }
               const context=currentAssets,authority=context?.handle;
+              custody.bindRequest(selected,record.requestId);
               if(allowWrites||selected.snapshot().thread?.writeGranted)custody.writesPossible(selected);
               if(value.modelSource){
                 if(!managed||!context||!authority||!allowAssets)throw new CodexClientError('ASSET_AUTHORITY','This message has no original managed model-source admission.');

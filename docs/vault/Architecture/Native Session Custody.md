@@ -5,7 +5,7 @@ tags: [arcane, chat, lifetimes]
 ---
 # Native session custody
 
-`apps/daemon/src/native-session-custody.ts` records native connection lifetime evidence in the existing project action database. Journal version5 adds a bounded strict table; it does not reinterpret older task or action outcomes.
+`apps/daemon/src/native-session-custody.ts` records native connection lifetime evidence in the existing project action database. Journal version5 adds a bounded strict lease table. Version6 adds exact allocated-request and reused-turn mappings, without reinterpreting older task or action outcomes.
 
 ## Allocation and closure
 
@@ -21,7 +21,17 @@ Normal task retirement does not close the native process. Physical close is cach
 
 Adding custody does not relabel legacy action/task outcomes; existing pending-request restart recovery remains unchanged. Do not reconstruct closed leases from terminal task labels. A pre-v5 journal containing unexpected custody metadata is refused before migration writes; a v5 journal must contain the exact custody schema. Future and invalid versions are refused. Retain the existing4096-entry bound without eviction.
 
-Native transport closure does not prove descendant-process containment, proposal-worker closure, Studio import custody, Blender job closure or human acceptance. Those resource journals and limits remain independent. This implementation records future evidence; it does not resolve the customer's retained historical tasks or admit a fresh recovery session by itself.
+Native transport closure does not prove descendant-process containment, proposal-worker closure, Studio import custody, Blender job closure or human acceptance. Those resource journals and limits remain independent.
+
+## Independent chat recovery
+
+At service startup, `native-recovery-quarantine.ts` seals original action and task payload fingerprints. It groups exact native lease, connection and allocated/reused request identities, retains unresolved resource charges, and blocks continuation of their old threads. Historical records stay inspectable and are never replayed, relabelled or treated as closed from a terminal task status.
+
+A fresh human connection, new thread and Send use new native/task ownership and the normal explicit write and asset permissions. Existing same-project task concurrency already permits independent owners; recovery does not add an exclusive filesystem writer rule or require a host reboot. Earlier staging and write-ceiling research was an additional restriction, not the existing product contract.
+
+Recovery applies a conservative128 native-owner admission ceiling, separately from the coordinator's existing128 task-owner bound and the4096-row journal retention limits. Original unresolved charges cannot be released from later metadata. Fresh closed leases cease charging their own resources only after original physical closure is persisted. Request mappings prevent the first turn's reuse of its connected client from being counted as a separate unknown allocation.
+
+Proposal-worker closure is persisted separately in task journal version5, independently from native journal version6. Original factory invocation, captured worker close and durable closure marking remain separate facts. Historical unclosed proposal IDs reserve the existing two-worker proposal budget; that debt does not prevent ordinary fresh chat. SDK import and Blender custody retain their own checks.
 
 Controlled verification uses actual SQLite reopen, local stdio fixtures, held original closures, persistence refusals, connection-binding changes and migration checks. Exact results belong in [[Operations/Current State]]. Authenticated customer and Studio acceptance remain separate.
 

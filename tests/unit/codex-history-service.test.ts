@@ -415,9 +415,9 @@ test('v1 migration preserves receipts without guessing project/thread binding or
   const f=await fixture(t),scope=await f.bind(f.service);await f.service.close();
   // A genuine v1 journal has action receipts but neither later native table.
   // Receipts must not be promoted into guessed native ownership on migration.
-  const db=new DatabaseSync(join(f.journal,'codex-actions.sqlite'));db.exec('DROP TABLE native_session_custody; DROP TABLE native_history; DROP TABLE native_threads; PRAGMA user_version=1;');db.close();
+  const db=new DatabaseSync(join(f.journal,'codex-actions.sqlite'));db.exec('DROP TABLE native_session_requests; DROP TABLE native_session_custody; DROP TABLE native_history; DROP TABLE native_threads; PRAGMA user_version=1;');db.close();
   const migrated=f.open(f.projectPath,false);assert.equal(migrated.state().nativeHistory,null);assert.deepEqual(migrated.state().nativeThreads,[]);assert.ok(migrated.state().actions.some(row=>row.threadId===scope.threadId));assert.equal(f.starts(),1);
-  const check=new DatabaseSync(join(f.journal,'codex-actions.sqlite'));assert.equal((check.prepare('PRAGMA user_version').get() as {user_version:number}).user_version,5);assert.equal((check.prepare('SELECT count(*) AS count FROM native_threads').get() as {count:number}).count,0);check.close();
+  const check=new DatabaseSync(join(f.journal,'codex-actions.sqlite'));assert.equal((check.prepare('PRAGMA user_version').get() as {user_version:number}).user_version,6);assert.equal((check.prepare('SELECT count(*) AS count FROM native_threads').get() as {count:number}).count,0);check.close();
 });
 
 test('client rejects nonhuman and mismatched identity before starting a read process',async t=>{

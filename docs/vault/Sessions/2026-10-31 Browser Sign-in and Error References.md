@@ -15,6 +15,8 @@ Read-only recovery inspection found three unknown tasks recorded as `application
 
 ## Required outcome
 
+Recovery follow-up uses independent fresh native ownership with conservative resource reservations, preserving the old outcomes. Earlier write-ceiling/staging restrictions in this session were exploratory; they are not the existing same-project concurrent-owner contract. See [[Architecture/Native Session Custody]] for the implemented boundary and [[Operations/Current State]] for current verification.
+
 Connect Codex opens the supported ChatGPT sign-in flow rather than Settings. Reuse a genuinely verified saved account, retain it when a new login is cancelled, and distinguish successful authentication from a blocked workspace connection. Errors must not move the page. Show stable numbers and explanations, with correlation IDs under Technical details.
 
 ## Implementation

@@ -31,15 +31,16 @@ function snapshot(f:ReturnType<typeof fixture>,foreign:ForeignName){
   try{
     const schema=db.prepare('SELECT type,name,tbl_name,rootpage,sql FROM sqlite_schema ORDER BY type,name').all();
     const tables=new Set(schema.filter(row=>row.type==='table').map(row=>row.name));
-    const journals=Object.fromEntries(['chat_tasks','chat_task_meta','chat_task_owner','chat_task_proposals','chat_task_plans','chat_task_plan_steps',foreign]
+    const journals=Object.fromEntries(['chat_tasks','chat_task_meta','chat_task_owner','chat_task_proposals','chat_task_plans','chat_task_plan_steps','chat_task_proposal_worker_closures',foreign]
       .map(name=>[name,tables.has(name)?db.prepare(`SELECT * FROM "${name}" ORDER BY rowid`).all():null]));
     return{version:db.prepare('PRAGMA user_version').get(),identity:db.prepare('PRAGMA application_id').get(),schema,journals};
   }finally{db.close();}
 }
-for(const version of [0,4] as const)for(const foreign of foreignNames)
+for(const version of [0,4,5] as const)for(const foreign of foreignNames)
   test(`task schema refuses ${foreign} in v${version} before adoption, ownership or recovery`,t=>{
-    const f=fixture(t),task=version===4?knownSchema(f):null,db=new DatabaseSync(sqliteTransportPath(f.file),{allowExtension:false});
+    const f=fixture(t),task=version!==0?knownSchema(f):null,db=new DatabaseSync(sqliteTransportPath(f.file),{allowExtension:false});
     try{
+      if(version===4)db.exec('DROP TABLE chat_task_proposal_worker_closures;PRAGMA user_version=4');
       assert.equal(db.prepare('PRAGMA user_version').get()?.user_version,version);
       db.exec(`CREATE TABLE "${foreign}"(id INTEGER PRIMARY KEY,payload TEXT NOT NULL) STRICT`);
       db.prepare(`INSERT INTO "${foreign}" VALUES(?,?)`).run(1,'{"retained":"foreign source bytes"}');

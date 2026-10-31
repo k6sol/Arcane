@@ -243,10 +243,19 @@ export interface ConnectNoticeReview { projectPath:string;requestId:string;recei
 export interface ConnectNoticeReviewReceipt extends ConnectNoticeReview { reviewedAt:string }
 export function readCodexState(value: unknown): ChatState {
   if (!dataObject(value) || value.provider !== 'codex' || value.use !== 'personal-local' || !text(value.projectPath,4096) || typeof value.connecting !== 'boolean' || typeof value.closing !== 'boolean' || typeof value.busy !== 'boolean' || !(value.displayLimited===undefined||value.displayLimited===true) || !Array.isArray(value.actions) || value.actions.length > 100 || !dataObject(value.nativeTools, ['configured','verified']) || typeof value.nativeTools.configured !== 'boolean' || value.nativeTools.verified !== false) throw new Error('Invalid human-only native workflow state.');
-  const allowed = ['provider','use','projectPath','connecting','closing','busy','snapshot','lastSnapshot','actions','nativeTools','nativeAssets','nativeHistory','nativeThreads','workflowModel','displayLimited','chatTasks','submittedMessages','connectNotices'];
+  const allowed = ['provider','use','projectPath','connecting','closing','busy','snapshot','lastSnapshot','actions','nativeTools','nativeAssets','nativeHistory','nativeThreads','workflowModel','displayLimited','chatTasks','submittedMessages','connectNotices','nativeRecovery'];
   if (Object.keys(value).some(key => !allowed.includes(key))) throw new Error('Unexpected native workflow state field.');
   if (Object.hasOwn(value, 'nativeAssets')) readNativeAssets(value.nativeAssets);
   readSnapshot(value.snapshot); readSnapshot(value.lastSnapshot);
+  if(Object.hasOwn(value,'nativeRecovery')){
+    const r=value.nativeRecovery;
+    if(!dataObject(r,['version','fingerprint','nativeReservations','legacyActions','legacyTasks','legacyThreads','legacyProposals','historicalActionIds','historicalTaskIds','blockedThreadIds'])||r.version!==1||typeof r.fingerprint!=='string'||!/^[a-f0-9]{64}$/.test(r.fingerprint))throw new Error('Invalid native recovery metadata.');
+    for(const [key,max]of [['nativeReservations',16384],['legacyActions',4096],['legacyTasks',256],['legacyThreads',4352],['legacyProposals',1024]]as const)if(!integer(r[key])||(r[key]as number)>max)throw new Error('Invalid bounded native recovery counts.');
+    for(const [key,max,check]of [['historicalActionIds',4096,uuid],['historicalTaskIds',256,uuid],['blockedThreadIds',256,text]]as const){
+      const ids=r[key];if(!Array.isArray(ids)||ids.length>max||ids.some(id=>!check(id))||new Set(ids).size!==ids.length)throw new Error('Invalid native recovery identities.');
+    }
+    if((r.legacyActions as number)>(r.historicalActionIds as string[]).length||(r.legacyTasks as number)>(r.historicalTaskIds as string[]).length||(r.blockedThreadIds as string[]).length>(r.legacyThreads as number))throw new Error('Native recovery counts changed scope.');
+  }
   if(Object.hasOwn(value,'submittedMessages')) {
     const submitted=value.submittedMessages, ids=new Set<string>();
     if(!dataObject(submitted,['provider','projectPath','threadId','sessionId','earlierCount','messages'])||submitted.provider!=='codex'||submitted.projectPath!==value.projectPath||
@@ -3470,6 +3479,9 @@ export class CodexChat {
     await this.refresh();const project=this.state?.projectPath;
     if(!sameNavigation()||!sameSource())return false;
     const blocked=this.tabBlockReason();if(!project||blocked){if(blocked)this.text('codex-notice',blocked);return false;}
+    if(action==='thread-resume'&&threadId!==undefined&&this.state?.nativeRecovery?.blockedThreadIds.includes(threadId)){
+      this.text('codex-notice','This earlier chat has an interrupted session. Its history is kept. Start a new chat for independent work.');return false;
+    }
     const saved=this.state?.nativeThreads?.find(row=>row.threadId===threadId),retained=action==='thread-resume'?this.state?.chatTasks?.filter(task=>task.retained===true&&task.threadId===threadId&&task.sessionId===saved?.sessionId)??[]:[];
     if(retained.length>1){this.text('codex-notice','Multiple retained task owners require review before opening this conversation.');return false;}
     if(!retained.length&&this.snapshot()&&!this.snapshot()!.models.some(row=>row.model===selection.model&&row.efforts.includes(selection.effort))){this.text('codex-notice','The saved model and effort are absent from the current catalogue. No fallback was selected.');return false;}
@@ -4354,9 +4366,14 @@ export class CodexChat {
     if(this.foreignDraft&&state.projectPath!==this.foreignDraft.project)this.releaseForeignDraft();
     // Recover unresolved IDs from the service journal after reload, without new browser storage.
     if(this.restoredRequestProject!==state.projectPath){this.restoredRequestProject=state.projectPath;this.restoredRequests.clear();}
+    const historical=state.displayLimited?new Set<string>():new Set(state.nativeRecovery?.historicalActionIds??[]);
+    for(const [id]of this.uncertain)if(historical.has(id)&&!this.pending.has(id))this.uncertain.delete(id);
     for(const record of state.actions)if(['pending','unknown'].includes(record.state)) {
       const notice=state.connectNotices?.find(row=>row.requestId===record.requestId),
         receipt=JSON.stringify([record.action,record.connectionId,record.state,record.errorCode,record.threadId,record.turnId,record.model,record.effort,record.createdAt,record.finishedAt,record.nextConnectionId??null,record.references??null,notice?.receiptFingerprint??null]);
+      // Historical outcomes stay unknown. The host separately reserves their
+      // resources and authorizes only fresh ownership; this is not a review/ACK.
+      if(historical.has(record.requestId)&&!this.pending.has(record.requestId)){this.restoredRequests.delete(record.requestId);continue;}
       // Reviewed display metadata applies only to this unchanged terminal receipt,
       // even while a different connection is opening. It never settles that new request.
       if(notice?.reviewedAt){this.restoredRequests.set(record.requestId,receipt);const entry=this.uncertain.get(record.requestId);if(!this.connectReview&&entry?.input.action==='connect'&&entry.input.connectionId===null)this.uncertain.delete(record.requestId);continue;}
@@ -4384,7 +4401,7 @@ export class CodexChat {
   private connectReviewIdle():boolean {
     return !!this.state&&this.fresh&&!this.stopped&&!this.surfaceYielded&&!this.foreignDraft&&this.providerAllowsCodex()&&!this.state.displayLimited&&
       !this.snapshot()&&!this.pending.size&&!this.state.connecting&&!this.state.closing&&!this.state.busy&&
-      !this.state.chatTasks?.some(task=>task.retained||['working','awaiting_verification','repair_queued','repairing','unknown'].includes(task.state));
+      !this.state.chatTasks?.some(task=>task.retained||!this.state?.nativeRecovery?.historicalTaskIds.includes(task.taskId)&&['working','awaiting_verification','repair_queued','repairing','unknown'].includes(task.state));
   }
   private async acknowledgeUncertain():Promise<void> {
     if(!this.canAcknowledge())return;

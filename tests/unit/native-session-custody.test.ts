@@ -17,6 +17,51 @@ const deferred=()=>{let resolve!:()=>void;const promise=new Promise<void>(done=>
 const rows=(db:DatabaseSync)=>db.prepare('SELECT * FROM native_session_custody ORDER BY rowid').all();
 const memory=(t:test.TestContext)=>{const db=new DatabaseSync(':memory:');t.after(()=>db.close());return db;};
 
+test('request custody binds allocated and reused turns to the original closed lease',async t=>{
+  const db=memory(t),custody=new NativeSessionCustody(db);custody.initializeRequests();
+  const allocated=randomUUID(),firstTurn=randomUUID();
+  const client=await custody.open(async()=>({id:randomUUID(),close:async()=>{}}),value=>value.id,allocated);
+  custody.bindRequest(client,allocated);custody.bindRequest(client,firstTurn);custody.bindRequest(client,firstTurn);
+  const live=custody.snapshot();assert.equal(live.length,1);assert.equal(live[0]!.requestId,allocated);
+  assert.deepEqual(live[0]!.requestIds,[firstTurn]);assert.equal(live[0]!.state,'bound');
+  assert.ok(Object.isFrozen(live));assert.ok(Object.isFrozen(live[0]!.requestIds));
+  await custody.close(client);assert.equal(custody.snapshot()[0]!.state,'closed');
+  const reopened=new NativeSessionCustody(db,true);reopened.initializeRequests(true);
+  assert.deepEqual(reopened.snapshot(),custody.snapshot());
+  assert.throws(()=>custody.bindRequest(client,randomUUID()),/original bound owner/);
+});
+
+test('failed request reservation rolls back its lease before any factory is invoked',async t=>{
+  const db=memory(t),custody=new NativeSessionCustody(db);custody.initializeRequests();let starts=0;
+  db.exec("CREATE TRIGGER refuse_request BEFORE INSERT ON native_session_requests BEGIN SELECT RAISE(ABORT,'controlled request save refusal'); END");
+  await assert.rejects(custody.open(async()=>{starts++;return{id:randomUUID(),close:async()=>{}};},value=>value.id,randomUUID()),
+    error=>error instanceof CodexClientError&&error.code==='JOURNAL_FAILURE'&&String(error.cause).includes('controlled request save refusal'));
+  assert.equal(starts,0);assert.deepEqual(rows(db),[]);assert.deepEqual(db.prepare('SELECT * FROM native_session_requests').all(),[]);
+});
+
+test('request reuse cannot transfer another allocation to a different native owner',async t=>{
+  const db=memory(t),custody=new NativeSessionCustody(db);custody.initializeRequests();
+  const requestA=randomUUID(),requestB=randomUUID();
+  const a=await custody.open(async()=>({id:randomUUID(),close:async()=>{}}),v=>v.id,requestA);
+  const b=await custody.open(async()=>({id:randomUUID(),close:async()=>{}}),v=>v.id,requestB);
+  const before=db.prepare('SELECT * FROM native_session_requests ORDER BY request_id').all();
+  assert.throws(()=>custody.bindRequest(b,requestA),/another owner/);
+  assert.deepEqual(db.prepare('SELECT * FROM native_session_requests ORDER BY request_id').all(),before);
+  await custody.close(a);await custody.close(b);
+});
+
+test('v6 request preflight refuses missing, malformed and orphan mappings',async t=>{
+  for(const defect of ['missing','schema','orphan']as const)await t.test(defect,t=>{
+    const db=memory(t),custody=new NativeSessionCustody(db);
+    if(defect==='schema')db.exec('CREATE TABLE native_session_requests(request_id TEXT)');
+    if(defect==='orphan'){
+      custody.initializeRequests();db.exec('PRAGMA foreign_keys=OFF');
+      db.prepare("INSERT INTO native_session_requests VALUES(?,?,'allocated')").run(randomUUID(),randomUUID());
+    }
+    assert.throws(()=>new NativeSessionCustody(db,true).initializeRequests(true),/missing|schema|invalid/);
+  });
+});
+
 test('native custody reserves before the factory and retains exact ownership through a held physical close',async t=>{
   const db=memory(t),custody=new NativeSessionCustody(db),allocated=deferred(),factoryGate=deferred(),closeGate=deferred();let closes=0;
   const client={id:randomUUID(),close:()=>{closes++;return closeGate.promise;}};
@@ -172,10 +217,22 @@ test('v4 migration preserves unknown action bytes and creates no guessed closure
   const saved=f.db.prepare('SELECT id,payload FROM actions').get()!,payload=JSON.parse(String(saved.payload));
   payload.state='unknown';payload.errorCode='FRAME_LIMIT';payload.connectionId=null;
   f.db.prepare('UPDATE actions SET payload=? WHERE id=?').run(JSON.stringify(payload),String(saved.id));
-  f.db.exec('DROP TABLE native_session_custody;PRAGMA user_version=4;');
+  f.db.exec('DROP TABLE native_session_requests;DROP TABLE native_session_custody;PRAGMA user_version=4;');
   const original=f.db.prepare('SELECT id,hash,payload FROM actions').all();let starts=0;
   // Exact existing project/database, without touching a customer profile.
   const migrated=createCodexService({directory:f.directory,projectPath:resolve('.'),connect:async()=>{starts++;throw Error('No allocation during migration');}});
   try{assert.deepEqual(f.db.prepare('SELECT id,hash,payload FROM actions').all(),original);assert.deepEqual(rows(f.db),[]);assert.equal(starts,0);assert.equal(migrated.state().actions[0]!.state,'unknown');}
   finally{await migrated.close();}
+});
+
+test('v5 migration preserves original native custody without guessing request aliases',async t=>{
+  const f=await serviceFixture(t);await f.service.close();
+  const original=f.db.prepare('SELECT id,hash,payload FROM actions ORDER BY rowid').all(),leases=rows(f.db);
+  f.db.exec('DROP TABLE native_session_requests;PRAGMA user_version=5;');let starts=0;
+  const migrated=createCodexService({directory:f.directory,projectPath:resolve('.'),connect:async()=>{starts++;throw Error('Migration cannot allocate');}});
+  try{
+    assert.equal(f.db.prepare('PRAGMA user_version').get()!.user_version,6);
+    assert.deepEqual(rows(f.db),leases);assert.deepEqual(f.db.prepare('SELECT id,hash,payload FROM actions ORDER BY rowid').all(),original);
+    assert.deepEqual(f.db.prepare('SELECT * FROM native_session_requests').all(),[]);assert.equal(starts,0);
+  }finally{await migrated.close();}
 });

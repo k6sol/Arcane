@@ -72,6 +72,22 @@ test('recovery errors are readable overlays and never move sign-in controls at d
         },variant);
         assert.equal(result,true,'Restart retains its '+variant+' guard');
       }
+      const quarantined=await page.evaluate(async()=>{
+        const w=window as any,original=structuredClone(w.fixture);
+        w.fixture.nativeRecovery={version:1,fingerprint:'d'.repeat(64),nativeReservations:4,
+          legacyActions:1,legacyTasks:3,legacyThreads:3,legacyProposals:0,
+          historicalActionIds:[w.fixture.actions[0].requestId],historicalTaskIds:w.fixture.chatTasks.map((task:any)=>task.taskId),
+          blockedThreadIds:[]};
+        await w.chat.refresh();
+        const result={connectEnabled:!(document.getElementById('codex-connect')as HTMLButtonElement).disabled,
+          noticeHidden:(document.getElementById('codex-unknown')as HTMLElement).hidden,
+          actions:JSON.stringify(w.fixture.actions)===JSON.stringify(original.actions),
+          tasks:JSON.stringify(w.fixture.chatTasks)===JSON.stringify(original.chatTasks)};
+        w.fixture=original;await w.chat.refresh();return result;
+      });
+      assert.deepEqual(quarantined,{connectEnabled:true,noticeHidden:true,actions:true,tasks:true},
+        'Backend-sealed historical quarantine allows a fresh Connect without relabelling outcomes');
+      assert.equal(await page.locator('#codex-connect').isEnabled(),false,'Without backend recovery evidence the original uncertainty guard remains');
     }
     assert.deepEqual(await page.evaluate(()=>(window as any).posts),[]);assert.deepEqual(errors,[]);
     if(process.env.ARCANE_ERROR_SCREENSHOTS){await mkdir(process.env.ARCANE_ERROR_SCREENSHOTS,{recursive:true});await page.screenshot({path:join(process.env.ARCANE_ERROR_SCREENSHOTS,'recovery-'+width+'.png')});}

@@ -214,7 +214,7 @@ test('failed original lifetimes retain all 64 charges after cancellation without
 test('original proposal close failure precedes a later budget fault and remains quarantined',async t=>{
   for(const failedDuringPropose of [false,true])await t.test(failedDuringPropose?'propose close failure first':'explicit close failure first',async st=>{
   const original=Object.assign(new Error('original worker close'),{code:'PROCESS_EXIT_UNCONFIRMED'}),next=new Error('later repeated close'),later=new Error('later budget release');
-  class FaultBudget extends ChatTaskProposalBudget {override release(closed:boolean){super.release(closed);throw later;}}
+  class FaultBudget extends ChatTaskProposalBudget {override release(closed:boolean,identity?:Parameters<ChatTaskProposalBudget['release']>[1]){super.release(closed,identity);throw later;}}
   const budget=new FaultBudget(),f=fixture(st,budget),parent=f.own();f.expectClose(original);let closes=0;
   const proposal=f.coordinator.startProposal({taskId:parent.id,requestId:randomUUID(),text:'Controlled suggestion',factory:async()=>({
     async propose(){if(failedDuringPropose)throw original;return {threadId:'proposal',sessionId:null,turnId:'turn',text:'suggestion'};},async close(){closes++;throw failedDuringPropose?next:original;}})});
