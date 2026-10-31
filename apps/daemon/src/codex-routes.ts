@@ -101,6 +101,13 @@ async function discard(request: IncomingMessage,response: ServerResponse): Promi
         const input=await body(request,1024);
         send(200,{state:project(await service.refreshUsage(input))});return true;
       }
+      if(url.pathname==='/v1/codex/review-connect'){
+        if(request.method!=='POST')throw new RouteError('METHOD',405);
+        if(request.headers.origin!==origin)throw new RouteError('ORIGIN',403);
+        if(!service.reviewConnectNotice)throw new RouteError('REVIEW_UNAVAILABLE',404);
+        const input=await body(request,32768);
+        send(200,service.reviewConnectNotice(input));return true;
+      }
       if(url.pathname==='/v1/codex/proposals'){
         // Display-only read for one exact owned task; never journaled and never starts work.
         if(request.method!=='POST')throw new RouteError('METHOD',405);

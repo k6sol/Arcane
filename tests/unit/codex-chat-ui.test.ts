@@ -165,11 +165,12 @@ function mockClient(projectPath:string,threadSuffix='') {
   };
   return {host,s,calls,push,loseAck(){loseAck=true;},hold(){hold=new Promise<void>(done=>{release=done;});},release(){release();hold=null;}};
 }
-async function harness(t:test.TestContext,spawned=false,distinctThreads=false) {
+async function harness(t:test.TestContext,spawned=false,distinctThreads=false,firstConnectFrameLimit=false) {
   const directory=await mkdtemp(join(tmpdir(),'arcane-codex-chat-')),projectPath=join(directory,'project');await mkdir(projectPath);
   const clients:ReturnType<typeof mockClient>[]=[];const children:CodexSession[]=[];let connected=0;
   const service=createCodexService({directory:join(directory,'journal'),projectPath,nativeToolsConfigured:true,connect:async()=>{
     connected++;
+    if(firstConnectFrameLimit&&connected===1)throw new CodexClientError('FRAME_LIMIT','Controlled original discovery frame refusal.',true);
     if(spawned){const client=new CodexSession({command:process.execPath,args:[resolve('packages/codex-client/fixtures/protocol.mjs'),'approvals',join(directory,'audit-'+connected+'.jsonl')],cwd:projectPath,env:nativeEnvironment()},limits({requestTimeoutMs:1500,approvalTimeoutMs:15000}),'spawned-node-fixture');children.push(client);await client.initialize();return client;}
     const client=mockClient(projectPath,distinctThreads?'-'+connected:'');clients.push(client);return client.host;
   }});
@@ -236,6 +237,21 @@ async function browser(t:test.TestContext,origin:string) {
   const grant=async()=>{await openAdvancedSettings(page);await (await visibleControl(page,'#codex-grant')).click();await text('codex-confirm-preview','Workspace');assert.equal(await page.locator('#codex-confirm-submit').isDisabled(),true);await (await visibleControl(page,'#codex-confirm-check')).check();await (await visibleControl(page,'#codex-confirm-submit')).click();await text('codex-policy','Workspace editing enabled');};
   return {page,errors,posts,text,ready,refresh,open,connect,select,grant,instance};
 }
+
+test('real Edge explicit review persists only the old connect notice across reload and never replays its unknown request', {skip:!browserModule,timeout:60000},async t=>{
+  const h=await harness(t,false,false,true),requestId=randomUUID(),original=await h.post({requestId,action:'connect',connectionId:null});assert.equal(original.body.record.state,'unknown');assert.equal(original.body.record.errorCode,'FRAME_LIMIT');
+  const retained=structuredClone(h.service.state().actions[0]!),b=await browser(t,h.origin),{page}=b,reviews:unknown[]=[];
+  page.on('request',(request:any)=>{if(request.url().endsWith('/v1/codex/review-connect'))reviews.push(request.postDataJSON());});await b.open();
+  if(await page.locator('#settings-drawer').isVisible())await page.locator('[data-settings-close]').click();
+  const skip=page.locator('#provider-login-skip');if(await skip.isVisible())await skip.click();
+  await b.text('codex-unknown-requests',requestId);assert.equal(await page.locator('#codex-unknown').isVisible(),true);assert.equal(b.posts.length,0);
+  const draft='Synthetic retained connection review draft';await page.locator('#codex-composer').fill(draft);await b.ready('codex-acknowledge');await (await visibleControl(page,'#codex-acknowledge')).click();
+  await page.waitForFunction(()=>document.getElementById('codex-unknown')?.hidden===true);assert.equal(reviews.length,1);assert.deepEqual(h.service.state().actions,[retained]);assert.equal(h.service.state().snapshot,null);assert.equal(b.posts.length,0);assert.equal(await page.locator('#codex-composer').inputValue(),draft);
+  await page.waitForFunction((draft:string)=>Object.values(localStorage).some(value=>value.includes(draft)),draft);
+  await page.reload();await b.ready('codex-refresh');assert.equal(await page.locator('#codex-unknown').isVisible(),false);assert.equal(await page.locator('#codex-composer').inputValue(),draft);assert.deepEqual(h.service.state().actions,[retained]);assert.equal(reviews.length,1);assert.equal(b.posts.length,0,'Reload does not repeat metadata review or native connect.');
+  await b.connect();assert.equal(h.connected,2);assert.equal(b.posts.length,1);assert.equal(b.posts[0].action,'connect');assert.notEqual(b.posts[0].requestId,requestId);assert.deepEqual(h.service.state().actions.find(row=>row.requestId===requestId),retained);assert.equal(h.clients[0]!.calls.length,0,'The new metadata connection never starts a native thread or turn.');assert.equal(await page.locator('#codex-composer').inputValue(),draft);assert.deepEqual(b.errors,[]);
+  t.diagnostic('Actual Edge review button, production HTTP route and SQLite receipt metadata with controlled native factory; no provider or Studio.');
+});
 
 test('real Edge account usage refresh preserves the draft and model while rendering bounded provider metadata as text', {skip:!browserModule,timeout:60000},async t=>{
   const h=await harness(t),b=await browser(t,h.origin),{page}=b;const usagePosts:unknown[]=[];

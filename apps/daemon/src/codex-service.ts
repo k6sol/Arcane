@@ -62,6 +62,16 @@ export interface CodexActionRecord {
   /** proposal-start only; such receipts are never listed in the desktop action history. */
   proposalId?: string;
 }
+/** A display-only review of one exact old receipt; never a native acknowledgement. */
+export interface CodexConnectNotice {
+  requestId: string; receiptFingerprint: string; reviewedAt: string | null;
+}
+export interface CodexConnectNoticeReview extends CodexConnectNotice { projectPath: string; reviewedAt: string }
+const connectNoticeReceipt = z.strictObject({
+  requestId: uuid, action: z.literal('connect'), connectionId: z.null(), state: z.literal('unknown'), errorCode: z.literal('FRAME_LIMIT'),
+  threadId: z.null(), turnId: z.null(), model: z.null(), effort: z.null(), createdAt: z.string().datetime(), finishedAt: z.string().datetime(),
+});
+const connectNoticeReviewInput = z.strictObject({projectPath:z.string().min(1).max(4096),requestId:uuid,receiptFingerprint:z.string().regex(/^[a-f0-9]{64}(?![\s\S])/)});
 /** Display data only: never an acceptance receipt, approval, grant or parent continuation. */
 export interface CodexProposalView {
   proposalId: string; requestId: string; state: ChatTaskProposalRecord['state']; reason: ChatTaskProposalRecord['reason'];
@@ -115,7 +125,7 @@ export interface CodexProductState {
   nativeAssets?: { available: boolean; sealed: boolean; granted: boolean; admissionOpen: boolean };
   /** Durable local Send receipts. Separate from provider-reported history; never replayed automatically. */
   submittedMessages?: SubmittedChatTranscript;
-  workflowModel?: NativeWorkflowModelProof | null; actions: CodexActionRecord[]; nativeHistory?: CodexHistoryState | null; nativeThreads?: CodexSavedThread[]; displayLimited?: true; nativeTools: { configured: boolean; verified: false };
+  workflowModel?: NativeWorkflowModelProof | null; actions: CodexActionRecord[]; connectNotices?: CodexConnectNotice[]; nativeHistory?: CodexHistoryState | null; nativeThreads?: CodexSavedThread[]; displayLimited?: true; nativeTools: { configured: boolean; verified: false };
   chatTasks?: { taskId: string; threadId: string; sessionId: string | null; connectionId: string;
     state: string; round: 0 | 1; reason: string | null; reportDigest: string | null;retained?:boolean }[];
 }
@@ -172,7 +182,7 @@ export function createCodexService(options: CodexServiceOptions) {
   catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
   const db = new DatabaseSync(sqliteTransportPath(filename), { timeout: 2000, allowExtension: false });
   const version = Number((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version);
-  if (version > 3) { db.close(); throw new CodexClientError('MIGRATION', 'Native journal is newer than this build.'); }
+  if (version > 4) { db.close(); throw new CodexClientError('MIGRATION', 'Native journal is newer than this build.'); }
   db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
     CREATE TABLE IF NOT EXISTS actions(id TEXT PRIMARY KEY, hash TEXT NOT NULL, payload TEXT NOT NULL) STRICT;
     CREATE TABLE IF NOT EXISTS native_history(
@@ -186,7 +196,12 @@ export function createCodexService(options: CodexServiceOptions) {
     ) STRICT;
     INSERT OR IGNORE INTO native_threads(project_path,thread_id,session_id,payload)
       SELECT project_path,thread_id,session_id,payload FROM native_history;
-    PRAGMA user_version=3;`);
+    CREATE TABLE IF NOT EXISTS reviewed_connect_notices(
+      project_path TEXT NOT NULL, request_id TEXT NOT NULL,
+      receipt_fingerprint TEXT NOT NULL CHECK(length(receipt_fingerprint)=64 AND receipt_fingerprint NOT GLOB '*[^a-f0-9]*'),
+      reviewed_at TEXT NOT NULL, PRIMARY KEY(project_path,request_id)
+    ) STRICT;
+    PRAGMA user_version=4;`);
   if(version<3)db.exec(`UPDATE native_threads SET selection=(
     SELECT json_object('model',json_extract(a.payload,'$.model'),'effort',json_extract(a.payload,'$.effort'))
     FROM actions a WHERE json_extract(a.payload,'$.state')='acknowledged'
@@ -330,7 +345,31 @@ export function createCodexService(options: CodexServiceOptions) {
     const live = !!status && !status.retired && !context?.retired && snapshot?.connected === true && snapshot.ready === true && snapshot.thread?.configured === true && snapshot.account?.auth === 'subscription' && snapshot.mcpIsolation === 'arcane-only-verified';
     return {available:options.assetRegistry!==undefined,sealed:live&&status!.sealed,granted:live&&status!.granted,admissionOpen:live&&status!.granted&&status!.admissionOpen};
   }
-  const history = (): CodexActionRecord[] => (db.prepare("SELECT payload FROM actions WHERE json_extract(payload,'$.action') IS NOT 'proposal-start' ORDER BY rowid DESC LIMIT 100").all() as {payload:string}[]).map(row => JSON.parse(row.payload) as CodexActionRecord);
+  let connectReviewFault=false;
+  type NoticeRow = {id:string;hash:string;payload:string;receipt_fingerprint?:string|null;reviewed_at?:string|null};
+  function noticeFingerprint(row:NoticeRow):string|null {
+    if(!/^[a-f0-9]{64}(?![\s\S])/.test(row.hash))return null;
+    const parsed=connectNoticeReceipt.safeParse(JSON.parse(row.payload));
+    if(!parsed.success||parsed.data.requestId!==row.id)return null;
+    return createHash('sha256').update(JSON.stringify({schemaVersion:1,projectPath,actionHash:row.hash,receipt:parsed.data})).digest('hex');
+  }
+  function history():{actions:CodexActionRecord[];connectNotices:CodexConnectNotice[]} {
+    const rows=db.prepare(`SELECT a.id,a.hash,a.payload,r.receipt_fingerprint,r.reviewed_at FROM actions a
+      LEFT JOIN reviewed_connect_notices r ON r.project_path=? AND r.request_id=a.id
+      WHERE json_extract(a.payload,'$.action') IS NOT 'proposal-start' ORDER BY a.rowid DESC LIMIT 100`).all(projectPath) as NoticeRow[];
+    const connectNotices:CodexConnectNotice[]=[];
+    for(const row of rows){
+      const receiptFingerprint=noticeFingerprint(row);if(!receiptFingerprint)continue;
+      let reviewedAt:string|null=null;
+      if(!connectReviewFault&&row.receipt_fingerprint===receiptFingerprint){
+        const parsed=z.string().datetime().safeParse(row.reviewed_at);
+        if(!parsed.success)throw new CodexClientError('JOURNAL_FAILURE','The recorded connection review could not be validated.');
+        reviewedAt=parsed.data;
+      }
+      connectNotices.push({requestId:row.id,receiptFingerprint,reviewedAt});
+    }
+    return {actions:rows.map(row=>JSON.parse(row.payload) as CodexActionRecord),connectNotices};
+  }
   function nativeHistory(threadId?: string): CodexHistoryState | null {
     const row = (threadId === undefined
       ? db.prepare('SELECT thread_id,session_id,payload FROM native_history WHERE id=1 AND project_path=?').get(projectPath)
@@ -366,7 +405,34 @@ export function createCodexService(options: CodexServiceOptions) {
       snapshot, lastSnapshot:lastSnapshot ? structuredClone(lastSnapshot) : null,
       ...(options.assetRegistry ? {nativeAssets:assetState(snapshot)} : {}),
       ...(tasks?.configured() ? {chatTasks:tasks.summaries().map(({id,...task})=>{const context=taskContexts.get(id);return{taskId:id,...task,retained:!!context?.ownerClient&&(!context.retired||readableNormal(context))};})} : {}),
-      actions:history(), nativeHistory:recordedHistory, nativeThreads:savedThreads(), ...(submittedScope?{submittedMessages:submitted.read(submittedScope)}:{}), nativeTools:{configured:options.arcaneMcp !== undefined || options.nativeToolsConfigured === true,verified:false} };
+      ...history(), nativeHistory:recordedHistory, nativeThreads:savedThreads(), ...(submittedScope?{submittedMessages:submitted.read(submittedScope)}:{}), nativeTools:{configured:options.arcaneMcp !== undefined || options.nativeToolsConfigured === true,verified:false} };
+  }
+  function reviewConnectNotice(input:unknown):CodexConnectNoticeReview {
+    if(closed)throw new CodexClientError('CLOSED','Native notice review is closed.');
+    if(journalFault)throw new CodexClientError('JOURNAL_FAILURE','The retained native journal requires inspection.');
+    if(connectReviewFault)throw new CodexClientError('REVIEW_UNCERTAIN','The connection notice review could not be confirmed. Reopen Arcane before reviewing it again.');
+    const parsed=connectNoticeReviewInput.safeParse(input);
+    if(!parsed.success)throw new CodexClientError('ARGUMENTS','Review requires one exact project and recorded connection fingerprint.');
+    const value=parsed.data;
+    if(value.projectPath!==projectPath)throw new CodexClientError('REVIEW_SCOPE','The recorded connection belongs to another project.');
+    const ownsTask=tasks?.summaries().some(task=>{
+      const context=taskContexts.get(task.id);
+      return !!context?.ownerClient&&(!context.retired||readableNormal(context))||['working','awaiting_verification','repair_queued','repairing','unknown'].includes(task.state);
+    });
+    if(client||pendingConnect||connecting||closing||busy||ownsTask)throw new CodexClientError('BUSY','Finish or disconnect the current native owner before reviewing this old connection.');
+    db.exec('BEGIN IMMEDIATE');
+    try{
+      const row=db.prepare('SELECT id,hash,payload FROM actions WHERE id=?').get(value.requestId) as NoticeRow|undefined;
+      if(!row||noticeFingerprint(row)!==value.receiptFingerprint)throw new CodexClientError('REVIEW_SCOPE','The original finished connection receipt changed or is not reviewable.');
+      if(db.prepare("SELECT id FROM actions WHERE json_extract(payload,'$.state')='pending' LIMIT 1").get())throw new CodexClientError('BUSY','An unfinished native request still requires inspection.');
+      const prior=db.prepare('SELECT receipt_fingerprint,reviewed_at FROM reviewed_connect_notices WHERE project_path=? AND request_id=?').get(projectPath,value.requestId) as {receipt_fingerprint:string;reviewed_at:string}|undefined;
+      const reviewedAt=prior?.receipt_fingerprint===value.receiptFingerprint?z.string().datetime().parse(prior.reviewed_at):new Date().toISOString();
+      if(!prior&&Number((db.prepare('SELECT count(*) AS n FROM reviewed_connect_notices').get() as {n:number}).n)>=4096)throw new CodexClientError('JOURNAL_LIMIT','The local connection review journal is full.');
+      db.prepare(`INSERT INTO reviewed_connect_notices(project_path,request_id,receipt_fingerprint,reviewed_at) VALUES(?,?,?,?)
+        ON CONFLICT(project_path,request_id) DO UPDATE SET receipt_fingerprint=excluded.receipt_fingerprint,reviewed_at=excluded.reviewed_at`).run(projectPath,value.requestId,value.receiptFingerprint,reviewedAt);
+      db.exec('COMMIT');
+      return {projectPath,requestId:value.requestId,receiptFingerprint:value.receiptFingerprint,reviewedAt};
+    }catch(error){try{db.exec('ROLLBACK');}catch{connectReviewFault=true;}throw error;}
   }
   const save = (record: CodexActionRecord) => {
     db.prepare('UPDATE actions SET payload=? WHERE id=?').run(JSON.stringify(record),record.requestId);
@@ -915,7 +981,7 @@ export function createCodexService(options: CodexServiceOptions) {
     const promise = readUsage(input); usageReads.add(promise);
     void promise.finally(() => usageReads.delete(promise)).catch(() => {}); return promise;
   }
-  return { state, action, refreshUsage, proposals, taskPlan,
+  return { state, action, reviewConnectNotice, refreshUsage, proposals, taskPlan,
     recordedHistory(threadId:unknown):CodexHistoryState|null {
       if(closed)throw new CodexClientError('CLOSED','The recorded history reader is closed.');
       if(!historyIdentifier.safeParse(threadId).success)throw new CodexClientError('HISTORY_INVALID','Invalid saved conversation identifier.');
@@ -956,6 +1022,6 @@ export function createCodexService(options: CodexServiceOptions) {
   },fenceTaskAdmission(){generation++;tasks?.fence();} };
 }
 export type CodexService = Pick<ReturnType<typeof createCodexService>, 'state'|'action'|'close'> &
-  Partial<Pick<ReturnType<typeof createCodexService>, 'recordedHistory'|'refreshUsage'|'proposals'|'taskPlan'|'authorizeBoundWork'|'playtestTasks'|'attachPlaytestCancellation'|'fenceTaskAdmission'>>;
+  Partial<Pick<ReturnType<typeof createCodexService>, 'reviewConnectNotice'|'recordedHistory'|'refreshUsage'|'proposals'|'taskPlan'|'authorizeBoundWork'|'playtestTasks'|'attachPlaytestCancellation'|'fenceTaskAdmission'>>;
 
 

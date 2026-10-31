@@ -173,7 +173,9 @@ test('history endpoints are inert and human-only; agent/foreign-origin/query/spo
   const cached=await h.call('/v1/codex/history');assert.equal(cached.status,200);assert.equal(cached.cache,'no-store');assert.equal(JSON.parse(cached.text).nativeHistory,null);
   assert.equal((await h.call('/v1/codex/history',undefined,h.agentToken)).status,403);
   assert.equal((await h.call('/v1/codex/history',undefined,'invalid')).status,401);
-  assert.equal((await h.call('/v1/codex/history?threadId=foreign')).status,400);
+  const before=f.service.state().actions,missing=await h.call('/v1/codex/history?threadId=foreign');
+  assert.equal(missing.status,200);assert.deepEqual(JSON.parse(missing.text),{nativeHistory:null});assert.deepEqual(f.service.state().actions,before);
+  assert.equal((await h.call('/v1/codex/history?threadId=foreign&projectPath=other')).status,400);
   assert.equal((await h.call('/v1/codex/history',undefined,h.token,'https://foreign.invalid')).status,403);
   assert.equal((await h.call('/v1/codex/history',{})).status,405);
   const input={requestId:randomUUID(),action:'history-load',connectionId:randomUUID(),threadId:THREAD};
@@ -415,7 +417,7 @@ test('v1 migration preserves receipts without guessing project/thread binding or
   // Receipts must not be promoted into guessed native ownership on migration.
   const db=new DatabaseSync(join(f.journal,'codex-actions.sqlite'));db.exec('DROP TABLE native_history; DROP TABLE native_threads; PRAGMA user_version=1;');db.close();
   const migrated=f.open(f.projectPath,false);assert.equal(migrated.state().nativeHistory,null);assert.deepEqual(migrated.state().nativeThreads,[]);assert.ok(migrated.state().actions.some(row=>row.threadId===scope.threadId));assert.equal(f.starts(),1);
-  const check=new DatabaseSync(join(f.journal,'codex-actions.sqlite'));assert.equal((check.prepare('PRAGMA user_version').get() as {user_version:number}).user_version,3);assert.equal((check.prepare('SELECT count(*) AS count FROM native_threads').get() as {count:number}).count,0);check.close();
+  const check=new DatabaseSync(join(f.journal,'codex-actions.sqlite'));assert.equal((check.prepare('PRAGMA user_version').get() as {user_version:number}).user_version,4);assert.equal((check.prepare('SELECT count(*) AS count FROM native_threads').get() as {count:number}).count,0);check.close();
 });
 
 test('client rejects nonhuman and mismatched identity before starting a read process',async t=>{

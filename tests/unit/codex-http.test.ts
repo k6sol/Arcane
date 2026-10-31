@@ -10,12 +10,15 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { createConnectionLab } from '../../apps/daemon/src/lab-server.js';
 import { createCodexService, type CodexAction, type CodexActionOutcome, type CodexProductState } from '../../apps/daemon/src/codex-service.js';
 import { CodexSession } from '../../packages/codex-client/src/session.js';
+import { CodexClientError } from '../../packages/codex-client/src/types.js';
+import { ChatTaskStore } from '../../packages/storage/src/chat-task-store.js';
+import { createNativeAssetRegistry } from '../../apps/daemon/src/native-asset-authority.js';
 import { limits } from '../../packages/codex-client/src/validation.js';
 import { nativeEnvironment } from '../../packages/codex-client/src/transport.js';
 const ROOT=resolve(process.cwd()),TEMP=join(ROOT,'tests','.tmp','codex-http');
-async function fixture(t:test.TestContext,mode='normal') {
+async function fixture(t:test.TestContext,mode='normal',firstConnectFailure?:CodexClientError) {
   await mkdir(TEMP,{recursive:true});const directory=await mkdtemp(join(TEMP,'native-'));let starts=0;
-  const connect=async()=>{starts++;const client=new CodexSession({command:process.execPath,args:[join(ROOT,'packages/codex-client/fixtures/protocol.mjs'),mode,join(directory,'receipt-'+starts+'.jsonl')],cwd:ROOT,env:nativeEnvironment()},limits({requestTimeoutMs:3000,approvalTimeoutMs:15000}),'spawned-node-fixture');await client.initialize();return client;};
+  const connect=async()=>{starts++;if(starts===1&&firstConnectFailure)throw firstConnectFailure;const client=new CodexSession({command:process.execPath,args:[join(ROOT,'packages/codex-client/fixtures/protocol.mjs'),mode,join(directory,'receipt-'+starts+'.jsonl')],cwd:ROOT,env:nativeEnvironment()},limits({requestTimeoutMs:3000,approvalTimeoutMs:15000}),'spawned-node-fixture');await client.initialize();return client;};
   const service=createCodexService({directory,projectPath:ROOT,connect});
   const lab=await createConnectionLab({cwd:ROOT,stateDirectory:join(directory,'lab'),codexService:service});
   t.after(async()=>{await lab.close();const path=relative(TEMP,directory);assert.ok(path.startsWith('native-')&&!path.includes(sep));await rm(directory,{recursive:true,force:true});});
@@ -190,6 +193,139 @@ test('crash-pending action is explicitly classified unknown by migration without
   db.prepare('INSERT INTO actions(id,hash,payload) VALUES(?,?,?)').run(input.requestId,createHash('sha256').update(JSON.stringify(input)).digest('hex'),JSON.stringify(row));db.close();
   let starts=0;const restored=createCodexService({directory:f.directory,projectPath:ROOT,connect:async()=>{starts++;throw new Error('No crash replay');}});
   try{const result=await restored.action(input);assert.equal(result.replayed,true);assert.equal(result.record.state,'unknown');assert.equal(result.record.errorCode,'DAEMON_RESTART');assert.equal(starts,0);}finally{await restored.close();}
+});
+
+async function connectNoticeFixture(t:test.TestContext){
+  const f=await fixture(t,'normal',new CodexClientError('FRAME_LIMIT','Controlled metadata frame refusal.',true));
+  const original=await f.action({action:'connect',connectionId:null});
+  assert.equal(original.record.state,'unknown');assert.equal(original.record.errorCode,'FRAME_LIMIT');
+  const candidate=original.state.connectNotices!.find(row=>row.requestId===original.record.requestId)!;
+  assert.ok(candidate);assert.equal(candidate.reviewedAt,null);
+  const input={projectPath:original.state.projectPath,requestId:candidate.requestId,receiptFingerprint:candidate.receiptFingerprint};
+  return {...f,original,candidate,input};
+}
+
+test('human connection notice review persists the exact old receipt without native acknowledgement, replay or a new action',async t=>{
+  const f=await connectNoticeFixture(t),path=join(f.directory,'codex-actions.sqlite');
+  const db=new DatabaseSync(path),before=db.prepare('SELECT hash,payload FROM actions WHERE id=?').get(f.input.requestId);
+  const reviewed=await f.call('/v1/codex/review-connect',f.input);assert.equal(reviewed.status,200);
+  const ack=JSON.parse(reviewed.text);assert.deepEqual(Object.keys(ack).sort(),['projectPath','receiptFingerprint','requestId','reviewedAt']);
+  assert.equal(ack.projectPath,f.input.projectPath);assert.equal(ack.requestId,f.input.requestId);assert.equal(ack.receiptFingerprint,f.input.receiptFingerprint);assert.ok(Number.isFinite(Date.parse(ack.reviewedAt)));
+  assert.deepEqual(JSON.parse((await f.call('/v1/codex/review-connect',f.input)).text),ack,'An exact repeated metadata review retains its original ACK.');
+  assert.deepEqual(db.prepare('SELECT hash,payload FROM actions WHERE id=?').get(f.input.requestId),before);assert.equal((db.prepare('SELECT count(*) AS n FROM actions').get() as {n:number}).n,1);db.close();
+  assert.equal(f.starts(),1);await f.lab.close();
+  let reconnects=0;const reopened=createCodexService({directory:f.directory,projectPath:ROOT,connect:async()=>{reconnects++;throw new Error('Review restoration must not connect.');}});
+  try{
+    assert.deepEqual(reopened.state().actions,[f.original.record]);assert.deepEqual(reopened.state().connectNotices,[{...f.candidate,reviewedAt:ack.reviewedAt}]);
+    const replay=await reopened.action({requestId:f.input.requestId,action:'connect',connectionId:null});
+    assert.equal(replay.replayed,true);assert.equal(replay.record.state,'unknown');assert.equal(replay.record.errorCode,'FRAME_LIMIT');assert.equal(reconnects,0);
+  }finally{await reopened.close();}
+});
+
+test('connection review is human-only, exact-origin and exact closed project/receipt metadata',async t=>{
+  const f=await connectNoticeFixture(t),route='/v1/codex/review-connect';
+  assert.equal((await f.call(route,f.input,f.lab.agentToken)).status,403);
+  assert.equal((await f.call(route,f.input,f.lab.token,'https://foreign.invalid')).status,403);
+  assert.equal((await f.call(route,f.input,f.lab.token,'')).status,403);
+  assert.equal((await f.call(route)).status,405);assert.equal((await f.call(route+'?extra=true',f.input)).status,400);
+  for(const input of [{...f.input,projectPath:ROOT+'-other'},{...f.input,requestId:randomUUID()},
+    {...f.input,receiptFingerprint:'0'.repeat(64)},{...f.input,receiptFingerprint:f.input.receiptFingerprint+'\n'},
+    {...f.input,approved:true},{...f.input,action:'connect'},{...f.input,receipt:f.original.record}]){
+    const response=await f.call(route,input);assert.equal(response.status,400);assert.equal(response.text.includes('Controlled metadata'),false);
+  }
+  assert.equal((await f.state()).connectNotices![0]!.reviewedAt,null);assert.deepEqual((await f.state()).actions,[f.original.record]);assert.equal(f.starts(),1);
+});
+
+test('connection review fingerprint refuses changed, unfinished, bound and non-FRAME_LIMIT receipts',async t=>{
+  const f=await connectNoticeFixture(t),db=new DatabaseSync(join(f.directory,'codex-actions.sqlite'));
+  const original=db.prepare('SELECT hash,payload FROM actions WHERE id=?').get(f.input.requestId) as {hash:string;payload:string};
+  try{
+    const changes:Record<string,unknown>[]=[{createdAt:'2026-10-29T00:00:00.000Z'},{finishedAt:'2026-10-31T01:00:00.000Z'},
+      {state:'pending',errorCode:null,finishedAt:null},{finishedAt:null},{state:'rejected'},{errorCode:'TIMEOUT'},{connectionId:randomUUID()},
+      {threadId:'owned-thread'},{turnId:'owned-turn'},{model:'owned-model'},{effort:'low'},{nextConnectionId:randomUUID()},{references:[]},{proposalId:randomUUID()}];
+    for(const change of changes){
+      db.prepare('UPDATE actions SET payload=? WHERE id=?').run(JSON.stringify({...f.original.record,...change}),f.input.requestId);
+      const response=await f.call('/v1/codex/review-connect',f.input);assert.equal(response.status,400,JSON.stringify(change));
+      assert.ok(!(await f.state()).connectNotices?.some(row=>row.reviewedAt!==null));
+      assert.equal((db.prepare('SELECT count(*) AS n FROM reviewed_connect_notices').get() as {n:number}).n,0);
+    }
+    db.prepare('UPDATE actions SET payload=?,hash=? WHERE id=?').run(original.payload,'1'.repeat(64),f.input.requestId);
+    const candidate=(await f.state()).connectNotices![0]!;assert.notEqual(candidate.receiptFingerprint,f.input.receiptFingerprint);
+    assert.equal((await f.call('/v1/codex/review-connect',f.input)).status,400);assert.equal(candidate.reviewedAt,null);assert.equal(f.starts(),1);
+  }finally{db.prepare('UPDATE actions SET payload=?,hash=? WHERE id=?').run(original.payload,original.hash,f.input.requestId);db.close();}
+});
+
+test('failed SQLite review commit preserves the original visible notice and permits only an exact metadata retry',async t=>{
+  const f=await connectNoticeFixture(t),db=new DatabaseSync(join(f.directory,'codex-actions.sqlite'));
+  try{
+    db.exec("CREATE TRIGGER reject_notice BEFORE INSERT ON reviewed_connect_notices BEGIN SELECT RAISE(ABORT,'controlled review write failure'); END;");
+    const failed=await f.call('/v1/codex/review-connect',f.input);assert.equal(failed.status,500);
+    assert.equal((await f.state()).connectNotices![0]!.reviewedAt,null);assert.deepEqual((await f.state()).actions,[f.original.record]);
+    assert.equal((db.prepare('SELECT count(*) AS n FROM reviewed_connect_notices').get() as {n:number}).n,0);
+    db.exec('DROP TRIGGER reject_notice');assert.equal((await f.call('/v1/codex/review-connect',f.input)).status,200);assert.equal(f.starts(),1);
+  }finally{db.close();}
+});
+
+test('unconfirmed review rollback cannot publish an uncommitted review or admit another write before reopen',async t=>{
+  const f=await connectNoticeFixture(t),originalExec=DatabaseSync.prototype.exec,commitFailure=new Error('Controlled review COMMIT failure'),rollbackFailure=new Error('Controlled review ROLLBACK failure');
+  let owned:DatabaseSync|null=null,inject=true,rolledBack=false;
+  const override=t.mock.method(DatabaseSync.prototype,'exec',function(this:DatabaseSync,sql:string){
+    if(inject&&(sql==='COMMIT'||sql==='ROLLBACK')){
+      let originalReceipt=false;try{originalReceipt=!!this.prepare('SELECT id FROM actions WHERE id=?').get(f.input.requestId);}catch{/* Other fixture databases have no action journal. */}
+      if(originalReceipt){owned=this;throw sql==='COMMIT'?commitFailure:rollbackFailure;}
+    }
+    return originalExec.call(this,sql);
+  });
+  try{
+    assert.throws(()=>f.service.reviewConnectNotice(f.input),(error:unknown)=>error===commitFailure);
+    assert.ok(owned);assert.equal(((owned as DatabaseSync).prepare('SELECT count(*) AS n FROM reviewed_connect_notices').get() as {n:number}).n,1,'The controlled live transaction really contains the uncommitted insertion.');
+    assert.equal(f.service.state().connectNotices![0]!.reviewedAt,null,'Unconfirmed live-connection rows are not durable review evidence.');
+    inject=false;originalExec.call(owned,'ROLLBACK');rolledBack=true;
+    const refused=await f.call('/v1/codex/review-connect',f.input);assert.equal(refused.status,400);assert.equal(JSON.parse(refused.text).error,'REVIEW_UNCERTAIN');
+    assert.deepEqual((await f.state()).actions,[f.original.record]);assert.equal(f.starts(),1);
+  }finally{inject=false;override.mock.restore();if(owned&&!rolledBack)originalExec.call(owned,'ROLLBACK');}
+  await f.lab.close();
+  const reopened=createCodexService({directory:f.directory,projectPath:ROOT,connect:async()=>{assert.fail('Review recovery cannot connect.');}});
+  try{assert.equal(reopened.state().connectNotices![0]!.reviewedAt,null);assert.ok(reopened.reviewConnectNotice(f.input).reviewedAt);assert.deepEqual(reopened.state().actions,[f.original.record]);}finally{await reopened.close();}
+});
+
+test('a held review body cannot borrow idle ownership after a new exact native connection has opened',async t=>{
+  const f=await connectNoticeFixture(t),text=JSON.stringify(f.input),split=Math.floor(text.length/2);let request!:ReturnType<typeof httpRequest>;
+  const result=new Promise<{status:number;text:string}>((resolveResult,reject)=>{
+    request=httpRequest(f.lab.origin+'/v1/codex/review-connect',{method:'POST',headers:{Authorization:'Bearer '+f.lab.token,Origin:f.lab.origin,'Content-Type':'application/json','Content-Length':Buffer.byteLength(text)}},response=>{
+      const chunks:Buffer[]=[];response.on('data',(chunk:Buffer)=>chunks.push(chunk));response.on('end',()=>resolveResult({status:response.statusCode!,text:Buffer.concat(chunks).toString('utf8')}));response.on('error',reject);
+    });request.on('error',reject);request.setTimeout(10000,()=>request.destroy(new Error('Owned held review request exceeded its fixture bound.')));
+  });void result.catch(()=>{});t.after(()=>request.destroy());
+  await new Promise<void>((done,reject)=>request.write(text.slice(0,split),error=>error?reject(error):done()));
+  const current=await f.action({action:'connect',connectionId:null});assert.equal(current.record.state,'acknowledged');
+  request.end(text.slice(split));const response=await result;assert.equal(response.status,400);assert.equal(JSON.parse(response.text).error,'BUSY');
+  assert.equal((await f.state()).connectNotices![0]!.reviewedAt,null);assert.equal(f.starts(),2);
+  assert.equal((await f.state()).snapshot!.connectionId,current.state.snapshot!.connectionId);assert.deepEqual((await f.state()).actions.find(row=>row.requestId===f.input.requestId),f.original.record);
+  const log=await readFile(join(f.directory,'receipt-2.jsonl'),'utf8');assert.equal(log.includes('turn/start'),false);assert.equal(log.includes('thread/start'),false);
+});
+
+test('persisted unknown task ownership blocks reviewing an otherwise exact unbound connection notice',async t=>{
+  const f=await connectNoticeFixture(t);await f.lab.close();
+  const tasks=new ChatTaskStore({directory:join(f.directory,'chat-tasks'),projectPath:ROOT});
+  const task=tasks.create({id:randomUUID(),provider:'codex',threadId:'retained-original-thread',sessionId:null,connectionId:randomUUID(),incarnationId:randomUUID(),model:'fixture-sol',effort:'low',
+    allowWorkspaceWrites:true,allowAssets:false,state:'unknown',round:0,operationId:'original-operation',turnId:'original-turn',nativeSettled:false,acknowledged:false,repairDispatch:'unknown',prepared:null,evidence:[],reason:'controlled original owner'});tasks.close();
+  const registry=createNativeAssetRegistry({projectPath:ROOT});let starts=0;
+  const reopened=createCodexService({directory:f.directory,projectPath:ROOT,assetRegistry:registry,connect:async()=>{starts++;throw new Error('Review must not resume original work.');}});
+  try{
+    assert.throws(()=>reopened.reviewConnectNotice(f.input),(error:unknown)=>error instanceof CodexClientError&&error.code==='BUSY');
+    assert.equal(reopened.state().connectNotices![0]!.reviewedAt,null);assert.deepEqual(reopened.state().actions,[f.original.record]);assert.equal(starts,0);
+  }finally{await reopened.close();registry.close();}
+  const check=new ChatTaskStore({directory:join(f.directory,'chat-tasks'),projectPath:ROOT});try{assert.equal(check.get(task.id).state,'unknown');}finally{check.close();}
+});
+
+test('v3 notice migration preserves original actions and a future journal is refused before mutable setup',async t=>{
+  const f=await connectNoticeFixture(t);await f.lab.close();const path=join(f.directory,'codex-actions.sqlite');
+  const legacy=new DatabaseSync(path);legacy.exec('DROP TABLE reviewed_connect_notices; PRAGMA user_version=3;');legacy.close();
+  let starts=0;const migrated=createCodexService({directory:f.directory,projectPath:ROOT,connect:async()=>{starts++;throw new Error('Migration cannot connect.');}});
+  try{assert.deepEqual(migrated.state().actions,[f.original.record]);assert.deepEqual(migrated.state().connectNotices,[f.candidate]);assert.equal(starts,0);}finally{await migrated.close();}
+  const future=new DatabaseSync(path);assert.equal((future.prepare('PRAGMA user_version').get() as {user_version:number}).user_version,4);future.exec('PRAGMA user_version=5;');future.close();
+  const before=await readFile(path);assert.throws(()=>createCodexService({directory:f.directory,projectPath:ROOT,connect:async()=>{starts++;throw new Error('Future journal cannot connect.');}}),
+    (error:unknown)=>error instanceof CodexClientError&&error.code==='MIGRATION');assert.deepEqual(await readFile(path),before);assert.equal(starts,0);
 });
 
 test('malformed, encoded and excessive HTTP input is rejected without spawning or echoing payloads',async t=>{

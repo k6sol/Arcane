@@ -1,5 +1,5 @@
 /// <reference lib="dom" />
-import type { CodexAction, CodexActionRecord, CodexProductState } from '../../daemon/src/codex-service.js';
+import type { CodexAction, CodexActionRecord, CodexConnectNotice, CodexProductState } from '../../daemon/src/codex-service.js';
 import type { RequestedModel } from '../../../packages/core/src/workflow-recipes.js';
 import type { NativeWorkflowConversation, WorkflowDraftProvenance } from './workflow-panel.js';
 import type { Approval, McpToolCallArgs, McpToolFailureSummary, McpToolFailureCode, McpFailureTool, Model, SessionEvent, Snapshot } from '../../../packages/codex-client/src/types.js';
@@ -231,9 +231,18 @@ function readActionRecord(value: unknown): ChatActionRecord {
   if (['grant-assets','revoke-assets'].includes(String(value.action)) && (!uuid(value.connectionId) || !text(value.threadId))) throw new Error('Invalid exact native asset action receipt scope.');
   return value as unknown as ChatActionRecord;
 }
+const connectReceiptKeys=['requestId','action','connectionId','state','errorCode','threadId','turnId','model','effort','createdAt','finishedAt'];
+const connectFingerprint=(value:unknown):value is string=>typeof value==='string'&&/^[a-f0-9]{64}(?![\s\S])/.test(value);
+const connectReviewTime=(value:unknown):value is string=>text(value,64)&&/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z(?![\s\S])/.test(value)&&Number.isFinite(Date.parse(value));
+function frameLimitedUnboundConnect(record:ChatActionRecord):boolean {
+  return dataObject(record,connectReceiptKeys)&&record.action==='connect'&&record.state==='unknown'&&record.errorCode==='FRAME_LIMIT'&&record.finishedAt!==null&&
+    record.connectionId===null&&record.threadId===null&&record.turnId===null&&record.model===null&&record.effort===null;
+}
+export interface ConnectNoticeReview { projectPath:string;requestId:string;receiptFingerprint:string }
+export interface ConnectNoticeReviewReceipt extends ConnectNoticeReview { reviewedAt:string }
 export function readCodexState(value: unknown): ChatState {
   if (!dataObject(value) || value.provider !== 'codex' || value.use !== 'personal-local' || !text(value.projectPath,4096) || typeof value.connecting !== 'boolean' || typeof value.closing !== 'boolean' || typeof value.busy !== 'boolean' || !(value.displayLimited===undefined||value.displayLimited===true) || !Array.isArray(value.actions) || value.actions.length > 100 || !dataObject(value.nativeTools, ['configured','verified']) || typeof value.nativeTools.configured !== 'boolean' || value.nativeTools.verified !== false) throw new Error('Invalid human-only native workflow state.');
-  const allowed = ['provider','use','projectPath','connecting','closing','busy','snapshot','lastSnapshot','actions','nativeTools','nativeAssets','nativeHistory','nativeThreads','workflowModel','displayLimited','chatTasks','submittedMessages'];
+  const allowed = ['provider','use','projectPath','connecting','closing','busy','snapshot','lastSnapshot','actions','nativeTools','nativeAssets','nativeHistory','nativeThreads','workflowModel','displayLimited','chatTasks','submittedMessages','connectNotices'];
   if (Object.keys(value).some(key => !allowed.includes(key))) throw new Error('Unexpected native workflow state field.');
   if (Object.hasOwn(value, 'nativeAssets')) readNativeAssets(value.nativeAssets);
   readSnapshot(value.snapshot); readSnapshot(value.lastSnapshot);
@@ -291,6 +300,16 @@ export function readCodexState(value: unknown): ChatState {
   }
   const ids = new Set<string>();
   for (const action of value.actions) { const r = readActionRecord(action); if (ids.has(r.requestId)) throw new Error('Duplicate native action receipt.'); ids.add(r.requestId); }
+  if(Object.hasOwn(value,'connectNotices')) {
+    if(!Array.isArray(value.connectNotices)||value.connectNotices.length>100)throw new Error('Invalid bounded connection notice reviews.');
+    const seen=new Set<string>();
+    for(const notice of value.connectNotices) {
+      if(!dataObject(notice,['requestId','receiptFingerprint','reviewedAt'])||!uuid(notice.requestId)||seen.has(notice.requestId)||!connectFingerprint(notice.receiptFingerprint)||
+        !(notice.reviewedAt===null||connectReviewTime(notice.reviewedAt))||!(value.actions as ChatActionRecord[]).some(record=>record.requestId===notice.requestId&&frameLimitedUnboundConnect(record)))
+        throw new Error('Invalid exact connection notice review.');
+      seen.add(notice.requestId);
+    }
+  }
   if (value.nativeAssets === null) { const { nativeAssets: unsupported, ...compatible } = value; return compatible as unknown as ChatState; }
   return value as unknown as ChatState;
 }
@@ -484,12 +503,12 @@ export class CodexChatApi {
   safe(value: string): string {
     return value.replaceAll(this.#token || '\0', '[REDACTED]').replace(/\barcane_local_v1_[0-9]+_[a-f0-9]{64}\b/g,'[REDACTED]').replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi,'Bearer [REDACTED]').replace(/\b(?:sk-|ghp_|github_pat_)[A-Za-z0-9_-]{8,}/g,'[REDACTED]').replace(/("?(?:accessToken|access_token|apiKey|api_key|password|secret)"?\s*[:=]\s*["']?)[^"',;\s]+/gi,'$1[REDACTED]').replace(/\x1b\[[0-?]*[ -/]*[@-~]/g,'').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\u202a-\u202e\u2066-\u2069]/g,'');
   }
-  async request(path: '/v1/codex/state' | '/v1/codex/action' | '/v1/codex/reference-turn' | '/v1/codex/usage' | '/v1/codex/proposals' | `/v1/codex/history?threadId=${string}`, input?: ChatAction|{connectionId:string}|TaskProposalRead, signal?: AbortSignal): Promise<unknown> {
+  async request(path: '/v1/codex/state' | '/v1/codex/action' | '/v1/codex/reference-turn' | '/v1/codex/review-connect' | '/v1/codex/usage' | '/v1/codex/proposals' | `/v1/codex/history?threadId=${string}`, input?: ChatAction|{connectionId:string}|TaskProposalRead|ConnectNoticeReview, signal?: AbortSignal): Promise<unknown> {
     if (!/^[a-f0-9]{64}$/.test(this.#token)) throw new CodexHttpError('Open the launcher’s human control link.',false);
     const controller = new AbortController(), abort = () => controller.abort();
     signal?.addEventListener('abort',abort,{once:true}); if(signal?.aborted) controller.abort();
     const timer = setTimeout(abort,this.deadline);
-    const mutable=!!input&&path!=='/v1/codex/usage'&&path!=='/v1/codex/proposals';
+    const mutable=!!input&&path!=='/v1/codex/usage'&&path!=='/v1/codex/proposals'&&path!=='/v1/codex/review-connect';
     try {
       const transport = this.transport;
       const response = await transport(path,{method:input?'POST':'GET',headers:{Authorization:'Bearer '+this.#token,...(input?{'Content-Type':'application/json'}:{})},...(input?{body:JSON.stringify(input)}:{}),signal:controller.signal,cache:'no-store',credentials:'omit',redirect:'error',referrerPolicy:'no-referrer'});
@@ -498,6 +517,7 @@ export class CodexChatApi {
       try { for(;;) {const part=await reader.read();if(part.done)break;length+=part.value.byteLength;if(length>CODEX_STATE_BYTES){await reader.cancel();throw new Error('Native snapshot exceeded 4 MiB.');}chunks.push(part.value);} } finally {reader.releaseLock();}
       const bytes=new Uint8Array(length);let offset=0;for(const part of chunks){bytes.set(part,offset);offset+=part.byteLength;}
       let result:unknown;try{result=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes));}catch{throw new Error('Native response was not valid UTF-8 JSON.');}
+      if(path==='/v1/codex/review-connect'&&response.status!==200)throw new CodexHttpError('Connection notice review was not confirmed (HTTP '+response.status+'). Check status; nothing was sent again.',false);
       if (mutable && object(result) && object(result.record)) {
         const expected = result.record.state === 'acknowledged' ? 200 : result.record.state === 'rejected' ? 409 : ['pending','unknown'].includes(String(result.record.state)) ? 202 : 0;
         if (response.status !== expected) throw new CodexHttpError('Native HTTP status and acknowledgement state disagree; inspect this request ID.', true);
@@ -512,6 +532,15 @@ export class CodexChatApi {
     finally {clearTimeout(timer);signal?.removeEventListener('abort',abort);}
   }
   async state(signal?: AbortSignal) { const value=await this.request('/v1/codex/state',undefined,signal); if(!object(value))throw new Error('Missing native state envelope.');return readCodexState(value.state); }
+  /** Saves display-review metadata only; this never creates or acknowledges a native action. */
+  async reviewConnectNotice(input:ConnectNoticeReview,signal?:AbortSignal):Promise<ConnectNoticeReviewReceipt> {
+    if(!dataObject(input,['projectPath','requestId','receiptFingerprint'])||!text(input.projectPath,4096)||!uuid(input.requestId)||!connectFingerprint(input.receiptFingerprint))throw new CodexHttpError('Choose the exact recorded connection notice.',false);
+    const submitted={projectPath:input.projectPath,requestId:input.requestId,receiptFingerprint:input.receiptFingerprint};
+    const value=await this.request('/v1/codex/review-connect',submitted,signal);
+    if(!dataObject(value,['projectPath','requestId','receiptFingerprint','reviewedAt'])||value.projectPath!==submitted.projectPath||value.requestId!==submitted.requestId||value.receiptFingerprint!==submitted.receiptFingerprint||!connectReviewTime(value.reviewedAt))
+      throw new CodexHttpError('Connection notice review was not confirmed. Check its recorded status; nothing was sent again.',false);
+    return value as unknown as ConnectNoticeReviewReceipt;
+  }
   async recordedHistory(threadId:string,signal?:AbortSignal):Promise<unknown> {
     if(!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(threadId))throw new Error('Invalid saved conversation identifier.');
     const value=await this.request(`/v1/codex/history?threadId=${encodeURIComponent(threadId)}`,undefined,signal);
@@ -2732,7 +2761,9 @@ export class CodexChat {
   private readonly pending=new Map<string,ChatAction>();
   private readonly uncertain=new Map<string,Uncertain>();
   private restoredRequestProject:string|null=null;
-  private readonly restoredRequests=new Set<string>();
+  private readonly restoredRequests=new Map<string,string>();
+  private connectReviewEpoch=0;
+  private connectReview:AbortController|null=null;
   private readonly transcript=new CodexTranscript();
   private confirmation:Confirmation|null=null;
   private approvalSignature=''; private modelSignature=''; private messageSignature='';
@@ -2933,6 +2964,7 @@ export class CodexChat {
    */
   yieldSurface(yielded:boolean):void {
     if(yielded===this.surfaceYielded)return;
+    this.retireConnectReview();
     this.modelSourceRevision++;this.modelSourceOwnerRevision++;
     this.savedRecordingRead?.abort();this.savedRecordingRead=null;
     this.pickerCaptureEpoch++;
@@ -2948,7 +2980,7 @@ export class CodexChat {
    */
   observeWorkspaceProject(path:string|null):void {
     const previous=this.workspaceProject;this.workspaceProject=path||null;
-    if(this.workspaceProject!==previous){this.modelSourceOwnerRevision++;this.workspaceRevision++;this.savedRecordingRead?.abort();this.savedRecordingRead=null;}
+    if(this.workspaceProject!==previous){this.retireConnectReview();this.modelSourceOwnerRevision++;this.workspaceRevision++;this.savedRecordingRead?.abort();this.savedRecordingRead=null;}
     if(this.stopped||!this.workspaceProject||this.workspaceProject===previous||!this.tabs)return;
     const project=this.state?.projectPath??null;
     if(this.foreignDraft){if([this.foreignDraft.project,this.foreignDraft.workspace].includes(this.workspaceProject)){this.releaseForeignDraft();this.render();this.publishState();}return;}
@@ -3150,7 +3182,7 @@ export class CodexChat {
   }
   /** Provider presentation preference only; Claude continues through native handoff. */
   setChatProviderPreference(provider:'codex'|'claude'):void {
-    if(provider!==this.providerPreference()){this.pauseQueue('Paused after changing providers. Choose Send next to resume.');this.messageLifetime++;this.imageRequest?.abort();}
+    if(provider!==this.providerPreference()){this.retireConnectReview();this.pauseQueue('Paused after changing providers. Choose Send next to resume.');this.messageLifetime++;this.imageRequest?.abort();}
     this.flushDraft();this.tabs?.setProviderPreference(provider);this.renderControls();this.publishState();
   }
   private providerPreference():'codex'|'claude' {
@@ -4220,7 +4252,7 @@ export class CodexChat {
     this.doc.getElementById('codex-notice-copy')?.addEventListener('click',()=>void this.copyRequestDetail());
     const usageButton=this.doc.getElementById('codex-refresh-usage');
     if(usageButton)usageButton.addEventListener('click',()=>void this.refreshUsage());
-    this.on('codex-acknowledge','click',()=>{if(!this.canAcknowledge())return;this.uncertain.clear();this.text('codex-notice','Reviewed. Nothing was sent again, and your draft is kept.');this.render();this.publishState();});
+    this.on('codex-acknowledge','click',()=>void this.acknowledgeUncertain());
     this.on('codex-confirm-check','change',()=>this.renderControls());
     this.on('codex-confirm-cancel','click',()=>this.closeConfirmation());
     this.on('codex-confirm','close',()=>{if(!this.el<HTMLDialogElement>('codex-confirm').open)this.confirmation=null;});
@@ -4229,6 +4261,7 @@ export class CodexChat {
     this.renderControls();await this.refresh();this.schedule();
   }
   stop() {
+    this.retireConnectReview();
     this.pauseQueue('Paused after the chat connection stopped. Choose Send next to resume.');
     this.usageController?.abort();this.usageController=undefined;this.usageNotice='';
     this.messageLifetime++;
@@ -4288,7 +4321,7 @@ export class CodexChat {
       if(this.modelSourceAccountSignature!==null&&accountSignature!==this.modelSourceAccountSignature){this.modelSourceRevision++;this.modelSourceOwnerRevision++;}
       this.modelSourceAccountSignature=accountSignature;
     }
-    if(this.state&&this.state.projectPath!==state.projectPath){this.messageLifetime++;this.imageRequest?.abort();}
+    if(this.state&&this.state.projectPath!==state.projectPath){this.retireConnectReview();this.messageLifetime++;this.imageRequest?.abort();}
     this.flushDraft();
     const before=this.snapshot()?.connectionId??'',after=state.snapshot?.connectionId??'';
     const previous=this.snapshot()?.thread,next=state.snapshot?.thread;
@@ -4305,25 +4338,63 @@ export class CodexChat {
     if(this.foreignDraft&&state.projectPath!==this.foreignDraft.project)this.releaseForeignDraft();
     // Recover unresolved IDs from the service journal after reload, without new browser storage.
     if(this.restoredRequestProject!==state.projectPath){this.restoredRequestProject=state.projectPath;this.restoredRequests.clear();}
-    for(const record of state.actions)if(['pending','unknown'].includes(record.state)&&!this.restoredRequests.has(record.requestId)&&
-      (!state.snapshot||record.connectionId===state.snapshot.connectionId||record.nextConnectionId===state.snapshot.connectionId||record.action==='connect'&&state.connecting)){
+    for(const record of state.actions)if(['pending','unknown'].includes(record.state)) {
+      const notice=state.connectNotices?.find(row=>row.requestId===record.requestId),
+        receipt=JSON.stringify([record.action,record.connectionId,record.state,record.errorCode,record.threadId,record.turnId,record.model,record.effort,record.createdAt,record.finishedAt,record.nextConnectionId??null,record.references??null,notice?.receiptFingerprint??null]);
+      // Reviewed display metadata applies only to this unchanged terminal receipt,
+      // even while a different connection is opening. It never settles that new request.
+      if(notice?.reviewedAt){this.restoredRequests.set(record.requestId,receipt);const entry=this.uncertain.get(record.requestId);if(!this.connectReview&&entry?.input.action==='connect'&&entry.input.connectionId===null)this.uncertain.delete(record.requestId);continue;}
+      if(this.restoredRequests.get(record.requestId)===receipt||!(!state.snapshot||record.connectionId===state.snapshot.connectionId||record.nextConnectionId===state.snapshot.connectionId||record.action==='connect'&&state.connecting))continue;
       // A missing snapshot restores project-journal uncertainty explicitly; two
       // absent connection IDs are never treated as an identity match. Restore
-      // once per receipt/window so an explicit review survives the next GET.
-      this.restoredRequests.add(record.requestId);
-      if(!this.pending.has(record.requestId)&&!this.uncertain.has(record.requestId))this.uncertain.set(record.requestId,{input:{requestId:record.requestId,connectionId:record.action==='connect'?null:record.connectionId,action:record.action} as ChatAction,read:true});
+      // once per exact receipt/window; changed same-ID receipts need fresh review.
+      this.restoredRequests.set(record.requestId,receipt);
+      if(!this.pending.has(record.requestId))this.uncertain.set(record.requestId,{input:{requestId:record.requestId,connectionId:record.action==='connect'?null:record.connectionId,action:record.action} as ChatAction,read:true});
     }
     this.publishProviderState();
     this.publishState();
   }
   private canAcknowledge() {
-    if(!this.fresh||!this.uncertain.size)return false;
+    if(!this.fresh||!this.uncertain.size||this.connectReview)return false;
     return [...this.uncertain.values()].every(u=>{
       if(!u.read)return false;
       const r=this.state!.actions.find(r=>r.requestId===u.input.requestId&&r.action===u.input.action);
+      if(this.state!.connectNotices?.some(notice=>notice.requestId===u.input.requestId&&notice.reviewedAt===null)&&!this.connectReviewIdle())return false;
       if(r&&['acknowledged','rejected'].includes(r.state))return true;
       return !this.state!.connecting&&!this.state!.closing&&!this.state!.busy&&((u.input.connectionId!==null&&u.input.connectionId!==this.snapshot()?.connectionId)||(u.input.action==='connect'&&!this.snapshot()));
     });
+  }
+  private retireConnectReview():void {this.connectReviewEpoch++;this.connectReview?.abort();}
+  private connectReviewIdle():boolean {
+    return !!this.state&&this.fresh&&!this.stopped&&!this.surfaceYielded&&!this.foreignDraft&&this.providerAllowsCodex()&&!this.state.displayLimited&&
+      !this.snapshot()&&!this.pending.size&&!this.state.connecting&&!this.state.closing&&!this.state.busy&&
+      !this.state.chatTasks?.some(task=>task.retained||['working','awaiting_verification','repair_queued','repairing','unknown'].includes(task.state));
+  }
+  private async acknowledgeUncertain():Promise<void> {
+    if(!this.canAcknowledge())return;
+    const entries=[...this.uncertain],durable: {entry:Uncertain;notice:CodexConnectNotice}[]=[];
+    for(const [id,entry]of entries){const notice=this.state!.connectNotices?.find(row=>row.requestId===id&&row.reviewedAt===null);
+      if(notice)durable.push({entry,notice:{...notice}});else if(this.uncertain.get(id)===entry)this.uncertain.delete(id);}
+    if(!durable.length){this.text('codex-notice','Reviewed. Nothing was sent again, and your draft is kept.');this.render();this.publishState();return;}
+    const controller=new AbortController(),epoch=this.connectReviewEpoch,generation=this.generation,projectPath=this.state!.projectPath;
+    this.connectReview=controller;
+    const owned=()=>!controller.signal.aborted&&!this.stopped&&epoch===this.connectReviewEpoch&&generation===this.generation&&this.state?.projectPath===projectPath&&this.providerAllowsCodex()&&!this.surfaceYielded;
+    this.text('codex-notice','Saving your connection notice review. Nothing is being sent again.');this.render();this.publishState();
+    try {
+      for(const {entry,notice}of durable){
+        if(!owned()||!this.connectReviewIdle()||this.uncertain.get(notice.requestId)!==entry||!this.state?.connectNotices?.some(row=>row.requestId===notice.requestId&&row.receiptFingerprint===notice.receiptFingerprint&&row.reviewedAt===null))return;
+        const saved=await this.api.reviewConnectNotice({projectPath,requestId:notice.requestId,receiptFingerprint:notice.receiptFingerprint},controller.signal);
+        if(!owned())return;
+        const version=this.readVersion+1;await this.refresh();
+        if(!owned())return;
+        if(!this.fresh||this.readVersion!==version||this.appliedReadVersion!==version||!this.state?.connectNotices?.some(row=>row.requestId===notice.requestId&&row.receiptFingerprint===notice.receiptFingerprint&&row.reviewedAt===saved.reviewedAt))
+          throw new Error('The saved connection notice review could not be confirmed. Check status; nothing was sent again.');
+        if(this.uncertain.get(notice.requestId)===entry)this.uncertain.delete(notice.requestId);
+      }
+      if(owned())this.text('codex-notice',this.uncertain.size?'The connection notice was reviewed. Other unconfirmed requests still need review.':'Reviewed. Nothing was sent again, and your draft is kept.');
+    } catch(error) {
+      if(owned())this.text('codex-notice','The connection notice review was not confirmed. '+(error instanceof Error?error.message:'Check its recorded status; nothing was sent again.'));
+    } finally {if(this.connectReview===controller)this.connectReview=null;if(!this.stopped){this.render();this.publishState();}}
   }
   private async dispatch(action:string,fields:Record<string,unknown>={},internal=false,queued?:ChatQueueRow,modelSource?:Pick<ModelSourceAdmission,'current'>) {
     if(this.stopped)return;
@@ -4623,7 +4694,7 @@ export class CodexChat {
       'turn-steer':'Arcane couldn’t confirm your steering message went through','thread-start':'Arcane couldn’t confirm the new chat started',
       'thread-resume':'Arcane couldn’t confirm this chat opened','history-load':'Arcane couldn’t confirm this chat’s history loaded',select:'Arcane couldn’t confirm the model change'};
     const title=rows.length>1?'Arcane couldn’t confirm '+rows.length+' requests':titles[rows[0]!.input.action]??'Arcane couldn’t confirm your last request';
-    const waiting=!!(this.state?.connecting||this.state?.closing||this.state?.busy||this.pending.size);
+    const waiting=!!(this.state?.connecting||this.state?.closing||this.state?.busy||this.pending.size||this.connectReview);
     const state=!rows.every(u=>u.read)||!this.fresh?'unchecked':this.canAcknowledge()?'checked':waiting?'waiting':'unconfirmed';
     const body={unchecked:'Nothing was sent again. Check its status before you send another message or change models.',
       checked:'Status checked, and nothing was sent again. Mark it reviewed to carry on.',

@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path';
 import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { ChatTabs, type ChatTabPreferences } from '../../apps/desktop/src/chat-tabs.js';
-import { CodexChat, CodexChatApi, type ChatState, type ChatActionRecord } from '../../apps/desktop/src/codex-chat.js';
+import { CodexChat, CodexChatApi, CodexHttpError, readCodexState, type ChatState, type ChatActionRecord, type ConnectNoticeReview } from '../../apps/desktop/src/codex-chat.js';
 import { createCodexService } from '../../apps/daemon/src/codex-service.js';
 import { CodexClientError, type Snapshot } from '../../packages/codex-client/src/types.js';
 import type { ChatQueueSnapshot, StoredChatQueueRow } from '../../packages/protocol/src/chat-queue.js';
@@ -236,6 +236,91 @@ function unknownConnectRecord():ChatActionRecord{return {requestId:randomUUID(),
   threadId:null,turnId:null,model:null,effort:null,createdAt:'2026-10-30T12:00:00.000Z',finishedAt:'2026-10-30T12:00:01.000Z'};}
 function deferred(){let resolve!:()=>void;const promise=new Promise<void>(done=>{resolve=done;});return {promise,resolve};}
 
+const REVIEWED_AT='2026-10-31T00:00:00.000Z';
+function noticeState():ChatState {const value=state(),record=unknownConnectRecord();value.actions=[record];value.connectNotices=[{requestId:record.requestId,receiptFingerprint:'c'.repeat(64),reviewedAt:null}];return value;}
+async function noticeFixture(t:test.TestContext,initial=noticeState()) {
+  const doc=new DocumentFixture(),posts:{path:string;input:ConnectNoticeReview}[]=[];let observed=structuredClone(initial),reads=0;
+  let reply=async(input:ConnectNoticeReview):Promise<Response>=>{const notice=observed.connectNotices!.find(row=>row.requestId===input.requestId)!;notice.reviewedAt=REVIEWED_AT;return Response.json({...input,reviewedAt:REVIEWED_AT});};
+  const api=new CodexChatApi(TOKEN,async(path,init)=>{
+    if(init?.method==='POST'){assert.equal(path,'/v1/codex/review-connect','Review must not dispatch a native action.');const input=JSON.parse(String(init.body)) as ConnectNoticeReview;posts.push({path:String(path),input});return reply(input);}
+    reads++;return Response.json({state:observed});
+  });
+  const chat=new CodexChat(doc.asDocument(),api);t.after(()=>chat.stop());await chat.start();
+  return {doc,chat,posts,api,reads:()=>reads,observed:()=>observed,set:(value:ChatState)=>{observed=structuredClone(value);},reply:(handler:typeof reply)=>{reply=handler;},click:()=>doc.getElementById('codex-acknowledge').dispatchEvent(new Event('click'))};
+}
+
+test('connection notice state is closed, bounded and refers only to exact terminal unbound FRAME_LIMIT receipts',()=>{
+  const original=noticeState();assert.doesNotThrow(()=>readCodexState(original));
+  for(const patch of [{requestId:randomUUID()},{receiptFingerprint:'c'.repeat(64)+'\n'},{reviewedAt:'yesterday'},{reviewedAt:REVIEWED_AT+'\n'},{extra:true}]) {
+    const value=structuredClone(original);Object.assign(value.connectNotices![0]!,patch);assert.throws(()=>readCodexState(value));
+  }
+  for(const patch of [{state:'pending'},{errorCode:'TIMEOUT'},{finishedAt:null},{connectionId:randomUUID()},{threadId:'bound'},{turnId:'turn'},{model:'model'},{effort:'low'},{nextConnectionId:randomUUID()}]) {
+    const value=structuredClone(original);Object.assign(value.actions[0]!,patch);assert.throws(()=>readCodexState(value));
+  }
+  const duplicate=structuredClone(original);duplicate.connectNotices!.push({...duplicate.connectNotices![0]!});assert.throws(()=>readCodexState(duplicate));
+  const overflow=structuredClone(original);overflow.connectNotices=Array.from({length:101},()=>({...original.connectNotices![0]!}));assert.throws(()=>readCodexState(overflow));
+  let invoked=0;const getter=structuredClone(original);Object.defineProperty(getter.connectNotices![0]!,'reviewedAt',{enumerable:true,get(){invoked++;return REVIEWED_AT;}});assert.throws(()=>readCodexState(getter));assert.equal(invoked,0);
+});
+
+test('review API snapshots exact metadata and refuses malformed or mismatched ACKs without native uncertainty',async()=>{
+  const input:ConnectNoticeReview={projectPath:PROJECT,requestId:randomUUID(),receiptFingerprint:'c'.repeat(64)},submitted={...input};let release!:(value:Response)=>void;
+  const api=new CodexChatApi(TOKEN,async(path,init)=>{assert.equal(path,'/v1/codex/review-connect');assert.deepEqual(JSON.parse(String(init?.body)),submitted);return new Promise(resolve=>{release=resolve;});});
+  const saving=api.reviewConnectNotice(input);input.projectPath+='-changed';input.requestId=randomUUID();release(Response.json({...submitted,reviewedAt:REVIEWED_AT}));assert.deepEqual(await saving,{...submitted,reviewedAt:REVIEWED_AT});
+  for(const patch of [{projectPath:PROJECT+'-foreign'},{requestId:randomUUID()},{receiptFingerprint:'d'.repeat(64)},{reviewedAt:null},{state:'acknowledged'}]) {
+    const hostile=new CodexChatApi(TOKEN,async()=>Response.json({...submitted,reviewedAt:REVIEWED_AT,...patch}));
+    await assert.rejects(hostile.reviewConnectNotice(submitted),error=>error instanceof CodexHttpError&&!error.unknown);
+  }
+  const refused=new CodexChatApi(TOKEN,async()=>Response.json({error:'Controlled metadata refusal.'},{status:409}));await assert.rejects(refused.reviewConnectNotice(submitted),error=>error instanceof CodexHttpError&&!error.unknown);
+  const pending=new CodexChatApi(TOKEN,async()=>Response.json({...submitted,reviewedAt:REVIEWED_AT},{status:202}));await assert.rejects(pending.reviewConnectNotice(submitted),error=>error instanceof CodexHttpError&&!error.unknown);
+});
+
+test('explicit review awaits both durable metadata ACK and its own fresh state without changing the unknown receipt or draft',async t=>{
+  const f=await noticeFixture(t),entered=deferred(),release=deferred(),retained=structuredClone(f.observed().actions[0]!);t.after(()=>release.resolve());
+  f.doc.getElementById('codex-composer').value='  Exact unsent draft\n';f.reply(async input=>{entered.resolve();await release.promise;f.observed().connectNotices![0]!.reviewedAt=REVIEWED_AT;return Response.json({...input,reviewedAt:REVIEWED_AT});});
+  assert.equal(f.doc.getElementById('codex-acknowledge').disabled,false);f.click();assert.equal(f.posts.length,1,'The held review reached its metadata transport.');await entered.promise;assert.equal(f.doc.getElementById('codex-unknown').hidden,false);assert.equal(f.doc.getElementById('codex-acknowledge').disabled,true);f.click();assert.equal(f.posts.length,1);release.resolve();await settle();
+  assert.equal(f.doc.getElementById('codex-unknown').hidden,true);assert.equal(f.doc.getElementById('codex-composer').value,'  Exact unsent draft\n');assert.deepEqual(f.observed().actions[0],retained);assert.equal(f.chat.currentStateView().state!.snapshot,null);assert.equal(f.posts.length,1);
+});
+
+for(const failure of ['refused','lost','malformed','unconfirmed-read']as const)test('connection notice review retains the original card on '+failure,async t=>{
+  const f=await noticeFixture(t),retained=structuredClone(f.observed().actions[0]!);
+  f.reply(async input=>{if(failure==='refused')return Response.json({error:'Controlled review refusal.'},{status:409});if(failure==='lost')throw Error('Controlled metadata ACK loss.');return Response.json({...input,reviewedAt:failure==='malformed'?null:REVIEWED_AT});});
+  f.click();await settle();assert.equal(f.doc.getElementById('codex-unknown').hidden,false);assert.equal(f.posts.length,1);assert.match(f.doc.getElementById('codex-notice').textContent,/review.*not confirmed/i);assert.deepEqual(f.observed().actions[0],retained);
+  assert.equal(f.chat.currentStateView().state!.actions.length,1,'No synthetic native action is created by a failed metadata save.');
+});
+
+for(const change of ['workspace ABA','project ABA','provider ABA','stop/resume']as const)test('held connection review cannot apply an old response after '+change,async t=>{
+  const f=await noticeFixture(t),entered=deferred(),release=deferred();t.after(()=>release.resolve());f.chat.observeWorkspaceProject(PROJECT);
+  f.reply(async input=>{entered.resolve();await release.promise;return Response.json({...input,reviewedAt:REVIEWED_AT});});assert.equal(f.doc.getElementById('codex-acknowledge').disabled,false);f.click();assert.equal(f.posts.length,1,'The held review reached its metadata transport.');await entered.promise;
+  if(change==='workspace ABA'){f.chat.observeWorkspaceProject(PROJECT+'-other');f.chat.observeWorkspaceProject(PROJECT);}
+  else if(change==='project ABA'){const original=structuredClone(f.observed()),foreign=state();foreign.projectPath=PROJECT+'-other';f.set(foreign);await f.chat.refresh();f.set(original);await f.chat.refresh();}
+  else if(change==='provider ABA'){f.chat.yieldSurface(true);f.chat.yieldSurface(false);}
+  else {f.chat.stop();f.chat.resume();await settle();}
+  const reads=f.reads();release.resolve();await settle();assert.equal(f.reads(),reads,'The stale review response cannot request or apply a new state.');assert.equal(f.doc.getElementById('codex-unknown').hidden,false);assert.equal(f.posts.length,1);
+});
+
+test('review removes only its exact original row and never clears a second uncertainty arriving during the save',async t=>{
+  const f=await noticeFixture(t),entered=deferred(),release=deferred();t.after(()=>release.resolve());const first=f.observed().actions[0]!.requestId;
+  f.reply(async input=>{entered.resolve();await release.promise;f.observed().connectNotices![0]!.reviewedAt=REVIEWED_AT;return Response.json({...input,reviewedAt:REVIEWED_AT});});assert.equal(f.doc.getElementById('codex-acknowledge').disabled,false);f.click();assert.equal(f.posts.length,1,'The held review reached its metadata transport.');await entered.promise;
+  const later=unknownConnectRecord();f.observed().actions.push(later);f.observed().connectNotices!.push({requestId:later.requestId,receiptFingerprint:'d'.repeat(64),reviewedAt:null});await f.chat.refresh();release.resolve();await settle();
+  assert.equal(f.doc.getElementById('codex-unknown').hidden,false);assert.doesNotMatch(f.doc.getElementById('codex-unknown-requests').textContent,new RegExp(first));assert.match(f.doc.getElementById('codex-unknown-requests').textContent,new RegExp(later.requestId));assert.equal(f.posts.length,1);
+});
+
+test('changed same-ID receipt fingerprint needs review again and cannot be cleared by a held old ACK',async t=>{
+  const f=await noticeFixture(t),entered=deferred(),release=deferred();t.after(()=>release.resolve());
+  f.reply(async input=>{entered.resolve();await release.promise;return Response.json({...input,reviewedAt:REVIEWED_AT});});assert.equal(f.doc.getElementById('codex-acknowledge').disabled,false);f.click();assert.equal(f.posts.length,1,'The held review reached its metadata transport.');await entered.promise;
+  f.observed().actions[0]!.finishedAt='2026-10-30T12:00:02.000Z';f.observed().connectNotices![0]!.receiptFingerprint='d'.repeat(64);await f.chat.refresh();release.resolve();await settle();
+  assert.equal(f.doc.getElementById('codex-unknown').hidden,false);assert.equal(f.observed().connectNotices![0]!.reviewedAt,null);assert.equal(f.posts.length,1);
+  f.reply(async input=>{f.observed().connectNotices![0]!.reviewedAt=REVIEWED_AT;return Response.json({...input,reviewedAt:REVIEWED_AT});});f.click();await settle();assert.equal(f.doc.getElementById('codex-unknown').hidden,true);
+  f.observed().actions[0]!.finishedAt='2026-10-30T12:00:03.000Z';f.observed().connectNotices![0]={...f.observed().connectNotices![0]!,receiptFingerprint:'e'.repeat(64),reviewedAt:null};await f.chat.refresh();assert.equal(f.doc.getElementById('codex-unknown').hidden,false);
+});
+
+test('exact reviewed history remains quiet during a new connection but its pending and failed receipts remain visible',async t=>{
+  const initial=noticeState();initial.connectNotices![0]!.reviewedAt=REVIEWED_AT;const old=initial.actions[0]!.requestId,f=await noticeFixture(t,initial);assert.equal(f.doc.getElementById('codex-unknown').hidden,true);assert.equal(f.posts.length,0);
+  const next=unknownConnectRecord();next.state='pending';next.errorCode=null;next.finishedAt=null;f.observed().actions.push(next);f.observed().connecting=true;await f.chat.refresh();
+  assert.equal(f.doc.getElementById('codex-unknown').hidden,false);assert.doesNotMatch(f.doc.getElementById('codex-unknown-requests').textContent,new RegExp(old));assert.match(f.doc.getElementById('codex-unknown-requests').textContent,new RegExp(next.requestId));
+  next.state='unknown';next.errorCode='FRAME_LIMIT';next.finishedAt='2026-10-31T00:00:01.000Z';f.observed().connecting=false;f.observed().connectNotices!.push({requestId:next.requestId,receiptFingerprint:'d'.repeat(64),reviewedAt:null});await f.chat.refresh();assert.match(f.doc.getElementById('codex-unknown-requests').textContent,new RegExp(next.requestId));assert.doesNotMatch(f.doc.getElementById('codex-unknown-requests').textContent,new RegExp(old));assert.equal(f.posts.length,0);
+});
+
 test('finished unknown connect survives actual journal reopen and restart checkpoints without acknowledgement or reconnect',async t=>{
   // Actual SQLite action persistence and document/ACK fixtures. No provider or physical child is started.
   const root=await realpath(await mkdtemp(join(tmpdir(),'arcane-restart-connect-')));
@@ -276,6 +361,38 @@ test('finished unknown connect survives actual journal reopen and restart checkp
   assert.equal(restoredDoc.getElementById('codex-composer').value,input.value);assert.equal(restoredDoc.getElementById('codex-unknown').hidden,false);
   assert.match(restoredDoc.getElementById('codex-unknown-requests').textContent,new RegExp(requestId));await restored.connectForSavedLogin();
   assert.equal(posts.length,0);assert.equal(factoryCalls,1,'Only the original controlled connection attempt existed.');
+});
+
+test('explicit durable review survives actual SQLite reopen while its unknown action stays unchanged and saved-login uses a new request',async t=>{
+  // Real action/review SQLite and actual frontend/API classes; document and native factory are controlled doubles.
+  const root=await realpath(await mkdtemp(join(tmpdir(),'arcane-reviewed-connect-'))),directory=join(root,'journal'),chats:CodexChat[]=[];
+  let factoryCalls=0,service=createCodexService({directory,projectPath:root,connect:async()=>{factoryCalls++;throw new CodexClientError('FRAME_LIMIT','Controlled original discovery refusal.',true);}});
+  t.after(async()=>{for(const chat of chats)chat.stop();try{await service.close();}finally{await rm(root,{recursive:true,force:true});}});
+  const original=await service.action({requestId:randomUUID(),action:'connect',connectionId:null}),retained=structuredClone(original.record);assert.equal(retained.state,'unknown');assert.equal(service.state().connectNotices![0]!.reviewedAt,null);await service.close();
+  service=createCodexService({directory,projectPath:root,connect:async()=>{factoryCalls++;throw new CodexClientError('BINARY_MISSING','Controlled later connection refusal.');}});
+  const requests:{path:string;input:Record<string,unknown>}[]=[];
+  const api=new CodexChatApi(TOKEN,async(path,init)=>{
+    if(init?.method!=='POST')return Response.json({state:service.state()});
+    const input=JSON.parse(String(init.body)) as Record<string,unknown>;requests.push({path:String(path),input});
+    if(path==='/v1/codex/review-connect')return Response.json(service.reviewConnectNotice(input));
+    assert.equal(path,'/v1/codex/action');const outcome=await service.action(input);return Response.json(outcome,{status:outcome.record.state==='acknowledged'?200:outcome.record.state==='rejected'?409:202});
+  });
+  const doc=new DocumentFixture(),chat=new CodexChat(doc.asDocument(),api);chats.push(chat);await chat.start();doc.getElementById('codex-composer').value='Retain this exact draft';
+  assert.equal(doc.getElementById('codex-unknown').hidden,false);await chat.connectForSavedLogin();assert.equal(requests.length,0);
+  doc.getElementById('codex-acknowledge').dispatchEvent(new Event('click'));await settle();assert.equal(doc.getElementById('codex-unknown').hidden,true);assert.deepEqual(service.state().actions,[retained]);assert.equal(requests.length,1);assert.equal(requests[0]!.path,'/v1/codex/review-connect');
+  assert.equal(doc.getElementById('codex-composer').value,'Retain this exact draft');const marker=structuredClone(service.state().connectNotices![0]!);assert.ok(marker.reviewedAt);chat.stop();await service.close();
+  service=createCodexService({directory,projectPath:root,connect:async()=>{factoryCalls++;throw new CodexClientError('BINARY_MISSING','Controlled later connection refusal.');}});
+  const restoredDoc=new DocumentFixture(),restored=new CodexChat(restoredDoc.asDocument(),api);chats.push(restored);await restored.start();assert.equal(restoredDoc.getElementById('codex-unknown').hidden,true);assert.deepEqual(service.state().actions,[retained]);assert.deepEqual(service.state().connectNotices,[marker]);assert.equal(requests.length,1,'Reopening does not send a native action or repeat review.');
+  await restored.connectForSavedLogin();assert.equal(factoryCalls,2);assert.equal(requests.length,2);assert.equal(requests[1]!.path,'/v1/codex/action');assert.equal(requests[1]!.input.action,'connect');assert.notEqual(requests[1]!.input.requestId,retained.requestId);assert.deepEqual(service.state().actions.find(row=>row.requestId===retained.requestId),retained);assert.equal(service.state().actions.some(row=>row.action==='turn-start'),false);
+});
+
+test('durable review is unavailable while a current native owner or lifecycle is unresolved',async t=>{
+  const cases:[string,(value:ChatState)=>void][]=[['connecting',value=>{value.connecting=true;}],['closing',value=>{value.closing=true;}],['busy',value=>{value.busy=true;}],['limited',value=>{value.displayLimited=true;}],['native connection',value=>{value.snapshot=snapshot();}],['retained owner',value=>{value.chatTasks=[{taskId:randomUUID(),threadId:'retained',sessionId:null,connectionId:randomUUID(),state:'verified',round:0,reason:null,reportDigest:null,retained:true}];}],['unknown task',value=>{value.chatTasks=[{taskId:randomUUID(),threadId:'unknown',sessionId:null,connectionId:randomUUID(),state:'unknown',round:0,reason:null,reportDigest:null}];}]];
+  for(const [name,change]of cases)await t.test(name,async t=>{const initial=noticeState();change(initial);const retained=structuredClone(initial),f=await noticeFixture(t,initial);assert.equal(f.doc.getElementById('codex-acknowledge').disabled,true);f.click();await settle();assert.equal(f.posts.length,0);
+    // An old unbound connect does not belong to a different current connection;
+    // the existing scope filter leaves that card hidden without marking it reviewed.
+    assert.equal(f.doc.getElementById('codex-unknown').hidden,name==='native connection');assert.deepEqual(f.chat.currentStateView().state!.snapshot,retained.snapshot);assert.deepEqual(f.observed().actions,retained.actions);assert.deepEqual(f.observed().connectNotices,retained.connectNotices);
+  });
 });
 
 test('unknown-connect checkpoint refuses stale, incomplete, mismatched and active state from the fresh read',async t=>{
