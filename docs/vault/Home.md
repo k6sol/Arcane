@@ -15,7 +15,7 @@ tags: [arcane, dashboard]
 
 The [[Delivery/Goal Board|ten urgent goals]] track the path to a dependable customer release. Open a goal for its outcome, dependencies and acceptance criteria. Check it off only after recording evidence.
 
-Latest installed runtime is `b3f9f3f`. Signed candidate code `89e6824` adds prompt saved-history display, restart joining the original navigation, an in-bar Pyx model/reasoning selector and durable review of one exact historical connection notice. Local verification is complete at its recorded scopes; fresh hosted/package acceptance and installation remain. Original failures and model-art limitations are retained. See [[Sessions/2026-10-31 Chat Navigation and Model Selection]] and [[Delivery/Goal Board]].
+Latest installed runtime is `b3f9f3f`. SSH-verified runtime `279bc87` adds prompt saved-history display, restart joining the original navigation, an in-bar Pyx model/reasoning selector and durable review of one exact historical connection notice. All seven hosted test/package jobs pass and the downloaded package is authenticated. Installation and the authorized reopening await sufficient local memory; no installer has started. Original failures and model-art limitations are retained. See [[Sessions/2026-10-31 Chat Navigation and Model Selection]] and [[Delivery/Goal Board]].
 
 ## Build with knowledge
 
