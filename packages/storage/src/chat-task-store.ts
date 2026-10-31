@@ -155,9 +155,20 @@ interface ProposalWorkerOwner {
   markerFailed:boolean;markerError:unknown;
 }
 const samePath=(a:string,b:string)=>process.platform==='win32'?a.toLowerCase()===b.toLowerCase():a===b;
+function isDirectPath(path: string): boolean {
+  if (process.platform === 'win32') {
+    try {
+      // Native lookup avoids the JS resolver's repeated ancestor walks. Only
+      // accept an unchanged result; other spellings/errors retain the legacy
+      // resolver's alias and error behavior. Never retain filesystem authority.
+      if (samePath(realpathSync.native(path), path)) return true;
+    } catch { /* Native handle lookup can fail where the legacy resolver works. */ }
+  }
+  return samePath(realpathSync(path), path);
+}
 function directDirectories(path:string,missing=false):void{
   for(let current=path;;current=dirname(current)){
-    try{const stat=lstatSync(current);if(!stat.isDirectory()||stat.isSymbolicLink()||!samePath(realpathSync(current),current))throw new Error('Task state directories must be direct.');}
+    try{const stat=lstatSync(current);if(!stat.isDirectory()||stat.isSymbolicLink()||!isDirectPath(current))throw new Error('Task state directories must be direct.');}
     catch(error){if(!missing||(error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
     if(current===dirname(current))return;
   }
@@ -252,7 +263,7 @@ export class ChatTaskStore {
   #paths():void{
     directDirectories(this.#directory);
     for(const suffix of ['','-wal','-shm','-journal'])try{const file=this.#filename+suffix,stat=lstatSync(file);
-      if(!stat.isFile()||stat.isSymbolicLink()||stat.nlink!==1||!samePath(realpathSync(file),file)||suffix===''&&this.#fileIdentity&&(stat.dev!==this.#fileIdentity.dev||stat.ino!==this.#fileIdentity.ino))throw new Error('Task SQLite files must be direct owned regular files.');
+      if(!stat.isFile()||stat.isSymbolicLink()||stat.nlink!==1||!isDirectPath(file)||suffix===''&&this.#fileIdentity&&(stat.dev!==this.#fileIdentity.dev||stat.ino!==this.#fileIdentity.ino))throw new Error('Task SQLite files must be direct owned regular files.');
     }catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT'||suffix===''&&this.#fileIdentity)throw error;}
   }
   #open(): void { if (this.#closed) throw new Error('Task journal is closed.');this.#paths();
