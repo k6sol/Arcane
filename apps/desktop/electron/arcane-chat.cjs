@@ -64,6 +64,13 @@ const MESSAGES = Object.freeze({
   steps: 'Arcane paused after the most steps one reply may take. Send "continue" to go on.',
 });
 const SAFE_ERRORS = Object.freeze([MESSAGES.unavailable, MESSAGES.busy, MESSAGES.full, MESSAGES.missing, MESSAGES.text, MESSAGES.rewind, MESSAGES.images]);
+const TERMINAL_DIAGNOSTICS = new Map(Object.entries({
+  notConnected:['authenticate','CONNECTION_UNAVAILABLE'], signedOut:['authenticate','AUTH_REQUIRED'],
+  credential:['tool-dispatch','CONNECTION_UNAVAILABLE'], tools:['tool-dispatch','PROCESS_LAUNCH'],
+  timeout:['request-stream','REQUEST_TIMEOUT'], failed:['request-stream','HOST_FAILURE'],
+  noCredits:['request-stream','REQUEST_REJECTED'], expired:['authenticate','AUTH_REQUIRED'],
+  rateLimited:['request-stream','REQUEST_REJECTED'], gateway:['request-stream','CONNECTION_UNAVAILABLE'],
+}).map(([key,value])=>[MESSAGES[key],Object.freeze(value)]));
 const PREAMBLE = 'You are Arcane\'s in-app assistant for Roblox development, running through the user\'s Arcane Credits. The functions you ' +
   'can call are Arcane\'s own project tools (the same tools Arcane offers every chat); there are no shell, file or web tools. Call tools ' +
   'when the task needs Studio facts or changes, one step at a time, and read results before acting on them. Reply in concise Markdown.\n' +
@@ -565,6 +572,11 @@ function createArcaneChat(options) {
     emit({ turnId: turn.turnId, conversationId: turn.conversationId, type: 'done', ok, error: ok ? null : error ?? MESSAGES.failed, usage,
       usageLimit: ok || !limit ? null : { resetsAt: null } });
     if (turn.asset) { turn.asset.deliverySettled = true; maybeCloseAssets(turn); }
+    const diagnostic = !ok && TERMINAL_DIAGNOSTICS.get(error);
+    if (diagnostic) try {
+      const report = options.reportFailure;
+      if (typeof report === 'function') void Promise.resolve(report(Object.freeze({operationId:turn.turnId,stage:diagnostic[0],code:diagnostic[1]}))).catch(()=>{});
+    } catch { /* Reporting never changes the original terminal result or claims worker closure. */ }
   }
   const interrupted = turn => turn.stopped || disposed || turn.timedOut || turn.finished || !assetCurrent();
   const stopMessage = turn => disposed || !assetCurrent() ? MESSAGES.closed : turn.timedOut ? MESSAGES.timeout : MESSAGES.stopped;

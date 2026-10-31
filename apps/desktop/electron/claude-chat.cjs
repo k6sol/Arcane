@@ -87,6 +87,16 @@ const MESSAGES = Object.freeze({
   images: 'Attached images must be at most 4 PNG references within 512 KiB in total.',
 });
 const SAFE_ERRORS = Object.freeze([MESSAGES.unavailable, MESSAGES.busy, MESSAGES.full, MESSAGES.missing, MESSAGES.text, MESSAGES.rewind, MESSAGES.images]);
+// Exact host-owned messages only. Provider text and intentional Stop/consent outcomes are not diagnostic input.
+const TERMINAL_DIAGNOSTICS = new Map(Object.entries({
+  notInstalled:['authenticate','PROCESS_LAUNCH'], version:['authenticate','PROCESS_LAUNCH'],
+  signedOut:['authenticate','AUTH_REQUIRED'], notSubscription:['authenticate','AUTH_REQUIRED'], authUnknown:['authenticate','AUTH_REQUIRED'],
+  credential:['tool-dispatch','CONNECTION_UNAVAILABLE'], start:['request-submit','PROCESS_LAUNCH'],
+  timeout:['request-stream','REQUEST_TIMEOUT'], noReply:['request-stream','WORKER_EXIT'], exited:['request-stream','WORKER_EXIT'],
+  authExpired:['authenticate','AUTH_REQUIRED'], network:['request-stream','CONNECTION_UNAVAILABLE'],
+  studioOffline:['tool-dispatch','CONNECTION_UNAVAILABLE'], failed:['request-stream','HOST_FAILURE'],
+  output:['request-stream','HOST_FAILURE'], usageLimit:['request-stream','REQUEST_REJECTED'],
+}).map(([key,value])=>[MESSAGES[key],Object.freeze(value)]));
 const PREAMBLE = 'You are running inside the Arcane desktop chat through Claude Code in headless mode. Only Arcane\'s own MCP tools ' +
   '(mcp__arcane__*) are available; built-in shell, file and web tools are turned off. Reply in concise Markdown.\n' +
   '@selection means the current Studio selection: read it with selection_read before acting on it. When the user must decide between ' +
@@ -1000,6 +1010,11 @@ function createClaudeChat(options) {
     turns.delete(turn.turnId); if (byConversation.get(turn.conversationId) === turn) byConversation.delete(turn.conversationId);
     emit({ turnId: turn.turnId, conversationId: turn.conversationId, type: 'done', ok, error: ok ? null : error ?? MESSAGES.failed, usage,
       usageLimit: ok || !limit ? null : limitOf(limit.resetsAt ?? null, limit.window ?? null) });
+    const diagnostic = !ok && TERMINAL_DIAGNOSTICS.get(error);
+    if (diagnostic) try {
+      const report = options.reportFailure;
+      if (typeof report === 'function') void Promise.resolve(report(Object.freeze({operationId:turn.turnId,stage:diagnostic[0],code:diagnostic[1]}))).catch(()=>{});
+    } catch { /* Reporting never changes the original terminal result or claims worker closure. */ }
   }
 
   async function runTurn(turn, text) {

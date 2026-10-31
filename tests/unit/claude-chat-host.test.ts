@@ -60,7 +60,7 @@ class FakeChild extends EventEmitter {
 type Script = (child: FakeChild, args: string[]) => void;
 const replay = (...lines: string[]): Script => child => { for (const l of lines) child.write(l); child.close(0); };
 
-async function fixture(t: TestContext, options: { auth?: unknown; help?: string; locate?: string | null; response?: number; limits?: Record<string, number>; directory?: string; permissions?: unknown; expiresInMs?: number } = {}) {
+async function fixture(t: TestContext, options: { auth?: unknown; help?: string; locate?: string | null; response?: number; limits?: Record<string, number>; directory?: string; permissions?: unknown; expiresInMs?: number; reportFailure?: (event: any) => unknown } = {}) {
   const root = await realpath(await mkdtemp(join(await realpath(tmpdir()), 'arcane-claude-chat-')));
   t.after(() => rm(root, { recursive: true, force: true }));
   const project = join(root, 'project'), state = options.directory ?? join(root, 'state');
@@ -68,6 +68,8 @@ async function fixture(t: TestContext, options: { auth?: unknown; help?: string;
   await mkdir(project); await mkdir(state, { recursive: true });
   const events: any[] = [], spawns: { command: string; args: string[]; options: any; child: FakeChild }[] = [], dialogs: any[] = [], prepared: any[] = [], released: string[] = [];
   const scripts: Script[] = [];
+  const reports: any[] = [];
+  const reportAfterDone: boolean[] = [];
   const window = { isDestroyed: () => false, webContents: { isDestroyed: () => false, send(channel: string, event: unknown) { assert.equal(channel, 'arcane:claude-chat-event'); events.push(JSON.parse(JSON.stringify(event))); } } };
   const spawn = (command: string, args: string[], spawnOptions: any) => {
     const child = new FakeChild(c => {
@@ -84,6 +86,7 @@ async function fixture(t: TestContext, options: { auth?: unknown; help?: string;
     return child;
   };
   const host = chat.createClaudeChat({
+    reportFailure: (event: any) => { reports.push(event); reportAfterDone.push(events.some(e => e.type === 'done' && e.turnId === event.operationId)); return options.reportFailure?.(event); },
     projectPath: project, stateDirectory: state, getWindow: () => window, spawn, platform: process.platform,
     env: { SystemRoot: 'C:\\Windows', PATH: 'C:\\Windows\\System32', USERPROFILE: 'C:\\Users\\u', ANTHROPIC_API_KEY: 'sk-ant-never-forward', ARCANE_LOCAL_TOKEN: 'inherited-never' },
     homedir: () => join(root, 'home'), locate: async () => options.locate === undefined ? command : options.locate,
@@ -102,13 +105,54 @@ async function fixture(t: TestContext, options: { auth?: unknown; help?: string;
   });
   const turns = () => spawns.filter(s => s.args[0] === '-p');
   const done = (turnId: string) => waitFor(() => events.find(e => e.turnId === turnId && e.type === 'done'));
-  return { root, project, state, command, host, events, spawns, turns, scripts, dialogs, prepared, released, done, window };
+  return { root, project, state, command, host, events, spawns, turns, scripts, dialogs, prepared, released, done, window, reports, reportAfterDone };
 }
 async function waitFor<T>(read: () => T | undefined, ms = 3000): Promise<T> {
   const deadline = Date.now() + ms;
   for (;;) { const value = read(); if (value) return value; if (Date.now() > deadline) throw new Error('timed out'); await new Promise(resolve => setTimeout(resolve, 5)); }
 }
 const turnInput = (text: string, conversationId: string | null = null) => ({ conversationId, text, model: 'sonnet', effort: 'high' });
+
+test('terminal Claude failure reports one finite original turn after saving its transcript without awaiting reporting', async t => {
+  const reports: any[] = [];
+  const f = await fixture(t, { reportFailure: event => { reports.push(event); return new Promise(() => {}); } });
+  t.after(() => f.host.dispose());
+  f.scripts.push(child => { child.stderr.emit('data', Buffer.from('private credential path and provider output')); child.close(17); });
+  const sent = await f.host.send(turnInput('private prompt'));
+  assert.equal((await f.done(sent.turnId)).ok, false);
+  assert.equal(reports.length, 1);
+  assert.deepEqual(f.reportAfterDone, [true]);
+  assert.deepEqual(reports[0], { operationId: sent.turnId, stage: 'request-stream', code: 'WORKER_EXIT' });
+  assert.ok(Object.isFrozen(reports[0]));
+  const saved = await f.host.history(sent.conversationId);
+  assert.ok(JSON.stringify(saved).includes('Claude Code stopped unexpectedly'));
+  assert.doesNotMatch(JSON.stringify(reports), /private|credential|provider output|prompt/);
+});
+
+test('successful Claude turns and declined tool consent do not report terminal failures', async t => {
+  const successful = await fixture(t);
+  t.after(() => successful.host.dispose());
+  successful.scripts.push(replay(init(), result()));
+  const sent = await successful.host.send(turnInput('hello'));
+  assert.equal((await successful.done(sent.turnId)).ok, true);
+  assert.deepEqual(successful.reports, []);
+  const declined = await fixture(t, { response: 0 });
+  t.after(() => declined.host.dispose());
+  const refused = await declined.host.send(turnInput('hello'));
+  assert.equal((await declined.done(refused.turnId)).ok, false);
+  assert.deepEqual(declined.reports, []);
+});
+
+test('a synchronous Claude reporting fault does not replace the saved failure or keep the turn active', async t => {
+  const f = await fixture(t, { reportFailure: () => { throw Error('private reporting fault'); } });
+  t.after(() => f.host.dispose());
+  f.scripts.push(child => child.close(17));
+  const sent = await f.host.send(turnInput('hello'));
+  const done = await f.done(sent.turnId);
+  assert.equal(done.error, chat.CLAUDE_CHAT_MESSAGES.exited);
+  assert.equal(f.host.activeTurns(), 0);
+  assert.equal(f.reports.length, 1);
+});
 
 test('status reads version, subscription sign-in and help choices without leaking helper output', async t => {
   const f = await fixture(t);
@@ -255,6 +299,7 @@ test('stop kills only the spawned child tree and reports a stopped turn; one act
   assert.equal(await f.host.stop(reply.turnId), true);
   const done = await f.done(reply.turnId);
   assert.deepEqual([done.ok, done.error], [false, 'Stopped.']);
+  assert.deepEqual(f.reports, [], 'intentional Stop is not a terminal diagnostic failure');
   const [run] = f.turns(); assert.equal(run!.child.killed, 1);
   const killer = f.spawns.find(s => s.command.toLowerCase().endsWith('taskkill.exe'));
   if (process.platform === 'win32') {

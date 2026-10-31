@@ -205,18 +205,37 @@ function attachDiagnosticChild(owned) {
 }
 function retireDiagnosticChild(owned) { diagnosticChildren.get(owned)?.retire(); }
 
-function persistDiagnostic(event, finishing = false) {
+function persistDiagnostic(event, finishing = false, stillCurrent = () => true) {
   const host = diagnostics;
   if (diagnosticRetiring && !finishing || !host || diagnosticReports.size >= 16) return;
-  const work = Promise.resolve().then(() => host.report(event)).then(result => { if (result?.stored !== true) diagnosticState = 'unavailable'; }).catch(() => { diagnosticState = 'unavailable'; });
+  const work = Promise.resolve().then(() => host.report(event, () => diagnostics === host && stillCurrent())).then(result => { if (result?.stored !== true) diagnosticState = 'unavailable'; }).catch(() => { diagnosticState = 'unavailable'; });
   diagnosticReports.add(work); void work.finally(() => diagnosticReports.delete(work)).catch(() => {});
+}
+/** Private host callback; finite observations only, with original ownership checked again by the encrypted outbox. */
+function providerFailureReporter(stillCurrent) {
+  const current = () => !smoke && !closing && !diagnosticRetiring && stillCurrent() === true;
+  return failure => {
+    try {
+      if (!current() || !failure || typeof failure !== 'object' || Array.isArray(failure)) return;
+      const fields = Object.getOwnPropertyDescriptors(failure);
+      if (Reflect.ownKeys(fields).sort().join(',') !== 'code,operationId,stage' ||
+          !Object.values(fields).every(field => Object.hasOwn(field,'value'))) return;
+      const operationId=fields.operationId.value,stage=fields.stage.value,code=fields.code.value;
+      if (typeof operationId !== 'string' || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(operationId) ||
+          !['authenticate','tool-dispatch','request-submit','request-stream'].includes(stage) ||
+          !['PROCESS_LAUNCH','AUTH_REQUIRED','CONNECTION_UNAVAILABLE','REQUEST_TIMEOUT','WORKER_EXIT','HOST_FAILURE','REQUEST_REJECTED'].includes(code)) return;
+      const event={schemaVersion:1,eventId:require('node:crypto').randomUUID(),occurredAt:Date.now(),component:'chat',stage,code,context:{operationId}};
+      if (diagnostics) persistDiagnostic(event,false,current);
+      else if (diagnosticBooting && diagnosticPending.length < 8) diagnosticPending.push({event,stillCurrent:current});
+    } catch { /* Best-effort metadata cannot change the completed chat operation. */ }
+  };
 }
 function recordStartupDiagnostic(code) {
   const codes = { PROJECT_IN_USE: 'PROJECT_IN_USE', PORT_IN_USE: 'PORT_IN_USE', STATE_NEWER: 'STATE_NEWER', STATE_UNSAFE: 'STATE_UNSAFE',
     RESOURCE_UNAVAILABLE: 'RESOURCE_UNAVAILABLE', STARTUP_TIMEOUT: 'REQUEST_TIMEOUT', STARTUP_FAILED: 'INTERNAL_ERROR' };
   if (smoke || diagnosticRetiring || !Object.hasOwn(codes, code)) return;
   const event = { schemaVersion: 1, eventId: require('node:crypto').randomUUID(), occurredAt: Date.now(), component: 'daemon', stage: 'startup', code: codes[code] };
-  if (diagnostics) persistDiagnostic(event); else if (diagnosticBooting && diagnosticPending.length < 8) diagnosticPending.push(event);
+  if (diagnostics) persistDiagnostic(event); else if (diagnosticBooting && diagnosticPending.length < 8) diagnosticPending.push({event,stillCurrent:()=>true});
 }
 async function flushDiagnostics() {
   if (diagnosticRetiring || diagnosticFlushing || !diagnostics) return;
@@ -248,7 +267,7 @@ function initializeDiagnostics() {
       diagnostics.list(); // Refuse a host whose private queue could not be initialized.
       if (diagnosticRetiring && !diagnosticPending.length) return;
       diagnosticState = 'ready';
-      for (const event of diagnosticPending.splice(0)) persistDiagnostic(event, true);
+      for (const pending of diagnosticPending.splice(0)) persistDiagnostic(pending.event, true, pending.stillCurrent);
       if (diagnosticRetiring) return;
       attachDiagnosticChild(child);
       for (const entry of diagnosticChildren.values()) entry.activate();
@@ -382,13 +401,16 @@ async function startClaudeChat() {
   // Persisted per-project consent (Settings > Permissions): on by default, so Claude chat starts without a question.
   const permissions = projectPermissions ? { claudeTools: async () => projectSession === chatEpoch && (await projectPermissions.read()).claudeTools === true,
     allowClaudeTools: async () => { if (projectSession === chatEpoch) await projectPermissions.save({ claudeTools: true }); } } : undefined;
-  claudeChat = require('./claude-chat.cjs').createClaudeChat({ projectPath: chatEpoch.projectPath, stateDirectory: chatDirectory, dialog, permissions,
+  let ownedHost;
+  ownedHost = require('./claude-chat.cjs').createClaudeChat({ projectPath: chatEpoch.projectPath, stateDirectory: chatDirectory, dialog, permissions,
+    reportFailure:providerFailureReporter(()=>!switching && claudeChat===ownedHost && projectSession===chatEpoch && nativeHandoff===chatBroker && child===chatChild),
     appAssets: appAssetPort('claude-code', assetBroker, chatEpoch, chatChild),
     getWindow: () => closing || switching || !window || window.isDestroyed() || projectSession !== chatEpoch ? null : window,
     handoff: { prepare: selection => nativeHandoff === chatBroker && projectSession === chatEpoch ? chatBroker.prepareChat(selection) : null,
       release: handoffId => chatBroker.releaseChat(handoffId) },
     learned: learnedContext,
     instructions: async () => (await import(require('node:url').pathToFileURL(join(productRoot, 'dist/packages/protocol/src/arcane-tools.js')).href)).ARCANE_TASK_INSTRUCTIONS });
+  claudeChat=ownedHost;
   await startArcaneChat(permissions);
 }
 // In-app Arcane chat (Arcane Credits): models through the user's own Arcane gateway, a bounded tool loop in this process
@@ -403,7 +425,9 @@ async function startArcaneChat(permissions) {
   if (nativeHandoff !== chatBroker || !ownedAppAssetRuntime(assetBroker, chatEpoch, chatChild)) return;
   void stopArcaneChat();
   const credential = async () => (await billing?.accountCredential().catch(() => null)) ?? null;
-  arcaneChat = require('./arcane-chat.cjs').createArcaneChat({ projectPath: chatEpoch.projectPath, stateDirectory: chatDirectory, dialog, permissions,
+  let ownedHost;
+  ownedHost = require('./arcane-chat.cjs').createArcaneChat({ projectPath: chatEpoch.projectPath, stateDirectory: chatDirectory, dialog, permissions,
+    reportFailure:providerFailureReporter(()=>!switching && arcaneChat===ownedHost && projectSession===chatEpoch && nativeHandoff===chatBroker && child===chatChild),
     appAssets: appAssetPort('arcane', assetBroker, chatEpoch, chatChild),
     getWindow: () => closing || switching || !window || window.isDestroyed() || projectSession !== chatEpoch ? null : window,
     handoff: { prepare: selection => nativeHandoff === chatBroker && projectSession === chatEpoch ? chatBroker.prepareChat(selection) : null,
@@ -415,6 +439,7 @@ async function startArcaneChat(permissions) {
     },
     learned: learnedContext,
     instructions: async () => (await import(require('node:url').pathToFileURL(join(productRoot, 'dist/packages/protocol/src/arcane-tools.js')).href)).ARCANE_TASK_INSTRUCTIONS });
+  arcaneChat=ownedHost;
 }
 async function stopDaemon() {
   // Clear/fence the exact private broker synchronously before any shutdown await.

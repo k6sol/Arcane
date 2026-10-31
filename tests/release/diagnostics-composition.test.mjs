@@ -2,22 +2,29 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
-import {createRequire} from 'node:module';
+import {createRequire,stripTypeScriptTypes} from 'node:module';
 import {EventEmitter} from 'node:events';
+import {DatabaseSync} from 'node:sqlite';
+import {randomBytes,randomUUID,createCipheriv,createDecipheriv} from 'node:crypto';
 import {win32 as path} from 'node:path';
 import vm from 'node:vm';
 import * as report from '../../packages/diagnostics/src/report.ts';
 const read=file=>readFileSync(new URL('../../'+file,import.meta.url),'utf8').replaceAll('\r\n','\n');
 const main=read('apps/desktop/electron/main.cjs'),product=read('apps/daemon/src/product-main.ts'),packaging=read('scripts/package-windows.mjs');
-const policy=createRequire(import.meta.url)('../../apps/desktop/electron/policy.cjs');
+const require=createRequire(import.meta.url),policy=require('../../apps/desktop/electron/policy.cjs');
+const {createDiagnosticsHost}=require('../../apps/desktop/electron/diagnostics-host.cjs');
+// The real encrypted outbox; only its compiled relative import is mapped to the source schema.
+const outboxSource=stripTypeScriptTypes(read('packages/diagnostics/src/outbox.ts'),{mode:'transform'})
+ .replace("'./report.js'",JSON.stringify(new URL('../../packages/diagnostics/src/report.ts',import.meta.url).href));
+const outbox=await import('data:text/javascript;base64,'+Buffer.from(outboxSource).toString('base64'));
 const defer=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});return{promise,resolve,reject};};
 const settle=()=>new Promise(resolve=>setImmediate(resolve));
 function between(source,start,end){const at=source.indexOf(start),last=source.indexOf(end,at+start.length);assert.ok(at>=0&&last>at,start);return source.slice(at,last);}
 function fixture(options={}){
  const calls=[],intervals=[],events=[],attachments=[];let id=0;
  const storage={db:{},assertReady(){},close(){calls.push('storage-close');options.storageClose?.();}};
- const host={list(){calls.push('list');if(options.listError)throw Error('private queue failure');return{events:[]};},
-  report(event){events.push(event);calls.push('report');return options.report?.(event)??Promise.resolve({stored:true,eventId:event.eventId});},
+ const host=options.host??{list(){calls.push('list');if(options.listError)throw Error('private queue failure');return{events:[]};},
+  report(event,stillCurrent=()=>true){if(!stillCurrent())return Promise.resolve({stored:false,state:'unavailable'});events.push(event);calls.push('report');return options.report?.(event,stillCurrent)??Promise.resolve({stored:true,eventId:event.eventId});},
   flush(){calls.push('flush');return options.flush?.()??Promise.resolve({state:'disabled'});},
   close(){calls.push('host-close');return options.close?.()??Promise.resolve(true);},
   attach(owned,current){const row={owned,current,detached:0};attachments.push(row);const receive=frame=>{
@@ -44,8 +51,43 @@ function fixture(options={}){
  let block=between(main,'let diagnostics = null','let studioPlugin;');
  const loader="const load = relative => import(require('node:url').pathToFileURL(join(productRoot, relative)).href);";
  assert.equal(block.split(loader).length,2);block=block.replace(loader,'const load = relative => fixtureLoad(relative);');
- vm.runInNewContext(block+'\nglobalThis.fixture = { initializeDiagnostics, recordStartupDiagnostic, flushDiagnostics, closeDiagnostics, exitAfterDiagnostics, attachDiagnosticChild, retireDiagnosticChild, initialized:()=>diagnosticInit, state:()=>diagnosticState };',context);
+ vm.runInNewContext(block+'\nglobalThis.fixture = { initializeDiagnostics, recordStartupDiagnostic, providerFailureReporter, flushDiagnostics, closeDiagnostics, exitAfterDiagnostics, attachDiagnosticChild, retireDiagnosticChild, initialized:()=>diagnosticInit, state:()=>diagnosticState };',context);
  return{api:context.fixture,context,calls,intervals,events,attachments,host,storage,ready:async()=>{await context.fixture.initialized();await settle();}};
+}
+const providerFailure=(stage='request-stream',code='HOST_FAILURE')=>({operationId:randomUUID(),stage,code});
+async function providerHosts(f){
+ const c=f.context,ports={},baseRequire=c.require;
+ Object.assign(c,{projectSession:{projectPath:'C:\\Projects\\Original',stateRoot:'C:\\State\\Original'},nativeHandoff:{},appAssets:{},child:childFixture(),
+  switching:false,claudeChat:null,arcaneChat:null,projectPermissions:null,dialog:{},learnedContext:async()=>'',ownedDirectory:async directory=>directory,
+  ownedAppAssetRuntime:(assets,epoch,owned)=>assets===c.appAssets&&epoch===c.projectSession&&owned===c.child,
+  appAssetPort:()=>Object.freeze({}),stopClaudeChat:()=>{c.claudeChat=null;c.arcaneChat=null;return Promise.resolve();}});
+ c.require=name=>{
+  const kind=name==='./claude-chat.cjs'?'claude':name==='./arcane-chat.cjs'?'arcane':null;
+  if(!kind)return baseRequire(name);
+  return{[kind==='claude'?'createClaudeChat':'createArcaneChat'](options){const host={dispose:async()=>{}};ports[kind]={host,report:options.reportFailure};return host;}};
+ };
+ const source=between(main,'async function startClaudeChat()','async function stopDaemon()');
+ vm.runInNewContext(source+'\nglobalThis.startProviderHosts=startClaudeChat;',c);await c.startProviderHosts();
+ assert.equal(c.claudeChat,ports.claude.host);assert.equal(c.arcaneChat,ports.arcane.host);return ports;
+}
+async function encryptedProviderFixture(t){
+ const db=new DatabaseSync(':memory:'),key=randomBytes(32),pending=[],credentialReads=[];let credentialGate=null;
+ // Controlled AES-GCM implements Electron safeStorage's contract; this is not an OS keychain test.
+ const safeStorage={isEncryptionAvailable:()=>true,encryptString(text){const iv=randomBytes(12),cipher=createCipheriv('aes-256-gcm',key,iv);
+  const body=Buffer.concat([cipher.update(text),cipher.final()]);return Buffer.concat([iv,cipher.getAuthTag(),body]);},
+  decryptString(bytes){const cipher=createDecipheriv('aes-256-gcm',key,bytes.subarray(0,12));cipher.setAuthTag(bytes.subarray(12,28));return Buffer.concat([cipher.update(bytes.subarray(28)),cipher.final()]).toString();}};
+ const options={enabled:true,storage:{db,assertReady(){}},safeStorage,loadRuntime:async()=>({...report,...outbox}),allowedOrigins:[],
+  credential:async()=>{const gate=credentialGate;credentialReads.push(gate);if(gate){gate.entered.resolve();await gate.release.promise;}return null;},
+  fetch:async()=>assert.fail('Provider diagnostics must not request a remote endpoint in this fixture.')};
+ const actual=await createDiagnosticsHost(options),opened=[actual];
+ const bridge={...actual,report(event,current){
+  // Production main and its CJS host share a realm. Remove only the VM fixture's foreign prototype.
+  const work=actual.report(structuredClone(event),current);pending.push(work);return work;
+ }};
+ const f=fixture({host:bridge});t.after(async()=>{credentialGate?.release.resolve();await f.api.closeDiagnostics();for(const host of opened)assert.equal(await host.close(),true);db.close();});
+ f.api.initializeDiagnostics();await f.ready();
+ return{...f,actual,db,pending,credentialReads,hold(){credentialGate={entered:defer(),release:defer()};return credentialGate;},release(){credentialGate?.release.resolve();credentialGate=null;},
+  async reopen(){assert.equal(await f.api.closeDiagnostics(),true);const host=await createDiagnosticsHost(options);opened.push(host);return host;}};
 }
 test('smoke mode never initializes diagnostics, loads modules, touches storage or schedules delivery',async()=>{
  const f=fixture({smoke:true});assert.equal(f.api.initializeDiagnostics(),undefined);f.api.recordStartupDiagnostic('STARTUP_FAILED');await f.api.closeDiagnostics();assert.deepEqual(f.calls,[]);assert.deepEqual(f.intervals,[]);
@@ -56,6 +98,65 @@ test('initialization stays asynchronous and preserves a bounded fixed startup ev
  assert.equal(f.events.length,0);gate.resolve();await f.ready();assert.equal(f.events.length,8);
  assert.ok(f.events.every(event=>event.code==='REQUEST_TIMEOUT'&&event.stage==='startup'&&Object.keys(event).sort().join(',')==='code,component,eventId,occurredAt,schemaVersion,stage'));
  assert.equal(f.api.state(),'ready');assert.equal(f.intervals[0].ms,60000);await f.api.closeDiagnostics();
+});
+test('provider failure callbacks accept finite data only and do not read rejected accessors',async t=>{
+ const f=fixture();t.after(()=>f.api.closeDiagnostics());f.api.initializeDiagnostics();await f.ready();const send=f.api.providerFailureReporter(()=>true);
+ const pairs=[['authenticate','AUTH_REQUIRED'],['tool-dispatch','CONNECTION_UNAVAILABLE'],['request-submit','PROCESS_LAUNCH'],['request-stream','REQUEST_TIMEOUT'],
+  ['request-stream','WORKER_EXIT'],['request-stream','HOST_FAILURE'],['request-stream','REQUEST_REJECTED']];
+ const failures=pairs.map(([stage,code])=>providerFailure(stage,code));for(const failure of failures)assert.equal(send(failure),undefined);
+ await settle();assert.equal(f.events.length,pairs.length);
+ for(let i=0;i<failures.length;i++){const event=report.diagnosticEvent(structuredClone(f.events[i]));
+  assert.equal(event.component,'chat');assert.equal(event.stage,failures[i].stage);assert.equal(event.code,failures[i].code);
+  assert.deepEqual(event.context,{operationId:failures[i].operationId});assert.equal(event.reason,report.DIAGNOSTIC_REASONS[event.code]);}
+ let reads=0;const accessor=Object.defineProperty(providerFailure(),'code',{enumerable:true,get(){reads++;throw Error('private provider detail');}});
+ for(const bad of [null,[],true,accessor,{...providerFailure(),operationId:'private/path'},
+  {...providerFailure(),stage:'provider-output'},{...providerFailure(),code:'private provider detail'},{...providerFailure(),message:'private provider detail'},
+  {...providerFailure(),[Symbol('private')]:true},Object.defineProperty(providerFailure(),'hidden',{value:true})])assert.doesNotThrow(()=>send(bad));
+ assert.doesNotThrow(()=>f.api.providerFailureReporter(()=>{throw Error('retired owner');})(providerFailure()));
+ await settle();assert.equal(reads,0);assert.equal(f.events.length,pairs.length);assert.doesNotMatch(JSON.stringify(f.events),/private|provider-output/);
+});
+test('provider initialization queue retains its eight-entry bound and drops retired original ownership',async t=>{
+ const gate=defer(),f=fixture({open:()=>gate.promise});t.after(()=>f.api.closeDiagnostics());f.api.initializeDiagnostics();await settle();
+ const send=f.api.providerFailureReporter(()=>true);for(let i=0;i<20;i++)send(providerFailure());assert.equal(f.events.length,0);
+ gate.resolve();await f.ready();assert.equal(f.events.length,8);assert.ok(f.events.every(event=>event.component==='chat'));
+ for(const mutation of ['host','project-aba','broker','child','switching']){
+  const opening=defer(),other=fixture({open:()=>opening.promise});t.after(()=>other.api.closeDiagnostics());other.api.initializeDiagnostics();await settle();
+  const ports=await providerHosts(other);ports.claude.report(providerFailure());ports.arcane.report(providerFailure());
+  if(mutation==='host'){other.context.claudeChat={};other.context.arcaneChat={};}
+  else if(mutation==='project-aba'){const original=other.context.projectSession;other.context.projectSession={projectPath:'C:\\Projects\\Other',stateRoot:'other'};other.context.projectSession={...original};}
+  else if(mutation==='broker')other.context.nativeHandoff={};else if(mutation==='child')other.context.child=childFixture();else other.context.switching=true;
+  opening.resolve();await other.ready();assert.equal(other.events.length,0,mutation+' must not revive an old queued callback');
+ }
+});
+test('actual main provider constructors bind callbacks to their original host, project, broker and child',async t=>{
+ for(const mutation of ['host','project','broker','child','switching','closing']){
+  const f=fixture();t.after(()=>f.api.closeDiagnostics());f.api.initializeDiagnostics();await f.ready();const ports=await providerHosts(f);
+  ports.claude.report(providerFailure());ports.arcane.report(providerFailure());await settle();assert.equal(f.events.length,2);
+  if(mutation==='host'){f.context.claudeChat={};f.context.arcaneChat={};}else if(mutation==='project')f.context.projectSession={...f.context.projectSession};
+  else if(mutation==='broker')f.context.nativeHandoff={};else if(mutation==='child')f.context.child=childFixture();else f.context[mutation]=true;
+  ports.claude.report(providerFailure());ports.arcane.report(providerFailure());await settle();assert.equal(f.events.length,2,mutation+' must refuse both stale provider callbacks');
+ }
+});
+test('provider report joins preserve the sixteen-report bound and original shutdown ordering',async t=>{
+ const gate=defer(),f=fixture({report:event=>gate.promise.then(()=>({stored:true,eventId:event.eventId}))});t.after(()=>{gate.resolve();return f.api.closeDiagnostics();});
+ f.api.initializeDiagnostics();await f.ready();const send=f.api.providerFailureReporter(()=>true);for(let i=0;i<20;i++)send(providerFailure());
+ await settle();assert.equal(f.events.length,16);const closing=f.api.closeDiagnostics();await settle();assert.equal(f.calls.includes('host-close'),false);
+ send(providerFailure());assert.equal(f.events.length,16);gate.resolve();assert.equal(await closing,true);
+ assert.ok(f.calls.lastIndexOf('report')<f.calls.indexOf('host-close'));assert.ok(f.calls.indexOf('host-close')<f.calls.indexOf('storage-close'));
+});
+test('provider project ABA during the actual encrypted host account read cannot persist a stale failure', {timeout:5000},async t=>{
+ for(const kind of ['claude','arcane']){
+  const f=await encryptedProviderFixture(t),ports=await providerHosts(f),held=f.hold(),stale=providerFailure('authenticate','AUTH_REQUIRED');
+  ports[kind].report(stale);await held.entered.promise;assert.equal(f.actual.list().events.length,0);
+  const original=f.context.projectSession;f.context.projectSession={projectPath:'C:\\Projects\\Other',stateRoot:'other'};f.context.projectSession={...original};
+  f.release();assert.equal((await f.pending[0]).stored,false);assert.equal(f.actual.list().events.length,0);assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM diagnostic_outbox').get().n,0);
+  // A genuinely fresh host in the same-path project can report; the old callback stays retired.
+  const fresh=await providerHosts(f),accepted=providerFailure('request-stream','REQUEST_TIMEOUT');fresh[kind].report(accepted);await settle();
+  assert.equal((await f.pending[1]).stored,true);ports[kind].report(stale);await settle();assert.equal(f.pending.length,2);
+  const raw=JSON.stringify(f.db.prepare('SELECT * FROM diagnostic_outbox').all());assert.ok(!raw.includes(accepted.operationId));assert.doesNotMatch(raw,/REQUEST_TIMEOUT|request-stream/);
+  const reopened=await f.reopen(),rows=reopened.list().events;assert.equal(rows.length,1);assert.equal(rows[0].event.component,'chat');assert.equal(rows[0].event.code,'REQUEST_TIMEOUT');
+  assert.deepEqual(rows[0].event.context,{operationId:accepted.operationId});assert.equal(rows[0].state,'local-only');assert.equal((await reopened.flush()).state,'disabled');
+ }
 });
 test('module or private storage initialization failure remains a finite unavailable state without rejecting startup',async()=>{
  for(const options of [{loadError:true},{open:()=>Promise.reject(Error('private storage path'))}]){

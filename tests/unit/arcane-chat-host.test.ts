@@ -52,7 +52,9 @@ const sse = (...events: unknown[]) => new Response(events.map(event => 'data: ' 
 const done = (extra: Record<string, unknown> = {}) => ({ type: 'done', creditsUsed: 2, actionsUsed: 0, stopReason: 'end', inputTokens: 100, outputTokens: 20, ...extra });
 const call = (id: string, name: string, args: Record<string, unknown> = {}) => ({ type: 'tool_call', id, name, arguments: args });
 
-async function fixture(t: TestContext, options: { connected?: boolean; limits?: Record<string, number>; permissions?: unknown; response?: number } = {}) {
+async function fixture(t: TestContext, options: { connected?: boolean; limits?: Record<string, number>; permissions?: unknown; response?: number; reportFailure?: (event: any) => unknown } = {}) {
+  const reports: any[] = [];
+  const reportAfterDone: boolean[] = [];
   const root = await realpath(await mkdtemp(join(await realpath(tmpdir()), 'arcane-arcane-chat-')));
   t.after(() => rm(root, { recursive: true, force: true, maxRetries: 40, retryDelay: 50 }));
   const project = join(root, 'project'), state = join(root, 'state'), script = join(root, 'mock-mcp.cjs'), config = join(root, 'arcane.mcp.json');
@@ -72,6 +74,7 @@ async function fixture(t: TestContext, options: { connected?: boolean; limits?: 
   }) as typeof globalThis.fetch;
   const window = { isDestroyed: () => false, webContents: { isDestroyed: () => false, send(channel: string, event: unknown) { assert.equal(channel, 'arcane:arcane-chat-event'); events.push(JSON.parse(JSON.stringify(event))); } } };
   const chat = host.createArcaneChat({
+    reportFailure: (event: any) => { reports.push(event); reportAfterDone.push(events.some(e => e.type === 'done' && e.turnId === event.operationId)); return options.reportFailure?.(event); },
     projectPath: project, stateDirectory: state, getWindow: () => window,
     env: { ...process.env, ARCANE_LOCAL_TOKEN: 'inherited-never', OPENAI_API_KEY: 'never-forward' },
     gateway: async () => connected ? createArcaneGateway({ config: null as never, vault: null, fetch, credential: async () => connected ? { base: BASE, token: ACCOUNT } : null }) : null,
@@ -91,13 +94,26 @@ async function fixture(t: TestContext, options: { connected?: boolean; limits?: 
   t.after(() => chat.dispose());
   const finished = (turnId: string) => waitFor(() => events.find(e => e.turnId === turnId && e.type === 'done'), 15000);
   const chats = () => requests.filter(r => r.url.endsWith('/v1/chat/stream'));
-  return { chat, events, requests, chats, replies, prepared, released, dialogs, finished, disconnect: () => { connected = false; } };
+  return { chat, events, requests, chats, replies, prepared, released, dialogs, finished, reports, reportAfterDone, disconnect: () => { connected = false; } };
 }
 async function waitFor<T>(read: () => T | undefined, ms = 5000): Promise<T> {
   const deadline = Date.now() + ms;
   for (;;) { const value = read(); if (value) return value; if (Date.now() > deadline) throw new Error('timed out'); await new Promise(resolve => setTimeout(resolve, 5)); }
 }
 const input = (text: string, conversationId: string | null = null, model = 'arcane-default') => ({ conversationId, text, model, effort: 'standard' });
+
+test('terminal Credits failure reports one finite original turn and reporting failure does not replace it', async t => {
+  const reports: any[] = [];
+  const f = await fixture(t, { connected: false, reportFailure: event => { reports.push(event); return Promise.reject(Error('private report failure')); } });
+  const sent = await f.chat.send(input('private prompt'));
+  const done = await f.finished(sent.turnId);
+  assert.equal(done.ok, false);
+  assert.equal(done.error, 'Arcane Credits are not connected yet.');
+  assert.deepEqual(reports, [{ operationId: sent.turnId, stage: 'authenticate', code: 'CONNECTION_UNAVAILABLE' }]);
+  assert.ok(Object.isFrozen(reports[0]));
+  assert.deepEqual(f.reportAfterDone, [true]);
+  assert.deepEqual(f.requests, []);
+});
 
 test('disabled until a gateway and account exist: status is unavailable, nothing is requested, a send fails closed', async t => {
   const f = await fixture(t, { connected: false });
@@ -193,6 +209,7 @@ test('the loop is bounded: model rounds, tool calls, unknown tools and slow tool
   const sent = await f.chat.send(input('Loop forever'));
   const end = await f.finished(sent.turnId);
   assert.equal(end.ok, false); assert.equal(end.error, 'Arcane paused after the most steps one reply may take. Send "continue" to go on.');
+  assert.deepEqual(f.reports, [], 'a bounded steps pause is not a terminal diagnostic failure');
   assert.equal(end.usage.credits, 6);
   const [, second, third] = f.chats();
   const toolMessages = (request: any) => request.body.messages.filter((m: any) => m.role === 'tool').map((m: any) => m.toolCallId + ':' + (m.isError ? 'error:' : '') + m.content.split(' ').slice(0, 3).join(' '));
@@ -230,6 +247,7 @@ test('Stop aborts the open stream and the MCP child; the credential never appear
   assert.equal(await f.chat.stop(sent.turnId), true);
   const end = await f.finished(sent.turnId);
   assert.deepEqual([end.ok, end.error], [false, 'Stopped.']);
+  assert.deepEqual(f.reports, [], 'intentional Stop is not a terminal diagnostic failure');
   const toolMessage = f.chats()[1]!.body.messages.find((m: any) => m.role === 'tool');
   assert.equal(toolMessage.content, 'token=[redacted]');
   assert.ok(!JSON.stringify(f.events).includes(CREDENTIAL), 'no event carries the credential');
@@ -242,10 +260,12 @@ test('consent: the project switch or one in-app question; a decline mints nothin
   const sent = await declined.chat.send(input('Build'));
   assert.equal((await declined.finished(sent.turnId)).error, 'Arcane chat was not allowed to use Arcane project tools for this project.');
   assert.equal(declined.dialogs.length, 1); assert.match(declined.dialogs[0].detail, /Arcane Credits/); assert.deepEqual(declined.prepared, []);
+  assert.deepEqual(declined.reports, []);
   const allowed = await fixture(t, { permissions: { claudeTools: async () => true } });
   allowed.replies.push(() => sse({ type: 'delta', text: 'ok' }, done()));
   const ok = await allowed.chat.send(input('Build'));
   assert.equal((await allowed.finished(ok.turnId)).ok, true); assert.equal(allowed.dialogs.length, 0);
+  assert.deepEqual(allowed.reports, []);
 });
 
 test('send and IPC envelopes are exact: text only, gateway model ids, fixed refusals', async t => {

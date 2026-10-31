@@ -34,6 +34,8 @@ Current work adds finite staging phase/reason details and preserves unknown/no-r
 
 ## Scoped connection evidence verified
 
+- [x] Exact host-owned Claude/Credits terminal failures have a one-shot nonblocking route into the existing encrypted outbox, correlated to the original turn UUID. Controlled verification passes194 cases across provider hosts, asset lifetimes, diagnostic storage and main composition, with strict649-source compilation and zero skips. The original two regression cases first demonstrated missing reports. Intentional Stop/closed/interrupted/consent/steps outcomes and unmatched provider text remain excluded. Original ownership is rechecked across account reads; stale same-path project replacement stores nothing. OS keychain, hosted collector and authenticated customer acceptance remain separate.
+
 - [x] Original transport frame-limit failures retain finite direction, byte-bound observation, pending-method mask and actual connect phase without payload content.
 - [x] Actual SQLite terminal action commit precedes optional reporting; replay and reporting failures do not resend the native operation or alter its recorded outcome.
 - [x] The finite event survives encrypted local reload and strict authenticated gateway validation within the existing byte bound.

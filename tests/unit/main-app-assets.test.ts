@@ -71,6 +71,7 @@ async function fixture(t:TestContext,{switching=false,heldOpen=false}={}){
   });
   child.parse=vm.runInContext('(text)=>JSON.parse(text)',context) as (text:string)=>unknown;
   const code=block('/** Exact main-frame workspace renderer','const CODE_VERIFICATION_WARNING')+
+    block('function providerFailureReporter(stillCurrent)','function recordStartupDiagnostic(')+
     block('// App-asset authority belongs','// In-app Claude chat:')+
     block('function stopClaudeChat(reason)','/** Learned preferences')+
     block('async function startClaudeChat()','async function stopDaemon()')+
