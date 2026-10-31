@@ -5,6 +5,12 @@ tags: [arcane, chat, persistence]
 ---
 # Shared draft readiness
 
+## Latest follow-up
+
+Original component run 41216643275 exposed a compiler-only cold-start VM that extracted `startDaemon` without its new canonical-path dependency. The fixture now supplies an explicit already-canonical directory double and witnesses that boundary; the real path identity/replacement tests remain in the desktop host suite. Both complete offline suites pass: 80 tests, zero skips/cancellations. The original failed job is retained; no workflow rerun is used as evidence.
+
+A private read-only Electron diagnostic reaches Windows decryption but cannot read the saved workspace record, including with a private copy of the application's encrypted Local State. Original record and Local State bytes remain unchanged; no plaintext is logged. This separate Electron version/profile is diagnostic evidence only, not proof of the loaded app's exact failure. The first isolated-profile result is inconclusive because its encryption context differs. Customer Send remains open, and the one unsent synthetic message is preserved. Ordinary conversation notices still need the separate layout-shift correction.
+
 [[Sessions/2026-10-31 Loaded Update Check]] reproduces a new-chat Send refusal in the verified loaded e813 app. The synthetic 138-byte draft remains in the composer. One original Send attempt was made; no Accepted indicator or reply appeared, and the request was not retried. Customer message delivery remains unverified.
 
 The source guard rejects a missing provider draft source or a project different from the shared library. Codex deliberately withholds its source while native tab preferences are unavailable. Local drafts can still render ready, so the shared pre-dispatch hook can refuse them. Do not fabricate a local ID, fold browser project paths or ignore the persistence error to enable Send.

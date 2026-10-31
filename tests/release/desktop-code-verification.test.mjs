@@ -236,7 +236,7 @@ test('main cold start passes an isolated unavailable compiler to the core daemon
   f.disk.nodes.delete(f.disk.key(f.compilerPath));
   const begin = mainSource.indexOf('async function startDaemon('), end = mainSource.indexOf('function makeWindow()', begin);
   assert.ok(begin >= 0 && end > begin);
-  const warnings = [], requested = [], owned = [], assetStarts = [], child = new EventEmitter();
+  const warnings = [], requested = [], owned = [], assetStarts = [], canonicalPaths = [], child = new EventEmitter();
   const warning = /const CODE_VERIFICATION_WARNING = ('[^']*');/.exec(mainSource)?.[1];
   assert.ok(warning);
   const context = { projectSession: null, child: null, origin: '', token: '', closing: false, switching: false,
@@ -246,6 +246,9 @@ test('main cold start passes an isolated unavailable compiler to the core daemon
     fs: { ...f.disk.filesystem, writeFileSync(fd, bytes) { const value = Buffer.from(bytes); f.disk.filesystem.writeSync(fd, value, 0, value.length); } },
     codeVerification: f.api, managedBootstrap, URL, setTimeout: () => 1, clearTimeout() {}, console: { warn: text => warnings.push(text) },
     policy: { ...f.policy, directPath: async value => value },
+    // This compiler-only VM receives an already canonical fixture directory.
+    // desktop-host.test.mjs exercises the actual identity helper and replacement guards.
+    canonicalProjectPath: async value => { assert.equal(value, f.projectPath); canonicalPaths.push(value); return value; },
     ownedDirectory: async value => { owned.push(value); return value; },
     smoke: false, window: null, nativeHandoff: null, providerSetup: { cancelPending() {} },
     recordStartupDiagnostic() {}, attachDiagnosticChild() {},
@@ -283,6 +286,7 @@ test('main cold start passes an isolated unavailable compiler to the core daemon
   assert.ok(bootstrap.includes(moduleLoad));
   vm.runInContext('const CODE_VERIFICATION_WARNING = ' + warning + ';\n' + bootstrap.replace(moduleLoad, 'managedBootstrap') + '\nglobalThis.coldStart = startDaemon;', context);
   await context.coldStart(f.projectPath);
+  assert.deepEqual(canonicalPaths, [f.projectPath], 'startup resolves its project before compiler isolation');
   assert.deepEqual(assetStarts, ['begin', 'ready'], 'one exact ready child/project reaches the startup witness');
   assert.equal(requested.length, 1, 'Only an in-memory core daemon spawn request is observed; no process executes.');
   // State ownership precedes the spawn; the handoff directory is owned only after readiness.
