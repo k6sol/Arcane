@@ -7,6 +7,7 @@
  * With nothing to choose, "Choose an asset" opens the file picker straight away.
  */
 import type { ImportedViewerAsset, ImportedEffectView } from './asset-viewer.js';
+import { USER_ERRORS, userErrorLabel } from './user-errors.js';
 
 export interface ImportReply {
   state: 'imported' | 'cancelled' | 'refused' | 'busy' | 'unavailable'; message: string;
@@ -153,7 +154,9 @@ export function startAssetImports(doc: Document, options: AssetImportOptions) {
       if (first) show(first);
       if (refused.length) say(added.length ? 'Imported ' + added.length + ' of ' + (added.length + refused.length) + ' files' : refused.length === 1 ? 'Couldn’t import this file' : 'Couldn’t import these files', refused, 'warn');
       else if (added.length) { notice.hidden = true; noticeBody.replaceChildren(); }
-    } catch { say('Arcane couldn’t import that. Nothing was changed.', [], 'warn'); }
+    } catch {
+      if (!stopped) say(userErrorLabel(USER_ERRORS[421]) + '. Arcane could not confirm the file import. Check Choose an asset before importing these files again.', [], 'warn');
+    }
     finally { busy = false; trigger?.removeAttribute('aria-busy'); }
   }
   async function load(asset: ImportedViewerAsset, signal: AbortSignal): Promise<ArrayBuffer> {

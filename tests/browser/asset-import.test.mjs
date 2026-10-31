@@ -61,7 +61,7 @@ ${emitter('Smoke', '<float name="Rate">6</float><NumberRange name="Lifetime">4 6
 </Item></Item></roblox>`;
 
 async function emitted(path) { return readFile(resolve(emit, path)); }
-async function start(t) {
+async function start(t, options = {}) {
   const state = await mkdtemp(join(tmpdir(), 'arcane-import-browser-')); t.after(() => rm(state, { recursive: true, force: true }));
   const files = join(state, 'my files'); await mkdir(files);
   await writeFile(join(files, 'crate.glb'), glb());
@@ -116,7 +116,11 @@ window.arcaneReady = true;`;
   page.on('pageerror', error => errors.push(error.message));
   page.on('console', message => { if (message.type() === 'error' && !/Failed to load resource/.test(message.text())) errors.push(message.text()); });
   let pickCalls = 0;
-  await page.exposeFunction('arcanePick', async () => { pickCalls++; return JSON.parse(JSON.stringify(await host.pick())); });
+  await page.exposeFunction('arcanePick', async () => {
+    pickCalls++; const result = await host.pick();
+    if (options.losePickReply) throw new Error('Private bridge failure: token=private-fixture');
+    return JSON.parse(JSON.stringify(result));
+  });
   await page.exposeFunction('arcaneDrop', async names => JSON.parse(JSON.stringify(await host.importFiles(names.map(name => join(files, name))))));
   await page.goto(origin + '/');
   await page.waitForFunction(() => window.arcaneReady === true);
@@ -132,6 +136,28 @@ async function canvasPixels(page) {
     return lit;
   });
 }
+
+test('a lost native import reply preserves the stored asset and explains its unconfirmed outcome without replay', { skip: !emit && 'set ARCANE_IMPORT_EMIT', timeout: 60000 }, async t => {
+  const f = await start(t, { losePickReply: true });
+  f.pick([join(f.files, 'crate.glb')]);
+  await f.page.click('#preview-settings');
+  await f.page.waitForSelector('.import-notice:not([hidden])');
+  const records = await f.store.list();
+  assert.equal(records.length, 1, 'original native import completed before its reply was lost');
+  const message = await f.page.locator('.import-notice').textContent();
+  assert.match(message, /Error 421/);
+  assert.match(message, /could not confirm.*import/i);
+  assert.match(message, /Check.*asset.*before importing/i);
+  assert.doesNotMatch(message, /Nothing was changed|Private bridge|private-fixture/);
+  assert.equal(f.pickCalls(), 1);
+  // The explicit read-only recovery lists the original stored asset; it does not repeat the native picker/import.
+  await f.page.click('#preview-settings');
+  await f.page.waitForSelector('#asset-picker:not([hidden])');
+  assert.match(await f.page.locator('#asset-picker .import-row').textContent(), /crate/);
+  assert.equal(f.pickCalls(), 1);
+  assert.deepEqual((await f.store.list()).map(row => row.id), records.map(row => row.id));
+  assert.deepEqual(f.errors, []);
+});
 
 test('Choose an asset with nothing to choose opens the file picker; a real GLB imports and shows in the viewer', { skip: !emit && 'set ARCANE_IMPORT_EMIT' }, async t => {
   const f = await start(t);
