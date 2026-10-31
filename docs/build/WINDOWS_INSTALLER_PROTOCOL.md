@@ -21,10 +21,22 @@ It never:
 "<stage>\bundle\resources\node\node.exe" "<stage>\kit\scripts\windows-install-cli.mjs" --bundle <ABSOLUTE> --install-root <ABSOLUTE>
 ```
 
-- **Arguments:** exactly these four, in this order. Each path is drive-absolute (`X:\…`), with no surrounding spaces, control characters or leading `-`, and at most 4096 characters. The engine then applies its own path rules (`PATH`, `PATH_LENGTH`, `OVERLAP`, `REDIRECT`).
+- **Arguments:** these four in this order, optionally followed by exactly `--replace-absent-release <release-id>`. Each path is drive-absolute (`X:\…`), with no surrounding spaces, control characters or leading `-`, and at most 4096 characters. The engine then applies its own path rules (`PATH`, `PATH_LENGTH`, `OVERLAP`, `REDIRECT`). The optional ID must be the complete lowercase `<64-hex-manifest>-<UUID>` recorded ID; no path, prefix, wildcard or additional selector is accepted.
 - **Refusal:** any other argv is refused before the engine is created. The result is `code: "ARGUMENTS"`, `published: false`, with exit 1.
-- **No other selectors:** no flag or environment variable selects a verifier, root or behaviour.
+- **No other selectors:** no flag or environment variable selects a verifier or bypasses installation checks. The setup bootstrapper continues to use the ordinary four arguments; it does not select a release to replace automatically.
 - **Parent process:** start Node with `UseShellExecute=false`, no shell, and redirected stdin, stdout and stderr.
+
+### Explicit absent inactive slot replacement
+
+Without the optional flag, a genuinely new source still refuses `RETENTION` at 32 recorded releases. Same-source recovery retains its existing rules. The flag permits one new source to replace only the named inactive record entry after its entire original directory is absent. It does not move, delete, repair or adopt any existing release directory, and does not increase the 32-entry bound.
+
+The trusted human/host must first authorize and reversibly preserve that exact inactive release outside `releases`, retaining its manifest and file identity evidence. A record's inactive selection or an absent path is not evidence that a process or descendant closed. Unknown activity must remain unknown; this option supplies no process stopping, takeover or closure proof. Preservation is a separate operation and is never inferred or performed by this CLI.
+
+Under the existing exclusive installation lock, the engine requires the exact recorded ID to be inactive and the incoming manifest to be new. A missing installation, unrecorded/active ID, present/partial/file/redirected target, or ambiguous same-source selector refuses before staging. Source and copied payload verification, original root/releases-parent identity, full-record bytes and file identity, cancellation and owned lock checks remain required. Immediately before publication the old path must still be absent and the parent, record and candidate must still match. Newly appearing contents are retained and never cleaned up. Publication replaces exactly that one row and the active pointer atomically; all other rows and existing release bytes remain unchanged.
+
+The engine's successful result has `replacedAbsentReleaseId` for this explicit operation and `repairedReleaseId: null`; ordinary same-source repairs still report only `repairedReleaseId`. `previousReleasesRetained` describes the engine leaving existing release files untouched, not verification of an external backup. The stdout frame schema below is unchanged. The host already owns the exact requested selector and must correlate the terminal result with the actual record. A failure or unknown result is never permission to retry, restore a path or edit the record blindly.
+
+For bootstrap, first authenticate the next source revision, trusted workflow/run/artifact and complete extracted portable inventory, including the bundled Node and installer modules. Run that verified package's `resources/node/node.exe` with its matching `resources/product/scripts/windows-install-cli.mjs`, the verified package as `--bundle`, the existing owned installation root and the explicit selector. An older package does not gain this option by editing its files. No local rebuild, application launch, registry/shortcut change or automatic restart is part of this operation. Preserve the original failed attempt and reversible backup; confirm the original process result and both pipe EOFs, then independently verify the selected record and installed bytes before any separate authorized launch.
 
 ## stdout: frames
 
@@ -108,8 +120,8 @@ The engine types every failure after it takes its lock. Failures before the lock
 ## Host API (tests and composition only)
 
 ```js
-runWindowsInstallCli({ bundle, installRoot, input, output, installation, now, timers }) // → Promise<exit code>
-admitWindowsInstallArguments(argv) // → { bundle, installRoot } | null
+runWindowsInstallCli({ bundle, installRoot, replaceAbsentReleaseId, input, output, installation, now, timers }) // → Promise<exit code>
+admitWindowsInstallArguments(argv) // → { bundle, installRoot, replaceAbsentReleaseId? } | null
 ```
 
 - **Ports:** `installation` is an explicit engine port. Production `main` always passes `createWindowsInstallation()`, the full verifier. Owned fixtures pass an engine created with their labelled small-inventory verifier.

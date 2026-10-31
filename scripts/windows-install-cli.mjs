@@ -21,12 +21,13 @@ const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/, R
 const counter = value => Number.isSafeInteger(value) && value >= 0;
 const noop = () => {};
 
-/** Production argv admission: exactly --bundle ABSOLUTE --install-root ABSOLUTE, in that order. */
+/** Production argv admission: fixed paths, then an optional exact absent inactive release selector. */
 export function admitWindowsInstallArguments(argv) {
-  if (!Array.isArray(argv) || argv.length !== 4 || argv[0] !== '--bundle' || argv[2] !== '--install-root') return null;
+  if (!Array.isArray(argv) || ![4,6].includes(argv.length) || argv[0] !== '--bundle' || argv[2] !== '--install-root' ||
+      argv.length === 6 && (argv[4] !== '--replace-absent-release' || typeof argv[5] !== 'string' || !RELEASE.test(argv[5]))) return null;
   const path = value => typeof value === 'string' && value.length <= WINDOWS_INSTALL_CLI_LIMITS.argumentChars && value === value.trim() &&
     !/[\x00-\x1f\x7f]/.test(value) && !value.startsWith('-') && isAbsolute(value) && (process.platform !== 'win32' || /^[A-Za-z]:\\/.test(value));
-  return path(argv[1]) && path(argv[3]) ? Object.freeze({ bundle: argv[1], installRoot: argv[3] }) : null;
+  return path(argv[1]) && path(argv[3]) ? Object.freeze({ bundle: argv[1], installRoot: argv[3], ...(argv.length === 6 ? {replaceAbsentReleaseId:argv[5]} : {}) }) : null;
 }
 
 function resultFrame(state, { published, code = null, installationId = null, activeReleaseId = null, abort = null, lockRetained = false, stagingRetained = false }) {
@@ -143,11 +144,11 @@ function controlReader(input, abort) {
  * Host-only runner with explicit ports. Production main passes stdin/stdout and the default engine (full bundle verifier);
  * owned fixtures pass an engine created with their labelled verifier. Waits for the engine's terminal state and never kills it.
  */
-export async function runWindowsInstallCli({ bundle, installRoot, input, output, installation, now = () => performance.now(),
+export async function runWindowsInstallCli({ bundle, installRoot, replaceAbsentReleaseId, input, output, installation, now = () => performance.now(),
   timers = { setTimeout: (callback, ms) => setTimeout(callback, ms), clearTimeout: handle => clearTimeout(handle) } } = {}) {
   const port = (value, names) => value && names.every(name => typeof value[name] === 'function');
   if (!port(installation, ['install']) || !port(input, ['on', 'removeListener']) || !port(output, ['write', 'on']) || typeof now !== 'function' ||
-      !port(timers, ['setTimeout', 'clearTimeout'])) {
+      !port(timers, ['setTimeout', 'clearTimeout']) || replaceAbsentReleaseId !== undefined && (typeof replaceAbsentReleaseId !== 'string' || !RELEASE.test(replaceAbsentReleaseId))) {
     throw new TypeError('The Windows install protocol requires explicit engine, input and output ports.');
   }
   const controller = new AbortController(); let abort = null;
@@ -165,7 +166,8 @@ export async function runWindowsInstallCli({ bundle, installRoot, input, output,
     held = null; lastPhase = frame.phase; lastAt = at; writer.progress(frame);
   };
   let result, failure, failed = false;
-  try { result = await installation.install({ bundle, installRoot, signal: controller.signal, onProgress }); }
+  try { result = await installation.install({ bundle, installRoot, signal: controller.signal, onProgress,
+    ...(replaceAbsentReleaseId === undefined ? {} : {replaceAbsentReleaseId}) }); }
   catch (error) { failure = error; failed = true; }
   // Throttled counters are reported before the terminal frame.
   if (held) writer.progress(held);

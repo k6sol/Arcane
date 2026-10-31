@@ -238,6 +238,84 @@ test('replacing one absent slot works with 32 recorded releases and does not rai
   await assert.rejects(f.engine.install({ bundle: await f.makeBundle('r32'), installRoot: f.target }), error => error.code === 'RETENTION');
 });
 
+test('an explicit absent inactive slot admits a new manifest at 32 without deleting any preserved release', async t => {
+  const f=await fixture(t),releases=[];
+  for(let i=0;i<32;i++)releases.push(await f.engine.install({bundle:await f.makeBundle('r'+i),installRoot:f.target}));
+  const chosen=releases[5],old=releasePath(f,chosen.activeReleaseId),preserved=join(f.root,'preserved');
+  const original=await fs.lstat(old,{bigint:true}),manifest=await fs.readFile(join(old,'windows-manifest.json'));
+  await fs.rename(old,preserved);const before=await f.record(),rows=JSON.parse(before),bundle=await f.makeBundle('new-source');
+  await assert.rejects(f.engine.install({bundle,installRoot:f.target}),error=>error.code==='RETENTION'&&error.published===false);
+  assert.equal(await f.record(),before);assert.equal((await fs.readdir(join(f.target,'releases'))).length,31);
+  const result=await f.engine.install({bundle,installRoot:f.target,replaceAbsentReleaseId:chosen.activeReleaseId});
+  assert.equal(result.state,'installed');assert.equal(result.replacedAbsentReleaseId,chosen.activeReleaseId);assert.equal(result.repairedReleaseId,null);
+  assert.equal(result.previousReleaseId,releases[31].activeReleaseId);assert.notEqual(result.manifestSha256,chosen.manifestSha256);
+  const after=JSON.parse(await f.record());assert.equal(after.installationId,rows.installationId);assert.equal(after.releases.length,32);
+  for(let i=0;i<32;i++)if(i===5)assert.equal(after.releases[i].id,result.activeReleaseId);else assert.deepEqual(after.releases[i],rows.releases[i]);
+  const retained=await fs.lstat(preserved,{bigint:true});assert.equal(retained.dev,original.dev);assert.equal(retained.ino,original.ino);
+  assert.deepEqual(await fs.readFile(join(preserved,'windows-manifest.json')),manifest);await f.verify(preserved);await absentAt(old);
+  assert.equal(await fs.readFile(join(releases[31].releaseDirectory,'Arcane.exe'),'utf8'),'fixture r31');assert.equal(await f.profileText(),'user work');
+  await absentAt(join(f.target,'installation.lock'));
+});
+
+test('explicit absent replacement refuses malformed selectors and never initializes a missing installation',async t=>{
+  for(const value of [null,'',true,{},'../release','A'.repeat(64)+'-11111111-2222-4333-8444-555555555555'])await t.test(String(value),async sub=>{
+    const f=await fixture(sub),bundle=await f.makeBundle('first');
+    await assert.rejects(f.engine.install({bundle,installRoot:f.target,replaceAbsentReleaseId:value}),error=>error.code==='INPUT'&&error.published===false);
+    await absentAt(f.target);
+  });
+  const f=await fixture(t),bundle=await f.makeBundle('first'),id='a'.repeat(64)+'-11111111-2222-4333-8444-555555555555';
+  await assert.rejects(f.engine.install({bundle,installRoot:f.target,replaceAbsentReleaseId:id}),error=>error.code==='RELEASE_MISSING'&&error.published===false);await absentAt(f.target);
+  await fs.mkdir(f.target);
+  await assert.rejects(f.engine.install({bundle,installRoot:f.target,replaceAbsentReleaseId:id}),error=>error.code==='RELEASE_MISSING'&&error.published===false);
+  assert.deepEqual(await fs.readdir(f.target),[],'replacement does not mint a new installation record');
+});
+
+test('explicit replacement refuses active, unrecorded, present, partial and ambiguous same-source slots before staging',async t=>{
+  for(const mode of ['active','active-absent','unrecorded','present','partial','file','same-source',...(process.platform==='win32'?['redirect']:[])])await t.test(mode,async sub=>{
+    const f=await fixture(sub),a=await f.makeBundle('first'),first=await f.engine.install({bundle:a,installRoot:f.target});
+    const active=await f.engine.install({bundle:await f.makeBundle('second'),installRoot:f.target}),old=releasePath(f,first.activeReleaseId);
+    let id=first.activeReleaseId,bundle=await f.makeBundle('third');
+    if(mode==='active'||mode==='active-absent')id=active.activeReleaseId;
+    if(['active-absent','same-source','file','redirect'].includes(mode))await fs.rename(releasePath(f,id),join(f.root,'preserved'));
+    if(mode==='unrecorded')id='a'.repeat(64)+'-11111111-2222-4333-8444-555555555555';
+    if(mode==='partial')await fs.unlink(join(old,'Arcane.exe'));
+    if(mode==='file')await fs.writeFile(old,'manual file');
+    if(mode==='redirect'){const away=join(f.root,'away');await fs.mkdir(away);await fs.symlink(away,old,'junction');}
+    if(mode==='same-source')bundle=a;
+    const before=await f.record(),entries=(await fs.readdir(join(f.target,'releases'))).sort();
+    await assert.rejects(f.engine.install({bundle,installRoot:f.target,replaceAbsentReleaseId:id}),error=>error.code==='RELEASE_CHANGED'&&error.published===false&&error.stagingDirectory===null);
+    assert.equal(await f.record(),before);assert.deepEqual((await fs.readdir(join(f.target,'releases'))).sort(),entries);await absentAt(join(f.target,'installation.lock'));
+  });
+});
+
+test('explicit absent replacement retains cancellation, record-change and appeared-leaf refusals',async t=>{
+  for(const mode of ['cancel','record','appeared'])await t.test(mode,async sub=>{
+    const f=await fixture(sub),first=await f.engine.install({bundle:await f.makeBundle('first'),installRoot:f.target});
+    await f.engine.install({bundle:await f.makeBundle('second'),installRoot:f.target});
+    const old=releasePath(f,first.activeReleaseId),preserved=join(f.root,'preserved');await fs.rename(old,preserved);
+    const before=await f.record(),controller=new AbortController();let changed=false;
+    await assert.rejects(f.engine.install({bundle:await f.makeBundle('third'),installRoot:f.target,replaceAbsentReleaseId:first.activeReleaseId,signal:controller.signal,
+      onProgress:event=>{if(event.phase!=='publishing'||changed)return;changed=true;if(mode==='cancel')controller.abort();
+        else if(mode==='record')fsSync.writeFileSync(join(f.target,'installation.json'),before+' ');else{fsSync.mkdirSync(old);fsSync.writeFileSync(join(old,'manual.txt'),'manual');}}}),
+      error=>error.code===({cancel:'CANCELLED',record:'CHANGED',appeared:'RELEASE_CHANGED'})[mode]&&error.published===false&&typeof error.stagingDirectory==='string');
+    assert.equal(changed,true);assert.equal(await f.record(),mode==='record'?before+' ':before);await f.verify(preserved);
+    if(mode==='appeared')assert.deepEqual(await fs.readdir(old),['manual.txt']);else await absentAt(old);await absentAt(join(f.target,'installation.lock'));
+  });
+});
+
+test('explicit replacement rechecks the original parent after its final absence observation',async t=>{
+  const f=await fixture(t),first=await f.engine.install({bundle:await f.makeBundle('first'),installRoot:f.target});
+  await f.engine.install({bundle:await f.makeBundle('second'),installRoot:f.target});
+  const parent=join(f.target,'releases'),old=releasePath(f,first.activeReleaseId),movedParent=join(f.target,'moved-releases');
+  await fs.rename(old,join(f.root,'preserved'));const before=await f.record(),bundle=await f.makeBundle('third'),originalLstat=fsPromises.lstat;
+  let armed=false,moved=false,failure;
+  fsPromises.lstat=async function(path,...args){if(armed&&!moved&&String(path)===old){fsSync.renameSync(parent,movedParent);moved=true;}return originalLstat.call(this,path,...args);};syncBuiltinESMExports();
+  try{await assert.rejects(f.engine.install({bundle,installRoot:f.target,replaceAbsentReleaseId:first.activeReleaseId,onProgress:event=>{if(event.phase==='publishing')armed=true;}}),error=>{
+    failure=error;return error.code==='IO'&&error.published===false&&typeof error.stagingDirectory==='string';
+  });}finally{fsPromises.lstat=originalLstat;syncBuiltinESMExports();}
+  assert.equal(moved,true);assert.equal(await f.record(),before);await absentAt(parent);await f.verify(join(movedParent,basename(failure.stagingDirectory)));
+});
+
 test('present, partial, changed, file and redirected release targets keep their existing refusals and stay untouched', async t => {
   const cases = [
     ['partial', async dir => fs.rm(join(dir, 'resources'), { recursive: true }), 'IO'],

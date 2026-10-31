@@ -118,8 +118,10 @@ export function createWindowsInstallation({ verifyBundle = verifyWindowsBundle }
     return Object.freeze({ installationId: record.installationId, activeReleaseId: record.activeReleaseId, integrityVerified: false,
       releases: Object.freeze(record.releases.map(entry => Object.freeze({ ...entry }))), root });
   }
-  async function install({ bundle, installRoot, signal, onProgress }) {
-    if (signal !== undefined && !(signal instanceof AbortSignal) || onProgress !== undefined && typeof onProgress !== 'function') fail('INPUT');
+  async function install({ bundle, installRoot, signal, onProgress, replaceAbsentReleaseId }) {
+    if (signal !== undefined && !(signal instanceof AbortSignal) || onProgress !== undefined && typeof onProgress !== 'function' ||
+        replaceAbsentReleaseId !== undefined && (typeof replaceAbsentReleaseId !== 'string' || replaceAbsentReleaseId.length !== 101 ||
+          !HASH.test(replaceAbsentReleaseId.slice(0,64)) || replaceAbsentReleaseId[64] !== '-' || !UUID.test(replaceAbsentReleaseId.slice(65)))) fail('INPUT');
     let filesCopied = 0, bytesCopied = 0, totalFiles = 0, totalBytes = 0;
     const cancelled = () => { if (signal?.aborted) fail('CANCELLED'); };
     const progress = phase => {
@@ -142,11 +144,12 @@ export function createWindowsInstallation({ verifyBundle = verifyWindowsBundle }
     totalFiles = manifest.fileCount + 1; totalBytes = manifest.totalBytes + sourceManifest.bytes.length; cancelled();
     let rootStat;
     try { rootStat = await direct(root); }
-    catch (error) { if (error.code !== 'ENOENT') throw error; await fs.mkdir(root, { mode: 0o700 }); rootStat = await direct(root); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; if (replaceAbsentReleaseId !== undefined) fail('RELEASE_MISSING'); await fs.mkdir(root, { mode: 0o700 }); rootStat = await direct(root); }
     const recordPath = join(root, RECORD);
     try { await direct(recordPath, 'file'); }
     catch (error) {
       if (error.code !== 'ENOENT') throw error;
+      if (replaceAbsentReleaseId !== undefined) fail('RELEASE_MISSING');
       if ((await fs.readdir(root)).length) fail('UNOWNED');
       const initial = { schemaVersion: 1, kind: 'arcane-windows-installation', installationId: randomUUID(), activeReleaseId: null, releases: [] };
       await writeExclusive(recordPath, Buffer.from(JSON.stringify(initial) + '\n'));
@@ -186,7 +189,15 @@ export function createWindowsInstallation({ verifyBundle = verifyWindowsBundle }
         catch (error) { if (error.code === 'ENOENT') return true; throw error; }
       };
       let absent = null;
-      if (recorded) { await assertCurrent(); if (await absentPath(recorded.id)) { await assertCurrent(); absent = recorded; } }
+      if (replaceAbsentReleaseId !== undefined) {
+        // Explicit maintenance consumes only this recorded, inactive, entirely absent slot.
+        // Absence neither proves child closure nor verifies an externally preserved backup.
+        const selected = record.releases.find(item => item.id === replaceAbsentReleaseId);
+        if (!selected || selected.id === record.activeReleaseId || recorded) fail('RELEASE_CHANGED');
+        await assertCurrent();
+        if (!await absentPath(selected.id)) fail('RELEASE_CHANGED');
+        await assertCurrent(); absent = selected;
+      } else if (recorded) { await assertCurrent(); if (await absentPath(recorded.id)) { await assertCurrent(); absent = recorded; } }
       const existing = absent ? undefined : recorded;
       let entry = existing;
       let assertCopied = async () => {};
@@ -254,7 +265,9 @@ export function createWindowsInstallation({ verifyBundle = verifyWindowsBundle }
       const state = existing && record.activeReleaseId === entry.id ? 'already-active' : 'installed'; progress(state);
       return Object.freeze({ state, installationId: record.installationId,
         activeReleaseId: entry.id, previousReleaseId: record.activeReleaseId, releaseDirectory: join(releasesRoot, entry.id), manifestSha256,
-        files: entry.files, bytes: entry.bytes, repairedReleaseId: absent ? absent.id : null, previousReleasesRetained: true, launched: false, registration: false, shortcuts: false, signed: false });
+        files: entry.files, bytes: entry.bytes, repairedReleaseId: absent && replaceAbsentReleaseId === undefined ? absent.id : null,
+        ...(replaceAbsentReleaseId === undefined ? {} : { replacedAbsentReleaseId: absent.id }),
+        previousReleasesRetained: true, launched: false, registration: false, shortcuts: false, signed: false });
     } catch (error) {
       primaryError = error instanceof WindowsInstallationError && !published && !stagingDirectory ? error :
         new WindowsInstallationError(error.code === 'EEXIST' && !lock ? 'LOCKED' : error instanceof WindowsInstallationError ? error.code : 'IO', { cause: error, published: published ? true : publishing ? null : false, stagingDirectory });

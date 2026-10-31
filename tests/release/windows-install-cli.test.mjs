@@ -85,6 +85,37 @@ test('known installs report bounded progress and one result; repeat is already-a
   assert.equal(repeat.result.activeReleaseId, status.activeReleaseId); assert.equal(await f.record(), record);
 });
 
+test('the optional absent-release selector is admitted exactly and reaches the original install with unchanged protocol frames',async()=>{
+  const bundle=process.platform==='win32'?'C:\\bundle':'/bundle',installRoot=process.platform==='win32'?'C:\\installed':'/installed';
+  const id='a'.repeat(64)+'-11111111-2222-4333-8444-555555555555',args=['--bundle',bundle,'--install-root',installRoot,'--replace-absent-release',id];
+  const admitted=admitWindowsInstallArguments(args);assert.deepEqual({...admitted},{bundle,installRoot,replaceAbsentReleaseId:id});
+  const output=sink();let observed;
+  const code=await runWindowsInstallCli({...admitted,input:new PassThrough(),output:output.stream,installation:{async install(options){observed=options;
+    return{state:'installed',installationId:'11111111-2222-4333-8444-555555555555',activeReleaseId:'b'.repeat(64)+'-11111111-2222-4333-8444-555555555555',replacedAbsentReleaseId:id};}}});
+  assert.equal(code,0);assert.equal(observed.bundle,bundle);assert.equal(observed.installRoot,installRoot);assert.equal(observed.replaceAbsentReleaseId,id);
+  assert.ok(observed.signal instanceof AbortSignal);assert.equal(typeof observed.onProgress,'function');assert.equal(frames(output.lines).result.published,true);
+  for(const bad of [args.slice(0,-1),[...args,'extra'],[...args.slice(0,4),'--replace-absent-release','../slot'],[...args.slice(0,4),'--replace-absent-release',id.toUpperCase()],
+    ['--replace-absent-release',id,...args.slice(0,4)],[...args.slice(0,4),'--replacement',id]])assert.equal(admitWindowsInstallArguments(bad),null);
+  for(const bad of [null,'',{},'../slot'])await assert.rejects(runWindowsInstallCli({bundle,installRoot,replaceAbsentReleaseId:bad,input:new PassThrough(),output:sink().stream,
+    installation:{install(){assert.fail('Invalid selector must not invoke the engine.');}}}),TypeError);
+});
+
+test('protocol replacement changes only the selected absent row and cancellation still reaches the original signal',async t=>{
+  const f=await fixture(t),first=await f.engine.install({bundle:await f.makeBundle('first'),installRoot:f.target});
+  const active=await f.engine.install({bundle:await f.makeBundle('second'),installRoot:f.target});await fs.rename(join(f.target,'releases',first.activeReleaseId),join(f.root,'preserved'));
+  const bundle=await f.makeBundle('third'),output=sink();
+  const code=await runWindowsInstallCli({bundle,installRoot:f.target,replaceAbsentReleaseId:first.activeReleaseId,input:new PassThrough(),output:output.stream,installation:f.engine});
+  assert.equal(code,0);const result=frames(output.lines).result;assert.equal(result.state,'installed');assert.equal(result.published,true);
+  const record=JSON.parse(await f.record());assert.equal(record.releases.length,2);assert.equal(record.releases[0].id,result.activeReleaseId);assert.equal(record.releases[1].id,active.activeReleaseId);
+  assert.equal((await fs.readdir(join(f.root,'preserved'))).length,3);
+  const input=new PassThrough(),cancelled=sink();input.write(cancelFrame);let signal;
+  const exit=await runWindowsInstallCli({bundle,installRoot:f.target,replaceAbsentReleaseId:active.activeReleaseId,input,output:cancelled.stream,
+    installation:{async install(options){signal=options.signal;assert.equal(options.replaceAbsentReleaseId,active.activeReleaseId);
+      await new Promise(resolve=>{if(signal.aborted)resolve();else signal.addEventListener('abort',resolve,{once:true});});
+      assert.equal(signal.aborted,true);throw new WindowsInstallationError('CANCELLED');}}});
+  assert.equal(exit,2);assert.equal(frames(cancelled.lines).result.published,false);assert.equal(signal.aborted,true);
+});
+
 test('a cancel frame before work is a safe prepublication cancellation with no target mutation (LF and CRLF)', async t => {
   for (const frame of [cancelFrame, '{"type":"cancel"}\r\n']) {
     const f = await fixture(t), bundle = await f.makeBundle('first'), input = new PassThrough(); input.write(frame);
@@ -245,7 +276,9 @@ test('production entry admits only exact absolute --bundle/--install-root argume
   });
   const refused = [[], ['--bundle', bundle], ['--install-root', f.target, '--bundle', bundle], ['--bundle', bundle, '--install-root', f.target, '--verbose'],
     ['--bundle=' + bundle, '--install-root', f.target], ['--bundle', 'relative', '--install-root', f.target], ['--bundle', bundle, '--install-root', '\\\\server\\share\\Arcane'],
-    ['--bundle', bundle, '--install-root', ' ' + f.target], ['--bundle', bundle, '--bundle', f.target], ['--bundle', bundle, '--install-root', f.target.replaceAll('\\', '/')]];
+    ['--bundle', bundle, '--install-root', ' ' + f.target], ['--bundle', bundle, '--bundle', f.target], ['--bundle', bundle, '--install-root', f.target.replaceAll('\\', '/')],
+    ['--bundle',bundle,'--install-root',f.target,'--replace-absent-release'],['--bundle',bundle,'--install-root',f.target,'--replace-absent-release','../slot'],
+    ['--bundle',bundle,'--install-root',f.target,'--replace-absent-release','a'.repeat(64)+'-11111111-2222-4333-8444-555555555555','--replace-absent-release','extra']];
   for (const args of refused) {
     assert.equal(admitWindowsInstallArguments(args), null, JSON.stringify(args));
     const { code, stdout, stderr } = await child(args);
@@ -260,6 +293,10 @@ test('production entry admits only exact absolute --bundle/--install-root argume
   const { result } = frames(real.stdout.split(/(?<=\n)/));
   assert.equal(result.state, 'failed'); assert.equal(result.published, false); assert.doesNotMatch(real.stdout, /PE executable|manifest\.|C:\\\\/);
   await assert.rejects(fs.stat(f.target), { code: 'ENOENT' });
+  const replacement=await child(['--bundle',bundle,'--install-root',f.target,'--replace-absent-release','a'.repeat(64)+'-11111111-2222-4333-8444-555555555555']);
+  assert.equal(replacement.code,1);assert.equal(replacement.stderr,'');const rejected=frames(replacement.stdout.split(/(?<=\n)/)).result;
+  assert.equal(rejected.state,'failed');assert.notEqual(rejected.code,'ARGUMENTS','the admitted option reaches the unchanged full verifier');assert.equal(rejected.published,false);
+  await assert.rejects(fs.stat(f.target),{code:'ENOENT'});
   // A cancel frame reaches the production child, which then exits on its own.
   const cancelled = await child(['--bundle', bundle, '--install-root', f.target], cancelFrame);
   assert.ok([1, 2].includes(cancelled.code)); assert.equal(frames(cancelled.stdout.split(/(?<=\n)/)).result.published, false);
