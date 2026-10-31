@@ -471,6 +471,9 @@ export function createCodexService(options: CodexServiceOptions) {
     return journalFault;
   }
   const inFlight = new Set<Promise<CodexActionOutcome>>();
+  async function fencePreservingJournalFailure():Promise<void>{
+    try{await fenceJournalFailure();}catch{/* The original action error wins; shutdown retains this separate cleanup failure. */}
+  }
   async function runAction(input: unknown): Promise<CodexActionOutcome> {
     if (closed) throw new CodexClientError('CLOSED','Native workflow is closed.');
     if(custody.faulted){try{await fenceJournalFailure();}catch{/* Shutdown retains the original close failure. */}throw new CodexClientError('JOURNAL_FAILURE','Native session custody requires inspection. No new action was sent.');}
@@ -481,7 +484,7 @@ export function createCodexService(options: CodexServiceOptions) {
     const hash = createHash('sha256').update(JSON.stringify(value)).digest('hex');
     let prior: {hash:string;payload:string}|undefined, count: number;
     try { prior = db.prepare('SELECT hash,payload FROM actions WHERE id=?').get(value.requestId) as typeof prior; count = Number((db.prepare('SELECT count(*) AS n FROM actions').get() as {n:number}).n); }
-    catch { await fenceJournalFailure(); throw new CodexClientError('JOURNAL_FAILURE','Native journal read failed. Authority retired; inspect retained receipts.',true); }
+    catch { await fencePreservingJournalFailure(); throw new CodexClientError('JOURNAL_FAILURE','Native journal read failed. Authority retired; inspect retained receipts.',true); }
     if (prior) {
       if (prior.hash !== hash) throw new CodexClientError('IDEMPOTENCY','This request ID already identifies a different action.');
       return {record:JSON.parse(prior.payload) as CodexActionRecord,replayed:true,state:state()};
@@ -516,7 +519,7 @@ export function createCodexService(options: CodexServiceOptions) {
           state:'pending',createdAt:record.createdAt,finishedAt:null,errorCode:null,contextIncluded:false,transmittedBytes:Buffer.byteLength(value.text)});
       db.exec('COMMIT');
     } catch { try{db.exec('ROLLBACK');}catch{/* The original journal failure remains authoritative. */}
-      await fenceJournalFailure(); throw new CodexClientError('JOURNAL_FAILURE','Native action receipt could not be persisted. Authority retired; no retry.',true); }
+      await fencePreservingJournalFailure(); throw new CodexClientError('JOURNAL_FAILURE','Native action receipt could not be persisted. Authority retired; no retry.',true); }
     let epoch = generation;
     let stagedHistory: CodexHistoryState | null = null;
     let ownsBusy = false,ownsTaskBinding=false; const existingOperations = new Set<string>();
@@ -575,7 +578,7 @@ export function createCodexService(options: CodexServiceOptions) {
                 if(current.approvals.length||current.operations.some(op=>op.state==='pending'||op.state==='unknown')||current.thread&&(!['idle','completed','failed','interrupted'].includes(current.thread.turnStatus)||current.thread.writeGranted)||assetState(current).granted)
                   throw new CodexClientError('BUSY','The selected conversation must settle before focusing another task.');
                 pendingTaskBinding=true;ownsTaskBinding=true;
-                record.nextConnectionId=snapshot.connectionId;try{save(record);}catch{await fenceJournalFailure();throw new CodexClientError('JOURNAL_FAILURE','Task selection could not be recorded. No task was dispatched.');}
+                record.nextConnectionId=snapshot.connectionId;try{save(record);}catch{await fencePreservingJournalFailure();throw new CodexClientError('JOURNAL_FAILURE','Task selection could not be recorded. No task was dispatched.');}
                 const previous=currentAssets;
                 if(!previous?.taskId){try{retireAssets(previous);}finally{await closeOwnedClient(selected);}}
                 const stillOwned=owned.snapshot();
@@ -688,7 +691,7 @@ export function createCodexService(options: CodexServiceOptions) {
                       throw new CodexClientError('TASK_SCOPE','Fresh task resume changed its native identity or policy.',true);
                     freshContext.handle!.seal({connectionId:resumed.connectionId,provider:'codex',threadId:binding.threadId,sessionId:binding.sessionId});
                     record.nextConnectionId=resumed.connectionId;
-                    try{save(record);}catch{await fenceJournalFailure();throw new CodexClientError('JOURNAL_FAILURE','Fresh task binding could not be persisted. No task turn was sent.');}
+                    try{save(record);}catch{await fencePreservingJournalFailure();throw new CodexClientError('JOURNAL_FAILURE','Fresh task binding could not be persisted. No task turn was sent.');}
                     client=fresh;currentAssets=freshContext;selected=fresh;actionClient=fresh;
                     if(context.manualAssets){freshContext.handle!.grant({connectionId:resumed.connectionId,threadId:thread.threadId});freshContext.manualAssets=true;}
                     if(context.manualWrites){custody.writesPossible(fresh);fresh.grantThreadWrites({initiatedBy:'human',threadId:thread.threadId});freshContext.manualWrites=true;}
@@ -854,7 +857,8 @@ export function createCodexService(options: CodexServiceOptions) {
       } catch {
         const fenced = fenceJournalFailure(); // Always before rollback, even if BEGIN or rollback fails.
         if (transaction) { try { db.exec('ROLLBACK'); } catch { /* Retain uncertain journal; never retry. */ } }
-        await fenced; throw new CodexClientError('JOURNAL_FAILURE','Native acknowledgement could not be committed. Authority retired; no retry.',true);
+        try{await fenced;}catch{/* Preserve the primary acknowledgement failure; shutdown joins the cached cleanup fault. */}
+        throw new CodexClientError('JOURNAL_FAILURE','Native acknowledgement could not be committed. Authority retired; no retry.',true);
       }
       if(custody.faulted)try{await fenceJournalFailure();}catch{/* Preserve this action's original outcome; shutdown also joins the retained fault. */}
       if (record.state === 'acknowledged' && (value.action === 'thread-start' || value.action === 'thread-resume') && currentAssets?.handle) {
@@ -868,7 +872,7 @@ export function createCodexService(options: CodexServiceOptions) {
       if (record.state === 'acknowledged' && grantAssetsAfterCommit) {
         try { grantAssetsAfterCommit(); }
         catch { retireAssets(); record.state='unknown'; record.errorCode='ASSET_AUTHORITY';
-          try { save(record); } catch { await fenceJournalFailure(); throw new CodexClientError('JOURNAL_FAILURE','Asset permission acknowledgement could not be persisted. Authority retired; no retry.',true); }
+          try { save(record); } catch { await fencePreservingJournalFailure(); throw new CodexClientError('JOURNAL_FAILURE','Asset permission acknowledgement could not be persisted. Authority retired; no retry.',true); }
         }
       }
       if(reportFailure&&(record.state==='rejected'||record.state==='unknown')){

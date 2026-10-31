@@ -8,7 +8,7 @@ import {join,resolve} from 'node:path';
 import {NativeSessionCustody} from '../../apps/daemon/src/native-session-custody.js';
 import {createCodexService,type CodexHostClient} from '../../apps/daemon/src/codex-service.js';
 import {sqliteTransportPath} from '../../packages/storage/src/sqlite-path.js';
-import type {Snapshot} from '../../packages/codex-client/src/types.js';
+import {CodexClientError,type Snapshot} from '../../packages/codex-client/src/types.js';
 import {CodexSession} from '../../packages/codex-client/src/session.js';
 import {nativeEnvironment} from '../../packages/codex-client/src/transport.js';
 import {limits} from '../../packages/codex-client/src/validation.js';
@@ -50,6 +50,13 @@ test('native close failure is cached without replacing falsy original errors or 
   });
 });
 
+test('a later close-method replacement cannot take over the original native owner',async t=>{
+  const db=memory(t),custody=new NativeSessionCustody(db);let originalCloses=0,replacementCloses=0;
+  const client=await custody.open(async()=>({id:randomUUID(),close:async()=>{originalCloses++;}}),value=>value.id);
+  client.close=async()=>{replacementCloses++;throw Error('Unrelated replacement');};
+  await custody.close(client);assert.equal(originalCloses,1);assert.equal(replacementCloses,0);assert.equal(rows(db)[0]!.close_proof,'owned-transport');
+});
+
 test('failed cleanup observation retains the first factory error and fences later allocation',async t=>{
   const db=memory(t),custody=new NativeSessionCustody(db),original=Error('Original initialization failure');let starts=0;
   db.exec("CREATE TRIGGER refuse_custody_cleanup BEFORE UPDATE OF state ON native_session_custody WHEN NEW.state='closed' BEGIN SELECT RAISE(ABORT,'controlled cleanup save refusal'); END");
@@ -57,7 +64,9 @@ test('failed cleanup observation retains the first factory error and fences late
     lifecycle.beforeProcessAllocation();try{lifecycle.failedInitializationClosed();}catch{/* Real adapter preserves original error too. */}throw original;
   },()=>randomUUID()),error=>error===original);
   assert.equal(custody.faulted,true);assert.equal(rows(db)[0]!.state,'reserved');
+  const firstFault=custody.firstFailure;assert.ok(firstFault);assert.equal(firstFault.code,'JOURNAL_FAILURE');assert.match(String(firstFault.cause),/controlled cleanup save refusal/);
   await assert.rejects(custody.open(async()=>{starts++;return{id:randomUUID(),close:async()=>{}};},value=>value.id));assert.equal(starts,0);
+  assert.equal(custody.firstFailure,firstFault,'Later admission faults cannot replace the original custody fault');
 });
 
 test('physical close cannot certify a changed persisted connection binding',async t=>{
@@ -75,7 +84,8 @@ test('physical close cannot certify a changed persisted connection binding',asyn
 test('a genuine binding-save refusal still joins its original client and records confirmed physical cleanup',async t=>{
   const db=memory(t),custody=new NativeSessionCustody(db);let closes=0;const id=randomUUID();
   db.exec("CREATE TRIGGER refuse_custody_binding BEFORE UPDATE OF state ON native_session_custody WHEN NEW.state='bound' BEGIN SELECT RAISE(ABORT,'controlled binding refusal'); END");
-  await assert.rejects(custody.open(async()=>({id,close:async()=>{closes++;}}),value=>value.id),/controlled binding refusal/);
+  await assert.rejects(custody.open(async()=>({id,close:async()=>{closes++;}}),value=>value.id),error=>
+    error instanceof CodexClientError&&error.code==='JOURNAL_FAILURE'&&String(error.cause).includes('controlled binding refusal'));
   assert.equal(closes,1);assert.equal(custody.faulted,true);assert.equal(rows(db)[0]!.state,'closed');assert.equal(rows(db)[0]!.connection_id,id);assert.equal(rows(db)[0]!.close_proof,'owned-transport');
 });
 

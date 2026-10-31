@@ -185,17 +185,19 @@ test('rotation retires the earlier parent and the new task keeps the exact captu
 test('service close keeps the original task failure, closes its client and caches falsy outcomes', async t => {
   for (const first of [new Error('original task cleanup'), null, undefined, false, 0]) {
     await t.test(String(first), async st => {
-      const f = await fixture(st); await f.ready();
       const actualTaskClose = ChatTaskCoordinator.prototype.close;
-      const actualClientClose = f.clients[0]!.close.bind(f.clients[0]);
+      const actualClientClose = CodexSession.prototype.close;
       const later = new Error('later client cleanup');
       let taskCloses = 0, clientCloses = 0;
       st.mock.method(ChatTaskCoordinator.prototype, 'close', async function (this: ChatTaskCoordinator) {
         taskCloses++; await actualTaskClose.call(this); throw first;
       });
-      st.mock.method(f.clients[0]!, 'close', async () => {
-        clientCloses++; await actualClientClose(); throw later;
+      // Install the fault before the factory publishes its original owner.
+      // Replacing a method afterwards must not replace captured custody.
+      st.mock.method(CodexSession.prototype, 'close', async function(this:CodexSession) {
+        clientCloses++; await actualClientClose.call(this); throw later;
       });
+      const f = await fixture(st); await f.ready();
       const expectFirst = async (operation: () => Promise<void>) => {
         let rejected = false, error: unknown;
         try { await operation(); } catch (value) { rejected = true; error = value; }

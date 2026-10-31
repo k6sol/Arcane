@@ -29,8 +29,14 @@ export class NativeSessionCustody {
   readonly #db:DatabaseSync;
   readonly #bindings=new WeakMap<object,Binding>();
   #faulted=false;
+  #firstFailure:CodexClientError|null=null;
   get faulted():boolean{return this.#faulted;}
-  #guard<T>(operation:()=>T):T{try{return operation();}catch(error){this.#faulted=true;throw error;}}
+  get firstFailure():CodexClientError|null{return this.#firstFailure;}
+  #guard<T>(operation:()=>T):T{try{return operation();}catch(error){
+    const failure=error instanceof CodexClientError?error:new CodexClientError('JOURNAL_FAILURE','Native session custody could not be saved or verified.');
+    if(failure!==error)Object.defineProperty(failure,'cause',{value:error});
+    this.#firstFailure??=failure;this.#faulted=true;throw failure;
+  }}
   constructor(db:DatabaseSync,requireExisting=false){
     this.#db=db;
     const schema=db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='native_session_custody'").get() as {sql:string}|undefined;

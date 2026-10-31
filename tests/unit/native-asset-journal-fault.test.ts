@@ -28,7 +28,11 @@ async function fixture(t:test.TestContext) {
  locker=new DatabaseSync(join(directory,'codex-actions.sqlite'),{timeout:0,allowExtension:false});
  const action=(action:string,fields:Record<string,unknown>={})=>service.action({requestId:randomUUID(),connectionId:action==='connect'?null:connectionId,action,...fields});
  const ready=async()=>{assert.equal((await action('connect')).record.state,'acknowledged');assert.equal((await action('thread-start')).record.state,'acknowledged');assert.equal((await action('grant-assets',{threadId})).record.state,'acknowledged');};
- t.after(async()=>{if(locked)locker.exec('ROLLBACK');locker.close();await service.close();registry.close();const part=relative(boundary,resolve(root));assert.ok(part&&!isAbsolute(part)&&part!=='..'&&!part.startsWith('..'+sep));assert.ok(!lstatSync(root).isSymbolicLink());rmSync(root,{recursive:true,force:true});});
+ t.after(async()=>{
+  if(locked)locker.exec('ROLLBACK');locker.close();
+  try{if(locked)await assert.rejects(service.close(),journalFault);else await service.close();}
+  finally{registry.close();const part=relative(boundary,resolve(root));assert.ok(part&&!isAbsolute(part)&&part!=='..'&&!part.startsWith('..'+sep));assert.ok(!lstatSync(root).isSymbolicLink());rmSync(root,{recursive:true,force:true});}
+ });
  return {registry,service,threadId,connectionId,snapshot,action,ready,lock,setLockAt:(v:'thread'|'turn')=>lockAt=v,get token(){return token;},get closes(){return closes;},failReceiptUpdate:()=>locker.exec("CREATE TRIGGER fail_receipt BEFORE UPDATE ON actions BEGIN SELECT RAISE(ABORT,'owned fixture update refused'); END;"),journal:()=>({history:locker.prepare('SELECT count(*) AS n FROM native_history').get(),rows:locker.prepare('SELECT payload FROM actions').all()})};
 }
 const journalFault=(error:unknown)=>error instanceof Error && 'code' in error && error.code==='JOURNAL_FAILURE';
