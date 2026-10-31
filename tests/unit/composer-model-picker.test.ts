@@ -558,6 +558,59 @@ function activeState(status: 'starting' | 'inProgress' | 'cancelling' = 'inProgr
   return initial;
 }
 
+function completedTaskState(taskState: 'awaiting_verification' | 'verified') {
+  const initial = activeState(); initial.busy = false;
+  initial.snapshot!.thread!.turnStatus = 'completed'; initial.snapshot!.thread!.writeGranted = false;
+  initial.nativeAssets = { available: true, sealed: true, granted: false, admissionOpen: false };
+  initial.chatTasks = [{ taskId: randomUUID(), threadId: 'fixture-thread', sessionId: 'fixture-session',
+    connectionId: initial.snapshot!.connectionId, state: taskState, round: 0, reason: null, reportDigest: null, retained: true }];
+  return initial;
+}
+
+test('browser completed native turn keeps picker choices advisory while its task awaits verification', { skip: !browserModule, timeout: 30000 }, async t => {
+  const initial = completedTaskState('awaiting_verification'), f = await browserFixture(t, initial), { page } = f;
+  await page.evaluate(() => (window as any).fixtureChat.enableChatTabs());
+  const actualTaskModel = await page.evaluate(() => (window as any).fixtureChat.workflowModelSelection());
+  const draft = 'Keep the verification task and this next-message draft.\n  ';
+  await page.locator('#codex-composer').fill(draft);
+  assert.equal(await page.evaluate(() => (window as any).fixtureChat.currentStateView().nativeBoundToActiveChat), true);
+  const taskScope = await page.evaluate(() => (window as any).fixtureChat.taskProposalScope());
+  assert.equal(taskScope.taskId, initial.chatTasks![0]!.taskId);
+  assert.equal(taskScope.connectionId, initial.snapshot!.connectionId);
+  assert.equal(taskScope.threadId, initial.snapshot!.thread!.threadId);
+  assert.equal(taskScope.sessionId, initial.snapshot!.thread!.sessionId);
+  assert.equal(taskScope.active, true);
+  assert.equal(await page.locator('#codex-interrupt').isDisabled(), false, 'The completed turn still has an exact owned task to stop');
+  await f.choose();
+  assert.deepEqual(f.posts, [], 'A completed native turn does not settle its awaiting-verification task');
+  assert.deepEqual(await page.evaluate(() => (window as any).fixtureChat.currentStateView().activeChat.selection), { model: 'fixture-beta', effort: 'high' });
+  assert.equal(await page.evaluate(async () => (window as any).fixtureChat.captureModelPicker().select('fixture-beta', 'medium')), 'applied');
+  await f.refresh();
+  assert.deepEqual(f.posts, [], 'The shared picker capture must also stage its choice without a native select');
+  assert.deepEqual(await page.evaluate(() => (window as any).fixtureChat.currentStateView().activeChat.selection), { model: 'fixture-beta', effort: 'medium' });
+  assert.deepEqual(await page.evaluate(() => (window as any).fixtureChat.workflowModelSelection()), actualTaskModel);
+  assert.deepEqual(f.observed().snapshot, initial.snapshot);
+  assert.deepEqual(f.observed().chatTasks, initial.chatTasks);
+  assert.deepEqual(f.observed().nativeAssets, initial.nativeAssets);
+  assert.equal(await page.locator('#codex-composer').inputValue(), draft);
+  assert.deepEqual(await page.evaluate(() => (window as any).fixtureChat.taskProposalScope()), taskScope);
+  assert.equal(await page.locator('#codex-interrupt').isDisabled(), false, 'A picker preference must retain task ownership');
+});
+
+test('browser completed native turn with a settled task still applies an explicit native model choice', { skip: !browserModule, timeout: 30000 }, async t => {
+  const initial = completedTaskState('verified'), f = await browserFixture(t, initial), { page } = f;
+  await page.evaluate(() => (window as any).fixtureChat.enableChatTabs());
+  const draft = 'Keep this settled conversation draft.  '; await page.locator('#codex-composer').fill(draft);
+  assert.equal(await page.evaluate(async () => (window as any).fixtureChat.captureModelPicker().select('fixture-beta', 'high')), 'applied');
+  await f.settled();
+  assert.equal(f.posts.length, 1); assert.equal(f.posts[0]!.action, 'select');
+  assert.deepEqual(f.observed().snapshot!.thread!.selection, { model: 'fixture-beta', effort: 'high' });
+  assert.equal(f.observed().snapshot!.connected, true);
+  assert.deepEqual(f.observed().chatTasks, initial.chatTasks);
+  assert.deepEqual(f.observed().nativeAssets, initial.nativeAssets);
+  assert.equal(await page.locator('#codex-composer').inputValue(), draft);
+});
+
 test('browser visible picker stages active and restored unbound owned preferences without changing actual task model or starting native work', { skip: !browserModule, timeout: 30000 }, async t => {
   const initial = activeState(), f = await browserFixture(t, initial), { page } = f;
   await page.evaluate(() => (window as any).fixtureChat.enableChatTabs());

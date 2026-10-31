@@ -3043,7 +3043,7 @@ export class CodexChat {
       select:async(model:string,effort:string)=>{
         if(!current()||!this.canSelectModel()||!models.some(row=>row.id===model&&row.efforts.includes(effort)))return 'rejected' as const;used=true;
         const selected=this.displaySelection();if(selected?.model===model&&selected.effort===effort)return 'applied' as const;
-        const local=!!this.tabs&&(this.tabs.active()?.kind==='draft'||!this.tabs.bound(this.state)||!this.normal()||!IDLE.includes(this.snapshot()?.thread?.turnStatus??''));
+        const local=this.advisoryModelSelection();
         const dispatch=this.dispatch('select',{model,effort}),localEpoch=this.pickerCaptureEpoch;
         const receipt=await dispatch;
         if(receipt?.state==='unknown'||receipt?.state==='pending')return 'unknown' as const;
@@ -3722,6 +3722,12 @@ export class CodexChat {
     // During a task or before a saved chat is resumed, changes are advisory
     // preferences for the next user Send; no native operation starts here.
     return this.modelBlockReason()===null;
+  }
+  private advisoryModelSelection():boolean {
+    // Native completion can precede task verification. A picker preference must
+    // not cancel that still-owned task through the native select action.
+    return !!this.tabs&&(this.tabs.active()?.kind==='draft'||!this.tabs.bound(this.state)||!this.normal()||
+      !IDLE.includes(this.snapshot()?.thread?.turnStatus??'')||!!this.currentTask());
   }
   private canStartConversation() {
     if(!this.providerAllowsCodex())return false;
@@ -4443,7 +4449,7 @@ export class CodexChat {
     if(action==='thread-start'&&internal&&(!this.normal()||!!this.snapshot()?.thread||!this.snapshot()?.selection))return;
     if(action==='select'&&!internal) {
       if(!this.canSelectModel())return;
-      if(this.tabs&&(this.tabs.active()?.kind==='draft'||!this.tabs.bound(this.state)||!this.normal()||!IDLE.includes(this.snapshot()?.thread?.turnStatus??''))) {
+      if(this.tabs&&this.advisoryModelSelection()) {
         try {prepareCodexAction(this.state,action,fields);}catch{return;}
         this.imageRequest?.abort();
         this.modelSourceRevision++;this.modelSourceOwnerRevision++;

@@ -21,6 +21,8 @@ Depends on: 1. Owner: chat functionality.
 
 ## Acceptance record
 
+Scoped model-switch correction: [[Bugs/Model Selection During Verification]] keeps picker choices advisory while the original task remains unfinished after native reply completion. The former picker-issued native select is reproduced before the fix;124 focused UI/service cases pass afterward without skips. Packaged authenticated customer acceptance and subsequent Send handoff remain open.
+
 - [ ] Required behavior implemented against current source.
 - [ ] Each outcome above verified at its stated scope.
 - [ ] Evidence and remaining limitations recorded below.
