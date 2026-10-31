@@ -22,6 +22,8 @@ Check a goal off only when its acceptance criteria pass and its evidence is reco
 
 ## Execution
 
+Current functional checkpoint: [[Sessions/2026-10-31 Browser Sign-in and Error References]] covers direct sign-in and readable, stable error notifications. Exact hosted delivery and legacy unknown-task recovery remain outstanding; whole-goal checkboxes stay open.
+
 Start with G01. Work in parallel on chat/session reliability, asset/plugin integration and task/runtime correctness once the baseline is clear. Diagnostics accompanies all three. Accounts and billing are a public-launch requirement, not a reason to delay usable local development.
 
 ## Goal lifecycle

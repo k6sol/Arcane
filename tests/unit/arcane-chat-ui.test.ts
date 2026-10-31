@@ -292,7 +292,7 @@ const browserModule = process.env.ARCANE_UI_BROWSER_MODULE;
 test('Edge: the composer model list shows ChatGPT, Claude and Arcane columns, stacking on narrow widths', { skip: !browserModule, timeout: 60000 }, async t => {
   const build = process.env.ARCANE_UI_BUILD_DIR ?? 'dist', shots = resolve(process.env.ARCANE_UI_SCREENSHOT ?? 'runtime/claude-codex-team/claude-audit/arcane-chat/shots');
   await mkdir(shots, { recursive: true });
-  const modules = ['codex-chat', 'chat-tabs', 'codex-history', 'workspace-shell', 'claude-chat', 'claude-preferences', 'arcane-chat', 'task-usage', 'task-usage-ui', 'script-diff'];
+  const modules = ['codex-chat', 'user-errors', 'chat-tabs', 'codex-history', 'workspace-shell', 'claude-chat', 'claude-preferences', 'arcane-chat', 'task-usage', 'task-usage-ui', 'script-diff'];
   const fixture = `import {ClaudeChat, linkChatProviders} from '/claude-chat.js';
     import {ArcaneChat} from '/arcane-chat.js';
     const f = window.fx = {};

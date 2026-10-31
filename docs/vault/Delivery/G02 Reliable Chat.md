@@ -5,6 +5,8 @@ tags: [arcane]
 ---
 # Make chat dependable
 
+Scoped follow-up: direct Connect now invokes native browser sign-in, retaining verified saved authentication, explicit cancellation and original workspace/provider ownership across waits. The real host protocol remains unchanged; no Settings fallback or model turn is introduced. Local tests distinguish account authentication from the still-blocked native workspace. See [[Sessions/2026-10-31 Browser Sign-in and Error References]]. Customer connection and the three legacy unknown tasks remain open.
+
 Status: **In progress**. Priority and original scope: Make chat dependable — P0, queued.
 
 Deliver: instant local submission feedback, durable prompts/drafts/history/folders, working model selection with remembered model/effort, shared Codex/Claude conversation context through supported adapters, responsive cancellation, and chat remaining accessible after previews.

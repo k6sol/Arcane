@@ -868,7 +868,7 @@ const FENCE = '`'.repeat(3);
 test('Edge: Codex and Claude share one chat surface; only provider labels differ', { skip: !browserModule, timeout: 60000 }, async t => {
   const build = process.env.ARCANE_UI_BUILD_DIR ?? 'dist', shots = resolve(process.env.ARCANE_UI_SCREENSHOT ?? 'runtime/claude-codex-team/claude-audit/unify/shots');
   await mkdir(shots, { recursive: true });
-  const modules = ['codex-chat', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat', 'claude-preferences', 'task-usage', 'task-usage-ui'];
+  const modules = ['codex-chat', 'user-errors', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat', 'claude-preferences', 'task-usage', 'task-usage-ui'];
   const reply = JSON.stringify('Here is the lobby plan.\n\n' + FENCE + 'lua\nlocal lobby = workspace.Lobby\n' + FENCE);
   const fixture = `import {CodexChat,CodexChatApi} from '/codex-chat.js';
     import {startProviderSetup} from '/provider-setup.js';
@@ -974,7 +974,7 @@ test('Edge: Codex and Claude share one chat surface; only provider labels differ
 test('Edge: one model list switches between ChatGPT and Claude in one click and the draft follows', { skip: !browserModule, timeout: 60000 }, async t => {
   const build = process.env.ARCANE_UI_BUILD_DIR ?? 'dist', shots = resolve(process.env.ARCANE_UI_SCREENSHOT ?? 'runtime/claude-codex-team/claude-audit/xprovider/shots');
   await mkdir(shots, { recursive: true });
-  const modules = ['codex-chat', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat', 'claude-preferences', 'task-usage', 'task-usage-ui'];
+  const modules = ['codex-chat', 'user-errors', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat', 'claude-preferences', 'task-usage', 'task-usage-ui'];
   const fixture = `import {CodexChat,CodexChatApi} from '/codex-chat.js';
     import {startProviderSetup} from '/provider-setup.js';
     import {startWorkspaceShell} from '/workspace-shell.js';
@@ -1101,7 +1101,7 @@ test('Edge: one model list switches between ChatGPT and Claude in one click and 
 test('Edge: usage-limit notice offers the other provider in both directions and the draft follows', { skip: !browserModule, timeout: 60000 }, async t => {
   const build = process.env.ARCANE_UI_BUILD_DIR ?? 'dist', shots = resolve(process.env.ARCANE_UI_SCREENSHOT ?? 'runtime/claude-codex-team/claude-audit/usage/shots');
   await mkdir(shots, { recursive: true });
-  const modules = ['codex-chat', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat', 'claude-preferences', 'task-usage', 'task-usage-ui'];
+  const modules = ['codex-chat', 'user-errors', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat', 'claude-preferences', 'task-usage', 'task-usage-ui'];
   const fixture = `import {CodexChat,CodexChatApi} from '/codex-chat.js';
     import {startProviderSetup} from '/provider-setup.js';
     import {startWorkspaceShell} from '/workspace-shell.js';
@@ -1199,7 +1199,7 @@ test('Edge: usage-limit notice offers the other provider in both directions and 
 test('Edge: switching between signed-in ChatGPT and Claude never shows the sign-in card; a limit shows its notice, model mark and Retry', { skip: !browserModule, timeout: 90000 }, async t => {
   const build = process.env.ARCANE_UI_BUILD_DIR ?? 'dist', shots = resolve(process.env.ARCANE_UI_SCREENSHOT ?? 'runtime/claude-codex-team/claude-audit/usage');
   await mkdir(shots, { recursive: true });
-  const modules = ['codex-chat', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat', 'claude-preferences', 'task-usage', 'task-usage-ui'];
+  const modules = ['codex-chat', 'user-errors', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat', 'claude-preferences', 'task-usage', 'task-usage-ui'];
   // Native status answers slowly (like the real CLI), so a gate shown while status is re-read would be caught.
   const fixture = `import {CodexChat,CodexChatApi} from '/codex-chat.js';
     import {startProviderSetup} from '/provider-setup.js';
@@ -1818,7 +1818,7 @@ test('choice blocks: restored rendering ignores a send callback and resolves the
 test('Edge: Claude activity lines, change card, queue chips, usage meter and the composer command menu',{ skip: !browserModule, timeout: 60000 }, async t => {
   const build = process.env.ARCANE_UI_BUILD_DIR ?? 'dist', shots = resolve(process.env.ARCANE_UI_SCREENSHOT ?? 'runtime/claude-codex-team/claude-audit/chatux/shots');
   await mkdir(shots, { recursive: true });
-  const modules = ['codex-chat', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat', 'claude-preferences', 'task-usage', 'task-usage-ui'];
+  const modules = ['codex-chat', 'user-errors', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat', 'claude-preferences', 'task-usage', 'task-usage-ui'];
   const fixture = `import {CodexChat,CodexChatApi} from '/codex-chat.js';
     import {startProviderSetup} from '/provider-setup.js';
     import {startWorkspaceShell} from '/workspace-shell.js';
@@ -1988,7 +1988,7 @@ test('Edge: Claude activity lines, change card, queue chips, usage meter and the
 test('Edge: Claude edit and rewind with the undo option, plan approval and option buttons', { skip: !browserModule, timeout: 60000 }, async t => {
   const build = process.env.ARCANE_UI_BUILD_DIR ?? 'dist', shots = resolve(process.env.ARCANE_UI_SCREENSHOT ?? 'runtime/claude-codex-team/claude-audit/rewind/shots');
   await mkdir(shots, { recursive: true });
-  const modules = ['codex-chat', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat', 'claude-preferences', 'task-usage', 'task-usage-ui'];
+  const modules = ['codex-chat', 'user-errors', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat', 'claude-preferences', 'task-usage', 'task-usage-ui'];
   const create = { parent: { instanceId: 'i', sessionId: 's', root: 'Workspace', pathSegments: [], className: 'Folder' }, className: 'Part', name: 'RedDoor' };
   const saved = [
     { id: '00000000-0000-4000-8000-000000000001', role: 'user', text: 'Make a lobby with a spawn point', at: '2026-10-17T10:00:00.000Z' },
@@ -2456,7 +2456,7 @@ test('runtime recovery preserves raw composer text and queued messages without r
 test('Edge: Enter queues and explicit Steer guides a running Claude reply while build progress continues', { skip: !browserModule, timeout: 60000 }, async t => {
   const build = process.env.ARCANE_UI_BUILD_DIR ?? 'dist', shots = resolve(process.env.ARCANE_UI_SCREENSHOT ?? 'runtime/claude-codex-team/claude-audit/steer/shots');
   await mkdir(shots, { recursive: true });
-  const modules = ['codex-chat', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat', 'claude-preferences', 'task-usage', 'task-usage-ui'];
+  const modules = ['codex-chat', 'user-errors', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat', 'claude-preferences', 'task-usage', 'task-usage-ui'];
   const fixture = `import {CodexChat,CodexChatApi} from '/codex-chat.js';
     import {startProviderSetup} from '/provider-setup.js';
     import {startWorkspaceShell} from '/workspace-shell.js';

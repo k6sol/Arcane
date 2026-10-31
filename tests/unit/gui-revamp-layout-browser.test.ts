@@ -97,6 +97,7 @@ test('Edge: production picker and settings handlers open reachable surfaces afte
     .replace('</body>', '<script type="module" src="/gui-controller-fixture.js"></script></body>');
   const files = new Map([
     ['/studio.css', [resolve('apps/desktop/public/studio.css'), 'text/css']],
+    ['/user-errors.js', [resolve(build, 'apps/desktop/src/user-errors.js'), 'text/javascript']],
     ['/codex-chat.js', [resolve(build, 'apps/desktop/src/codex-chat.js'), 'text/javascript']],
     ['/workspace-shell.js', [resolve(build, 'apps/desktop/src/workspace-shell.js'), 'text/javascript']],
     ['/packages/protocol/src/chat-queue.js', [resolve(build, 'packages/protocol/src/chat-queue.js'), 'text/javascript']],

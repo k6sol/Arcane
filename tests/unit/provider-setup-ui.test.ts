@@ -36,9 +36,9 @@ test('remembered provider accepts only bounded presentation metadata, never auth
 });
 test('real Edge setup: bounded startup status, explicit login/install, auth gate and draft preserved',{skip:!process.env.ARCANE_UI_BROWSER_MODULE,timeout:30000},async t=>{
  const {chromium}=await import(pathToFileURL(resolve(process.env.ARCANE_UI_BROWSER_MODULE!)).href);const browser=await chromium.launch({headless:true,executablePath:process.env.ARCANE_UI_BROWSER_EXE});t.after(()=>browser.close());
- const build=process.env.ARCANE_UI_BUILD_DIR??resolve('dist'),html=await readFile('apps/desktop/public/studio.html','utf8'),js=await readFile(join(build,'apps/desktop/src/provider-setup.js'),'utf8'),update=await readFile(join(build,'apps/desktop/src/desktop-update.js'),'utf8'),css=await readFile('apps/desktop/public/studio.css','utf8');
- const server=createServer((req,res)=>{const p=req.url?.split('?')[0],value=p==='/fixture'?html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/g,''):p==='/provider-setup.js'?js:p==='/desktop-update.js'?update:p==='/studio.css'?css:'';res.writeHead(value?200:404,{'Content-Type':p==='/fixture'?'text/html':p==='/studio.css'?'text/css':'text/javascript'});res.end(value);});await new Promise<void>(done=>server.listen(0,'127.0.0.1',done));t.after(async()=>{server.closeAllConnections();await new Promise<void>(done=>server.close(()=>done()));});const port=(server.address() as {port:number}).port;
- const page=await browser.newPage(),errors:string[]=[];page.on('pageerror',(e:Error)=>errors.push(e.message));await page.goto('http://127.0.0.1:'+port+'/fixture');
+  const build=process.env.ARCANE_UI_BUILD_DIR??resolve('dist'),html=await readFile('apps/desktop/public/studio.html','utf8'),js=await readFile(join(build,'apps/desktop/src/provider-setup.js'),'utf8'),errorsJs=await readFile(join(build,'apps/desktop/src/user-errors.js'),'utf8'),update=await readFile(join(build,'apps/desktop/src/desktop-update.js'),'utf8'),css=await readFile('apps/desktop/public/studio.css','utf8');
+  const server=createServer((req,res)=>{const p=req.url?.split('?')[0],value=p==='/fixture'?html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/g,''):p==='/provider-setup.js'?js:p==='/user-errors.js'?errorsJs:p==='/desktop-update.js'?update:p==='/studio.css'?css:'';res.writeHead(value?200:404,{'Content-Type':p==='/fixture'?'text/html':p==='/studio.css'?'text/css':'text/javascript'});res.end(value);});await new Promise<void>(done=>server.listen(0,'127.0.0.1',done));t.after(async()=>{server.closeAllConnections();await new Promise<void>(done=>server.close(()=>done()));});const port=(server.address() as {port:number}).port;
+ const page=await browser.newPage(),errors:string[]=[];page.setDefaultTimeout(8000);page.on('pageerror',(e:Error)=>errors.push(e.message));await page.goto('http://127.0.0.1:'+port+'/fixture');
  await page.evaluate(async()=>{const modulePath:string='/provider-setup.js',m=await import(modulePath);const w=window as unknown as Record<string,any>;w.calls=[];w.account=null;w.subscriber=()=>{};w.providerFixtureState={version:1,provider:'codex',installed:true,auth:'signed-out',cliVersion:'1.0.0',busy:false,message:null};
  const bridge=Object.freeze({version:1,...Object.fromEntries(['status','login','install','launch'].map(action=>[action,async(provider:string)=>{w.calls.push({action,provider});return {...w.providerFixtureState,provider};}]))});
  w.controller=m.startProviderSetup(document,{chat:{providerConnectionStatus:()=>w.account,subscribeProviderStateChange:(fn:()=>void)=>{w.subscriber=fn;return()=>{};}},nativeBridge:bridge});
@@ -74,9 +74,11 @@ test('real Edge setup: bounded startup status, explicit login/install, auth gate
  await exposePane('workspace-settings');await page.locator('#provider-setup-refresh').click();await page.waitForFunction(()=>(window as any).calls.length===8);
  await page.evaluate(()=>(document.getElementById('settings-drawer') as HTMLDialogElement).close());assert.match(await page.locator('#provider-login-start').innerText(),/Disconnect old session/);assert.deepEqual(await page.evaluate(()=>(window as any).sessionActions),[]);
  await page.locator('#provider-login-start').click();assert.deepEqual(await page.evaluate(()=>(window as any).sessionActions),['disconnect']);
- await page.locator('#provider-login-start').click();assert.deepEqual(await page.evaluate(()=>(window as any).sessionActions),['disconnect','connect']);assert.equal(await page.evaluate(()=>(window as any).calls.length),8);
+  await page.locator('#provider-login-start').click();assert.deepEqual(await page.evaluate(()=>(window as any).sessionActions),['disconnect','connect']);assert.equal(await page.evaluate(()=>(window as any).calls.length),9);
+  assert.deepEqual(await page.evaluate(()=>(window as any).calls.at(-1)),{action:'login',provider:'codex'},'Connect verifies the original provider login instead of opening Settings');
  assert.equal(await page.locator('#codex-composer').inputValue(),'Keep my unsent draft');
- await page.evaluate(()=>{const w=window as any;w.controller.stop();w.controller.resume();});await page.waitForFunction(()=>(window as any).calls.length===9);assert.equal(await page.evaluate(()=>(window as any).calls.length),9);
+ await page.evaluate(()=>{const w=window as any;w.controller.stop();w.controller.resume();});await page.waitForFunction(()=>(window as any).calls.length===10);assert.equal(await page.evaluate(()=>(window as any).calls.length),10);
+ assert.deepEqual(await page.evaluate(()=>(window as any).calls.at(-1)),{action:'status',provider:'codex'},'Resume makes one fresh status read, without another login.');
  await page.evaluate(async()=>{
    const w=window as any;w.account={connected:true,ready:true,fresh:true,auth:'subscription'};w.subscriber();
    w.arcaneDesktop=Object.freeze({updates:Object.freeze({version:1,status:async()=>({version:1,state:'available',buildId:'a'.repeat(64)+'-11111111-2222-4333-8444-555555555555',message:'Update ready'}),restart:async()=>({state:'refused',message:'Fixture only'})})});
@@ -88,7 +90,7 @@ test('real Edge setup: bounded startup status, explicit login/install, auth gate
  assert.equal(await page.locator('#provider-login-gate').isVisible(),false,'update banner and temporary read failure preserve the authenticated chat surface');
  assert.equal(await page.evaluate(()=>(window as any).controller.isSignedIn()),false,'native authority still requires fresh state');
  assert.equal(await page.locator('#codex-composer').inputValue(),'Keep my unsent draft');
- assert.equal(await page.evaluate(()=>(window as any).calls.length),9,'displaying an update starts no sign-in or provider request');
+ assert.equal(await page.evaluate(()=>(window as any).calls.length),10,'displaying an update starts no sign-in or provider request');
  // Native cancellation and model rotation may briefly publish no ready client.
  await page.evaluate(()=>{const w=window as any;w.account={connected:false,ready:false,fresh:true,auth:'unknown'};w.subscriber();});
  assert.equal(await page.locator('#provider-login-gate').isVisible(),false,'native handoff does not flash the login screen');
@@ -101,7 +103,7 @@ test('real Edge setup: bounded startup status, explicit login/install, auth gate
  assert.equal(await page.locator('#provider-login-gate').isVisible(),true,'an explicit signed-out observation clears presentation evidence');
  await page.evaluate(()=>{const w=window as any;w.account={connected:true,ready:true,fresh:true,auth:'subscription'};w.subscriber();});
  assert.equal(await page.locator('#provider-login-gate').isVisible(),false);
- assert.equal(await page.evaluate(()=>(window as any).calls.length),9,'handoff rendering starts no login or native status call');
+ assert.equal(await page.evaluate(()=>(window as any).calls.length),10,'handoff rendering starts no login or native status call');
  await page.evaluate(()=>{(window as any).updater.stop();(window as any).controller.cleanup();});
  // A cold launch checks saved auth first; metadata may stay pending without showing Sign in.
  await page.evaluate(async()=>{

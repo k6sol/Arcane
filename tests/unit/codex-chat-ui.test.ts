@@ -142,7 +142,9 @@ test('Codex bundle is browser-only and boot shares takeControlToken without new 
   const source=await readFile(resolve('apps/desktop/src/codex-chat.ts'),'utf8'),boot=await readFile(resolve('apps/desktop/src/studio.ts'),'utf8');
   assert.doesNotMatch(source,/\.innerHTML|\.outerHTML|\beval\s*\(|new Function|localStorage|sessionStorage|initiatedBy\s*:/);
   assert.match(boot,/new CodexChatApi\(token\)/);assert.match(boot,/takeControlToken/);
-  const js=await readFile(resolve(process.env.ARCANE_UI_BUILD_DIR??'dist','apps/desktop/src/codex-chat.js'),'utf8');assert.doesNotMatch(js,/^\s*import\s|\brequire\s*\(|\bprocess\.|node:/m);
+  const js=await readFile(resolve(process.env.ARCANE_UI_BUILD_DIR??'dist','apps/desktop/src/codex-chat.js'),'utf8');
+  const errorImport=/^import \{ USER_ERRORS, userError, userErrorLabel, userErrorText \} from '\.\/user-errors\.js';$/m;
+  assert.match(js,errorImport);assert.doesNotMatch(js.replace(errorImport,''),/^\s*import\s|\brequire\s*\(|\bprocess\.|node:/m);
 });
 
 function mockClient(projectPath:string,threadSuffix='') {
@@ -180,6 +182,7 @@ async function harness(t:test.TestContext,spawned=false,distinctThreads=false,fi
   for(const name of ['asset-viewer','automatic-asset-previews','glb-preflight']) assets.set('/'+name+'.js',resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist','apps/desktop/src/'+name+'.js'));
   assets.set('/codex-history.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/codex-history.js'));
   assets.set('/desktop-verification.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/desktop-verification.js'));
+  assets.set('/user-errors.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/user-errors.js'));
   assets.set('/provider-setup.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/provider-setup.js'));
   assets.set('/native-handoff.js', resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/native-handoff.js'));
   assets.set('/studio-key-settings.js', resolve(build, 'apps/desktop/src/studio-key-settings.js'));

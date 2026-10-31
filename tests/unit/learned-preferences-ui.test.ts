@@ -114,7 +114,7 @@ test('Edge: rate a build, explain it, get a Learning note from the next message,
   const root = await mkdtemp(join(tmpdir(), 'arcane-learned-ui-')); t.after(() => rm(root, { recursive: true, force: true }));
   const store = createPreferenceStore({ projectDirectory: join(root, 'project'), globalDirectory: join(root, 'global') });
   const routes = preferenceRoutes({ store, agent: () => false });
-  const modules = ['codex-chat', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat', 'claude-preferences', 'task-usage', 'task-usage-ui', 'learned-preferences'];
+  const modules = ['codex-chat', 'user-errors', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat', 'claude-preferences', 'task-usage', 'task-usage-ui', 'learned-preferences'];
   const fixture = `import {CodexChat,CodexChatApi} from '/codex-chat.js';
     import {startProviderSetup} from '/provider-setup.js';
     import {startWorkspaceShell} from '/workspace-shell.js';

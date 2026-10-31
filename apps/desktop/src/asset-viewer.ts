@@ -1,4 +1,5 @@
 /// <reference lib="dom" />
+import {userError,userErrorText} from './user-errors.js';
 import { fetchVerifiedArtifact, readDownloadArtifacts } from './asset-downloads.js';
 import { validateGlb } from './glb-preflight.js';
 import { AssetReviewCard } from './asset-review.js';
@@ -356,7 +357,7 @@ export class AssetViewerPanel {
     } catch {
       if (epoch === this.epoch) { this.runtime?.dispose(); this.runtime = null; }
       // Do not echo loader/network errors or untrusted GLB names into the product.
-      if (epoch === this.epoch && current() && !controller.signal.aborted) { status.textContent = '3D preview unavailable. Check the asset’s export and validation report.'; setPhase('stopped'); }
+      if (epoch === this.epoch && current() && !controller.signal.aborted) { status.textContent = userErrorText(userError(null,'preview')); setPhase('stopped'); }
     } finally {
       clearTimeout(timer);
       if (!current() && epoch === this.epoch) this.clear();

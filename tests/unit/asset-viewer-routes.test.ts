@@ -13,7 +13,7 @@ test('product serves only fixed offline viewer modules with same-origin and owne
   const workStore = new WorkStore({ directory: join(directory, 'work'), projectPath: directory });
   const app = await createConnectionLab({ cwd: resolve('.'), projectPath: directory, stateDirectory: join(directory, 'preferences'), studioStore, workStore, probe: async () => [], codexConnect: refuseNativeCodex });
   t.after(async () => { await app.close(); workStore.close(); studioStore.close(); });
-  const paths = ['/asset-viewer.js', '/glb-preflight.js', '/asset-viewer-runtime.mjs',
+  const paths = ['/asset-viewer.js', '/user-errors.js', '/glb-preflight.js', '/asset-viewer-runtime.mjs',
     '/vendor/three/build/three.module.js', '/vendor/three/build/three.core.js',
     '/vendor/three/examples/jsm/loaders/GLTFLoader.js', '/vendor/three/examples/jsm/controls/OrbitControls.js',
     '/vendor/three/examples/jsm/utils/BufferGeometryUtils.js', '/vendor/three/examples/jsm/utils/SkeletonUtils.js'];

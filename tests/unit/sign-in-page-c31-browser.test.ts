@@ -22,6 +22,7 @@ async function fixture(t: TestContext, viewport = { width: 1440, height: 900 }) 
   const html = await readFile('apps/desktop/public/studio.html'), css = await readFile('apps/desktop/public/studio.css');
   const build = process.env.ARCANE_UI_BUILD_DIR!;
   const modules = new Map([
+    ['/user-errors.js', await readFile(join(build, 'apps/desktop/src/user-errors.js'))],
     ['/provider-setup.js', await readFile(join(build, 'apps/desktop/src/provider-setup.js'))],
     ['/setup-checklist.js', await readFile(join(build, 'apps/desktop/src/setup-checklist.js'))],
   ]);

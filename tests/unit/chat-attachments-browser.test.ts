@@ -92,6 +92,7 @@ async function fixture(t: TestContext, options: { tabs?: boolean; initial?: Chat
   const originalHistory=structuredClone(observed.nativeHistory??null);
   const files = new Map([
     ['/studio.css', [resolve('apps/desktop/public/studio.css'), 'text/css']],
+    ['/user-errors.js', [resolve(build, 'apps/desktop/src/user-errors.js'), 'text/javascript']],
     ['/codex-chat.js', [resolve(build, 'apps/desktop/src/codex-chat.js'), 'text/javascript']],
     ['/chat-attachments.js', [resolve(build, 'apps/desktop/src/chat-attachments.js'), 'text/javascript']],
     ['/chat-tabs.js', [resolve(build, 'apps/desktop/src/chat-tabs.js'), 'text/javascript']],

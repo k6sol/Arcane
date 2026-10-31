@@ -47,6 +47,7 @@ async function fixture(t: TestContext) {
   const proof = await mkdtemp(join(process.env.ARCANE_UI_FIXTURE_DIR ?? tmpdir(), 'settings-confirmation-layer-'));
   const files = new Map([
     ...shippedFonts(), ['/studio.css', [resolve('apps/desktop/public/studio.css'), 'text/css']],
+    ['/user-errors.js', [resolve(build, 'apps/desktop/src/user-errors.js'), 'text/javascript']],
     ['/codex-chat.js', [resolve(build, 'apps/desktop/src/codex-chat.js'), 'text/javascript']],
     ['/workspace-shell.js', [resolve(build, 'apps/desktop/src/workspace-shell.js'), 'text/javascript']],
     ['/brand/arcane-ridges.png', [resolve('apps/desktop/public/brand/arcane-ridges.png'), 'image/png']],

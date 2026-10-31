@@ -115,6 +115,7 @@ test('real Edge: Settings › Project memory saves ARCANE.md and a chat suggesti
   const build = process.env.ARCANE_UI_BUILD_DIR ?? resolve('dist');
   const html = (await readFile('apps/desktop/public/studio.html', 'utf8')).replace(/<script\b[^>]*>[\s\S]*?<\/script>/g, '');
   const files: Record<string, string> = { '/fixture': html, '/studio.css': await readFile('apps/desktop/public/studio.css', 'utf8'),
+    '/user-errors.js': await readFile(join(build, 'apps/desktop/src/user-errors.js'), 'utf8'),
     '/project-memory.js': await readFile(join(build, 'apps/desktop/src/project-memory.js'), 'utf8'), '/codex-chat.js': await readFile(join(build, 'apps/desktop/src/codex-chat.js'), 'utf8') };
   const dir = await project(t), token = 'e'.repeat(64), routes = projectMemoryRoutes({ projectPath: dir });
   let origin = '';

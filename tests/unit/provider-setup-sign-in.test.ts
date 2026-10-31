@@ -23,7 +23,7 @@ class Control {
   }
   click() { this.emit('click', false); }
 }
-function fixture(options: { autoSelect?: boolean; preferred?: SetupProvider; state?: Partial<ProviderSetupState>; connectSavedLogin?: () => Promise<void>; initialStatus?: (provider: SetupProvider) => Promise<unknown>; noBridge?: boolean } = {}) {
+function fixture(options: { autoSelect?: boolean; preferred?: SetupProvider; state?: Partial<ProviderSetupState>; connectSavedLogin?: (isCurrent?:()=>boolean) => Promise<void>; initialStatus?: (provider: SetupProvider) => Promise<unknown>; noBridge?: boolean } = {}) {
   const elements = new Map(['provider-setup-panel', 'provider-login-gate', 'provider-setup-provider',
     'provider-login-start', 'provider-login-refresh', 'provider-login-codex', 'provider-login-claude',
     'provider-login-message', 'provider-setup-status', 'provider-setup-details', 'provider-setup-refresh',
@@ -59,6 +59,20 @@ function fixture(options: { autoSelect?: boolean; preferred?: SetupProvider; sta
 const settled = async () => { await new Promise<void>(resolve => setImmediate(resolve)); };
 const connected: ProviderConnectionStatus = { connected: true, ready: true, fresh: true, auth: 'subscription' };
 
+test('explicit Connect verifies sign-in directly and preserves a blocked native connection without Settings',async t=>{
+  const scopes:(()=>boolean)[]=[];
+  const f=fixture({state:{auth:'subscription'},connectSavedLogin:async current=>{assert.equal(typeof current,'function');scopes.push(current!);}});t.after(()=>f.controller.cleanup());
+  const settings:unknown[]=[];f.doc.addEventListener('workspace:settingsrequest',event=>settings.push((event as CustomEvent).detail));
+  await settled();scopes.length=0;f.control('codex-connect').disabled=true;
+  assert.equal(f.control('provider-login-start').textContent,'Connect Codex');f.control('provider-login-start').emit('click');await settled();
+  assert.equal(f.calls.at(-1),'login:codex');assert.equal(settings.length,0);assert.equal(scopes.length,1);assert.equal(scopes[0]!(),true);
+  assert.equal(f.control('codex-connect').disabled,true);assert.equal(f.controller.isSignedIn(),false);
+  assert.match(f.control('provider-login-message').textContent,/ChatGPT sign-in was verified\. Codex is not connected/);
+  assert.doesNotMatch(f.control('provider-login-message').textContent,/signed out|Settings/);
+  const original=scopes[0]!;f.choose('claude');f.choose('codex');await settled();assert.equal(original(),false,'the original provider epoch cannot revive through ABA');
+  f.connection(connected);assert.equal(f.controller.isSignedIn(),true);assert.equal(f.control('provider-setup-status').textContent,'Codex connected.');
+});
+
 test('an undecided startup check hides sign-in without exposing workspace actions', async t => {
   let release!: (value: unknown) => void;
   const f = fixture({ initialStatus: () => new Promise(resolve => { release = resolve; }) });
@@ -75,6 +89,16 @@ test('an undecided startup check hides sign-in without exposing workspace action
   assert.equal(f.control('provider-login-gate').hidden, false);
   assert.equal(f.controller.isSignedIn(), false);
   assert.deepEqual(f.calls, ['status:codex']);
+  assert.doesNotMatch(f.control('provider-login-message').textContent,/Error \d+/,'ordinary signed-out guidance is not an operation failure');
+});
+
+test('a rejected login keeps its safe explanation with Error 414 and starts no connection or Settings',async t=>{
+  let connects=0;const f=fixture({connectSavedLogin:async()=>{connects++;}});t.after(()=>f.controller.cleanup());await settled();
+  const settings:unknown[]=[];f.doc.addEventListener('workspace:settingsrequest',event=>settings.push((event as CustomEvent).detail));
+  const explanation='Native browser sign-in request could not be verified.';f.reply(async()=>{throw new Error(explanation);});
+  f.control('provider-login-start').emit('click');await settled();
+  const text=f.control('provider-login-message').textContent;assert.match(text,/Error 414/);assert.ok(text.includes(explanation));
+  assert.equal(f.calls.filter(value=>value==='login:codex').length,1);assert.equal(connects,0);assert.equal(settings.length,0);assert.equal(f.controller.isSignedIn(),false);
 });
 
 test('saved login restores the workspace during held or failed metadata without authorizing a turn', async t => {
@@ -91,7 +115,7 @@ test('saved login restores the workspace during held or failed metadata without 
   assert.equal(f.controller.isSignedIn(), false);
   fail(Error('Metadata unavailable')); await settled();
   assert.equal(stage.attributes.get('data-provider-view'), 'workspace');
-  assert.match(f.control('provider-setup-status').textContent, /Signed in\. Connection unavailable/);
+  assert.match(f.control('provider-setup-status').textContent, /Error 415.*Metadata unavailable/);
   assert.equal(f.controller.isSignedIn(), false);
   f.connection(connected); assert.equal(f.controller.isSignedIn(), true);
   f.connection({ ...connected, ready: false });
@@ -321,7 +345,7 @@ test('busy, API/cloud, signed-out, unavailable and hostile status cannot connect
     assert.equal(f.control('provider-setup-install').hidden, state.installed !== false);
     f.reply(async () => ({ version: 1, provider: 'codex', installed: true, auth: 'subscription', busy: false, cliVersion: '1', message: null, token: 'fixture' }));
     f.control('provider-setup-refresh').emit('click'); await settled();
-    assert.equal(connections, 0); assert.match(f.control('provider-setup-status').textContent, /Setup unavailable/);
+    assert.equal(connections, 0); assert.match(f.control('provider-setup-status').textContent, /Error 499.*Native provider status unavailable/);
     f.controller.cleanup();
   }
   const browser = fixture({ noBridge: true }); t.after(() => browser.controller.cleanup());
@@ -353,7 +377,7 @@ test('status is bounded and late responses after timeout, stop or cleanup cannot
   f.reply(() => new Promise(resolve => { release = resolve; })); f.control('provider-setup-refresh').emit('click');
   t.mock.timers.tick(35000); await settled();
   assert.equal(f.control('provider-login-start').disabled, false); assert.equal(f.control('provider-login-start').textContent, 'Check sign-in');
-  release(saved); await settled(); assert.equal(connections, 0); assert.match(f.control('provider-setup-status').textContent, /Setup unavailable/);
+  release(saved); await settled(); assert.equal(connections, 0); assert.match(f.control('provider-setup-status').textContent, /Error 499.*Native provider status timed out/);
   f.control('provider-setup-refresh').emit('click'); f.controller.stop(); release(saved); await settled(); assert.equal(connections, 0);
   f.reply(async () => ({ ...saved, auth: 'signed-out' })); f.controller.resume(); await settled();
   f.reply(() => new Promise(resolve => { release = resolve; })); f.control('provider-setup-refresh').emit('click');
@@ -365,7 +389,7 @@ test('metadata connection failure preserves observed auth and never loops on ren
   const f = fixture({ state: { auth: 'subscription' }, connectSavedLogin: async () => { connections++; throw Error('unavailable'); } });
   t.after(() => f.controller.cleanup()); await settled();
   assert.equal(connections, 1); assert.equal(f.controller.isSignedIn(), false);
-  assert.match(f.control('provider-login-message').textContent, /Signed in\. Connection unavailable/);
+  assert.match(f.control('provider-login-message').textContent, /Error 415.*unavailable/);
   f.connection(null); f.control('provider-setup-refresh').emit('click'); await settled();
   assert.equal(connections, 1); assert.equal(f.control('provider-setup-status').textContent, 'ChatGPT signed in.');
 });
@@ -386,6 +410,16 @@ test('pending saved-login metadata connects once, does not offer an extra Connec
   assert.deepEqual(f.calls, ['status:codex', 'status:codex', 'status:claude']);
 });
 
+test('a metadata error arriving after explicit Disconnect cannot replace the current login message',async t=>{
+  let fail!:(error:Error)=>void,connections=0;
+  const f=fixture({state:{auth:'subscription'},connectSavedLogin:async()=>{connections++;await new Promise<void>((_resolve,reject)=>{fail=reject;});}});
+  t.after(()=>f.controller.cleanup());await settled();assert.equal(connections,1);
+  f.control('codex-disconnect').disabled=false;f.control('codex-disconnect').emit('click');
+  fail(Error('Retired connection failure'));await settled();
+  assert.doesNotMatch(f.control('provider-login-message').textContent,/Retired connection failure|Error 415/);
+  assert.equal(connections,1);assert.deepEqual(f.calls,['status:codex']);assert.equal(f.controller.isSignedIn(),false);
+});
+
 test('ChatGPT browser labels and sanitized native pending/failure messages remain visible in the sign-in card', async t => {
   const f = fixture(); t.after(() => f.controller.cleanup());
   assert.equal(f.control('provider-login-start').textContent, 'Checking sign-in…');
@@ -401,7 +435,8 @@ test('ChatGPT browser labels and sanitized native pending/failure messages remai
   assert.equal(f.control('provider-login-start').textContent, 'Check sign-in');
   const failure = 'Native browser sign-in expired. No completion was verified.';
   f.state({ busy: false, message: failure }); f.control('provider-login-start').emit('click'); await settled();
-  assert.equal(f.control('provider-login-message').textContent, failure); assert.equal(f.controller.isSignedIn(), false);
+  assert.match(f.control('provider-login-message').textContent, /^Error 414 · Sign-in could not be confirmed\./);
+  assert.ok(f.control('provider-login-message').textContent.endsWith('Details: '+failure)); assert.equal(f.controller.isSignedIn(), false);
 });
 
 // Sign in once: a saved sign-in on the other provider is used automatically until the human picks explicitly.

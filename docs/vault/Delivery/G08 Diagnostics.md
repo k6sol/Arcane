@@ -5,6 +5,8 @@ tags: [arcane]
 ---
 # Make every failure diagnosable
 
+Scoped follow-up: [[Architecture/Error References]] supplies stable public numbers and explanations for connection, sign-in, request, model-stage, import and preview failures. Technical IDs remain available for correlation. Fixed recovery notices and reserved login-message space preserve the sign-in controls in four tested viewport widths. See [[Sessions/2026-10-31 Browser Sign-in and Error References]] for exact local evidence and remaining delivery/customer boundaries. This does not configure the central server or complete the whole diagnostics goal.
+
 Status: **In progress**. Priority and original scope: Make every failure diagnosable — P1.
 
 Deliver: message details show real operations, model/effort, timing and errors; failed jobs show stage, cause and remedy; bounded local reports feed the prepared central service through a redacted retry queue.

@@ -250,7 +250,7 @@ const browserModule = process.env.ARCANE_UI_BROWSER_MODULE;
 test('Edge: build progress group, live and collapsed, with facts, retry, reason and a viewport thumbnail', { skip: !browserModule, timeout: 120000 }, async t => {
   const build = process.env.ARCANE_UI_BUILD_DIR ?? 'dist', shots = resolve(process.env.ARCANE_UI_SCREENSHOT ?? 'runtime/claude-codex-team/claude-audit/progress');
   await mkdir(shots, { recursive: true });
-  const modules = ['codex-chat', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat', 'claude-preferences', 'task-usage', 'task-usage-ui'];
+  const modules = ['codex-chat', 'user-errors', 'chat-tabs', 'codex-history', 'provider-setup', 'workspace-shell', 'claude-chat', 'claude-preferences', 'task-usage', 'task-usage-ui'];
   const fixture = `import {CodexChat,CodexChatApi} from '/codex-chat.js';
     import {startProviderSetup} from '/provider-setup.js';
     import {startWorkspaceShell} from '/workspace-shell.js';
@@ -314,9 +314,11 @@ test('Edge: build progress group, live and collapsed, with facts, retry, reason 
     const staging=page.locator('#staging-diagnostic-proof');
     assert.equal(await staging.locator('.tool-activity-mark').getAttribute('data-tool-state'),'unknown');
     assert.match(await staging.locator('.visually-hidden').innerText(),/Outcome unconfirmed/);
-    assert.equal(await staging.locator('.tool-activity-reason').innerText(),'Packet receipt, packet 13: the Studio connection check expired.');
+    assert.equal(await staging.locator('.tool-activity-reason').innerText(),'Error 436 · Studio import unconfirmed · Packet receipt, packet 13: the Studio connection check expired.');
     assert.equal(await staging.locator('.tool-fact').count(),0);await staging.locator('.tool-activity').press('Enter');
-    assert.equal(await staging.locator('details').evaluate(node=>(node as HTMLDetailsElement).open),true);
+    assert.equal(await staging.locator('.tool-details').evaluate(node=>(node as HTMLDetailsElement).open),true);
+    assert.match(await staging.locator('.tool-error-explanation').innerText(),/Placement is not proof of an uploaded asset/);
+    await staging.locator('.tool-technical-details > summary').click();
     assert.match(await staging.locator('pre').innerText(),/"state": "unknown"/);assert.doesNotMatch(await staging.locator('.message-text').innerText(),/Imported|Failed/);
     await staging.evaluate(node=>node.remove());
     const failureChange=await page.evaluate(async()=>{
@@ -330,10 +332,11 @@ test('Edge: build progress group, live and collapsed, with facts, retry, reason 
     assert.equal(await failed.locator('.tool-fact').count(),0);
     assert.match(await failed.locator('.tool-activity-reason').innerText(),/Forest model sources are missing/);
     await failed.locator('.tool-activity').press('Enter');
-    assert.equal(await failed.locator('details').evaluate(node=>(node as HTMLDetailsElement).open),true);
+    assert.equal(await failed.locator('.tool-details').evaluate(node=>(node as HTMLDetailsElement).open),true);
+    await failed.locator('.tool-technical-details > summary').click();
     assert.match(await failed.locator('pre').innerText(),/Code: FOREST_SOURCES_REQUIRED/);
     await failed.locator('.tool-activity').press('Space');
-    assert.equal(await failed.locator('details').evaluate(node=>(node as HTMLDetailsElement).open),false);
+    assert.equal(await failed.locator('.tool-details').evaluate(node=>(node as HTMLDetailsElement).open),false);
     await failed.evaluate(node=>node.remove());
     await page.evaluate(() => document.dispatchEvent(new CustomEvent('workspace:providerpreference', { detail: { provider: 'claude' } })));
     await page.waitForFunction(() => !document.getElementById('claude-chat-tabs')!.hidden);
@@ -385,7 +388,7 @@ test('Edge: build progress group, live and collapsed, with facts, retry, reason 
       'Placing forest on terrain', 'Placing forest on terrain', 'Building the spawn plinth', 'Applying forest lighting', 'Capturing viewport']);
     assert.deepEqual(await group.locator('.build-progress-items .tool-fact').allInnerTexts(), ['2 lines', 'no errors', '3 chambers', '2 entrances', '1 done',
       '240 placed', '20 skipped', 'spawn at 53 studs', '2.4k tris', '768×432'], 'at most two chips per row');
-    assert.equal(await group.locator('.tool-activity-reason').innerText(), 'Studio is not in edit mode. Retried below.');
+    assert.equal(await group.locator('.tool-activity-reason').innerText(), 'Error 499 · Operation could not complete · Studio is not in edit mode. Retried below.');
     assert.equal(await group.locator('.tool-details[open]').count(), 0, 'raw details stay collapsed');
     assert.equal(await group.locator('.tool-details > summary').evaluateAll(nodes => nodes.filter(node => (node as HTMLElement).getBoundingClientRect().height > 0).length), 0, 'no Details link on any row');
     // A row is its own disclosure: Enter opens its raw details under it, Enter again closes them.

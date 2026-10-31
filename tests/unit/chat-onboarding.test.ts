@@ -70,6 +70,7 @@ async function fixture(t: TestContext, initial = state()) {
     .replace('</body>', '<script type="module" src="/onboarding-fixture.js"></script></body>');
   const files = new Map([
     ['/studio.css', [resolve('apps/desktop/public/studio.css'), 'text/css']],
+    ['/user-errors.js', [join(build, 'apps/desktop/src/user-errors.js'), 'text/javascript']],
     ['/codex-chat.js', [join(build, 'apps/desktop/src/codex-chat.js'), 'text/javascript']],
     ['/workspace-shell.js', [join(build, 'apps/desktop/src/workspace-shell.js'), 'text/javascript']],
     ['/provider-setup.js', [join(build, 'apps/desktop/src/provider-setup.js'), 'text/javascript']],
@@ -207,13 +208,14 @@ test('Edge direct start: mount sends zero actions; explicit setup remains single
   assert.equal(await page.locator('#codex-thread-start').isVisible(), false);
   assert.equal(await page.locator('#codex-submit').isDisabled(), false, 'A selected model and draft already allow explicit Send to set up its own conversation.');
   await page.screenshot({ path: join(f.root, 'ready-to-start.png') });
-  let release!: () => void; const held = new Promise<void>(done => { release = done; }); t.after(() => release());
-  f.handler(async input => { await held; const next = f.observed(); next.snapshot!.thread = thread(next);
+  let release!: () => void,received!:()=>void; const held = new Promise<void>(done => { release = done; }),dispatched=new Promise<void>(done=>{received=done;}); t.after(() => release());
+  f.handler(async input => { received();await held; const next = f.observed(); next.snapshot!.thread = thread(next);
     const record = receipt(input, next); next.actions = [record]; f.set(next); return { record, state: next }; });
   await page.locator('#codex-conversation-start').evaluate((button: HTMLElement) => button.click());
   assert.equal(f.posts.length, 0, 'Synthetic activation cannot start a conversation');
   await page.locator('#codex-conversation-start').click();
   await page.waitForFunction(() => document.getElementById('codex-conversation-start')?.getAttribute('aria-busy') === 'true');
+  await dispatched; // Observe this original transport, rather than equating the earlier busy paint with dispatch.
   assert.equal(f.posts.length, 1); assert.equal(f.posts[0]!.connectionId, f.observed().snapshot!.connectionId);
   assert.equal(await page.locator('#codex-conversation-start').isDisabled(), true);
   // Even an early state poll reporting a thread cannot enable Send while its POST is pending.
@@ -267,7 +269,7 @@ test('Edge uncertain start acknowledgements block Send; known rejection permits 
       // A rejected start reads in plain words with Review and Details; the request ID lives only in Details.
       await page.waitForFunction(() => document.getElementById('codex-notice-actions')?.hidden === false);
       assert.doesNotMatch(await page.locator('#codex-notice').textContent() ?? '', /[0-9a-f]{8}-[0-9a-f]{4}-|acknowledgement|Request ID/);
-      assert.match(await page.locator('#codex-notice-detail').textContent() ?? '', /^Request [0-9a-f-]{36} \u00b7 /);
+      assert.match(await page.locator('#codex-notice-detail').textContent() ?? '', /^Error \d{3} · [^\n]+\n\nRequest [0-9a-f-]{36} · /);
     } else {
       // An unconfirmed start is told once, by the recovery card: plain words, the request ID only in its collapsed Details.
       await page.locator('#codex-unknown').waitFor();
@@ -275,7 +277,7 @@ test('Edge uncertain start acknowledgements block Send; known rejection permits 
       const words = (await page.locator('#codex-unknown-title').textContent() ?? '') + (await page.locator('#codex-unknown-body').textContent() ?? '') + (await page.locator('#codex-notice').textContent() ?? '');
       assert.doesNotMatch(words, /[0-9a-f]{8}-[0-9a-f]{4}-|acknowledgement|Request ID/);
       assert.equal(await page.locator('#codex-unknown-details').evaluate((node: HTMLDetailsElement) => node.open), false);
-      assert.match(await page.locator('#codex-unknown-requests').textContent() ?? '', /^[0-9a-f-]{36} \u00b7 /);
+      assert.match(await page.locator('#codex-unknown-requests').textContent() ?? '', /^Error \d{3} · [^\n]+\n[^\n]+\nTechnical reference: [0-9a-f-]{36} · /);
     }
     await settled(page); assert.equal(f.posts.length, 1); assert.equal(await page.locator('#codex-submit').isDisabled(), outcome!=='rejected');
     assert.equal(await page.locator('#codex-unknown').isVisible(), outcome !== 'rejected');

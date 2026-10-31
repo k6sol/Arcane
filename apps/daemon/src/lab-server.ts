@@ -453,6 +453,7 @@ export async function createConnectionLab(options: Options) {
           ['/pyx-sprite.js', [join(options.cwd, 'dist/apps/desktop/src/pyx-sprite.js'), 'text/javascript']],
           ['/pyx-link.js', [join(options.cwd, 'dist/apps/desktop/src/pyx-link.js'), 'text/javascript']],
           ['/codex-chat.js', [join(options.cwd, 'dist/apps/desktop/src/codex-chat.js'), 'text/javascript']],
+          ['/user-errors.js', [join(options.cwd, 'dist/apps/desktop/src/user-errors.js'), 'text/javascript']],
           ['/codex-task-plan.js', [join(options.cwd, 'dist/apps/desktop/src/codex-task-plan.js'), 'text/javascript']],
           ['/task-plan-boot.js', [join(options.cwd, 'dist/apps/desktop/src/task-plan-boot.js'), 'text/javascript']],
           ['/studio-diagnostics.js', [join(options.cwd, 'dist/apps/desktop/src/studio-diagnostics.js'), 'text/javascript']],

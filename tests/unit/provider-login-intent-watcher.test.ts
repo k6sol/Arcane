@@ -18,6 +18,7 @@ async function fixture(t: TestContext) {
   const files = new Map([
     ...shippedFonts(), ['/studio.css', [resolve('apps/desktop/public/studio.css'), 'text/css']],
     ['/provider-setup.js', [join(build,'apps/desktop/src/provider-setup.js'), 'text/javascript']],
+    ['/user-errors.js', [join(build,'apps/desktop/src/user-errors.js'), 'text/javascript']],
   ]);
   const unexpected: string[] = [], errors: string[] = [];
   const server = createServer((req,res)=>{void(async()=>{
@@ -192,7 +193,8 @@ test('failed or malformed watcher replies stop polling and never imply authentic
     if(invalid==='error')await page.evaluate(()=>{(window as any).failure=true;});else await set(page,{auth:'subscription',busy:false,token:'fixture-credential'});
     await advance(page);await settled(page);const count=(await view(page)).calls.length;await advance(page,10000);
     assert.equal((await view(page)).calls.length,count);assert.deepEqual((await view(page)).effects,[]);
-    assert.match(await page.locator('#provider-login-message').innerText(),/Setup unavailable/);
+    assert.match(await page.locator('#provider-login-message').innerText(),/^Error 499 · Operation could not complete/);
+    assert.doesNotMatch(await page.locator('#provider-login-message').innerText(),/fixture-credential/);
   }
 });
 

@@ -16,6 +16,7 @@ export const FONT_FILES = ['ibm-plex-sans-latin-wght-normal.woff2', 'ibm-plex-sa
 export const REQUIRED_FRONTEND_FILES = [
   'apps/desktop/public/studio.html', 'apps/desktop/public/studio.css',
   'dist/apps/desktop/src/studio.js', 'dist/apps/desktop/src/codex-chat.js',
+  'apps/desktop/src/user-errors.ts', 'dist/apps/desktop/src/user-errors.js', 'dist/apps/desktop/src/user-errors.js.map',
   'packages/protocol/src/chat-queue.ts', 'dist/packages/protocol/src/chat-queue.js', 'dist/packages/protocol/src/chat-queue.js.map',
   'apps/desktop/src/codex-task-plan.ts', 'dist/apps/desktop/src/codex-task-plan.js', 'dist/apps/desktop/src/codex-task-plan.js.map',
   'apps/desktop/src/task-plan-boot.ts', 'dist/apps/desktop/src/task-plan-boot.js', 'dist/apps/desktop/src/task-plan-boot.js.map',

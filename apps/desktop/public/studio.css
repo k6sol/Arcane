@@ -3416,13 +3416,22 @@ body.arcane-app{background:var(--vignette),var(--canvas);background-color:var(--
   :root:not([data-theme=dark]) .arcane-app #codex-unknown.recovery-card{--rc-surface:linear-gradient(180deg,rgba(229,50,63,.06),rgba(229,50,63,.02)),#fff;--rc-line:rgba(200,16,46,.24);--rc-shadow:0 8px 24px -16px rgba(0,0,0,.18);--rc-mark:#c8102e;--rc-well:rgba(8,8,8,.03);--rc-well-line:rgba(8,8,8,.08)}
 }
 :root[data-theme=light] .arcane-app #codex-unknown.recovery-card{--rc-surface:linear-gradient(180deg,rgba(229,50,63,.06),rgba(229,50,63,.02)),#fff;--rc-line:rgba(200,16,46,.24);--rc-shadow:0 8px 24px -16px rgba(0,0,0,.18);--rc-mark:#c8102e;--rc-well:rgba(8,8,8,.03);--rc-well-line:rgba(8,8,8,.08)}
-.arcane-app .workspace-stage #codex-unknown.recovery-card:not([hidden]){display:flex;align-items:flex-start;gap:12px;flex:none;min-height:0;max-height:none;overflow:visible;margin:8px 0 24px;padding:16px;border:1px solid var(--rc-line);border-radius:var(--c30-r-md,12px);background:var(--rc-surface);box-shadow:var(--rc-shadow);color:var(--rc-body);font:400 14px/20px var(--font-ui)}
+.arcane-app #codex-unknown.recovery-card:not([hidden]){display:flex;align-items:flex-start;gap:10px;position:fixed;inset-block-start:calc(env(titlebar-area-height,0px) + 12px);inset-inline-start:16px;z-index:70;box-sizing:border-box;width:min(420px,calc(100vw - 32px));min-height:0;max-height:calc(100svh - env(titlebar-area-height,0px) - 32px);overflow:auto;margin:0;padding:14px;border:1px solid var(--rc-line);border-radius:var(--c30-r-md,12px);background:var(--rc-surface);box-shadow:var(--rc-shadow);color:var(--rc-body);font:400 14px/20px var(--font-ui);backdrop-filter:blur(18px)}
+.arcane-app #codex-unknown .recovery-panel{margin:0;padding:0;border:0;background:none}
+.arcane-app #codex-unknown .recovery-panel-summary{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:28px;cursor:pointer;list-style:none}
+.arcane-app #codex-unknown .recovery-panel-summary::-webkit-details-marker{display:none}
+.arcane-app #codex-unknown .recovery-panel-summary:focus-visible{outline:2px solid var(--focus-ring,#fff);outline-offset:4px;border-radius:4px}
+.arcane-app #codex-unknown .recovery-panel-toggle{flex:none;color:var(--rc-meta);font:500 12px/18px var(--font-ui)}
+.arcane-app #codex-unknown .recovery-panel[open] .recovery-panel-toggle{color:var(--rc-title)}
+.arcane-app #codex-unknown .recovery-panel-body{display:grid;gap:8px;padding-top:12px}
+.arcane-app #codex-unknown .recovery-error-explanation{margin:0;color:var(--rc-body);font:400 13px/19px var(--font-ui)}
+@media (forced-colors:active){.arcane-app #codex-unknown.recovery-card:not([hidden]){background:Canvas;border-color:CanvasText;color:CanvasText}}
 .arcane-app #codex-unknown.recovery-card[hidden]{display:none}
 .arcane-app #codex-unknown .recovery-card-icon{flex:none;width:20px;height:20px;margin:0;color:var(--rc-mark)}
 .arcane-app #codex-unknown .recovery-card-main{display:flex;flex:1 1 auto;flex-direction:column;gap:4px;min-width:0}
 .arcane-app #codex-unknown .recovery-card-title{margin:0;color:var(--rc-title);font:600 14px/20px var(--font-ui);overflow-wrap:anywhere}
 .arcane-app #codex-unknown .recovery-card-body{margin:0;color:var(--rc-body);font:400 14px/20px var(--font-ui);overflow-wrap:anywhere}
-.arcane-app #codex-unknown .recovery-card-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:8px 0 0}
+.arcane-app #codex-unknown .recovery-card-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:4px 0 0}
 .arcane-app #codex-unknown .recovery-card-actions>button{display:inline-flex;align-items:center;justify-content:center;width:auto;height:32px;min-height:32px;margin:0;padding:0 12px;border:1px solid var(--c30-line-control,rgba(255,255,255,.1));border-radius:var(--c30-r-1,10px);background:var(--c30-hover,rgba(255,255,255,.05));box-shadow:none;color:var(--c30-text,#f4efef);font:500 13px/16px var(--font-ui);white-space:nowrap}
 .arcane-app #codex-unknown .recovery-card-actions>#codex-reconcile{border-color:rgba(255,90,99,.4);background:var(--c30-send,linear-gradient(180deg,#ff4a55,#c8102e));color:#fff}
 .arcane-app #codex-unknown .recovery-card-actions>button:hover:not(:disabled){filter:brightness(1.08)}
@@ -4046,8 +4055,7 @@ body.arcane-app #app-sidebar .sidebar-status-card .sidebar-account{padding:0 10p
 :root[data-provider-view=setup] body.arcane-app:has(#provider-login-gate:not([hidden])) #workspace-stage{gap:0}
 :root[data-provider-view=setup] body.arcane-app:has(#provider-login-gate:not([hidden])) #workspace-stage>#codex-panel{width:100%;max-width:none}
 :root[data-provider-view=setup] body.arcane-app:has(#provider-login-gate:not([hidden])) #workspace-stage .conversation-scroll{padding:0;-webkit-mask-image:none;mask-image:none}
-/* A recorded uncertain action stays reviewable: its notice leads the page, above the sign-in. */
-:root[data-provider-view=setup] body.arcane-app:has(#provider-login-gate:not([hidden])) #workspace-stage .conversation-scroll>#codex-unknown:not([hidden]){order:-1;flex:none;width:min(720px,calc(100% - 32px));margin:16px auto 0;box-sizing:border-box}
+/* Recovery is a compact notification outside page flow; expansion is a deliberate disclosure. */
 /* The page: hero | card, the canvas composition (1040px) centred, its crimson light behind the card. */
 :root[data-provider-view=setup] body.arcane-app #workspace-stage #provider-login-gate{
   display:grid;grid-template-columns:minmax(0,1fr) 432px;column-gap:64px;row-gap:32px;align-items:center;justify-items:stretch;
@@ -4070,7 +4078,7 @@ body.arcane-app #workspace-stage #provider-login-gate #provider-login-heading{
   margin:0;padding:0;max-width:none;font-family:var(--font-display);font-size:var(--c30-t-heading,28px);font-weight:var(--c30-w-semibold,600);line-height:var(--c30-lh-heading,36px);
   letter-spacing:var(--c30-track-heading,-.015em);color:var(--si-text);background:none;-webkit-text-fill-color:currentColor;text-align:left;text-wrap:balance
 }
-body.arcane-app #workspace-stage #provider-login-gate #provider-login-message{margin:8px 0 0;max-width:none;font-size:var(--c30-t-ui,14px);line-height:var(--c30-lh-ui,20px);color:var(--si-sub);text-align:left}
+body.arcane-app #workspace-stage #provider-login-gate #provider-login-message{margin:8px 0 0;max-width:none;block-size:60px;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable;font-size:var(--c30-t-ui,14px);line-height:var(--c30-lh-ui,20px);color:var(--si-sub);text-align:left}
 /* Provider options: the canvas option rows. The chosen one carries a red rim and wash and a filled check. */
 body.arcane-app #workspace-stage #provider-login-gate .provider-choices{display:flex;flex-direction:column;align-items:stretch;gap:8px;width:100%;margin:32px 0 0;padding:0;border:0;border-radius:0;background:none;box-shadow:none}
 body.arcane-app #workspace-stage #provider-login-gate .provider-option{

@@ -561,9 +561,10 @@ test('owned Edge fixture: real trusted click/keyboard, inert scripted click, dra
   const js = await readFile(resolve(build, 'apps/desktop/src/codex-chat.js'), 'utf8');
   const shellJs = await readFile(resolve(build, 'apps/desktop/src/workspace-shell.js'), 'utf8');
   const setupJs = await readFile(resolve(build, 'apps/desktop/src/provider-setup.js'), 'utf8');
+  const userErrorsJs = await readFile(resolve(build, 'apps/desktop/src/user-errors.js'), 'utf8');
   const server = createServer((request, reply) => {
     const path = request.url?.split('?')[0];
-    const body = path === '/fixture' ? html : path === '/studio.css' ? css : path === '/codex-chat.js' ? js : path === '/workspace-shell.js' ? shellJs : path==='/provider-setup.js'?setupJs:null;
+    const body = path === '/fixture' ? html : path === '/studio.css' ? css : path === '/codex-chat.js' ? js : path === '/workspace-shell.js' ? shellJs : path==='/provider-setup.js'?setupJs:path==='/user-errors.js'?userErrorsJs:null;
     reply.writeHead(body === null ? 404 : 200, { 'Content-Type': path === '/fixture' ? 'text/html' : path?.endsWith('.css') ? 'text/css' : 'text/javascript' });
     reply.end(body ?? '');
   });

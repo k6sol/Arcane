@@ -50,6 +50,7 @@ async function fixture(t: TestContext, native = false, denyStorage = false) {
   const html = await readFile(htmlPath), css = await readFile(cssPath);
   const build = process.env.ARCANE_UI_BUILD_DIR!;
   const modules = new Map([
+    ['/user-errors.js', await readFile(join(build, 'apps/desktop/src/user-errors.js'))],
     ['/provider-setup.js', await readFile(join(build, 'apps/desktop/src/provider-setup.js'))],
     ['/workspace-shell.js', await readFile(join(build, 'apps/desktop/src/workspace-shell.js'))],
     ['/brand/arcane-ridges.png', await readFile('apps/desktop/public/brand/arcane-ridges.png')],
@@ -118,11 +119,15 @@ test('Edge production surface: three viewports, real disabled browser setup, rem
     const proof: object[] = [];
     for (const viewport of [{ width: 1440, height: 900 }, { width: 1024, height: 768 }, { width: 390, height: 844 }]) {
       await page.setViewportSize(viewport);
+      await page.locator('#provider-login-gate').evaluate(async gate=>{
+        await document.fonts.ready;
+        await Promise.all(gate.getAnimations({subtree:true}).filter(animation=>Number.isFinite(animation.effect?.getComputedTiming().endTime)).map(animation=>animation.finished.catch(()=>undefined)));
+      });
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
       for (const id of ['provider-login-start', 'provider-login-codex', 'provider-login-claude']) {
         const rect = await page.locator('#' + id).boundingBox(); assert.ok(rect, id);
         assert.ok(rect.x >= 0 && rect.x + rect.width <= viewport.width + 1, id + ': ' + JSON.stringify(rect));
-        assert.ok(rect.height >= 44, id + ' has a usable target');
+        assert.ok(rect.height >= 44, id + ' has a usable target: '+JSON.stringify({viewport,rect}));
       }
       assert.equal(await page.locator('#provider-login-heading').innerText(), 'Sign in');
       assert.equal(await page.locator('#provider-login-start').isDisabled(), true);
@@ -201,7 +206,8 @@ test('Edge native-contract fixture: metadata status reads, explicit login/connec
     assert.equal(await page.locator('#provider-login-gate').isVisible(), true, 'Native sign-in metadata alone never creates a chat binding');
     await page.locator('#provider-login-start').click();
     assert.deepEqual(await page.evaluate(() => (window as any).providerUI.sessionActions), ['connect']);
-    assert.deepEqual((await f.calls()).map((call: any) => call.action), ['status', 'status', 'login', 'status']);
+    assert.deepEqual((await f.calls()).map((call: any) => call.action), ['status', 'status', 'login', 'status', 'login']);
+    assert.equal(await page.locator('#settings-drawer').evaluate((dialog:HTMLDialogElement)=>dialog.open),false,'Connect uses provider sign-in without opening Settings');
     await page.evaluate(() => { const f = (window as any).providerUI; f.account = { connected: true, ready: true, fresh: true, auth: 'subscription' }; f.refresh(); });
     assert.equal(await page.locator('#provider-login-gate').isVisible(), false);
     assert.equal(await page.locator('#codex-composer').isVisible(), true);
@@ -282,7 +288,8 @@ test('Edge setup guards: late provider/lifecycle responses, exact preference res
     assert.equal(await page.locator('#provider-login-start').innerText(), 'Check sign-in', 'A late response after stop/resume cannot sign in');
     await page.evaluate(() => { const f = (window as any).providerUI; f.hold = false; f.response.token = 'not-allowed'; });
     await page.locator('#provider-login-start').click();
-    await page.waitForFunction(() => document.getElementById('provider-login-message')?.textContent?.includes('Setup unavailable'));
+    await page.waitForFunction(() => document.getElementById('provider-login-message')?.textContent?.startsWith('Error 499'));
+    assert.doesNotMatch(await page.locator('#provider-login-message').textContent()??'',/not-allowed/);
     assert.equal(await page.locator('#provider-login-gate').isVisible(), true);
     assert.equal(await page.locator('#codex-submit').isDisabled(), true);
     await page.evaluate(() => {

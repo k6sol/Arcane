@@ -1,5 +1,6 @@
 /// <reference lib="dom" />
 import type { ProviderConnectionStatus } from './codex-chat.js';
+import { userError, userErrorText } from './user-errors.js';
 
 export type SetupProvider = 'codex' | 'claude';
 /** 'arcane' is the Arcane Credits chat: it owns the surface only while the user chose it and it reports availability. */
@@ -35,7 +36,7 @@ export interface ProviderSetupOptions {
     providerConnectionStatus(): ProviderConnectionStatus | null;
     subscribeProviderStateChange(listener: () => void): () => void;
     /** Refresh native API state and connect metadata only; never create a thread or turn. */
-    connectForSavedLogin?(): Promise<void>;
+    connectForSavedLogin?(isCurrent?: () => boolean): Promise<void>;
   };
   nativeBridge?: unknown;
   /**
@@ -189,6 +190,14 @@ function presentationStorage(doc: Document): Storage | null {
 const STATUS_FRESH_MS = 60000;
 // The host bounds each CLI command to 15 seconds; status can run two commands.
 const STATUS_TIMEOUT_MS = 35000;
+/** Only already-public host/preload details cross this boundary; never coerce native output or inspect causes. */
+function providerFailureText(action:'status'|'login'|'install'|'launch'|'connect',failure:unknown):string {
+  let detail:unknown=failure;
+  if(failure&&typeof failure==='object')try{detail=Object.getOwnPropertyDescriptor(failure,'message')?.value;}catch{detail=null;}
+  const safe=typeof detail==='string'&&detail.length>0&&detail.length<=2048&&!/[\x00-\x1f\x7f\u202a-\u202e\u2066-\u2069]/.test(detail)?detail:null;
+  const message=userErrorText(userError(action==='login'?'LOGIN_UNCONFIRMED':action==='connect'?'CONNECTION_UNAVAILABLE':'UNKNOWN'));
+  return safe?message+' Details: '+safe:message;
+}
 /** Mount, provider changes and resume read status once. Only observed saved login may connect metadata. */
 export function startProviderSetup(doc: Document, options: ProviderSetupOptions): ProviderSetupController {
   const panel = doc.getElementById('provider-setup-panel'), gate = doc.getElementById('provider-login-gate');
@@ -204,6 +213,8 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
   const states = new Map<SetupProvider, { state: ProviderSetupState; observed: number }>(), awaitingStatus = new Set<SetupProvider>();
   const removers: (() => void)[] = [];
   let provider: SetupProvider = 'codex', epoch = 0, stopped = false, disposed = false, busy = false, actionError: string | null = null;
+  let connectionNotice: string | null = null;
+  let connectionEpoch=0;
   let loginWatch: { provider: SetupProvider; epoch: number; remaining: number } | null = null;
   let loginTimer: ReturnType<typeof setTimeout> | null = null;
   let signInTimer: ReturnType<typeof setTimeout> | null = null, lastSignedIn = false;
@@ -337,6 +348,7 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
     // Conversation visibility survives native task cancellation/model handoff.
     // This volatile evidence never grants fresh native/task authority.
     if(provider==='codex') {
+      if(connection?.fresh&&connection.connected&&connection.ready)connectionNotice=null;
       if(connection?.fresh&&connection.auth==='subscription'&&connection.connected&&connection.ready&&reconnectAllowed)codexChatEvidence=true;
       else if(connection?.fresh&&(connection.auth==='signed-out'||connection.auth==='unsupported'))codexChatEvidence=false;
       else if(!connection?.connected&&(state?.auth==='signed-out'||state?.auth==='api-or-cloud'))codexChatEvidence=false;
@@ -363,11 +375,12 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
     const text = connected() ? 'Codex connected.' : checking ? 'Checking ' + name + ' sign-in…' : connectingSavedLogin ? 'Connecting Codex…' : state?.auth === 'subscription' && !state.busy ? name + ' signed in.' :
       state?.auth === 'signed-out' || provider === 'codex' && connection?.fresh && connection.auth === 'signed-out' ? 'Sign in with ' + name + '.' :
       state?.auth === 'api-or-cloud' ? 'API or cloud account.' : state && !state.installed ? 'CLI unavailable.' : native ? 'Sign-in not checked.' : 'Desktop setup unavailable.';
-    set('provider-setup-status', actionError ?? text);
+    const currentConnectionNotice=provider==='codex'&&!stopped&&!disposed&&!arcaneChosen&&state?.auth==='subscription'?connectionNotice:null;
+    set('provider-setup-status', actionError ?? currentConnectionNotice ?? text);
     set('provider-setup-details', (actionError ?? state?.message ?? (native ? provider === 'codex' ? 'Sign in with ChatGPT in your browser. Arcane reuses an existing native ChatGPT sign-in.' :
       'Claude Code sign-in opens in its native terminal. Check status after signing in.' : 'Native sign-in requires the Arcane desktop app.')) +
       (state?.cliVersion ? ' Version ' + state.cliVersion + '.' : '') + (state?.auth === 'api-or-cloud' ? ' API or cloud billing was reported; no request was started.' : ''));
-    set('provider-login-message', actionError ?? (!native ? 'Open the desktop app to sign in.' : checking ? 'Checking your saved ' + name + ' sign-in…' : needsDisconnect() ? 'Reconnect to use your signed-in account.' :
+    set('provider-login-message', actionError ?? currentConnectionNotice ?? (!native ? 'Open the desktop app to sign in.' : checking ? 'Checking your saved ' + name + ' sign-in…' : needsDisconnect() ? 'Reconnect to use your signed-in account.' :
       guidance(state) ?? state?.message ?? (
       provider === 'claude' ? 'Claude Code opens in its native terminal.' : awaitingStatus.has(provider) ? 'Finish native sign-in, then check status.' :
       state?.auth === 'subscription' || connection?.fresh && connection.auth === 'subscription' ? 'Use your signed-in ChatGPT account.' : 'Sign in with ChatGPT in your browser.')));
@@ -409,12 +422,16 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
   };
   const requestSettings = (target: string) => { const Event = doc.defaultView?.CustomEvent; if (Event) doc.dispatchEvent(new Event('workspace:settingsrequest', { detail: { target } })); };
   const choose = (next: SetupProvider, publish = true) => {
-    if (next !== provider) clearLoginWatch();
+    if (next !== provider) {
+      // A late successful account check stays saved, but cannot revive this retired manual connection intent.
+      if(loginWatch||activeAction==='login'){connectionEpoch++;reconnectAllowed=false;}
+      clearLoginWatch();
+    }
     if (stopped || disposed) return;
     // An explicit ChatGPT/Claude choice leaves the Arcane chat; a restored preference (publish false) does not.
     if (publish) { retireFallback(); chooseArcane(false); }
     const changed = next !== provider;
-    if (changed) { retireFallback();clearRecovery();recoveryAttempt=0;savedLoginObserved=false;savedLoginConnections.clear(); rememberEvidence(); provider = next; codexChatEvidence = next === 'codex' && knownSignedIn.codex; epoch++; actionError = null; states.delete(next); claudeChatEvidence = next === 'claude' && knownSignedIn.claude; if (next === 'claude') claudeSignInObserved = null; }
+    if (changed) { retireFallback();clearRecovery();recoveryAttempt=0;savedLoginObserved=false;savedLoginConnections.clear(); rememberEvidence(); provider = next; codexChatEvidence = next === 'codex' && knownSignedIn.codex; epoch++; actionError = null; connectionNotice=null; states.delete(next); claudeChatEvidence = next === 'claude' && knownSignedIn.claude; if (next === 'claude') claudeSignInObserved = null; }
     try { storage?.setItem(PROVIDER_PRESENTATION_KEY, JSON.stringify({ version: 1, provider })); } catch { /* Only presentation is lost. */ }
     render();
     const Event = doc.defaultView?.CustomEvent;
@@ -425,7 +442,7 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
   const trusted = (event: Event) => { const mouse = event as MouseEvent; return event.isTrusted === true && !event.defaultPrevented && !mouse.altKey && !mouse.ctrlKey && !mouse.metaKey && !mouse.shiftKey; };
   const invoke = async (action: 'status' | 'login' | 'install' | 'launch') => {
     if (!native || busy || stopped || disposed) return;
-    const target = provider, generation = epoch; busy = true; activeAction = action; actionError = null; render();
+    const target = provider, generation = epoch,connectionGeneration=connectionEpoch; busy = true; activeAction = action; actionError = null; connectionNotice=null; render();
     let connectAfterLogin = false, connectSavedLogin = false, observed: ProviderSetupState | null = null;
     try {
       const request = native[action](target);
@@ -461,12 +478,16 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
         else if (action === 'status' && !value.busy) awaitingStatus.delete(target);
         if (target === 'codex' && action === 'login' && value.busy) loginWatch = { provider: target, epoch: generation, remaining: 450 };
         const watching = loginWatch?.provider === target && loginWatch.epoch === generation;
-        connectAfterLogin = target === 'codex' && value.auth === 'subscription' && !value.busy && (action === 'login' || watching);
+        // This exact host-owned notice can only DENY a handoff; text never grants account or connection authority.
+        const cancelledLogin=target==='codex'&&(action==='login'||watching)&&value.message==='Native browser sign-in was cancelled.';
+        if(cancelledLogin){connectionEpoch++;reconnectAllowed=false;clearRecovery();clearLoginWatch();}
+        if((action==='login'||watching)&&!value.busy&&value.auth!=='subscription'&&!cancelledLogin)actionError=providerFailureText('login',value.message);
+        connectAfterLogin = target === 'codex' && value.auth === 'subscription' && !value.busy && (action === 'login' || watching)&&!cancelledLogin;
         connectSavedLogin = target === 'codex' && action === 'status' && value.auth === 'subscription' && !value.busy && !watching;
         if (watching && !value.busy) clearLoginWatch();
       }
-    } catch {
-      if (!stopped && !disposed && generation === epoch) { clearLoginWatch(); states.delete(target); if (target === 'claude') { claudeSignInObserved = null; } awaitingStatus.delete(target); actionError = 'Setup unavailable. Click Check sign-in to try again; restart Arcane if it keeps happening.'; }
+    } catch(error) {
+      if (!stopped && !disposed && generation === epoch) { clearLoginWatch(); states.delete(target); if (target === 'claude') { claudeSignInObserved = null; } awaitingStatus.delete(target); actionError = providerFailureText(action,error); }
     } finally {
       const checkOther = !stopped && !disposed && generation === epoch && target === provider && action === 'status' &&
         observed && !observed.busy && (observed.auth === 'signed-out' || observed.auth === 'api-or-cloud') && autoSelect;
@@ -475,25 +496,29 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
       if (!stopped && !disposed && generation === epoch && target === provider) {
         // This follows only the user's explicit sign-in intent, not startup or
         // cached preferences. Connecting reads account/models, never a turn.
-        if (connectAfterLogin && !needsDisconnect() && !connected()) {
+        if(connectAfterLogin)reconnectAllowed=true;
+        if (connectAfterLogin && !options.chat.connectForSavedLogin && !needsDisconnect() && !connected()) {
           const connect = button('codex-connect'); if (connect && !connect.disabled) connect.click();
         }
-        if (connectSavedLogin && reconnectAllowed && options.chat.connectForSavedLogin && !connected() && !savedConnectionPending) {
+        if ((connectAfterLogin || connectSavedLogin) && reconnectAllowed && options.chat.connectForSavedLogin && !needsDisconnect() && !connected() && !savedConnectionPending) {
           const connection = options.chat.providerConnectionStatus();
           const snapshot = connection ? JSON.stringify([connection.connected, connection.ready, connection.fresh, connection.auth]) : 'none';
-          if (!savedLoginConnections.has(snapshot)) {
+          if (connectAfterLogin || !savedLoginConnections.has(snapshot)) {
             savedLoginConnections.add(snapshot);
             savedConnectionPending = true;
             render();
             // Only this validated native status ACK permits the metadata hook.
             // Its implementation owns API freshness and native session authority.
+            const current=()=>!stopped&&!disposed&&generation===epoch&&connectionGeneration===connectionEpoch&&reconnectAllowed&&provider===target&&!arcaneChosen;
             try {
-              void options.chat.connectForSavedLogin().catch(() => {
-                if (!stopped && !disposed && generation === epoch) { actionError = 'Signed in. Connection unavailable. Click Check sign-in to try again.'; render(); }
+              void options.chat.connectForSavedLogin(current).then(()=>{
+                if(current()&&connectAfterLogin&&!connected())connectionNotice='ChatGPT sign-in was verified. Codex is not connected. Review the connection notice for details; no message was sent again.';
+              }).catch(error => {
+                if (current()) { actionError = providerFailureText('connect',error); render(); }
               }).finally(() => { savedConnectionPending = false; if (!disposed) render(); });
-            } catch {
+            } catch(error) {
               savedConnectionPending = false;
-              if (!stopped && !disposed && generation === epoch) { actionError = 'Signed in. Connection unavailable. Click Check sign-in to try again.'; render(); }
+              if (current()) { actionError = providerFailureText('connect',error); render(); }
             }
           }
         }
@@ -559,7 +584,7 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
   };
   listen(doc,'visibilitychange',checkOnReturn);
   if(typeof doc.defaultView?.addEventListener==='function')listen(doc.defaultView,'focus',checkOnReturn);
-  const disconnectIntent = () => { reconnectAllowed=false;codexChatEvidence=false;knownSignedIn.codex=false;clearRecovery();render(); };
+  const disconnectIntent = () => { connectionEpoch++;reconnectAllowed=false;codexChatEvidence=false;knownSignedIn.codex=false;clearRecovery();render(); };
   const disconnect = button('codex-disconnect');
   if(disconnect)listen(disconnect,'click',event=>{if(trusted(event)&&!disconnect.disabled)disconnectIntent();},true);
   const connect = button('codex-connect');
@@ -576,7 +601,7 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
     if (!trusted(event) || login.disabled || busy || stopped || disposed || !native) return;
     const action = nextAction();
     if (action === 'disconnect') { disconnectIntent(); const disconnect = button('codex-disconnect'); if (disconnect && !disconnect.disabled) disconnect.click(); return; }
-    if (action === 'connect') { reconnectAllowed=true; const connect = button('codex-connect'); if (connect && !connect.disabled) connect.click(); else requestSettings('native-conversation-settings'); }
+    if (action === 'connect') { reconnectAllowed=true; void invoke('login'); }
     else void invoke(action);
   });
   const credits = button('provider-login-credits');

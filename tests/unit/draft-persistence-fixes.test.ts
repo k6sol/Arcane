@@ -249,6 +249,44 @@ async function noticeFixture(t:test.TestContext,initial=noticeState()) {
   return {doc,chat,posts,api,reads:()=>reads,observed:()=>observed,set:(value:ChatState)=>{observed=structuredClone(value);},reply:(handler:typeof reply)=>{reply=handler;},click:()=>doc.getElementById('codex-acknowledge').dispatchEvent(new Event('click'))};
 }
 
+test('actual historical notice plus three unknown tasks explains Error 412 without changing any task or sending a request',async t=>{
+  const observed=noticeState();observed.chatTasks=Array.from({length:3},(_,i)=>({taskId:randomUUID(),threadId:'earlier-thread-'+i,sessionId:null,connectionId:randomUUID(),state:'unknown',round:0,reason:'daemon_restarted_no_replay',reportDigest:null,retained:false}));
+  const original=structuredClone(observed),f=await noticeFixture(t,observed);
+  assert.equal(f.doc.getElementById('codex-unknown-title').textContent,'Error 412 · Earlier tasks need review');
+  assert.match(f.doc.getElementById('codex-unknown-body').textContent,/3 earlier tasks have an unconfirmed outcome/);
+  assert.match(f.doc.getElementById('codex-error-explanation').textContent,/Reconnecting does not settle/);
+  assert.doesNotMatch(f.doc.getElementById('codex-unknown-body').textContent,new RegExp(observed.actions[0]!.requestId));
+  assert.match(f.doc.getElementById('codex-unknown-requests').textContent,/Error 411/);
+  assert.equal(f.doc.getElementById('codex-acknowledge').disabled,true);f.click();await settle();
+  assert.equal(f.posts.length,0);assert.deepEqual(f.observed(),original);
+});
+
+test('a historical frame failure explains Error 411 while preserving its exact technical reference',async t=>{
+  const f=await noticeFixture(t),request=f.observed().actions[0]!.requestId;
+  assert.match(f.doc.getElementById('codex-unknown-title').textContent,/^Error 411 · /);
+  assert.match(f.doc.getElementById('codex-error-explanation').textContent,/exceeded the size Arcane can accept/);
+  assert.match(f.doc.getElementById('codex-unknown-requests').textContent,new RegExp(request));
+  assert.doesNotMatch(f.doc.getElementById('codex-unknown-title').textContent,new RegExp(request));
+  assert.equal(f.doc.getElementById('codex-acknowledge').disabled,false);assert.equal(f.posts.length,0);
+});
+
+test('a delayed saved-login state read cannot connect after its original login owner changes',async t=>{
+  const doc=new DocumentFixture(),observed=state(),entered=deferred(),release=deferred();let hold=false,current=true,posts=0;
+  const api=new CodexChatApi(TOKEN,async(_path,init)=>{if(init?.method==='POST'){posts++;assert.fail('A stale login must not create a native connection.');}if(hold){entered.resolve();await release.promise;}return Response.json({state:observed});});
+  const chat=new CodexChat(doc.asDocument(),api);t.after(()=>chat.stop());await chat.start();hold=true;
+  const connecting=chat.connectForSavedLogin(()=>current);await entered.promise;current=false;release.resolve();await connecting;
+  assert.equal(posts,0);
+});
+
+test('a held saved-login read cannot connect after a workspace A to B to A change',async t=>{
+  const doc=new DocumentFixture(),observed=state(),entered=deferred(),release=deferred();let hold=false,posts=0;
+  const before=structuredClone(observed);
+  const chat=new CodexChat(doc.asDocument(),new CodexChatApi(TOKEN,async(_path,init)=>{if(init?.method==='POST'){posts++;assert.fail('A retired workspace login cannot connect.');}if(hold){entered.resolve();await release.promise;}return Response.json({state:observed});}));
+  t.after(()=>{release.resolve();chat.stop();});await chat.start();chat.observeWorkspaceProject(PROJECT);hold=true;
+  const connecting=chat.connectForSavedLogin();await entered.promise;chat.observeWorkspaceProject('/another-workspace');chat.observeWorkspaceProject(PROJECT);release.resolve();await connecting;
+  assert.equal(posts,0);assert.deepEqual(observed,before);
+});
+
 test('connection notice state is closed, bounded and refers only to exact terminal unbound FRAME_LIMIT receipts',()=>{
   const original=noticeState();assert.doesNotThrow(()=>readCodexState(original));
   for(const patch of [{requestId:randomUUID()},{receiptFingerprint:'c'.repeat(64)+'\n'},{reviewedAt:'yesterday'},{reviewedAt:REVIEWED_AT+'\n'},{extra:true}]) {

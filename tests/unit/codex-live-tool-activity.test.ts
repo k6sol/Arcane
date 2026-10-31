@@ -127,7 +127,7 @@ test('saved ChatGPT history uses the same labels: a named result, a recognised s
   assert.equal(label(saved(JSON.stringify({ sessions: [] }))), 'Checking the Studio connection');
   const playtest = saved('A playtest operation is already in progress.', 'failed');
   assert.equal(label(playtest), 'Starting a playtest');
-  assert.equal(playtest.querySelector('.tool-activity-reason')!.textContent, 'A playtest operation is already in progress.');
+  assert.equal(playtest.querySelector('.tool-activity-reason')!.textContent, 'Error 499 · Operation could not complete · A playtest operation is already in progress.');
   for (const text of [JSON.stringify({ ok: true }), 'done', '']) assert.equal(label(saved(text)), 'Running a step', 'neutral label for ' + JSON.stringify(text));
   assert.equal(label(saved(JSON.stringify({ x: 1 }), 'failed')), 'Running a step', 'a failed step without a name is not "A step failed"');
   // The row is the disclosure for its raw details: no Details link to click, Enter or a click opens them.

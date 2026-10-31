@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { createRequire } from 'node:module';
+import { createRequire, stripTypeScriptTypes } from 'node:module';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { StringDecoder } from 'node:string_decoder';
@@ -10,6 +10,12 @@ import { win32 } from 'node:path';
 const require = createRequire(import.meta.url);
 const { createCodexBrowserLogin } = require('../../apps/desktop/electron/provider-login.cjs');
 const { createProviderSetup } = require('../../apps/desktop/electron/provider-setup.cjs');
+// Load the actual controller and shared public error catalogue without a product build or a browser.
+const errorSource=stripTypeScriptTypes(readFileSync(new URL('../../apps/desktop/src/user-errors.ts',import.meta.url),'utf8'),{mode:'transform'});
+const errorModule='data:text/javascript;base64,'+Buffer.from(errorSource).toString('base64');
+const controllerSource=stripTypeScriptTypes(readFileSync(new URL('../../apps/desktop/src/provider-setup.ts',import.meta.url),'utf8'),{mode:'transform'})
+  .replace("'./user-errors.js'",JSON.stringify(errorModule));
+const {startProviderSetup}=await import('data:text/javascript;base64,'+Buffer.from(controllerSource).toString('base64'));
 const VERSION = '0.162.0-alpha.17.2';
 const LOGIN = 'a1223344-5566-7788-99aa-bbccddeeff00';
 const OTHER = 'b1223344-5566-7788-99aa-bbccddeeff00';
@@ -108,6 +114,92 @@ function cleaned(f) {
   assert.equal(f.calls.filter(value => /^(turn\/|thread\/|model\/|command\/)/.test(value.method)).length, 0, 'inference count 0');
   assert.ok(f.calls.every(value => ['initialize', 'initialized', 'account/read', 'account/login/start', 'account/login/cancel'].includes(value.method)));
 }
+
+class SetupControl {
+  textContent='';value='';disabled=false;hidden=false;parentElement=null;attributes=new Map();listeners=new Map();
+  classList={toggle(){}};
+  setAttribute(name,value){this.attributes.set(name,value);}
+  addEventListener(name,listener){if(!this.listeners.has(name))this.listeners.set(name,new Set());this.listeners.get(name).add(listener);}
+  removeEventListener(name,listener){this.listeners.get(name)?.delete(listener);}
+  emit(name){for(const listener of this.listeners.get(name)??[])listener({isTrusted:true,defaultPrevented:false});}
+  click(){for(const listener of this.listeners.get('click')??[])listener({isTrusted:false,defaultPrevented:false});}
+  closest(){return null;}focus(){}
+}
+async function controllerHost(t,f){
+  const names=['provider-setup-panel','provider-login-gate','provider-setup-provider','provider-login-start','provider-login-refresh','provider-login-codex','provider-login-claude',
+    'provider-login-message','provider-setup-status','provider-setup-details','provider-setup-refresh','provider-setup-login','provider-setup-install','provider-setup-launch',
+    'workspace-stage','codex-connect','codex-disconnect','provider-login-credits','provider-login-credits-note','codex-composer'];
+  const controls=new Map(names.map(name=>[name,new SetupControl()])),doc=new EventTarget(),stored=new Map(),settings=[],connections=[],replies=[];
+  doc.getElementById=id=>controls.get(id)??null;doc.documentElement=new SetupControl();
+  doc.defaultView={CustomEvent,location:{protocol:'http:',origin:'http://fixture.test'},localStorage:{getItem:key=>stored.get(key)??null,setItem:(key,value)=>stored.set(key,value)}};
+  doc.addEventListener('workspace:settingsrequest',event=>settings.push(event.detail));
+  controls.get('codex-connect').disabled=true; // Original unresolved native receipt still owns its normal connect fence.
+  let status={connected:false,ready:false,fresh:true,auth:'unknown'};
+  const call=async(method,provider)=>{const value=await f.host[method](provider);replies.push({method,value});return value;};
+  const controller=startProviderSetup(doc,{nativeBridge:Object.freeze({version:1,status:provider=>call('status',provider),login:provider=>call('login',provider),
+    install:provider=>call('install',provider),launch:provider=>call('launch',provider)}),chat:{providerConnectionStatus:()=>status,subscribeProviderStateChange:()=>()=>{},
+    connectForSavedLogin:async current=>{connections.push(current);}}});
+  t.after(()=>{controller.cleanup();f.host.dispose();});await delay(0);
+  return{controller,settings,connections,replies,control:id=>controls.get(id),setConnection:value=>{status=value;}};
+}
+
+test('Connect Codex follows actual owned browser login when cached sign-in needs renewal, without Settings or native replay',async t=>{
+  const f=fixture();f.state.loggedIn=true;const ui=await controllerHost(t,f);ui.connections.length=0;
+  assert.equal(ui.control('provider-login-start').textContent,'Connect Codex');assert.equal(ui.control('codex-connect').disabled,true);
+  ui.control('provider-login-start').emit('click');await delay(0);
+  assert.equal(f.urls.length,1,'the original host opened its validated ChatGPT authorization URL');assert.equal(ui.settings.length,0);
+  assert.equal(f.calls.filter(call=>call.method==='account/login/start').length,1);assert.equal(ui.connections.length,0,'browser opening is not sign-in completion');
+  f.notify();await delay(0);ui.control('provider-setup-refresh').emit('click');await delay(0);
+  assert.equal(ui.connections.length,1,'only completed and freshly verified sign-in reaches guarded connection metadata');assert.equal(typeof ui.connections[0],'function');assert.equal(ui.connections[0](),true);
+  assert.equal(ui.control('codex-connect').disabled,true,'login does not acknowledge or reset the old native receipt');assert.equal(ui.controller.isSignedIn(),false,'no native connection was fabricated');
+  assert.equal(f.urls.length,1);assert.equal(ui.settings.length,0);cleaned(f);
+});
+test('Connect Codex reuses a genuinely saved account and still invokes the guarded connection without Settings',async t=>{
+  const f=fixture({existing:signedIn});f.state.loggedIn=true;const ui=await controllerHost(t,f);ui.connections.length=0;
+  ui.control('provider-login-start').emit('click');await delay(0);
+  assert.equal(ui.settings.length,0);assert.equal(f.urls.length,0);assert.equal(f.calls.filter(call=>call.method==='account/login/start').length,0);
+  assert.equal(f.calls.filter(call=>call.method==='account/read').length,1);assert.equal(ui.connections.length,1);assert.equal(typeof ui.connections[0],'function');
+  assert.equal(ui.control('codex-connect').disabled,true);assert.equal(ui.controller.isSignedIn(),false);cleaned(f);
+});
+test('provider changes and owner cancellation cannot turn a late browser completion into a connection',async t=>{
+  for(const change of ['provider-aba','stop','native-owner'])await t.test(change,async sub=>{
+    const f=fixture();f.state.loggedIn=true;const ui=await controllerHost(sub,f);ui.connections.length=0;
+    ui.control('provider-login-start').emit('click');await delay(0);assert.equal(f.urls.length,1);
+    if(change==='provider-aba'){ui.controller.requestProvider('claude');ui.controller.requestProvider('codex');}
+    else if(change==='stop')ui.controller.stop();else f.state.window.webContents.emit('will-navigate');
+    f.notify();await delay(0);assert.equal(ui.connections.length,0);assert.equal(ui.settings.length,0);
+    assert.equal(f.calls.filter(call=>call.method==='account/login/start').length,1);assert.equal(f.calls.some(call=>/^(turn|thread)\//.test(call.method)),false);
+  });
+});
+test('an unsupported browser login remains unconfirmed and never reconnects or automatically repeats login',async t=>{
+  const f=fixture({respond(request,api){if(request.method!=='account/login/start')return false;api.state.response=0;api.emit({id:request.id,error:{code:-32601,message:SECRET}});return true;}});
+  f.state.loggedIn=true;const ui=await controllerHost(t,f);ui.connections.length=0;
+  ui.control('provider-login-start').emit('click');await delay(0);await delay(0);
+  assert.equal(f.urls.length,0);assert.equal(ui.settings.length,0);assert.equal(ui.connections.length,0);assert.equal(ui.controller.isSignedIn(),false);
+  assert.equal(f.calls.filter(call=>call.method==='account/login/start').length,1);assert.equal(f.processes.some(child=>child.executable.includes('powershell')),false);cleaned(f);
+});
+test('a rejected login shows Error 414 with the actual host-safe explanation and no false connection',async t=>{
+  const f=fixture({respond(request,api){if(request.method!=='account/login/start')return false;api.emit({id:request.id,error:{code:-32000,message:SECRET}});return true;}});
+  f.state.loggedIn=true;const ui=await controllerHost(t,f);ui.connections.length=0;
+  ui.control('provider-login-start').emit('click');await delay(0);await delay(0);
+  const text=ui.control('provider-login-message').textContent;assert.match(text,/Error 414/);
+  const original=ui.replies.findLast(reply=>reply.method==='login').value.message;assert.equal(typeof original,'string');assert.ok(original.length>0);
+  assert.ok(text.includes(original),'the public explanation includes the actual original fixed host detail');
+  assert.doesNotMatch(text,new RegExp(SECRET));assert.equal(ui.connections.length,0);assert.equal(ui.settings.length,0);assert.equal(f.urls.length,0);
+  assert.equal(ui.controller.isSignedIn(),false);assert.equal(f.calls.filter(call=>call.method==='account/login/start').length,1);cleaned(f);
+});
+test('Cancel with cached subscription denies only that manual handoff and fresh status cannot revive it',async t=>{
+  const f=fixture({existing:signedIn});f.state.loggedIn=true;const ui=await controllerHost(t,f),original=ui.connections[0];ui.connections.length=0;f.state.response=0;
+  ui.control('provider-login-start').emit('click');await delay(0);
+  assert.equal(ui.replies.findLast(reply=>reply.method==='login').value.auth,'subscription','the real saved account was not erased');
+  assert.match(ui.control('provider-login-message').textContent,/Native browser sign-in was cancelled/);assert.equal(ui.connections.length,0);
+  assert.equal(original(),false,'the canceled original handoff cannot revive through a later Connect choice');
+  ui.control('provider-setup-refresh').emit('click');await delay(0);
+  assert.equal(ui.replies.at(-1).value.auth,'subscription');assert.equal(ui.connections.length,0);assert.equal(ui.settings.length,0);assert.equal(f.urls.length,0);
+  assert.equal(f.processes.some(child=>child.args[0]==='app-server'),false);assert.equal(f.calls.some(call=>/^(turn|thread)\//.test(call.method)),false);
+  f.state.response=1;ui.control('provider-login-start').emit('click');await delay(0);
+  assert.equal(ui.connections.length,1,'only a new explicit accepted intent may connect');assert.equal(f.urls.length,0);assert.equal(original(),false);cleaned(f);
+});
 
 test('helper import and construction are inert and only export the private native client', () => {
   const source = readFileSync(new URL('../../apps/desktop/electron/provider-login.cjs', import.meta.url), 'utf8');

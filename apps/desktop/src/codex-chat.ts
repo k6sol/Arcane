@@ -1,4 +1,5 @@
 /// <reference lib="dom" />
+import { USER_ERRORS,userError,userErrorLabel,userErrorText,type UserErrorNumber } from './user-errors.js';
 import type { CodexAction, CodexActionRecord, CodexConnectNotice, CodexProductState } from '../../daemon/src/codex-service.js';
 import type { RequestedModel } from '../../../packages/core/src/workflow-recipes.js';
 import type { NativeWorkflowConversation, WorkflowDraftProvenance } from './workflow-panel.js';
@@ -391,9 +392,11 @@ const CODEX_REQUEST_FAILED:Readonly<Record<string,string>>=Object.freeze({
 export interface CodexRequestNotice { text:string; detail:string }
 export function codexRequestNotice(action:string,state:string,requestId:string,errorCode:string|null=null,message:string|null=null):CodexRequestNotice {
   const hint=codexFailureHint(errorCode);
-  const text=state==='rejected'?(Object.hasOwn(CODEX_REQUEST_FAILED,action)?CODEX_REQUEST_FAILED[action]!:'That request didn\u2019t go through.')+(hint?' '+hint:'')
+  const error=userError(errorCode??(state==='rejected'?null:'OUTCOME_UNKNOWN'));
+  const reason=state==='rejected'?(Object.hasOwn(CODEX_REQUEST_FAILED,action)?CODEX_REQUEST_FAILED[action]!:'That request didn\u2019t go through.')+(hint?' '+hint:'')
     :'Arcane couldn\u2019t confirm that this went through, so nothing was sent again.'+(hint?' '+hint:'')+' Review what was recorded before continuing.';
-  const detail=['Request '+requestId,action,state,...(errorCode?[errorCode]:[]),...(message?[message]:[])].join(' \u00b7 ');
+  const text='Error '+error.number+'. '+reason;
+  const detail=userErrorText(error)+'\n\n'+['Request '+requestId,action,state,...(errorCode?[errorCode]:[]),...(message?[message]:[])].join(' \u00b7 ');
   return {text,detail};
 }
 /** Exact public quota shape; raw provider account/configuration objects never enter the view. */
@@ -1411,6 +1414,8 @@ export interface ToolGroupInfo {
 }
 export interface ToolActivity {
   text:string; change:ToolChange|null; group?:ToolGroupInfo|null;
+  /** Public cause reference, independent of job/request correlation. */
+  errorReference?:UserErrorNumber;
   /** A completed tool response can still leave its native operation unconfirmed. */
   unconfirmed?:boolean;
   /** Arcane tool name (no MCP prefix), for retry counting in the build progress group. */
@@ -1789,6 +1794,7 @@ function stagingUnknownDiagnostic(value:unknown):StudioStagingDiagnostic|null {
  * text in .message-text and, collapsed, the raw details. Returns the nodes to place inside article.codex-message.tool.
  */
 export function renderToolActivity(doc:Document,activity:ToolActivity,state:ToolActivityState,details:string):HTMLElement[] {
+  const error=state==='failed'||activity.unconfirmed?(USER_ERRORS[activity.errorReference??(activity.unconfirmed?436:499)]??USER_ERRORS[499]):null;
   const line=doc.createElement('div');line.className='tool-activity';line.dataset.toolState=state;
   const mark=doc.createElement('span');mark.className='tool-activity-mark';mark.setAttribute('aria-hidden','true');mark.dataset.toolState=activity.unconfirmed?'unknown':state;
   const label=doc.createElement('span');label.className='message-text tool-activity-text';label.textContent=activity.text;
@@ -1808,13 +1814,16 @@ export function renderToolActivity(doc:Document,activity:ToolActivity,state:Tool
   const group=activity.group;
   if(group){line.dataset.toolGroup=group.key;line.dataset.toolVerbs=group.verbs.join('|');line.dataset.toolNoun=group.noun.join('|');if(group.container)line.dataset.toolContainer=group.container;}
   const out:HTMLElement[]=[line];
-  if((state==='failed'||activity.unconfirmed)&&activity.reason){const reason=doc.createElement('p');reason.className='tool-activity-reason';reason.textContent=activity.reason;out.push(reason);}
+  if(error){const reason=doc.createElement('p');reason.className='tool-activity-reason';reason.textContent=userErrorLabel(error)+(activity.reason?' · '+activity.reason:'');out.push(reason);}
   const thumb=activity.image?renderToolThumbnail(doc,activity.image,activity.facts?.[0]??null):null;if(thumb)out.push(thumb);
   // Raw details have no per-row "Details" link: the row itself is the disclosure control (click, Enter or Space).
   const more=doc.createElement('details');more.className='message-details tool-details';more.id='tool-details-'+(++toolDetailsSeq);
   const summary=doc.createElement('summary');summary.textContent='Details';summary.tabIndex=-1;
   const pre=doc.createElement('pre');pre.className='hint mono';pre.textContent=details;
-  more.append(summary,pre);
+  more.append(summary);
+  if(error){const explanation=doc.createElement('p');explanation.className='tool-error-explanation';explanation.textContent=error.explanation+' '+error.nextStep;
+    const technical=doc.createElement('details'),technicalSummary=doc.createElement('summary');technical.className='tool-technical-details';technicalSummary.textContent='Technical details';technical.append(technicalSummary,pre);more.append(explanation,technical);
+  }else more.append(pre);
   out.push(more);
   line.setAttribute('role','button');line.setAttribute('tabindex','0');line.setAttribute('aria-expanded','false');line.setAttribute('aria-controls',more.id);
   const sync=()=>line.setAttribute('aria-expanded',String(!!more.open));
@@ -1907,7 +1916,8 @@ export function renderCodexToolArticle(doc:Document,message:Pick<ChatMessage,'sc
   article.setAttribute('data-role','tool');article.setAttribute('aria-label','Tool activity');article.dataset.toolState=state;
   if(message.key)article.dataset.toolKey=message.key.slice(0,512);
   const fallback='The tool failed. No recognized safe error detail is available.';
-  const display=state==='failed'&&!activity.reason&&!/ — /.test(activity.text)?{...activity,reason:fallback}:activity;
+  const described=state==='failed'&&!activity.reason&&!/ — /.test(activity.text)?{...activity,reason:fallback}:activity;
+  const display=failure?{...described,errorReference:userError(failure.code).number as UserErrorNumber}:described;
   const details=failure?message.scope+'\n'+(failure.tool?'Tool: '+failure.tool+'\n':'')+(failure.code?'Code: '+failure.code+'\n':'')+mcpFailureMessage(failure)
     :message.scope+(message.text?'\n'+message.text:state==='failed'?'\n'+fallback:'');
   article.append(...renderToolActivity(doc,display,state,safe(details)));
@@ -2764,6 +2774,7 @@ export class CodexChat {
   private readonly restoredRequests=new Map<string,string>();
   private connectReviewEpoch=0;
   private connectReview:AbortController|null=null;
+  private recoveryPortal:{card:HTMLElement;parent:Node;next:Node|null}|null=null;
   private readonly transcript=new CodexTranscript();
   private confirmation:Confirmation|null=null;
   private approvalSignature=''; private modelSignature=''; private messageSignature='';
@@ -3525,10 +3536,12 @@ export class CodexChat {
       fresh: this.fresh && !this.stopped, auth: snapshot?.account?.auth ?? 'unknown' };
   }
   /** User-requested startup connection discovery; never starts a chat or model turn. */
-  async connectForSavedLogin(): Promise<void> {
-    if(this.stopped||!this.providerAllowsCodex())return;
+  async connectForSavedLogin(isCurrent:()=>boolean=()=>true): Promise<void> {
+    const generation=this.generation,workspaceRevision=this.workspaceRevision,project=this.state?.projectPath,version=this.readVersion;
+    const current=()=>{try{return isCurrent()===true&&!this.stopped&&!this.surfaceYielded&&!this.foreignDraft&&this.generation===generation&&this.workspaceRevision===workspaceRevision&&this.providerAllowsCodex()&&(project===undefined||this.state?.projectPath===project);}catch{return false;}};
+    if(!current())return;
     await this.refresh();
-    if(this.stopped||!this.providerAllowsCodex()||!this.fresh||this.snapshot()||this.pending.size||this.uncertain.size||this.state?.busy||this.state?.connecting||this.state?.closing)return;
+    if(!current()||this.readVersion!==version+1||this.appliedReadVersion!==version+1||!this.fresh||this.snapshot()||this.pending.size||this.uncertain.size||this.state?.busy||this.state?.connecting||this.state?.closing)return;
     await this.dispatch('connect');
   }
   subscribeProviderStateChange(listener: () => void): () => void {
@@ -4272,7 +4285,7 @@ export class CodexChat {
     for(const input of this.pending.values())this.uncertain.set(input.requestId,{input,read:false});
     this.closePicker();for(const cleanup of this.pickerCleanup.splice(0))cleanup();
     for(const cleanup of this.draftCleanup.splice(0))cleanup();
-    this.closeConfirmation();this.fresh=false;this.transcript.reset();this.messageSignature='';this.el('codex-messages').replaceChildren();this.renderControls();this.publishProviderState();this.publishState();
+    this.closeConfirmation();this.fresh=false;this.transcript.reset();this.messageSignature='';this.el('codex-messages').replaceChildren();this.restoreRecoveryPortal();this.renderControls();this.publishProviderState();this.publishState();
   }
   resume(){this.stopped=false;this.attachments?.resume();this.tabs?.mount();this.preferenceController?.resume();this.bindPicker();this.bindDraftLifecycle();void this.refresh().finally(()=>this.schedule());}
   private schedule() {
@@ -4666,7 +4679,7 @@ export class CodexChat {
     if(approvalSignature!==this.approvalSignature){this.approvalSignature=approvalSignature;const host=this.el('codex-approvals');host.replaceChildren();for(const approval of approvals)this.renderApproval(host,approval);}
     this.el('codex-approval-section').hidden=!approvals.length;
     this.renderRecovery();
-    this.text('codex-unknown-requests',[...this.uncertain].map(([id,u])=>{const r=this.state?.actions.find(r=>r.requestId===id);return id+' · '+u.input.action+' · '+(r?.state??'not found in recorded actions')+(r?.errorCode?' · '+r.errorCode:'');}).join('\n'));
+    this.text('codex-unknown-requests',[...this.uncertain].map(([id,u])=>{const r=this.state?.actions.find(r=>r.requestId===id),error=userError(r?.errorCode??'OUTCOME_UNKNOWN');return userErrorLabel(error)+'\n'+error.explanation+'\nTechnical reference: '+[id,u.input.action,r?.state??'unavailable',...(r?.errorCode?[r.errorCode]:[])].join(' · ');}).join('\n\n'));
     const actions=this.el('codex-actions');actions.replaceChildren();for(const r of this.state?.actions??[])actions.append(this.make('p',r.requestId+' · '+r.action+' · native acknowledgement '+r.state+(r.errorCode?' · '+r.errorCode:''),'hint mono'));
     this.renderControls();
   }
@@ -4687,23 +4700,38 @@ export class CodexChat {
    * the recorded actions and state (refresh, never a retry); I've reviewed it is the existing acknowledgement. The card
    * belongs to the connection, not to a tab, so it stays on whichever chat is shown after a draft closes.
    */
+  private mountRecoveryPortal(card:HTMLElement):void {
+    // Keep notifications outside the masked/scrolling conversation flow. No auth or task state changes here.
+    const body=this.doc.body;
+    if(this.stopped||!body?.classList?.contains('arcane-app')||this.recoveryPortal||!card.parentNode)return;
+    this.recoveryPortal={card,parent:card.parentNode,next:card.nextSibling};
+    body.append(card);card.dataset.recoveryOverlay='true';
+  }
+  private restoreRecoveryPortal():void {
+    const portal=this.recoveryPortal;if(!portal)return;
+    this.recoveryPortal=null;portal.card.hidden=true;delete portal.card.dataset.recoveryOverlay;
+    if(portal.parent.isConnected){if(portal.next?.parentNode===portal.parent)portal.parent.insertBefore(portal.card,portal.next);else portal.parent.appendChild(portal.card);}
+  }
   private renderRecovery():void {
-    const card=this.el('codex-unknown'),rows=[...this.uncertain.values()];card.hidden=!rows.length;
+    const card=this.el('codex-unknown'),rows=[...this.uncertain.values()];this.mountRecoveryPortal(card);card.hidden=!rows.length||this.stopped||!this.providerAllowsCodex()||this.surfaceYielded;
     if(!rows.length){delete card.dataset.state;return;}
-    const titles:Record<string,string>={connect:'Arcane couldn’t confirm the connection to ChatGPT','turn-start':'Arcane couldn’t confirm your message went through',
-      'turn-steer':'Arcane couldn’t confirm your steering message went through','thread-start':'Arcane couldn’t confirm the new chat started',
-      'thread-resume':'Arcane couldn’t confirm this chat opened','history-load':'Arcane couldn’t confirm this chat’s history loaded',select:'Arcane couldn’t confirm the model change'};
-    const title=rows.length>1?'Arcane couldn’t confirm '+rows.length+' requests':titles[rows[0]!.input.action]??'Arcane couldn’t confirm your last request';
+    const unknownTasks=this.fresh?this.state?.chatTasks?.filter(task=>task.state==='unknown')??[]:[];
+    const taskHold=unknownTasks.length>0&&this.state?.connectNotices?.some(notice=>notice.reviewedAt===null&&rows.some(row=>row.input.requestId===notice.requestId));
+    const firstRecord=this.fresh?this.state?.actions.find(record=>record.requestId===rows[0]!.input.requestId):undefined;
+    const error=taskHold?USER_ERRORS[412]:firstRecord?.errorCode?userError(firstRecord.errorCode):USER_ERRORS[421];
+    const title=userErrorLabel(error);
     const waiting=!!(this.state?.connecting||this.state?.closing||this.state?.busy||this.pending.size||this.connectReview);
     const state=!rows.every(u=>u.read)||!this.fresh?'unchecked':this.canAcknowledge()?'checked':waiting?'waiting':'unconfirmed';
-    const body={unchecked:'Nothing was sent again. Check its status before you send another message or change models.',
+    const body=taskHold?unknownTasks.length+' earlier '+(unknownTasks.length===1?'task has':'tasks have')+' an unconfirmed outcome. Their records are kept.':{unchecked:'Nothing was sent again. Check its status before you send another message or change models.',
       checked:'Status checked, and nothing was sent again. Mark it reviewed to carry on.',
       waiting:'Still waiting for an answer. Nothing was sent again.',
-      unconfirmed:'Still unconfirmed, and nothing was sent again. Reconnect from Conversation settings, then mark it reviewed.'}[state];
+      unconfirmed:error.explanation+' '+error.nextStep}[state];
     card.dataset.state=state;
     const titleNode=this.doc.getElementById('codex-unknown-title'),bodyNode=this.doc.getElementById('codex-unknown-body');
     if(titleNode&&titleNode.textContent!==title)titleNode.textContent=this.api.safe(title);
     if(bodyNode&&bodyNode.textContent!==body)bodyNode.textContent=this.api.safe(body);
+    const explanation=this.doc.getElementById('codex-error-explanation');
+    if(explanation)explanation.textContent=this.api.safe(taskHold?error.nextStep:error.explanation+' '+error.nextStep);
   }
   private renderControls() {
     this.renderUsage();

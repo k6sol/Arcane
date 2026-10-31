@@ -147,6 +147,7 @@ async function syntheticDaemon({ failWithCredentials = false, unsafePngHeaders =
   let origin;
   const routes = new Map([
     ['/studio', ['apps/desktop/public/studio.html', 'text/html; charset=utf-8']],
+    ['/user-errors.js', ['dist/apps/desktop/src/user-errors.js', 'text/javascript; charset=utf-8']],
     ['/codex-chat.js', ['dist/apps/desktop/src/codex-chat.js', 'text/javascript; charset=utf-8']],
     ['/workspace-shell.js', ['dist/apps/desktop/src/workspace-shell.js', 'text/javascript; charset=utf-8']],
     ['/desktop-verification.js', ['dist/apps/desktop/src/desktop-verification.js', 'text/javascript; charset=utf-8']],

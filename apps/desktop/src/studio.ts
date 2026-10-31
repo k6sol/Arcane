@@ -1,4 +1,5 @@
 import { startScriptEditorDrafts, type ScriptDraftTarget, type AppliedScriptDraft } from './script-editor-drafts.js';
+import {userError,userErrorText} from './user-errors.js';
 import type { EditorDraft } from './editor-drafts.js';
 import { EditorDraftStore, type EditorDraftBridge } from './editor-drafts.js';
 import { startProjectMemory } from './project-memory.js';
@@ -1962,7 +1963,7 @@ export class StudioWorkbench {
         if (EventType) this.doc.dispatchEvent(new EventType<WorkspaceAssetActivity>(WORKSPACE_ASSET_ACTIVITY_EVENT, {detail:{jobId:job.jobId,state:'running'},bubbles:false}));
       }
     }
-    this.text('asset-job-summary', job ? assetJobName(job) + (assetJobKind(job) === 'adopted-glb' ? ' · adopted GLB; engine import unavailable' : assetJobKind(job) === 'converted-glb' ? ' · converted GLB; Studio verification pending' : '') + ' · ' + job.state.replaceAll('_', ' ') + ' · stage ' + job.stage + (job.error ? ' · ' + job.error.code + ': ' + job.error.message : '') : 'Choose an exact recorded job to inspect progress and evidence.');
+    this.text('asset-job-summary', job ? assetJobName(job) + (assetJobKind(job) === 'adopted-glb' ? ' · adopted GLB; engine import unavailable' : assetJobKind(job) === 'converted-glb' ? ' · converted GLB; Studio verification pending' : '') + ' · ' + job.state.replaceAll('_', ' ') + ' · stage ' + job.stage + (job.error ? ' · ' + userErrorText(userError(job.error.diagnostic?.reasonCode??job.error.code,'model',job.error.diagnostic?.stage??job.stage)) + ' '+job.error.message : '') : 'Choose an exact recorded job to inspect progress and evidence.');
   }
   private bindAssetAcknowledgement():void{
     const button=this.doc.getElementById('asset-acknowledge');if(!button||this.assetAcknowledgementBound)return;

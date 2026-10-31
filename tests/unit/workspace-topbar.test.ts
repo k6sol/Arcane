@@ -35,17 +35,18 @@ test('the header names the current chat; with none open it says New chat', () =>
 
 test('a rejected or unconfirmed request reads in plain words; its ID, action and state go only to Details', () => {
   const rejected = codexRequestNotice('history-load', 'rejected', UUID);
-  assert.equal(rejected.text, 'Couldn\u2019t load this chat\u2019s saved history.');
-  assert.equal(rejected.detail, 'Request ' + UUID + ' \u00b7 history-load \u00b7 rejected');
+  assert.equal(rejected.text, 'Error 499. Couldn\u2019t load this chat\u2019s saved history.');
+  assert.match(rejected.detail, /^Error 499/);
+  assert.ok(rejected.detail.endsWith('Request ' + UUID + ' \u00b7 history-load \u00b7 rejected'));
   const timedOut = codexRequestNotice('history-load', 'rejected', UUID, 'TIMEOUT');
-  assert.match(timedOut.text, /^Couldn\u2019t load this chat\u2019s saved history\. Codex did not answer in time\./);
+  assert.match(timedOut.text, /^Error 422\. Couldn\u2019t load this chat\u2019s saved history\. Codex did not answer in time\./);
   assert.match(timedOut.detail, / \u00b7 TIMEOUT$/);
   for (const state of ['pending', 'unknown']) {
     const unsure = codexRequestNotice('turn-start', state, UUID, null, 'Unreadable native acknowledgement.');
-    assert.match(unsure.text, /^Arcane couldn\u2019t confirm that this went through, so nothing was sent again\./);
-    assert.match(unsure.detail, new RegExp('^Request ' + UUID + ' \u00b7 turn-start \u00b7 ' + state + ' \u00b7 Unreadable native acknowledgement\\.$'));
+    assert.match(unsure.text, /^Error 421\. Arcane couldn\u2019t confirm that this went through, so nothing was sent again\./);
+    assert.match(unsure.detail, new RegExp('Request ' + UUID + ' \u00b7 turn-start \u00b7 ' + state + ' \u00b7 Unreadable native acknowledgement\\.$'));
   }
-  assert.equal(codexRequestNotice('something-new', 'rejected', UUID).text, 'That request didn\u2019t go through.');
+  assert.equal(codexRequestNotice('something-new', 'rejected', UUID).text, 'Error 499. That request didn\u2019t go through.');
   for (const action of ['connect', 'disconnect', 'select', 'thread-start', 'thread-resume', 'history-load', 'turn-start', 'turn-steer', 'turn-interrupt',
     'task-stop', 'task-focus', 'grant-writes', 'revoke-writes', 'grant-assets', 'revoke-assets', 'approval', 'unlisted'])
     for (const state of ['rejected', 'pending', 'unknown']) {

@@ -121,6 +121,7 @@ async function browserFixture(t: test.TestContext, initial = state()) {
   let handler: ((input: ChatAction) => Promise<{ record: ChatActionRecord; state: ChatState }>) | null = null;
   const files = new Map([
     ['/studio', [resolve('apps/desktop/public/studio.html'), 'text/html']], ['/studio.css', [resolve('apps/desktop/public/studio.css'), 'text/css']],
+    ['/user-errors.js', [resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/user-errors.js'), 'text/javascript']],
     ['/codex-chat.js', [resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/codex-chat.js'), 'text/javascript']],
     ['/workspace-shell.js', [resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/workspace-shell.js'), 'text/javascript']],
     ['/chat-tabs.js', [resolve(process.env.ARCANE_UI_BUILD_DIR ?? 'dist', 'apps/desktop/src/chat-tabs.js'), 'text/javascript']],
@@ -367,7 +368,7 @@ test('browser rejects optimistic labels and blocks busy, unconfigured, stale and
   await f.choose();
   // The visible line says what failed in plain words; the rejected state and request stay in the notice details.
   await page.waitForFunction(() => document.getElementById('codex-notice')?.textContent?.includes('Couldn’t change the model.'));
-  assert.match(await page.locator('#codex-notice-detail').textContent() ?? '', /^Request \S+ · select · rejected\b/);
+  assert.match(await page.locator('#codex-notice-detail').textContent() ?? '', /^Error 499 · [^\n]+\n\nRequest \S+ · select · rejected\b/);
   assert.doesNotMatch(await page.locator('#codex-notice').textContent() ?? '', /rejected|Request /);
   assert.equal(await page.locator('#codex-model-label').textContent(), 'Fixture Alpha'); assert.equal(f.posts.length, 1);
   const baseline = f.observed();
