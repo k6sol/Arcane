@@ -16,10 +16,15 @@ const productStartupModules = await Promise.all(['state-directory-validation', '
 // Exact runtime import closure of the real parent-only dispatcher. Type-only
 // dependencies erase; this fixture never constructs its controller/registry.
 const appAssetControlModules = await Promise.all([
-  'apps/daemon/src/app-asset-control.ts', 'apps/daemon/src/app-asset-human-selection.ts', 'apps/daemon/src/native-asset-authority.ts',
+  'apps/daemon/src/app-asset-control.ts', 'apps/daemon/src/app-asset-human-selection.ts', 'apps/daemon/src/native-asset-authority.ts', 'apps/daemon/src/model-source-binding.ts',
+  'packages/studio-test-controller/src/contracts.ts', 'packages/studio-test-controller/src/scenario.ts', 'packages/studio-test-controller/src/scenario-limits.ts',
   'packages/storage/src/workflow-store.ts', 'packages/storage/src/sqlite-path.ts', 'packages/protocol/src/providers.ts',
-].map(async path => ({ path: path.replace(/\.ts$/, '.js'), source: stripTypeScriptTypes(
-  await readFile(new URL('../../' + path, import.meta.url), 'utf8'), { mode: 'transform' }) })));
+].map(async path => {
+  const source = stripTypeScriptTypes(await readFile(new URL('../../' + path, import.meta.url), 'utf8'), { mode: 'transform' });
+  // Use the real installed validator dependency for the copied schema modules;
+  // this isolated source fixture has no fabricated package implementation.
+  return { path: path.replace(/\.ts$/, '.js'), source: source.replace(/from (['"])zod\1/g, 'from ' + JSON.stringify(import.meta.resolve('zod'))) };
+}));
 const digest = path => createHash('sha256').update(process.platform === 'win32' ? path.toLowerCase() : path).digest('hex');
 function cleanEnv(extra = {}) {
   const env = { ...process.env };

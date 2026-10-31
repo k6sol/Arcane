@@ -88,7 +88,8 @@ async function fixture(t: TestContext, options: { tabs?: boolean; initial?: Chat
   if (options.tabs) observed.nativeThreads ??= [{ provider: 'codex', projectPath: observed.projectPath,
     threadId: observed.snapshot!.thread!.threadId, sessionId: observed.snapshot!.thread!.sessionId,
     selection: { ...observed.snapshot!.thread!.selection } }];
-  const posts: Extract<ChatAction, { action: 'turn-start' }>[] = [], errors: string[] = [], unexpected: string[] = [];
+  const posts: Extract<ChatAction, { action: 'turn-start' }>[] = [], errors: string[] = [], unexpected: string[] = [], historyReads:string[]=[];
+  const originalHistory=structuredClone(observed.nativeHistory??null);
   const files = new Map([
     ['/studio.css', [resolve('apps/desktop/public/studio.css'), 'text/css']],
     ['/codex-chat.js', [resolve(build, 'apps/desktop/src/codex-chat.js'), 'text/javascript']],
@@ -161,7 +162,16 @@ async function fixture(t: TestContext, options: { tabs?: boolean; initial?: Chat
     audit.ready=true;
   `;
   const server = createServer((request, response) => { void (async () => {
-    const path = new URL(request.url ?? '/', 'http://fixture').pathname;
+    const url=new URL(request.url??'/','http://fixture'),path=url.pathname;
+    if(path==='/v1/codex/history') {
+      assert.equal(request.headers.authorization,'Bearer '+HUMAN,'Only the exact human control transport reads cached history');
+      assert.equal(request.headers.cookie,undefined);assert.equal(request.method,'GET');assert.ok(url.search.length<=1024);
+      assert.deepEqual([...url.searchParams.keys()],['threadId'],'Only one exact threadId query is permitted');
+      const threadId=url.searchParams.get('threadId')!;assert.match(threadId,/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}(?![\s\S])/);
+      const owned=observed.nativeThreads?.find(row=>row.threadId===threadId&&row.projectPath===observed.projectPath);assert.ok(owned,'Read only a thread in the exact current project catalogue');
+      const recording=[observed.nativeHistory,originalHistory].find(value=>value?.projectPath===observed.projectPath&&value.threadId===threadId&&value.sessionId===owned.sessionId);
+      historyReads.push(threadId);response.writeHead(200,{'Content-Type':'application/json'});response.end(JSON.stringify({nativeHistory:recording??{projectPath:observed.projectPath,threadId,sessionId:owned.sessionId,recorded:null}}));return;
+    }
     if (path === '/v1/codex/state' || path === '/v1/codex/action' || path === '/v1/codex/reference-turn') {
       assert.equal(request.headers.authorization, 'Bearer ' + HUMAN, 'Synthetic human HTTP capability required');
       assert.equal(request.headers.cookie, undefined, 'The fixture does not use credential cookies');
@@ -271,7 +281,7 @@ async function fixture(t: TestContext, options: { tabs?: boolean; initial?: Chat
   t.after(() => { assert.deepEqual(errors, [], 'No page or fixture server errors');
     assert.deepEqual(unexpected, [], 'Only explicitly allowed synthetic local HTTP routes'); });
   t.diagnostic('Actual Edge ' + browser.version() + '; synthetic HTTP; build=' + build);
-  return { page: currentPage, posts, root, setup, holdSetup, releaseSetup: () => releaseSetup(), enteredSetup: () => setupEntered, chooserCount: () => chooserCount,
+  return { page: currentPage, posts, root, setup, historyReads, holdSetup, releaseSetup: () => releaseSetup(), enteredSetup: () => setupEntered, chooserCount: () => chooserCount,
     observed: () => structuredClone(observed), set: (value: ChatState) => { observed = structuredClone(value); },
     failState: (value: boolean) => { failState = value; },
     refresh: () => currentPage.evaluate(() => window.attachmentFixture.chat.refresh()) };
@@ -746,6 +756,7 @@ test('Edge opens the selected saved conversation after an outgoing history limit
     { provider: 'codex', projectPath: initial.projectPath, threadId: targetThread, sessionId: 'attachment-target-session', selection: { ...old.selection } }];
   const originalRecording = structuredClone(initial.nativeHistory), originalConnection = initial.snapshot!.connectionId;
   const f = await fixture(t, { tabs: true, setup: true, initial, historyLimitThread: old.threadId }), { page } = f;
+  assert.deepEqual(f.historyReads,[],'The already recorded outgoing thread needs no additional cache read.');
   await page.locator('#codex-messages').getByText(earlierText, { exact: true }).waitFor({ state: 'visible' });
   const outgoingKey = await page.locator('#workspace-chat-tabs [role="tab"][aria-selected="true"]').getAttribute('data-chat-key');
   assert.ok(outgoingKey);
@@ -771,6 +782,7 @@ test('Edge opens the selected saved conversation after an outgoing history limit
   assert.deepEqual(await page.evaluate(id => window.attachmentFixture.recording(id), old.threadId), originalRecording);
   assert.deepEqual(f.setup.map(row => row.action), ['history-load', 'disconnect', 'connect', 'select', 'thread-resume', 'history-load']);
   assert.deepEqual(f.setup.filter(row => row.action === 'history-load').map(row => row.threadId), [old.threadId, targetThread]);
+  assert.deepEqual(f.historyReads,[targetThread],'The target has exactly one authenticated display-only cache read.');
   assert.equal((f.setup.find(row => row.action === 'disconnect') as Extract<ChatAction, { action: 'disconnect' }>).preserveAssetWork, true);
   assert.equal(f.posts.length, 0); assert.notEqual(f.observed().snapshot!.connectionId, originalConnection);
   assert.equal(f.observed().snapshot!.thread!.threadId, targetThread); assert.equal(f.observed().snapshot!.thread!.writeGranted, false);

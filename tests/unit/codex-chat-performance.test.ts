@@ -230,7 +230,7 @@ test('input validation is immediate at exact UTF-8 limits and never submits on c
   assert.equal(f.calls.length,requests);assert.equal(f.doc.getElementById('codex-composer').value.length,CODEX_INPUT_BYTES/2+1);
 });
 
-test('edits made while a saved-chat resume is pending stay in the outgoing draft',async t=>{
+test('saved-chat resume preserves the outgoing draft and edits made in its already visible destination',async t=>{
   const initial=reportedState(),selection={model:'reported-fixture',effort:'low'};
   initial.snapshot!.thread={threadId:'thread-a',sessionId:null,selection,configured:true,writeGranted:false,turnId:null,turnStatus:'idle'};
   initial.nativeHistory={projectPath:initial.projectPath,threadId:'thread-a',sessionId:null,recorded:null};
@@ -241,9 +241,16 @@ test('edits made while a saved-chat resume is pending stay in the outgoing draft
   const target=controller.tabs.ensureSaved('thread-b')!;let release!:()=>void;
   const receipt=new Promise<void>(done=>{release=done;});controller.bindNativeChat=async()=>{await receipt;return true;};
   f.input('Before resume');const switching=f.chat.selectChat(target.key);
+  assert.equal(f.chat.currentStateView().activeChat!.key,target.key,'Saved presentation changes before the native resume ACK.');
+  assert.equal(controller.tabs.views().find(row=>row.key===outgoing)!.draft,'Before resume');
+  assert.equal(f.doc.getElementById('codex-composer').value,'');
   const bound=structuredClone(initial);bound.snapshot!.thread!.threadId='thread-b';bound.nativeHistory!.threadId='thread-b';
   f.set(bound);await f.chat.refresh();
   const latest='Last edit during resume 🧩\nTrailing spaces.  ';f.input(latest);release();
-  assert.equal(await switching,true);assert.equal(f.doc.getElementById('codex-composer').value,'');
-  assert.equal(await f.chat.selectChat(outgoing),true);assert.equal(f.doc.getElementById('codex-composer').value,latest);
+  assert.equal(await switching,true);assert.equal(f.doc.getElementById('codex-composer').value,latest);
+  assert.equal(controller.tabs.views().find(row=>row.key===outgoing)!.draft,'Before resume');
+  assert.equal(controller.tabs.views().find(row=>row.key===target.key)!.draft,latest);
+  assert.equal(await f.chat.selectChat(outgoing),true);assert.equal(f.doc.getElementById('codex-composer').value,'Before resume');
+  assert.equal(await f.chat.selectChat(target.key),true);assert.equal(f.doc.getElementById('codex-composer').value,latest);
+  assert.ok(f.calls.every(method=>method==='GET'),'Presentation and edits never invoke a native POST.');
 });

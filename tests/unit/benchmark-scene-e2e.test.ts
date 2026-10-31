@@ -14,14 +14,15 @@ import { KIT_TRIANGLE_BUDGET, forestOriginals } from '../../apps/mcp/src/scene-k
 import { createConnectionLab } from '../../apps/daemon/src/lab-server.js';
 import { HISTORY_PAGE_BYTES, type AssetService, type GeneratedOrAdoptedAssetJobRecord as AssetJobRecord } from '../../apps/daemon/src/asset-service.js';
 import { studioImportPluginArtifactHash } from '../../apps/daemon/src/studio-import-plugin-artifact.js';
-import { StudioStore } from '../../packages/storage/src/studio-store.js';
+import { StudioStore, type StageRunIntent } from '../../packages/storage/src/studio-store.js';
 import { WorkStore } from '../../packages/storage/src/work-store.js';
+import { workflowProjectIdentity } from '../../packages/storage/src/workflow-store.js';
 import { normalizeRequest } from '../../packages/asset-pipeline/src/validation.js';
 import { PROCEDURAL_LIMITS } from '../../packages/asset-pipeline/src/procedural.js';
 import type { AssetInput, AssetManifest, AssetProbe } from '../../packages/asset-pipeline/src/types.js';
 import { sceneBuildInstanceCount, ENVIRONMENT_PRESETS } from '../../packages/core/src/studio-policy.js';
 import { terrainVoxelCount } from '../../packages/core/src/terrain-policy.js';
-import { READ_METHODS, WRITE_METHODS, STUDIO_FEATURE_CAPABILITIES, SCENE_BUILD_LIMITS, type InstanceRef, type Json, type StudioCommand } from '../../packages/protocol/src/studio.js';
+import { READ_METHODS, WRITE_METHODS, ASSET_STAGE_METHODS, STUDIO_FEATURE_CAPABILITIES, SCENE_BUILD_LIMITS, type InstanceRef, type Json, type StudioCommand } from '../../packages/protocol/src/studio.js';
 import { VIEWPORT_CAMERA_READ_PROGRAM } from '../../packages/studio-test-controller/src/viewport.js';
 import { encodeRgbPng } from '../../packages/studio-test-controller/src/viewport-image.js';
 import { refuseNativeCodex, noProviderProbe } from './native-fixture-refusal.js';
@@ -41,7 +42,7 @@ interface FakeNode { ref: InstanceRef; name: string; className: string; parent: 
 function simulatedPlugin(store: StudioStore, options: { pluginVersion: string; artifactHash: string }) {
   const grant = store.createGrant({ allowedRoots: ['Workspace', 'ServerStorage', 'Lighting'], allowWrites: true });
   const clientSessionId = 'benchmark-plugin-' + randomUUID().slice(0, 8);
-  const pair = store.pair({ code: grant.code, protocolVersion: 1, capabilities: [...READ_METHODS, ...WRITE_METHODS, ...STUDIO_FEATURE_CAPABILITIES],
+  const pair = store.pair({ code: grant.code, protocolVersion: 1, capabilities: [...READ_METHODS, ...WRITE_METHODS, ...ASSET_STAGE_METHODS, ...STUDIO_FEATURE_CAPABILITIES],
     identity: { clientSessionId, placeId: 0, universeId: 0, name: PLACE, pluginVersion: options.pluginVersion } });
   store.authenticate(pair.sessionId, pair.token);
   const sessionId = pair.sessionId, nodes = new Map<string, FakeNode>(), commands: StudioCommand[] = [], failures: string[] = [];
@@ -55,9 +56,11 @@ function simulatedPlugin(store: StudioStore, options: { pluginVersion: string; a
   const add = (ref: InstanceRef, name: string, parent: string | null, min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity]) => {
     nodes.set(ref.instanceId, { ref, name, className: ref.className, parent, min, max }); return ref;
   };
-  // Originals already placed by the host import flow (assets_place_studio_import) into a hidden template Folder.
+  // Unrecorded template stand-ins exercise denial first. Reviewed copies are
+  // subsequently created only by the queued scene.place_asset responder below.
   const folder = add(mkRef('ServerStorage', ['ArcaneTemplates'], 'Folder'), 'ArcaneTemplates', null);
-  const placeOriginal = (name: string, size: Vec) => add(mkRef('ServerStorage', ['ArcaneTemplates', name], 'Model'), name, folder.instanceId, [-size[0] / 2, 0, -size[2] / 2], [size[0] / 2, size[1], size[2] / 2]);
+  const originalSizes=new Map<string,Vec>(),staged=new Map<string,{packets:number;bytes:number}>(),reconstructed=new Set<string>();
+  const placeOriginal = (name: string, size: Vec) => {originalSizes.set(name,[...size]);return add(mkRef('ServerStorage', ['ArcaneTemplates', name], 'Model'), name, folder.instanceId, [-size[0] / 2, 0, -size[2] / 2], [size[0] / 2, size[1], size[2] / 2]);};
   const vec = (value: Json | undefined, fallback: number[]) => (value as { value?: number[] } | undefined)?.value ?? fallback;
   const grow = (id: string | null, lo: number[], hi: number[]) => {
     for (let at = id; at; at = nodes.get(at)?.parent ?? null) { const n = nodes.get(at)!; for (let i = 0; i < 3; i++) { n.min[i] = Math.min(n.min[i]!, lo[i]!); n.max[i] = Math.max(n.max[i]!, hi[i]!); } }
@@ -94,6 +97,23 @@ function simulatedPlugin(store: StudioStore, options: { pluginVersion: string; a
   function answer(c: StudioCommand): Json {
     const a = c.args as Record<string, Json>;
     switch (c.method) {
+      case 'asset.stage_packet': {
+        const expected=a.expected as {digest:string},packet=JSON.parse(a.packet as string) as {ordinal:number;kind:string};
+        const prior=staged.get(expected.digest)??{packets:0,bytes:0};assert.equal(packet.ordinal,prior.packets);
+        const next={packets:prior.packets+1,bytes:prior.bytes+Buffer.byteLength(a.packet as string)};staged.set(expected.digest,next);
+        return {transferDigest:expected.digest,packetCount:next.packets,byteLength:next.bytes,state:packet.kind==='seal'?'sealed':'receiving',engineVerification:'pending'};
+      }
+      case 'asset.reconstruct': {
+        const expected=a.expected as {digest:string},received=staged.get(expected.digest);assert.ok(received);
+        assert.equal(a.packetCount,received.packets);assert.equal(a.byteLength,received.bytes);reconstructed.add(expected.digest);
+        return {runId:a.runId,transferDigest:expected.digest,state:'reconstructed',objects:a.objects,imported:false,engineVerification:'pending'} as unknown as Json;
+      }
+      case 'scene.place_asset': {
+        const name=a.name as string,size=originalSizes.get(name);assert.ok(size);assert.equal((a.parent as unknown as InstanceRef).instanceId,folder.instanceId);
+        assert.ok(reconstructed.has((a.watch as string).slice('editable-'.length)),'Placement requires this original reconstructed transfer.');
+        const ref=placeOriginal(name,size);
+        return {ref,removedScripts:{count:0,classes:{},names:[]},mutation:{kind:'scene.place_asset',ref,before:null,after:{descendants:3,removedScripts:0,keptScripts:0,scale:1}}} as unknown as Json;
+      }
       case 'scene.children': {
         const parent = (a.ref as unknown as InstanceRef | undefined) ?? rootRef(a.root as string);
         const items = [...nodes.values()].filter(n => n.ref.root === parent.root && n.ref.pathSegments.length === parent.pathSegments.length + 1
@@ -171,7 +191,7 @@ function simulatedPlugin(store: StudioStore, options: { pluginVersion: string; a
     setTimeout(tick, 5);
   };
   tick();
-  return { sessionId, clientSessionId, nodes, commands, failures, log, print, placeOriginal, scripts, stop: () => { stopped = true; } };
+  return { sessionId, clientSessionId, nodes, commands, failures, log, print, placeOriginal, scripts, observation, templateFolder:folder, stop: () => { stopped = true; } };
 }
 
 // ---------------------------------------------------------------- simulated built-in Studio MCP peer (viewport only)
@@ -292,7 +312,8 @@ test('benchmark scene: pillar + circular spawn + forest + lighting play end to e
   cleanups.push(() => lab.close());
   plugin = simulatedPlugin(studio, { pluginVersion, artifactHash });
   cleanups.push(() => plugin!.stop());
-  const server = createMcpServer({ client: new DaemonClient({ url: lab.origin, token: lab.agentToken, pollIntervalMs: 10 }), projectRoot: project });
+  const daemon=new DaemonClient({url:lab.origin,token:lab.agentToken,pollIntervalMs:10});
+  const server = createMcpServer({ client: daemon, projectRoot: project });
   const mcp = new Client({ name: 'benchmark-agent', version: '1.0.0' });
   const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport); await mcp.connect(clientTransport);
@@ -427,17 +448,77 @@ test('benchmark scene: pillar + circular spawn + forest + lighting play end to e
 
   // 5. Forest kit cloning the originals; refs come from a class search of the template Folder.
   const found = await call('5 templates', 'scene_search', { sessionId, root: 'ServerStorage', className: 'Model', limit: 50 });
-  const templates = Object.fromEntries(found.command.result.items.map((item: any) => [item.name ?? item.ref.path.split('/').at(-1), item.ref]));
+  let templates = Object.fromEntries(found.command.result.items.map((item: any) => [item.name ?? item.ref.path.split('/').at(-1), item.ref]));
   assert.equal(Object.keys(templates).length, 16);
+  const beforeRefusal=studio.commands(sessionId).length;
   const refused = await call('5 forest (default policy)', 'scene_build', { sessionId, parent: workspace, name: 'Forest', templates, kits: [forestKit] }, true);
   assert.equal(refused.error.code, 'TEMPLATE_SOURCE', 'unrecorded templates are refused before anything is queued');
+  assert.equal(studio.commands(sessionId).length,beforeRefusal);
   steps.pop(); // an expected refusal, not part of the agent's happy path
-  // Fixture stand-in for the host-recorded placement receipts: the human Settings choice that admits these templates.
-  const policy = await fetch(lab.origin + '/v1/studio-native/toolbox-policy', { method: 'POST',
-    headers: { Authorization: 'Bearer ' + lab.token, Origin: lab.origin, 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId, allowModels: true }) });
-  assert.equal(policy.status, 200, await policy.clone().text());
+  const manualPolicy=async(allowModels:boolean)=>{
+    const response=await fetch(lab.origin+'/v1/studio-native/toolbox-policy',{method:'POST',headers:{Authorization:'Bearer '+lab.token,Origin:lab.origin,'Content-Type':'application/json'},body:JSON.stringify({sessionId,allowModels})});
+    assert.equal(response.status,200,await response.clone().text());assert.equal((await response.json()).allowModels,allowModels);
+  };
+  await manualPolicy(true);
+  const manualRefused=await call('5 forest (manual browsing only)','scene_build',{sessionId,parent:workspace,name:'Forest',templates,kits:[forestKit]},true);
+  assert.equal(manualRefused.error.code,'TEMPLATE_SOURCE','Manual browsing cannot supply an agent task grant.');
+  assert.equal(studio.commands(sessionId).length,beforeRefusal);steps.pop();await manualPolicy(false);
+
+  // Synthetic host/human-review and mesh materialization are the fixture boundary.
+  // These are original jobs, not external models: record each distinct original
+  // through real staging/reconstruction associations and authenticated placement
+  // receipts. No task/source allowance or manual Models preference admits them.
+  const digest=(value:unknown)=>createHash('sha256').update(JSON.stringify(value)).digest('hex'),projectId=workflowProjectIdentity(project).projectId;
+  type ApprovedOriginal=Pick<StageRunIntent,'transferDigest'|'payloadDigest'|'manifestDigest'|'preparedDigest'>&{modelReview:NonNullable<StageRunIntent['modelReview']>};
+  const approved=new Map<string,ApprovedOriginal>();
+  cleanups.push(studio.bindAssetModelReview(intent=>{
+    const original=approved.get(intent.jobId);assert.ok(original,'Only this completed original job was reviewed.');
+    assert.equal(intent.projectId,projectId);assert.deepEqual(intent.modelReview,original.modelReview);
+    for(const field of ['transferDigest','payloadDigest','manifestDigest','preparedDigest']as const)assert.equal(intent[field],original[field]);
+    assert.equal(assets.jobs.find(job=>job.jobId===intent.jobId)?.state,'succeeded');
+  }));
+  const completed=async(command:StudioCommand)=>{
+    const end=performance.now()+30_000;let current=studio.command(command.id);
+    while(current.state==='queued'||current.state==='dispatched'){
+      assert.ok(performance.now()<end,'Original command did not finish: '+command.method);await studio.waitForCommandResult(command.id,25);current=studio.command(command.id);
+    }
+    assert.equal(current.state,'succeeded',JSON.stringify(current.error));assert.deepEqual(plugin!.failures,[]);
+    // Stage/reconstruction commands are a private host queue surface, not the
+    // public scene-command decoder. Placement below uses the actual HTTP client.
+    return current;
+  };
+  const placed=new Map<string,string>();
+  for(const variant of recipe){
+    const job=assets.jobs.find(item=>item.jobId===jobIds[variant.name])!;assert.ok(job);assert.equal(job.state,'succeeded');
+    const proof=studio.session(sessionId).proof!;assert.ok(proof);
+    const payloadDigest=digest({jobId:job.jobId,mesh:'synthetic-original'}),manifestDigest=digest(job.request),preparedDigest=digest({jobId:job.jobId,projectId});
+    const bodies=[{kind:'begin'},{kind:'object',object:{sourceObjectId:variant.name,meshExportSha256:digest({jobId:job.jobId,geometry:'synthetic'})},primitives:[{vertexCount:4,triangleCount:4}]},{kind:'seal'}];
+    const packets=bodies.map((body,ordinal)=>JSON.stringify({formatVersion:1,payloadDigest,manifestDigest,ordinal,...body})),transferDigest=digest(packets);
+    const modelReview={reviewId:randomUUID(),subjectDigest:digest({projectId,jobId:job.jobId,request:job.request}),revision:1};
+    approved.set(job.jobId,{modelReview,transferDigest,payloadDigest,manifestDigest,preparedDigest});
+    const target={sessionId,placeId:proof.placeId,universeId:proof.universeId,root:'Workspace' as const,parentRef:workspace.instanceId,creator:{kind:'user' as const,id:'1'}},
+      continuity={clientLifetimeId:proof.clientLifetimeId,pluginArtifactHash:proof.pluginArtifactHash,playEpoch:proof.playEpoch};
+    const args=packets.map(packet=>({expected:{digest:transferDigest,payloadDigest,manifestDigest},target,continuity,packet}));let bytes=0;
+    const intent:StageRunIntent={projectId,jobId:job.jobId,conversation:{provider:'codex',threadId:'synthetic-benchmark-originals',sessionId:null},modelReview,transferDigest,payloadDigest,manifestDigest,preparedDigest,target,continuity,
+      plan:args.map((a,ordinal)=>{const packetByteLength=Buffer.byteLength(a.packet);bytes+=packetByteLength;return {ordinal,argsSha256:digest(a),packetByteLength,envelopeByteLength:Buffer.byteLength(JSON.stringify(a)),expectedReceipt:{transferDigest,packetCount:ordinal+1,byteLength:bytes,state:ordinal===2?'sealed':'receiving',engineVerification:'pending'}};})};
+    const guard=()=>{assert.equal(studio.session(sessionId).clientSessionId,plugin!.clientSessionId);assert.equal(assets.jobs.find(item=>item.jobId===job.jobId)?.state,'succeeded');};
+    const run=studio.beginStageRun(intent,guard);assert.equal(run.created,true);
+    for(const [ordinal,a]of args.entries())await completed(studio.enqueueStagePacket(run.handle,ordinal,a,guard));
+    studio.closeStageRun(run.handle);await completed(studio.enqueueStageReconstruction(projectId,job.jobId,run.runId,guard));
+    const placement=await daemon.execute(sessionId,'scene.place_asset',{watch:'editable-'+transferDigest,parent:plugin.templateFolder as unknown as Json,name:variant.name,position:[0,0,0],yaw:0,ground:true,anchor:true,allowScripts:false});
+    assert.equal(placement.state,'succeeded');const ref=(placement.command!.result as unknown as {ref:InstanceRef}).ref;placed.set(variant.name,ref.instanceId);
+    assert.equal(studio.readStageReconstruction(projectId,job.jobId,run.runId)!.receipt!.transferDigest,transferDigest);
+  }
+  assert.equal(approved.size,16);assert.equal(new Set([...approved.values()].map(item=>item.transferDigest)).size,16);assert.equal(placed.size,16);
+  const authenticated=await call('5 original templates','scene_search',{sessionId,root:'ServerStorage',className:'Model',limit:50});
+  templates=Object.fromEntries(authenticated.command.result.items.flatMap((item:any)=>{
+    const name=item.name??item.ref.path.split('/').at(-1);
+    return placed.get(name)===item.ref.instanceId?[[name,item.ref]]:[];
+  }));
+  assert.deepEqual(Object.keys(templates).sort(),recipe.map(item=>item.name).sort(),'Only exact authenticated placement refs become forest templates.');
   const forest = await call('5 forest', 'scene_build', { sessionId, parent: workspace, name: 'Forest', templates, kits: [forestKit] });
   assert.equal(forest.state, 'succeeded');
+  await manualPolicy(false);
   const forestReport = forest.kits[0];
   assert.equal(forestReport.blockouts, undefined, 'no blockout layer remains: ' + forestReport.note);
   assert.deepEqual(Object.keys(forestReport.originals).sort(), ['birch', 'bush', 'fern', 'oak', 'pine', 'rock']);

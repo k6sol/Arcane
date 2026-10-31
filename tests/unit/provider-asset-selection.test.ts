@@ -14,6 +14,7 @@ type Scope=null|{provider:string;threadId:string;sessionId:string|null;projectPa
 const studio=await readFile(join(process.cwd(),'apps/desktop/src/studio.ts'),'utf8');
 const coordinator=await readFile(join(process.cwd(),'apps/desktop/src/asset-conversation-selection.ts'),'utf8');
 const review=await readFile(join(process.cwd(),'apps/desktop/src/asset-review.ts'),'utf8');
+const toolbox=await readFile(join(process.cwd(),'apps/desktop/src/toolbox-policy.ts'),'utf8');
 function section(source:string,start:string,end:string):string{
   const begin=source.indexOf(start);assert.ok(begin>=0&&source.indexOf(start,begin+start.length)<0,'Production start anchor must be unique');
   const finish=source.indexOf(end,begin+start.length);assert.ok(finish>begin,'Production end anchor must follow its start');
@@ -27,10 +28,16 @@ function local(source:string,declaration:string):string{
 }
 const mount=section(studio,'  // Bind review to the actual provider transcript, never the shared library row.','  if (chatLink &&');
 const workbench=section(studio,'  const workbench = new StudioWorkbench(','  const startTests=')+section(studio,'  reviewProjectPath = () =>','  // Script-editor drafts:');
+const toolboxMount=section(studio,'  const toolboxPolicy=startToolboxPolicy(','  const playtestToggle=');
 const arcane=section(studio,'    const chat = arcaneChat = new module.ArcaneChat(document);','    // The sign-in card offers Arcane Credits');
 const registry=section(review,'const documentSelections = new WeakMap','\ninterface Session {');
 const coordinatorJs=local(coordinator,'class AssetConversationSelection');
 const registryJs=local(registry,'function installAssetReviewSelection');
+let toolboxJs=stripTypeScriptTypes(toolbox,{mode:'transform'});
+for(const declaration of ['function createModelSourceConsent','function startToolboxPolicy']){
+  const exported='export '+declaration;assert.equal(toolboxJs.split(exported).length,2,'Keep the exact production toolbox declarations');toolboxJs=toolboxJs.replace(exported,declaration);
+}
+assert.doesNotMatch(toolboxJs,/^\s*(?:import|export)\b/m);
 
 // Every peer, bridge reply and state object is created INSIDE the actual VM
 // realm. The strict coordinator must not reject a host-realm fixture object.
@@ -38,7 +45,7 @@ const registryJs=local(registry,'function installAssetReviewSelection');
 // provider constructors, the complete workbench or the model-review card DOM.
 const harness=String.raw`
 var selectionCalls=[],surfaceListeners=new Set(),projectListeners=new Set(),pageListeners=new Map();
-var contextChanges=0,reviewPrepares=0,arcaneConstructed=0,savedScope=null,workbenchOptions=null;
+var contextChanges=0,reviewPrepares=0,arcaneConstructed=0,savedScope=null,workbenchOptions=null,consentBindings=[];
 var activeProvider=initial.provider||'claude';
 var activeProject=Object.hasOwn(initial,'project')?initial.project:'C:/synthetic/current-project';
 function makePeer(name,defaults){
@@ -47,7 +54,13 @@ function makePeer(name,defaults){
     recordedTranscript(){return state.transcript;},
     isDraftConversation(){return state.draft;},
     workflowConversation(){return state.native||null;},
+    modelSourceContext(){return null;},
+    setModelSourceConsent(port,project){
+      if(port!==toolboxPolicy.consent||!Object.isFrozen(port)||port.pending()||port.capture()!==null)throw Error('Expected the real unarmed consent port');
+      consentBindings.push({provider:name,port,project});
+    },
     subscribeTranscriptChange(listener){listeners.add(listener);return()=>listeners.delete(listener);},
+    subscribeStateChange(listener){listeners.add(listener);return()=>listeners.delete(listener);},
     subscribeWorkflowContextChange(){return()=>{};},
     replace(json){state={...state,...JSON.parse(json)};for(var listener of [...listeners])listener();},
     tokens(count){for(var at=0;at<count;at++){state.transcript={...state.transcript,tokens:at};for(var listener of [...listeners])listener();}},
@@ -73,7 +86,10 @@ var window={
   addEventListener(name,listener){if(!pageListeners.has(name))pageListeners.set(name,new Set());pageListeners.get(name).add(listener);}
 };
 if(initial.missingBridge)delete window.arcaneDesktop.selectAssetConversation;
-var document={defaultView:window},token='synthetic-workspace-control';
+var document={defaultView:window,getElementById(id){
+  if(!['toolbox-models-allow','toolbox-models-status','session-picker','toolbox-models-revoke'].includes(id))throw Error('Unexpected toolbox DOM dependency: '+id);
+  return null; // No Models controls exist in this provider-selection fixture.
+}},token='synthetic-workspace-control';
 class StudioApi{constructor(){}}
 class StudioWorkbench{
   constructor(doc,api,origin,control,options){
@@ -88,6 +104,7 @@ var module={ArcaneChat:class{
 `;
 interface MountControl {
   calls():string;scope():string;notifyCount():number;prepares():number;constructorCount():number;
+  consents():string;
   ack(index:number,json:string):void;reject(index:number):void;settleAll():void;
   provider(value:string):void;peer(name:string,json:string):void;tokens(name:string,count:number):void;
   project(json:string):void;page(name:string,persisted:boolean):void;
@@ -95,12 +112,13 @@ interface MountControl {
 }
 async function drain(){for(let at=0;at<20;at++)await Promise.resolve();}
 function fixture(t:TestContext,initial:Record<string,unknown>={}){
-  const context=createContext({});
-  runInContext('var initial=JSON.parse('+JSON.stringify(JSON.stringify(initial))+');\n'+coordinatorJs+'\n'+registryJs+'\n'+harness+'\n'+stripTypeScriptTypes(mount,{mode:'transform'})+'\n'+stripTypeScriptTypes(workbench,{mode:'transform'}),context,{timeout:1000});
+  const context=createContext({clearTimeout});
+  runInContext('var initial=JSON.parse('+JSON.stringify(JSON.stringify(initial))+');\n'+coordinatorJs+'\n'+registryJs+'\n'+toolboxJs+'\n'+harness+'\n'+stripTypeScriptTypes(mount,{mode:'transform'})+'\n'+stripTypeScriptTypes(toolboxMount,{mode:'transform'})+'\n'+stripTypeScriptTypes(workbench,{mode:'transform'}),context,{timeout:1000});
   const control=runInContext(`({
     calls(){return JSON.stringify(selectionCalls.map(call=>call.selection));},
     scope(){return JSON.stringify(workbenchOptions.getNativeConversation());},
     notifyCount(){return contextChanges;},prepares(){return reviewPrepares;},constructorCount(){return arcaneConstructed;},
+    consents(){return JSON.stringify(consentBindings.map(binding=>({provider:binding.provider,samePort:binding.port===toolboxPolicy.consent,project:binding.project?binding.project():null})));},
     ack(index,json){selectionCalls[index].resolve(JSON.parse(json));},
     reject(index){selectionCalls[index].reject(Error('Synthetic selection refusal'));},
     settleAll(){for(var call of selectionCalls)call.resolve({state:'unavailable'});},
@@ -129,6 +147,7 @@ function fixture(t:TestContext,initial:Record<string,unknown>={}){
 
 test('production Codex mount waits for the native ACK and publishes the real workflow scope',async t=>{
   const f=fixture(t,{provider:'codex'});await drain();
+  assert.deepEqual(JSON.parse(f.control.consents()),[{provider:'codex',samePort:true,project:null},{provider:'claude',samePort:true,project:PROJECT}]);
   assert.deepEqual(f.calls(),[{provider:'codex'}]);assert.equal(f.scope(),null);
   const pending=f.beginReview();assert.equal(f.control.prepares(),0);
   f.ack(0);await drain();assert.equal(await pending,true);
@@ -144,6 +163,7 @@ test('production Claude mount uses the durable app CID rather than native sessio
 test('the exact lazy Arcane constructor-wiring prefix subscribes and publishes the durable Arcane anchor after ACK',async t=>{
   const f=fixture(t,{provider:'arcane'});await drain();assert.deepEqual(f.calls(),[null]);assert.equal(f.scope(),null);
   f.ack(0);await drain();f.mountArcane();await drain();
+  assert.deepEqual(JSON.parse(f.control.consents()),[{provider:'codex',samePort:true,project:null},{provider:'claude',samePort:true,project:PROJECT},{provider:'arcane',samePort:true,project:PROJECT}]);
   assert.equal(f.control.constructorCount(),1);assert.deepEqual(f.calls()[1],{provider:'arcane',conversationId:C});
   assert.equal(f.scope(),null);f.ack(1);await drain();
   assert.deepEqual(f.scope(),{provider:'arcane',threadId:'app:'+C,sessionId:null,projectPath:PROJECT});
