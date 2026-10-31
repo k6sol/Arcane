@@ -439,7 +439,9 @@ test('unknown-connect checkpoint refuses stale, incomplete, mismatched and activ
     ['busy',value=>{value.busy=true;}],['connecting',value=>{value.connecting=true;}],['closing',value=>{value.closing=true;}],
     ['current idle session',value=>{value.snapshot=snapshot();}],
     ['live turn',value=>{value.snapshot=state(true).snapshot;value.snapshot!.thread!.turnStatus='inProgress';value.snapshot!.thread!.turnId='owned-turn';}],
-    ['active task',value=>activeTask(value)],['unknown task',value=>activeTask(value,'unknown')],['retained normal owner',value=>activeTask(value,'verified',true)],
+    ['active task',value=>activeTask(value)],['retained unknown task',value=>activeTask(value,'unknown',true)],
+    ['unknown ownership missing',value=>{activeTask(value,'unknown');delete value.chatTasks![0]!.retained;}],
+    ['retained normal owner',value=>activeTask(value,'verified',true)],
     ['missing receipt',value=>{value.actions=[];}],['unfinished receipt',value=>{value.actions[0]!.finishedAt=null;}],
     ['still pending',value=>{value.actions[0]!.state='pending';}],['different disposition',value=>{value.actions[0]!.state='rejected';}],
     ['different request',value=>{value.actions[0]!.requestId=randomUUID();}],['different action',value=>{value.actions[0]!.action='history-load';}],
@@ -484,13 +486,14 @@ test('a local pending connect still blocks restart when an unrelated finished co
 });
 
 test('connect checkpoint rechecks activity and project after held native draft persistence',async t=>{
-  for(const change of ['busy','project','live-session'] as const)await t.test(change,async t=>{
+  for(const change of ['busy','project','live-session','retained-task'] as const)await t.test(change,async t=>{
     const doc=new DocumentFixture(),observed=state();observed.actions=[unknownConnectRecord()];const entered=deferred(),release=deferred();let hold=false,posts=0;
+    if(change==='retained-task')observed.chatTasks=[{taskId:randomUUID(),threadId:'historical',sessionId:null,connectionId:randomUUID(),state:'unknown',round:0,reason:'application_closed',reportDigest:null,retained:false}];
     const chat=new CodexChat(doc.asDocument(),new CodexChatApi(TOKEN,async(_input,init)=>{if(init?.method==='POST')posts++;return Response.json({state:observed});}));t.after(()=>{release.resolve();chat.stop();});
     await chat.start();await chat.enableChatTabs({preferences:{read:async()=>plainRow('Saved draft').preferences,save:async()=>{if(hold){entered.resolve();await release.promise;}}}});await settle();
     hold=true;doc.getElementById('codex-composer').value='Keep the exact held draft';doc.getElementById('codex-composer').dispatchEvent(new Event('input'));
     const checkpoint=chat.prepareForRestart();const refused=assert.rejects(checkpoint,/Finish or stop|workspace changed|Check current native state/);await Promise.race([entered.promise,checkpoint.then(()=>assert.fail('Checkpoint ended before the held draft ACK.'))]);
-    if(change==='busy')observed.busy=true;else if(change==='project')observed.projectPath=PROJECT+'-changed';else observed.snapshot=snapshot();
+    if(change==='busy')observed.busy=true;else if(change==='project')observed.projectPath=PROJECT+'-changed';else if(change==='retained-task')observed.chatTasks![0]!.retained=true;else observed.snapshot=snapshot();
     release.resolve();await refused;assert.equal(posts,0);assert.equal(doc.getElementById('codex-unknown').hidden,false);
   });
 });

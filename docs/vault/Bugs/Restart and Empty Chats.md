@@ -5,6 +5,12 @@ tags: [arcane, chat, updates]
 ---
 # Restart and empty chats
 
+## Historical task recovery and update restart
+
+A further browser regression reproduces the update lock when a finished unbound connection notice coexists with three explicitly unretained historical unknown tasks. Draft checkpointing now permits this exact idle case without settling the tasks or reviewing the notice. Active tasks, retained owners, missing ownership evidence, a current native session, pending work, incomplete or changed receipts, failed fresh reads and unsaved drafts remain guarded. Ownership becoming retained while draft persistence is held still refuses restart. Connect, Send and write permissions are unchanged.
+
+Strict652-source compilation and176 focused persistence, update, navigation and actual Edge cases pass with zero failures or skips. The original browser failure and the previous overbroad unknown-task expectation remain in private test evidence; the latter now checks retained unknown tasks and missing ownership separately. This is controlled source verification, not loaded customer restart or native recovery acceptance. Installed runtime remainsff18a9d; the open window still runs447 pending user readiness.
+
 The older running desktop refused Restart to update after a completed, unknown connection attempt with `FRAME_LIMIT`. Its durable action journal records a finished connect without a connection, thread or turn, and no pending actions. Empty sidebar conversations also had no close control. These are separate from an active model turn or an unsaved draft.
 
 The restart correction re-reads the original service state before and after persistence. Only matching finished, unbound unknown connect receipts can pass this exception. Active or retained tasks, current sessions, pending actions, incomplete receipts, failed reads and workspace changes still block it. Draft and queued-message acknowledgements remain required. The original unknown receipt stays recorded and visible after reopening; neither checkpointing nor saved-login startup retries it. Native daemon shutdown must still complete before relaunch.

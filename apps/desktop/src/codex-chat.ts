@@ -3145,8 +3145,11 @@ export class CodexChat {
     return record.action==='connect'&&record.state==='unknown'&&record.finishedAt!==null&&record.errorCode!==null&&record.connectionId===null&&record.threadId===null&&record.turnId===null&&record.model===null&&record.effort===null;
   }
   private restartableConnectUncertainty():boolean {
+    // Saving drafts for an update neither settles historical tasks nor admits
+    // native work. Explicitly unretained unknown tasks survive the restart;
+    // live owners, active work and missing ownership evidence still block it.
     if(!this.fresh||this.stopped||!this.state||this.state.displayLimited||this.snapshot()||!this.uncertain.size||
-      this.state.chatTasks?.some(task=>task.retained||['working','awaiting_verification','repair_queued','repairing','unknown'].includes(task.state)))return false;
+      this.state.chatTasks?.some(task=>task.retained||['working','awaiting_verification','repair_queued','repairing'].includes(task.state)||task.state==='unknown'&&task.retained!==false))return false;
     return [...this.uncertain.values()].every(item=>item.read&&item.input.action==='connect'&&item.input.connectionId===null&&
       this.state!.actions.some(record=>record.requestId===item.input.requestId&&this.finishedUnknownConnect(record)));
   }

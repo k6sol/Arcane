@@ -47,6 +47,32 @@ test('recovery errors are readable overlays and never move sign-in controls at d
     assert.deepEqual(await page.locator('#provider-login-start').boundingBox(),before,'Expanding explanation must not move sign-in controls');
     await page.locator('#codex-unknown-details > summary').click();assert.match(await page.locator('#codex-unknown-requests').innerText(),new RegExp(record.requestId));
     assert.match(await page.locator('#codex-unknown-requests').innerText(),/Error 411/);
+    if(width===1484){
+      const checkpoint=await page.evaluate(async()=>{
+        const w=window as any,before=JSON.stringify(w.fixture);let error:string|null=null;
+        try{await w.chat.prepareForRestart();}catch(failure){error=String(failure);}
+        return{error,unchanged:before===JSON.stringify(w.fixture)};
+      });
+      assert.equal(checkpoint.error,null,'Historical unretained tasks must not trap an otherwise idle update');
+      assert.equal(checkpoint.unchanged,true,'Restart checkpoint cannot settle or rewrite historical outcomes');
+      assert.equal(await page.locator('#codex-acknowledge').isEnabled(),false,'Restart does not grant notice-review authority');
+      assert.equal(await page.locator('#codex-connect').isEnabled(),false,'Restart does not grant connection authority');
+      for(const variant of ['retained','retention-missing','active','busy','connecting','closing','bound-receipt','unfinished-receipt']as const){
+        const result=await page.evaluate(async(variant:string)=>{
+          const w=window as any,original=structuredClone(w.fixture);
+          if(variant==='retained')w.fixture.chatTasks[0].retained=true;
+          else if(variant==='retention-missing')delete w.fixture.chatTasks[0].retained;
+          else if(variant==='active')w.fixture.chatTasks[0].state='working';
+          else if(variant==='bound-receipt')w.fixture.actions[0].connectionId='22222222-3333-4444-8555-666666666666';
+          else if(variant==='unfinished-receipt')w.fixture.actions[0].finishedAt=null;
+          else w.fixture[variant]=true;
+          await w.chat.refresh();let refused=false;
+          try{await w.chat.prepareForRestart();}catch{refused=true;}
+          w.fixture=original;await w.chat.refresh();return refused;
+        },variant);
+        assert.equal(result,true,'Restart retains its '+variant+' guard');
+      }
+    }
     assert.deepEqual(await page.evaluate(()=>(window as any).posts),[]);assert.deepEqual(errors,[]);
     if(process.env.ARCANE_ERROR_SCREENSHOTS){await mkdir(process.env.ARCANE_ERROR_SCREENSHOTS,{recursive:true});await page.screenshot({path:join(process.env.ARCANE_ERROR_SCREENSHOTS,'recovery-'+width+'.png')});}
     await page.evaluate(async()=>{
