@@ -13,6 +13,8 @@ The actual open window still runs old447 and visibly shows the update banner. It
 
 ## Verified functionality and limits
 
+Latest repeated sign-in report: read-only live-process inspection still identifies the older447 executable, while the installation record selects verifiedcdda8e4. The direct-login, provider sign-in and public-error regression selection passes80 cases with zero failures or skips. This confirms controlled behavior only; it does not establish that the open customer window has loaded the fix. A renewed readiness question requests saving drafts and closing the old window before the authorized exact-path reopen. Do not replay the completed native connection smoke or installer.
+
 The update combines direct browser sign-in, stable numbered errors without moving the page, and independent fresh-chat recovery. Original historical action/task rows stay inspectable and unchanged; unresolved native/task/proposal resources remain reserved and unsafe old continuations stay denied. New human ownership may authorize ordinary writes/assets under the existing same-project concurrency contract. Staging, an exclusive writer rule and OS reboot were earlier extra restrictions, not requirements.
 
 Strict compilation covers658 explicit sources. The435-case focused checkpoint and131-case follow-up pass with zero skips. Snapshot comparison proves production files unchanged between them. Original failed runs and corrections remain retained; no workflow was rerun for green. See [[Sessions/2026-10-31 Independent Chat Recovery]] and [[Architecture/Native Session Custody]].
