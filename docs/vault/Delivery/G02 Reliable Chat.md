@@ -5,6 +5,8 @@ tags: [arcane]
 ---
 # Make chat dependable
 
+Native metadata smoke on runtimecdda8e4 uses the actual saved subscription and vendor CLI through the production provider host and authenticated Arcane service in an isolated project. One acknowledged Connect returns ready subscription state and eight models; no thread, model turn or Studio operation starts, and original physical close is persisted. This supports real connection compatibility without claiming loaded desktop or configured-thread/tool acceptance. See [[Sessions/2026-10-31 Independent Chat Recovery]]. The full chat acceptance checklist remains open.
+
 Explicit account entry follow-up: verified login completes the first-launch page and shows the workspace during connection recovery, with native actions still disabled. Strict652 compilation and94 focused cases pass; the actual API/controller browser fixture keeps all three unknown tasks and the original action unchanged, sends zero native POSTs and retains Error412. Cached-auth cancellation and fresh signed-out state cannot manufacture page success or native readiness. Customer/native task recovery remains open.
 
 Scoped follow-up: direct Connect now invokes native browser sign-in, retaining verified saved authentication, explicit cancellation and original workspace/provider ownership across waits. The real host protocol remains unchanged; no Settings fallback or model turn is introduced. Local tests distinguish account authentication from the still-blocked native workspace. See [[Sessions/2026-10-31 Browser Sign-in and Error References]]. Customer connection and the three legacy unknown tasks remain open.

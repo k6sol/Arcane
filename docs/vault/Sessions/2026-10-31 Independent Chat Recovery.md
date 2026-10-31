@@ -25,6 +25,16 @@ A separate read-only aggregate audit of existing customer metadata fits the new 
 
 ## Remaining work
 
+## Actual native metadata verification
+
+Published runtimecdda8e4 also passes a status-only inspection through the production provider setup host and actual vendor CLI. Its saved account is recognized as subscription-authenticated; no browser login, terminal handoff or model request is started. The owner context is controlled, so this is native status evidence rather than an actual desktop click.
+
+A separate isolated-project smoke uses the real CLI, production service, authenticated HTTP action route, original Arcane MCP profile and native asset hooks. Exactly one Connect returns HTTP200 and acknowledged, with connected/ready subscription state and eight reported models. No thread or model turn is created and no Studio operation occurs. Service shutdown observes the original native close and persists its lease as closed. It does not claim descendant-process containment.
+
+The snapshot reports `arcane-only-pending`, correctly reflecting that no configured thread has verified runtime tools. Actual thread execution, saved-history behavior in the loaded customer desktop and Studio acceptance remain separate. The exclusive attempt and its safe aggregate receipts remain private; no customer journal or credential was rewritten.
+
+## Delivery still pending
+
 Original hosted workflow41189224687 on4d4b24b retained failures in three draft-recovery assertions on Linux and Windows: those expected the former global historical block. The revised connected expectations preserve actual SQLite receipts, held draft/queue acknowledgements and zero automatic native requests while allowing the new host quarantine. Linux additionally exposed a cleanup fixture whose1250ms delay was not proof that the later Play heartbeat expired. It now observes that exact proof's actual expiry, without widening run, SDK, cleanup or case deadlines or changing production behavior.
 
 The follow-up passes658-source compilation and131 focused cases with zero skips. Source/compiled snapshots show only the two test files and their compiled outputs changed from the435-case checkpoint; all production inputs remain identical. One intermediate130-pass/one-checkpoint-read assertion failure is retained: quarantined history follows the ordinary idle save path rather than the old unconfirmed-connect exception's extra reads. Dedicated no-recovery-metadata checkpoint guards remain unchanged. New exact-source hosted/package acceptance is still required; no failed candidate was installed.
