@@ -7,6 +7,8 @@ tags: [arcane]
 
 ## Installed and running
 
+Latest repeated Connect report was checked against the actual running executable: it still belongs to the older447 bundle; installation still selects cdda8e4. A fresh unchanged-input selection passes all50 sign-in, onboarding, public-error and real-browser error-layout cases with zero skips. The browser checks cover1484,980,540 and375px widths and assert unchanged sign-in button coordinates when notices appear or expand. Direct provider login and saved-account reuse are implemented; this is controlled verification, not acceptance in the older running window. The user has been asked to save and close it before the authorized exact-launcher reopen. Do not force-close the window or replay an uncertain request.
+
 Selected desktop runtime is SSH-verified `cdda8e454b4598a260f23ca5892462bca9c34926`. All seven original [jobs41190423880](https://github.com/k6sol/Arcane/actions/runs/41190423880) pass without rerun. Original stock installation completed with exit0, both pipe EOFs, publishedtrue, no issues and no retained lock/staging. Independent verification checks4673 files/533180324 bytes and manifest `2282cb321d42dce923ce79b0a0858874da3f5ab2d735760d81cfc45208a00516`. One inactive code bundle was reversibly archived with its original identity preserved and zero deletions; the32-entry limit remains unchanged.
 
 The actual open window still runs old447 and visibly shows the update banner. It has not been force-closed or restarted. A current readiness question asks the user to save/close it when ready for the already-authorized updated reopen. Selection is not loaded customer acceptance. Never replay completed delivery helpers. See [[Sessions/2026-10-31 Verified Chat Recovery Delivery]].
