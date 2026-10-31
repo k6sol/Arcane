@@ -13,4 +13,6 @@ The regression uses actual headless Edge, the production page/import controller,
 
 This is file-library and preview acceptance. It does not prove connected Studio import, Asset Manager upload, authenticated packaged customer behavior or a configured remote collector. No Studio operation or customer file is used.
 
+Hosted follow-up: Linux unit shard2 of original run41198260696 rejected the new `asset-imports` dependency because its fixed presentation-import inventory still expected no imports. The inventory now explicitly permits only `./user-errors.js`; the catalogue remains independently checked to have zero dependencies, with the existing Node/store/daemon/dynamic-import exclusions unchanged. Strict658-source compilation and the exact emitted-browser dependency case pass. Fresh original hosted verification is required; the failed run is retained rather than rerun.
+
 [[Delivery/G06 Connected Import]] · [[Delivery/G08 Diagnostics]] · [[Architecture/Error References]]
