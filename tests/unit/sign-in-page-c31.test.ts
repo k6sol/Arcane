@@ -180,7 +180,8 @@ test('first launch with a saved ChatGPT login whose connection fails shows the p
   fail(Error('Metadata unavailable')); await settled();
   assert.equal(f.view(), 'setup');
   assert.equal(f.control('provider-login-gate').hidden, false);
-  assert.match(f.control('provider-login-message').textContent, /Signed in\. Connection unavailable/);
+  assert.match(f.control('provider-login-message').textContent, /^Error 415 · Connection unavailable/);
+  assert.match(f.control('provider-login-message').textContent, /Details: Metadata unavailable$/);
   assert.equal(f.controller.isSignedIn(), false);
   assert.equal(f.views().includes('workspace'), false);
   f.connection(ready);

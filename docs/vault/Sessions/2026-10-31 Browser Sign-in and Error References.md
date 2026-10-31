@@ -29,4 +29,12 @@ The earlier broad run retains807 passes, nine failures and one skipped check, in
 
 Hosted/package delivery is pending for this source. Controlled browser/native-protocol fixtures are not authenticated customer acceptance or a Studio test. The three legacy unknown tasks remain unresolved.
 
+## Explicit account entry during recovery
+
+The original `68def99` [hosted run41171832657](https://github.com/k6sol/Arcane/actions/runs/41171832657) retained three completed failed jobs: the release compiler inventory omitted the new real module, and both operating systems retained old error-message assertions in two unit files. The corrected three full files pass102 cases locally, with no skips or deadline/guard changes. Original logs are kept; no workflow was rerun to replace their outcomes.
+
+An additional first-launch regression reproduced successful account verification remaining on the login page while metadata connection was blocked. Explicit validated subscription login now remembers the completed sign-in page and opens the workspace. Cached-auth cancellation does not remember success. This changes presentation only: fresh signed-out native state remains authoritative, and native readiness, model selection, Send and task recovery keep their original guards.
+
+Strict652-source compilation and94 focused cases pass with no skips, cancellations or failures, including actual four-width Edge composition of ProviderSetup with the real Codex API decoder and controller. The three unknown task records and old action remain unchanged, no native POST occurs, and the workspace opens with Error412 while Send and the model selector stay disabled. The independent source-loaded controller harness retained its original red case and then37 passing cases; its PowerShell wrapper reported an experimental-warning redirection error, so the compiled root run supplies the clean original process exit-zero evidence. Hosted/package/customer acceptance remains separate.
+
 [[Architecture/Error References]] · [[Delivery/G02 Reliable Chat]] · [[Delivery/G08 Diagnostics]] · [[Operations/Next Session]]

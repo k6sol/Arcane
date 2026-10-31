@@ -496,7 +496,11 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
       if (!stopped && !disposed && generation === epoch && target === provider) {
         // This follows only the user's explicit sign-in intent, not startup or
         // cached preferences. Connecting reads account/models, never a turn.
-        if(connectAfterLogin)reconnectAllowed=true;
+        if(connectAfterLogin){
+          reconnectAllowed=true;
+          // Verified account sign-in ends the login page. Native readiness still gates every chat action.
+          codexChatEvidence=true;rememberPage('signed-in');
+        }
         if (connectAfterLogin && !options.chat.connectForSavedLogin && !needsDisconnect() && !connected()) {
           const connect = button('codex-connect'); if (connect && !connect.disabled) connect.click();
         }

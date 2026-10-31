@@ -62,7 +62,33 @@ test('recovery errors are readable overlays and never move sign-in controls at d
     assert.deepEqual(await page.locator('#provider-login-start').boundingBox(),loginBefore,'A browser login failure must not move its action at '+width);
     assert.match(await page.locator('#provider-login-message').innerText(),/Controlled browser sign-in failed before confirmation/);
     assert.deepEqual(await page.evaluate(()=>(window as any).loginCalls),['codex']);assert.equal(await page.evaluate(()=>(window as any).settingsRequests),0);
-    assert.deepEqual(errors,[]);await page.evaluate(()=>(window as any).provider.cleanup());await page.close();
+    assert.deepEqual(errors,[]);await page.evaluate(()=>(window as any).provider.cleanup());
+    await page.evaluate(async()=>{
+      const w=window as any;w.loginCalls=[];w.metadataChecks=0;w.chat.resume();await w.chat.refresh();
+      const modulePath='/provider-setup.js',m=await import(modulePath);
+      const status=async()=>({version:1,provider:'codex',installed:true,auth:'signed-out',cliVersion:'fixture',busy:false,message:null});
+      const forbidden=async()=>{throw Error('No installation or terminal launch is expected.');};
+      w.provider=m.startProviderSetup(document,{signInPage:true,chat:{
+        providerConnectionStatus:()=>w.chat.providerConnectionStatus(),subscribeProviderStateChange:(listener:()=>void)=>w.chat.subscribeProviderStateChange(listener),
+        connectForSavedLogin:async(current?:()=>boolean)=>{w.metadataChecks++;await w.chat.connectForSavedLogin(current);}},
+        nativeBridge:Object.freeze({version:1,status,login:async(provider:string)=>{w.loginCalls.push(provider);return {...await status(),auth:'subscription'};},install:forbidden,launch:forbidden})});
+    });
+    await page.waitForFunction(()=>!(document.getElementById('provider-login-start') as HTMLButtonElement).disabled);
+    assert.equal(await page.locator('#provider-login-gate').isVisible(),true);
+    await page.locator('#provider-login-start').click();
+    await page.waitForFunction(()=>(window as any).metadataChecks===1&&document.getElementById('provider-login-gate')!.getAttribute('aria-busy')==='false');
+    assert.equal(await page.locator('#provider-login-gate').isVisible(),false,'Verified account sign-in must open the workspace even while recovery holds native connection');
+    assert.equal(await page.locator('html').getAttribute('data-provider-view'),'workspace');
+    assert.match(await page.locator('#codex-unknown-title').innerText(),/^Error 412/);
+    assert.equal(await page.locator('#codex-submit').isDisabled(),true);assert.equal(await page.locator('#codex-model-trigger').isDisabled(),true);
+    assert.equal(await page.evaluate(()=>(window as any).provider.isSignedIn()),false,'Presentation cannot establish native readiness');
+    assert.deepEqual(await page.evaluate(()=>(window as any).posts),[]);
+    assert.deepEqual(await page.evaluate(()=>(window as any).loginCalls),['codex']);
+    assert.deepEqual(await page.evaluate(()=>{const s=(window as any).chat.currentStateView().state;return{snapshot:s.snapshot,actions:s.actions,tasks:s.chatTasks.map((task:any)=>task.state)};}),
+      {snapshot:null,actions:[record],tasks:['unknown','unknown','unknown']});
+    await page.evaluate(()=>(window as any).chat.refresh());assert.equal(await page.evaluate(()=>(window as any).metadataChecks),1);
+    assert.equal(await page.evaluate(()=>(window as any).settingsRequests),0);assert.deepEqual(errors,[]);
+    await page.evaluate(()=>{const w=window as any;w.provider.cleanup();w.chat.stop();});await page.close();
   }
   assert.deepEqual(unexpected,[]);
  });

@@ -625,9 +625,9 @@ test('target history failure keeps its own truthful notice after outgoing FRAME_
   assert.equal(await f.chat.openSavedChat(f.b),true);assert.equal(f.chat.currentStateView().conversation!.threadId,f.b);
   const notice=f.doc.getElementById('codex-notice').textContent;
   // Plain words in the line; the request ID, action and state only in its Details (for support).
-  assert.match(notice,/^Couldn\u2019t load this chat\u2019s saved history\./);assert.doesNotMatch(notice,/history-load|rejected|acknowledgement|[0-9a-f]{8}-[0-9a-f]{4}-/);
+  assert.match(notice,/^Error 422\. Couldn\u2019t load this chat\u2019s saved history\./);assert.doesNotMatch(notice,/history-load|rejected|acknowledgement|[0-9a-f]{8}-[0-9a-f]{4}-/);
   assert.equal(f.doc.getElementById('codex-notice-actions').hidden,false);
-  assert.match(f.doc.getElementById('codex-notice-detail').textContent,/^Request [0-9a-f-]{36} \u00b7 history-load \u00b7 rejected/);
+  assert.match(f.doc.getElementById('codex-notice-detail').textContent,/^Error 422 · [^\n]+\n\nRequest [0-9a-f-]{36} · history-load · rejected/);
   assert.notEqual(notice,HISTORY_LIMIT_NOTICE);assert.equal(f.recording(),f.originalRecording);
 });
 

@@ -5,6 +5,8 @@ tags: [arcane]
 ---
 # Next session
 
+Latest follow-up ends the first-launch page after explicit verified account login, so the user can enter the workspace and inspect recovery without granting native readiness. Strict652 compilation and94 focused cases pass; original records, cancellation, stale-owner and native admission guards remain intact. Ship the latest combined source after its exact hosted checks; do not install the intermediate68def99 only to replace it immediately. Browser account entry is fixed at controlled-test scope, while the three legacy unknown tasks still require a real recovery design before native work resumes.
+
 Read [[Home]], [[Operations/Current State]], [[Delivery/Goal Board]] and relevant developer skills. Verify current source and runtime before acting. Preserve contributor work in the shared checkout.
 
 Latest functional source adds direct browser sign-in, stable error references and fixed recovery notices, with verified local boundaries in [[Sessions/2026-10-31 Browser Sign-in and Error References]]. Finish exact hosted/package delivery before calling it installed. The still-selected447 app stays open; preserve it and any drafts. Keep browser account authentication separate from actual native workspace connection. The three legacy unknown tasks lack complete original owner/worker closure evidence. Metadata-only historical review must not bypass native admission: add an authoritative unresolved-task barrier before relaxing that review guard. No uncertain request replay or fabricated task closure. All ten whole goals remain open.

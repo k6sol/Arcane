@@ -1,7 +1,7 @@
 /// <reference lib="dom" />
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { startProviderSetup, ARCANE_CREDITS_OFFER, ARCANE_CREDITS_TARGET, PROVIDER_PRESENTATION_KEY, type ProviderSetupState, type SetupProvider } from '../../apps/desktop/src/provider-setup.js';
+import { startProviderSetup, ARCANE_CREDITS_OFFER, ARCANE_CREDITS_TARGET, PROVIDER_PRESENTATION_KEY, SIGN_IN_PAGE_KEY, type ProviderSetupState, type SetupProvider } from '../../apps/desktop/src/provider-setup.js';
 import type { ProviderConnectionStatus } from '../../apps/desktop/src/codex-chat.js';
 
 // In-memory DOM/bridge doubles only: no browser, native CLI, network or credentials.
@@ -23,7 +23,7 @@ class Control {
   }
   click() { this.emit('click', false); }
 }
-function fixture(options: { autoSelect?: boolean; preferred?: SetupProvider; state?: Partial<ProviderSetupState>; connectSavedLogin?: (isCurrent?:()=>boolean) => Promise<void>; initialStatus?: (provider: SetupProvider) => Promise<unknown>; noBridge?: boolean } = {}) {
+function fixture(options: { autoSelect?: boolean; signInPage?: boolean; preferred?: SetupProvider; state?: Partial<ProviderSetupState>; connectSavedLogin?: (isCurrent?:()=>boolean) => Promise<void>; initialStatus?: (provider: SetupProvider) => Promise<unknown>; noBridge?: boolean } = {}) {
   const elements = new Map(['provider-setup-panel', 'provider-login-gate', 'provider-setup-provider',
     'provider-login-start', 'provider-login-refresh', 'provider-login-codex', 'provider-login-claude',
     'provider-login-message', 'provider-setup-status', 'provider-setup-details', 'provider-setup-refresh',
@@ -43,7 +43,7 @@ function fixture(options: { autoSelect?: boolean; preferred?: SetupProvider; sta
   let reply: (() => Promise<unknown>) | null = null;
   const native = Object.freeze({ version: 1, ...Object.fromEntries(['status', 'login', 'install', 'launch'].map(action =>
     [action, async (provider: string) => { calls.push(action + ':' + provider); return reply ? reply() : action === 'status' && options.initialStatus ? options.initialStatus(provider as SetupProvider) : { ...state, provider }; }])) });
-  const controller = startProviderSetup(doc as unknown as Document, { ...(options.autoSelect ? { autoSelectSignedIn: true } : {}), nativeBridge: options.noBridge ? null : native, chat: {
+  const controller = startProviderSetup(doc as unknown as Document, { ...(options.autoSelect ? { autoSelectSignedIn: true } : {}), ...(options.signInPage ? { signInPage: true } : {}), nativeBridge: options.noBridge ? null : native, chat: {
     providerConnectionStatus: () => connection,
     subscribeProviderStateChange(listener) { subscriber = listener; return () => { subscriber = () => {}; }; },
     ...(options.connectSavedLogin ? { connectForSavedLogin: options.connectSavedLogin } : {}),
@@ -58,6 +58,56 @@ function fixture(options: { autoSelect?: boolean; preferred?: SetupProvider; sta
 }
 const settled = async () => { await new Promise<void>(resolve => setImmediate(resolve)); };
 const connected: ProviderConnectionStatus = { connected: true, ready: true, fresh: true, auth: 'subscription' };
+
+test('explicit verified login ends the first-launch page when native metadata remains blocked, without granting sign-in',async t=>{
+  const scopes:(()=>boolean)[]=[];
+  const f=fixture({signInPage:true,connectSavedLogin:async current=>{assert.equal(typeof current,'function');scopes.push(current!);}});
+  t.after(()=>f.controller.cleanup());
+  const settings:unknown[]=[];let nativeClicks=0;
+  f.doc.addEventListener('workspace:settingsrequest',event=>settings.push((event as CustomEvent).detail));
+  f.control('codex-connect').addEventListener('click',()=>{nativeClicks++;});
+  f.control('codex-composer').value='Keep this original draft';
+  await settled();
+  assert.equal(f.control('workspace-stage').attributes.get('data-provider-view'),'setup');
+  assert.equal(f.stored.has(SIGN_IN_PAGE_KEY),false);
+  f.control('codex-connect').disabled=true;f.state({auth:'subscription'});
+  f.control('provider-login-start').emit('click');await settled();
+  assert.equal(f.control('workspace-stage').attributes.get('data-provider-view'),'workspace');
+  assert.equal(f.doc.documentElement.attributes.get('data-provider-view'),'workspace');
+  assert.equal(f.control('provider-login-gate').hidden,true);
+  assert.deepEqual(JSON.parse(f.stored.get(SIGN_IN_PAGE_KEY)!),{version:1,state:'signed-in'});
+  assert.equal(f.controller.isSignedIn(),false,'account verification does not establish a ready native connection');
+  assert.equal(scopes.length,1);assert.equal(scopes[0]!(),true);
+  assert.equal(nativeClicks,0);assert.equal(settings.length,0);assert.equal(f.control('codex-connect').disabled,true);
+  assert.deepEqual(f.calls,['status:codex','login:codex'],'no model, native-turn or extra login action is exposed by this presentation change');
+  assert.match(f.control('provider-login-message').textContent,/ChatGPT sign-in was verified\. Codex is not connected/);
+  assert.equal(f.control('codex-composer').value,'Keep this original draft');
+  for(let i=0;i<5;i++){f.doc.dispatchEvent(new Event('input'));f.connection(null);}
+  f.control('provider-setup-refresh').emit('click');await settled();
+  assert.equal(scopes.length,1,'renders and an unchanged saved-auth check do not retry blocked metadata');
+  assert.deepEqual(f.calls,['status:codex','login:codex','status:codex']);
+  assert.equal(f.controller.isSignedIn(),false);assert.equal(nativeClicks,0);assert.equal(settings.length,0);
+  f.connection({connected:false,ready:false,fresh:true,auth:'signed-out'});
+  assert.equal(f.control('workspace-stage').attributes.get('data-provider-view'),'setup','a fresh signed-out native snapshot remains authoritative');
+  assert.equal(f.controller.isSignedIn(),false);
+});
+
+test('cancelled cached-auth login never remembers first-launch sign-in or revives its denied metadata handoff',async t=>{
+  let metadata=0;const f=fixture({signInPage:true,connectSavedLogin:async()=>{metadata++;}});t.after(()=>f.controller.cleanup());
+  const settings:unknown[]=[];let nativeClicks=0;
+  f.doc.addEventListener('workspace:settingsrequest',event=>settings.push((event as CustomEvent).detail));
+  f.control('codex-connect').addEventListener('click',()=>{nativeClicks++;});
+  await settled();
+  f.state({auth:'subscription',message:'Native browser sign-in was cancelled.'});
+  f.control('provider-login-start').emit('click');await settled();
+  assert.match(f.control('provider-login-message').textContent,/Native browser sign-in was cancelled/);
+  assert.equal(f.stored.has(SIGN_IN_PAGE_KEY),false);assert.equal(f.control('workspace-stage').attributes.get('data-provider-view'),'setup');
+  assert.equal(f.controller.isSignedIn(),false);assert.equal(metadata,0);assert.equal(nativeClicks,0);assert.equal(settings.length,0);
+  f.state({message:null});f.control('provider-setup-refresh').emit('click');await settled();
+  assert.deepEqual(f.calls,['status:codex','login:codex','status:codex'],'the saved subscription is checked without another login or authority effect');
+  assert.equal(f.stored.has(SIGN_IN_PAGE_KEY),false);assert.equal(f.control('workspace-stage').attributes.get('data-provider-view'),'setup');
+  assert.equal(f.controller.isSignedIn(),false);assert.equal(metadata,0);assert.equal(nativeClicks,0);assert.equal(settings.length,0);
+});
 
 test('explicit Connect verifies sign-in directly and preserves a blocked native connection without Settings',async t=>{
   const scopes:(()=>boolean)[]=[];
