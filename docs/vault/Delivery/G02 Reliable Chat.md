@@ -5,7 +5,7 @@ tags: [arcane]
 ---
 # Make chat dependable
 
-Status: **Queued**. Priority and original scope: Make chat dependable — P0, queued.
+Status: **In progress**. Priority and original scope: Make chat dependable — P0, queued.
 
 Deliver: instant local submission feedback, durable prompts/drafts/history/folders, working model selection with remembered model/effort, shared Codex/Claude conversation context through supported adapters, responsive cancellation, and chat remaining accessible after previews.
 
@@ -32,3 +32,15 @@ Complete the loaded5d customer journey after user-chosen restart, then verify th
 
 
 Delivery checkpoint:5d81794 passes seven original hosted jobs and is selected in the immutable desktop installation, with original exit zero, both pipe EOFs and exact selection observed. Main is fast-forwarded. The older fa7 window shows the update banner; no forced restart or new customer prompt. Actual5d first-Send acceptance and broader old-chat/cancellation/provider/preview/update coverage remain open. The prepared caption-layout follow-up passes14 controlled window/update cases without requesting a real restart.
+
+## Saved-chat responsiveness follow-up
+
+- [x] Existing project-scoped SQLite history can display before the original native open finishes in controlled fixtures, without certifying a connection or allowing Send/tools.
+- [x] Original opening, stale cache/project/provider responses and workspace ABA cases are fenced; restart joins its original navigation and then retains ordinary safety/persistence checks.
+- [x] Signed component `dcbfb08` passes645-source strict compilation and161 focused controller/SQLite/HTTP/draft cases. Original failures and the corrected cold-cache fixture are retained.
+- [ ] Combined-source hosted, packaged and customer acceptance.
+- [ ] Floating-bar model selector delivery and loaded customer acceptance.
+
+See [[Sessions/2026-10-31 Chat Navigation and Model Selection]]. No whole-goal completion is claimed.
+
+Combined local integration:649-source strict compilation and663/663 focused cases pass with no skips. Fresh hosted/package/customer acceptance and the newly reported repeated startup-notice fix remain open.

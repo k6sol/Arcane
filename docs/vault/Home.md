@@ -15,7 +15,7 @@ tags: [arcane, dashboard]
 
 The [[Delivery/Goal Board|ten urgent goals]] track the path to a dependable customer release. Open a goal for its outcome, dependencies and acceptance criteria. Check it off only after recording evidence.
 
-Runtime `b3f9f3f` is on main and selected in the desktop installation. All seven original component/package jobs and both fresh Blender verification jobs pass. The immutable installation closed successfully, preserving prior releases and the stable launcher. The last observed window still runs the older version and was left open; loaded-update customer acceptance remains separate. See [[Sessions/2026-10-30 Caption and Tree Delivery]] for the delivered changes, verification and remaining art work.
+Latest installed runtime is `b3f9f3f`, with the caption-safe restart control and incremental tree changes. Its original nine jobs passed and installation closed successfully. A later automatic main Windows browser lane failed; that evidence remains open. Saved-chat loading, per-task model-source consent and a floating-bar model selector are being integrated and require fresh combined verification. See [[Sessions/2026-10-31 Chat Navigation and Model Selection]] and [[Delivery/Goal Board]].
 
 ## Build with knowledge
 

@@ -5,7 +5,7 @@ tags: [arcane]
 ---
 # Current state
 
-Recorded 30 October 2026. Runtime `b3f9f3f` is on main and selected in the desktop installation. All seven original component/package jobs and both fresh Blender verification jobs pass. The immutable installation closed successfully, preserving prior releases and the stable launcher. The last observed window still runs the older version and was left open; loaded-update customer acceptance remains separate. The update carries the first-Send correction, caption-safe restart control, height-aware oak leaves, costed branch refinement and richer fresh broadleaf requests. Six authenticated native artifact archives and sixteen images were inspected. Tree/rock realism remains unaccepted; see [[Sessions/2026-10-30 Caption and Tree Delivery]]. Historical evidence below retains its original source scope.
+Recorded 31 October 2026. The latest installed runtime is `b3f9f3f`; the user has reopened that selected build, verified by its actual window executable. Its old finished connection notice reappeared; durable display-review is now a separate necessary fix. Original component/package41139258530 and native41139258546 all passed, and immutable installation closed with exit zero, both pipe EOFs and exact selection. Later automatic main native41143511244 also passed, but Windows release in41143511359 timed out in an existing Claude Edge Enter interaction; packaging was skipped. Original logs remain, and isolated local success does not establish the hosted cause. The new functionality integration is not installed yet. See [[Sessions/2026-10-31 Chat Navigation and Model Selection]]. Historical evidence below retains its original scope.
 
 ## Source, delivery and live checks
 

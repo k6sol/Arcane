@@ -570,8 +570,8 @@ test('browser visible picker stages active and restored unbound owned preference
   assert.equal(await page.locator('#codex-submit').getAttribute('aria-label'), 'Stop task');
   await f.open(); await page.locator('#codex-picker-effort-slider').press('Home');
   assert.equal(await page.locator('#codex-effort-label').textContent(), 'medium');
-  await page.locator('#codex-composer').press('Enter');
-  draft += '\n'; // An active task leaves Enter as native textarea editing.
+  await page.locator('#codex-composer').press('Shift+Enter');
+  draft += '\n'; // Newlines remain native textarea editing while Enter retains its queue/send behavior.
   assert.equal(await page.locator('#codex-composer').inputValue(), draft); assert.deepEqual(f.posts, []);
   await f.refresh();
   assert.deepEqual(await page.evaluate(() => (window as any).fixtureChat.workflowModelSelection()), actualTaskModel);
