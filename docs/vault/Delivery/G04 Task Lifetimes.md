@@ -22,6 +22,8 @@ Depends on: 1. Owner: task/runtime integration.
 
 ## Evidence
 
+[[Sessions/2026-10-31 Native Asset Dispatch]] now observes a real original Blender job still running at native terminal and then succeeding through normal retirement, with all three original worker exits and native custody close verified. The task remains working/nativeSettled, so this is lifetime evidence, not task/playtest verification or whole-goal completion.
+
 Exact e813 hosted/package and installed integrity now pass. [[Sessions/2026-10-31 Native Chat Desktop Delivery]] records the seven original successful jobs and4673-file independent installed verification. This closes that follow-up's delivery gap, while the loaded customer handoff, full parallel planning/test/repair and whole-goal acceptance remain open.
 
 Windows guard performance: [[Bugs/Windows Task Path Checks]] preserves every fresh path/ownership check while using the existing native-positive-proof/fallback resolution pattern. Strict 660-source compilation and 156 focused cases pass with zero skips/cancellations and frozen inputs. The exact previously timing-out local handoff now completes in 14,395.5174 ms under the unchanged 20-second limit, retaining original human review, worker cleanup and third Send. Hosted/package/customer verification on this follow-up remains open; no whole-goal completion is claimed.
