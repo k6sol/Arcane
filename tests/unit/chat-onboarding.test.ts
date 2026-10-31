@@ -161,6 +161,46 @@ async function untouched(f: Awaited<ReturnType<typeof fixture>>) {
   assert.equal(f.observed().nativeTools.verified, false);
 }
 
+async function trustedGuardClick(f: Awaited<ReturnType<typeof fixture>>, guard: string) {
+  const {page}=f;
+  await page.evaluate(()=>{
+    const button=document.getElementById('codex-conversation-start') as HTMLButtonElement,
+      stage=document.getElementById('workspace-stage')!,gate=document.getElementById('provider-login-gate')!;
+    const display={active:true,repairs:0,clicks:[] as {trusted:boolean;button:number;detail:number;target:string|null;alt:boolean;ctrl:boolean;meta:boolean;shift:boolean}[]};
+    // Keep only the original display tamper stable across controller refreshes.
+    // The controller state, native guards and normal polling are untouched.
+    const restore=()=>{if(!display.active)return;let changed=false;
+      if(stage.classList.contains('provider-required')){stage.classList.remove('provider-required');changed=true;}
+      if(!gate.hidden){gate.hidden=true;changed=true;}
+      if(button.disabled){button.disabled=false;changed=true;}
+      if(button.hidden){button.hidden=false;changed=true;}
+      if(changed)display.repairs++;
+    };
+    const observer=new MutationObserver(restore);
+    observer.observe(button,{attributes:true,attributeFilter:['disabled','hidden']});
+    observer.observe(stage,{attributes:true,attributeFilter:['class']});
+    observer.observe(gate,{attributes:true,attributeFilter:['hidden']});
+    const cleanup=()=>{display.active=false;observer.disconnect();button.removeEventListener('click',capture,true);};
+    const capture=(event:MouseEvent)=>{display.clicks.push({trusted:event.isTrusted,button:event.button,detail:event.detail,
+      target:event.target instanceof Element?event.target.closest('button')?.id??null:null,alt:event.altKey,ctrl:event.ctrlKey,meta:event.metaKey,shift:event.shiftKey});
+      if(event.isTrusted&&event.button===0)cleanup();
+    };
+    button.addEventListener('click',capture,true);restore();
+    (window as any).fixtureGuardDisplay={display,cleanup,initialRepairs:display.repairs};
+  });
+  try{
+    // Exercise a real controller render after the display override, rather than
+    // rely on finishing the gesture before the next 1500ms poll.
+    await f.refresh();
+    assert.equal(await page.evaluate(()=>{const owned=(window as any).fixtureGuardDisplay;return owned.display.repairs>owned.initialRepairs;}),true,guard+' refresh reapplied the controller display guard');
+    await page.locator('#codex-conversation-start').click();
+    assert.deepEqual(await page.evaluate(()=>(window as any).fixtureGuardDisplay.display.clicks),
+      [{trusted:true,button:0,detail:1,target:'codex-conversation-start',alt:false,ctrl:false,meta:false,shift:false}],guard+' received one real left click');
+  }finally{
+    await page.evaluate(()=>{const owned=(window as any).fixtureGuardDisplay;owned?.cleanup();delete (window as any).fixtureGuardDisplay;});
+  }
+}
+
 test('Edge direct start: mount sends zero actions; explicit setup remains single-flight alongside automatic Send', { skip: !browserModule, timeout: 30000 }, async t => {
   const f = await fixture(t), { page } = f;
   assert.equal(f.posts.length, 0); assert.equal(await page.locator('#codex-conversation-start').isVisible(), true);
@@ -268,17 +308,11 @@ test('Edge stale, busy, limited and invalid account states fence both start cont
     f.set(next); await f.refresh();
     assert.equal(await page.locator('#codex-thread-start').isDisabled(), true, guard);
     assert.equal(await page.locator('#codex-conversation-start').isDisabled(), true, guard);
-    // Restore display only to deliver a genuine browser gesture against the controller guard.
-    await page.evaluate(() => { document.getElementById('workspace-stage')!.classList.remove('provider-required');
-      document.getElementById('provider-login-gate')!.hidden = true;
-      const button = document.getElementById('codex-conversation-start') as HTMLButtonElement; button.disabled = false; button.hidden = false; });
-    await page.locator('#codex-conversation-start').click(); assert.equal(f.posts.length, 0, guard);
+    await trustedGuardClick(f,guard); assert.equal(f.posts.length, 0, guard);
   }
   f.set(baseline); await f.refresh(); f.fail(true); await f.refresh();
   assert.equal(await page.locator('#codex-conversation-start').isDisabled(), true);
-  await page.evaluate(() => { document.getElementById('workspace-stage')!.classList.remove('provider-required');
-    const button = document.getElementById('codex-conversation-start') as HTMLButtonElement; button.disabled = false; button.hidden = false; });
-  await page.locator('#codex-conversation-start').click(); assert.equal(f.posts.length, 0);
+  await trustedGuardClick(f,'stale read'); assert.equal(f.posts.length, 0);
   f.fail(false); await f.refresh();
   await page.setViewportSize({ width: 390, height: 844 });
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
