@@ -109,6 +109,76 @@ test('cancelled cached-auth login never remembers first-launch sign-in or revive
   assert.equal(f.controller.isSignedIn(),false);assert.equal(metadata,0);assert.equal(nativeClicks,0);assert.equal(settings.length,0);
 });
 
+test('trusted Disconnect during held explicit login retires only that handoff and cannot be undone by late subscription',async t=>{
+  const scopes:(()=>boolean)[]=[];
+  const f=fixture({signInPage:true,connectSavedLogin:async current=>{assert.equal(typeof current,'function');scopes.push(current!);}});
+  t.after(()=>f.controller.cleanup());
+  const settings:unknown[]=[];let nativeClicks=0;
+  f.doc.addEventListener('workspace:settingsrequest',event=>settings.push((event as CustomEvent).detail));
+  f.control('codex-connect').addEventListener('click',()=>{nativeClicks++;});
+  await settled();
+  assert.equal(f.control('workspace-stage').attributes.get('data-provider-view'),'setup');
+  let release!:(value:ProviderSetupState)=>void;
+  f.reply(()=>new Promise(resolve=>{release=resolve;}));
+  f.control('provider-login-start').emit('click');await settled();
+  assert.deepEqual(f.calls,['status:codex','login:codex']);assert.equal(scopes.length,0);
+  assert.equal(f.control('codex-disconnect').disabled,false);f.control('codex-disconnect').emit('click');
+  const subscription:ProviderSetupState={version:1,provider:'codex',installed:true,auth:'subscription',cliVersion:'0.162.0-alpha.17.2',busy:false,message:null};
+  f.state({auth:'subscription'});f.reply(async()=>subscription);release(subscription);await settled();
+  assert.equal(scopes.length,0,'the original Disconnect must prevent even invoking its late metadata handoff');
+  assert.equal(f.stored.has(SIGN_IN_PAGE_KEY),false,'late account verification must not remember a retired connection intent');
+  assert.equal(f.control('workspace-stage').attributes.get('data-provider-view'),'setup');
+  assert.equal(f.controller.isSignedIn(),false);assert.equal(nativeClicks,0);assert.equal(settings.length,0);
+  assert.equal(f.control('provider-login-start').textContent,'Connect Codex','the valid saved account is retained without reviving the old handoff');
+  f.connection({connected:false,ready:false,fresh:true,auth:'unknown'});
+  f.control('provider-setup-refresh').emit('click');await settled();
+  assert.deepEqual(f.calls,['status:codex','login:codex','status:codex']);
+  assert.equal(scopes.length,0,'a changed metadata snapshot and fresh saved-auth read cannot auto-connect after Disconnect');
+  assert.equal(f.stored.has(SIGN_IN_PAGE_KEY),false);assert.equal(f.controller.isSignedIn(),false);
+  assert.equal(f.control('workspace-stage').attributes.get('data-provider-view'),'setup');
+  f.control('provider-login-start').emit('click');await settled();
+  assert.deepEqual(f.calls,['status:codex','login:codex','status:codex','login:codex']);
+  assert.equal(scopes.length,1,'only a separate explicit Connect may create a new metadata handoff');assert.equal(scopes[0]!(),true);
+  assert.deepEqual(JSON.parse(f.stored.get(SIGN_IN_PAGE_KEY)!),{version:1,state:'signed-in'});
+  assert.equal(f.control('workspace-stage').attributes.get('data-provider-view'),'workspace');
+  assert.equal(f.controller.isSignedIn(),false);assert.equal(nativeClicks,0);assert.equal(settings.length,0);
+});
+
+test('Disconnect retires a pending browser-login watcher before or after its busy reply',async t=>{
+  for(const order of ['before-busy-reply','after-busy-reply'] as const)await t.test(order,async sub=>{
+    sub.mock.timers.enable({apis:['setTimeout','Date']});
+    const scopes:(()=>boolean)[]=[];
+    const f=fixture({signInPage:true,connectSavedLogin:async current=>{assert.equal(typeof current,'function');scopes.push(current!);}});
+    sub.after(()=>f.controller.cleanup());await settled();
+    const settings:unknown[]=[];let nativeClicks=0;
+    f.doc.addEventListener('workspace:settingsrequest',event=>settings.push((event as CustomEvent).detail));
+    f.control('codex-connect').addEventListener('click',()=>{nativeClicks++;});
+    let release!:(value:ProviderSetupState)=>void;
+    f.reply(()=>new Promise(resolve=>{release=resolve;}));f.control('provider-login-start').emit('click');await settled();
+    if(order==='before-busy-reply')f.control('codex-disconnect').emit('click');
+    release({version:1,provider:'codex',installed:true,auth:'unknown',cliVersion:'0.162.0-alpha.17.2',busy:true,message:'Complete ChatGPT sign-in in your browser. Authentication is not yet verified.'});
+    await settled();
+    if(order==='after-busy-reply')f.control('codex-disconnect').emit('click');
+    f.state({auth:'subscription',busy:false,message:null});
+    f.reply(async()=>({version:1,provider:'codex',installed:true,auth:'subscription',cliVersion:'0.162.0-alpha.17.2',busy:false,message:null}));
+    sub.mock.timers.tick(2000);await settled();
+    assert.equal(scopes.length,0,'a retired login watcher cannot hand off later saved subscription evidence');
+    assert.equal(f.stored.has(SIGN_IN_PAGE_KEY),false);assert.equal(f.control('workspace-stage').attributes.get('data-provider-view'),'setup');
+    assert.equal(f.controller.isSignedIn(),false);assert.equal(nativeClicks,0);assert.equal(settings.length,0);
+    assert.deepEqual(f.calls,['status:codex','login:codex'],'Disconnect also retires the original login polling timer');
+    f.control('provider-setup-refresh').emit('click');await settled();
+    assert.deepEqual(f.calls,['status:codex','login:codex','status:codex']);
+    assert.equal(f.control('provider-login-start').textContent,'Connect Codex','fresh account evidence remains usable for a new explicit intent');
+    assert.equal(scopes.length,0);assert.equal(f.stored.has(SIGN_IN_PAGE_KEY),false);assert.equal(f.controller.isSignedIn(),false);
+    f.control('provider-login-start').emit('click');await settled();
+    assert.deepEqual(f.calls,['status:codex','login:codex','status:codex','login:codex']);
+    assert.equal(scopes.length,1);assert.equal(scopes[0]!(),true);
+    assert.deepEqual(JSON.parse(f.stored.get(SIGN_IN_PAGE_KEY)!),{version:1,state:'signed-in'});
+    assert.equal(f.control('workspace-stage').attributes.get('data-provider-view'),'workspace');
+    assert.equal(f.controller.isSignedIn(),false);assert.equal(nativeClicks,0);assert.equal(settings.length,0);
+  });
+});
+
 test('explicit Connect verifies sign-in directly and preserves a blocked native connection without Settings',async t=>{
   const scopes:(()=>boolean)[]=[];
   const f=fixture({state:{auth:'subscription'},connectSavedLogin:async current=>{assert.equal(typeof current,'function');scopes.push(current!);}});t.after(()=>f.controller.cleanup());

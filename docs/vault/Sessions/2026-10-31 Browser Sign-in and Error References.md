@@ -31,6 +31,10 @@ Hosted/package delivery is pending for this source. Controlled browser/native-pr
 
 ## Explicit account entry during recovery
 
+A final intent check reproduces a held sign-in reply reviving handoff after trusted Disconnect. Pending replies and busy-login watchers now retain their original connection epoch; Disconnect retires the watcher. Three original red schedules cover direct completion and Disconnect before/after a busy reply. All41 source cases and98 compiled/browser/host cases pass with clean process exit zero, no skips and unchanged source during the run. Account evidence is retained, no metadata handoff resumes after Disconnect, and a later separate explicit login can proceed.
+
+At the follow-up checkpoint, all three Linux jobs in [cf210c3 run41173337417](https://github.com/k6sol/Arcane/actions/runs/41173337417) passed; Windows jobs were still running. The additional intent correction requires its own exact-source hosted acceptance before installation.
+
 The original `68def99` [hosted run41171832657](https://github.com/k6sol/Arcane/actions/runs/41171832657) retained three completed failed jobs: the release compiler inventory omitted the new real module, and both operating systems retained old error-message assertions in two unit files. The corrected three full files pass102 cases locally, with no skips or deadline/guard changes. Original logs are kept; no workflow was rerun to replace their outcomes.
 
 An additional first-launch regression reproduced successful account verification remaining on the login page while metadata connection was blocked. Explicit validated subscription login now remembers the completed sign-in page and opens the workspace. Cached-auth cancellation does not remember success. This changes presentation only: fresh signed-out native state remains authoritative, and native readiness, model selection, Send and task recovery keep their original guards.

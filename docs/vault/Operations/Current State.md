@@ -5,6 +5,8 @@ tags: [arcane]
 ---
 # Current state
 
+Sign-in handoff now also respects a Disconnect that occurs while the login reply or status watcher is pending. Its original intent is retired without discarding the verified account; a new explicit login remains available. Strict652 compilation and98 focused compiled/browser/host cases pass, with source hashes stable. Exact hosted/package delivery of the latest source remains pending, and installed447 is unchanged.
+
 Explicit verified account sign-in now opens the workspace even when old task recovery prevents native connection. A first-launch regression reproduced the login-page loop; strict652 compilation and94 focused cases pass, including real four-width browser composition with the actual Codex controller/decoder, unchanged legacy records and zero native POSTs. Cancellation and fresh signed-out state remain denied. This is a source follow-up awaiting hosted/package delivery; the installed447 app is unchanged. See [[Sessions/2026-10-31 Browser Sign-in and Error References]].
 
 Browser sign-in and readable error references are implemented and locally verified; hosted/package delivery is pending. Connect Codex invokes native ChatGPT sign-in directly instead of Settings, with cached-auth, cancellation and workspace-owner fences. Recovery notices no longer move the sign-in page; numbered explanations precede technical IDs. Strict652-source compilation and focused checks pass at their recorded scopes. Installed447 remains open and unchanged. Three legacy unknown tasks still prevent a usable native workspace; no records were relabelled or replayed. See [[Sessions/2026-10-31 Browser Sign-in and Error References]] and [[Architecture/Error References]].

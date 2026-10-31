@@ -476,13 +476,13 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
         else if (value.installed || action === 'status') installOpened.delete(target);
         if (action === 'login' && value.installed && value.auth === 'unknown') awaitingStatus.add(target);
         else if (action === 'status' && !value.busy) awaitingStatus.delete(target);
-        if (target === 'codex' && action === 'login' && value.busy) loginWatch = { provider: target, epoch: generation, remaining: 450 };
+        if (target === 'codex' && action === 'login' && value.busy && connectionGeneration === connectionEpoch) loginWatch = { provider: target, epoch: generation, remaining: 450 };
         const watching = loginWatch?.provider === target && loginWatch.epoch === generation;
         // This exact host-owned notice can only DENY a handoff; text never grants account or connection authority.
         const cancelledLogin=target==='codex'&&(action==='login'||watching)&&value.message==='Native browser sign-in was cancelled.';
         if(cancelledLogin){connectionEpoch++;reconnectAllowed=false;clearRecovery();clearLoginWatch();}
         if((action==='login'||watching)&&!value.busy&&value.auth!=='subscription'&&!cancelledLogin)actionError=providerFailureText('login',value.message);
-        connectAfterLogin = target === 'codex' && value.auth === 'subscription' && !value.busy && (action === 'login' || watching)&&!cancelledLogin;
+        connectAfterLogin = target === 'codex' && value.auth === 'subscription' && !value.busy && (action === 'login' || watching)&&!cancelledLogin&&connectionGeneration===connectionEpoch;
         connectSavedLogin = target === 'codex' && action === 'status' && value.auth === 'subscription' && !value.busy && !watching;
         if (watching && !value.busy) clearLoginWatch();
       }
@@ -588,7 +588,7 @@ export function startProviderSetup(doc: Document, options: ProviderSetupOptions)
   };
   listen(doc,'visibilitychange',checkOnReturn);
   if(typeof doc.defaultView?.addEventListener==='function')listen(doc.defaultView,'focus',checkOnReturn);
-  const disconnectIntent = () => { connectionEpoch++;reconnectAllowed=false;codexChatEvidence=false;knownSignedIn.codex=false;clearRecovery();render(); };
+  const disconnectIntent = () => { connectionEpoch++;reconnectAllowed=false;codexChatEvidence=false;knownSignedIn.codex=false;clearRecovery();clearLoginWatch();render(); };
   const disconnect = button('codex-disconnect');
   if(disconnect)listen(disconnect,'click',event=>{if(trusted(event)&&!disconnect.disabled)disconnectIntent();},true);
   const connect = button('codex-connect');

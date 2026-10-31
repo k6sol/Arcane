@@ -5,6 +5,8 @@ tags: [arcane]
 ---
 # Next session
 
+Latest sign-in correction fences late login/busy-watch replies by their original connection epoch and retires the watcher on trusted Disconnect. The three reproduced races now pass within41 source cases and98 compiled/browser/host cases. Publish/verify/install only the latest combined candidate; do not replace the app repeatedly with intermediate builds. Keep all older hosted failures and partial successes as recorded evidence.
+
 Latest follow-up ends the first-launch page after explicit verified account login, so the user can enter the workspace and inspect recovery without granting native readiness. Strict652 compilation and94 focused cases pass; original records, cancellation, stale-owner and native admission guards remain intact. Ship the latest combined source after its exact hosted checks; do not install the intermediate68def99 only to replace it immediately. Browser account entry is fixed at controlled-test scope, while the three legacy unknown tasks still require a real recovery design before native work resumes.
 
 Read [[Home]], [[Operations/Current State]], [[Delivery/Goal Board]] and relevant developer skills. Verify current source and runtime before acting. Preserve contributor work in the shared checkout.
