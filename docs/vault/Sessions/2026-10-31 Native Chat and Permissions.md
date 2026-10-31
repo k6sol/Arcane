@@ -17,6 +17,8 @@ The attempt is an exclusive completed operation. Keep its original receipts; **n
 
 ## Acceptance boundary
 
+Later delivery update: all seven original e813 component/package jobs41204006086 succeeded. Exact archives, source/startup evidence and independent installed integrity pass; e813 is now selected while the open customer window remains447. See [[Sessions/2026-10-31 Native Chat Desktop Delivery]]. This supersedes the earlier pending-run and selected-cdda statements retained below without widening this one-turn native check's scope.
+
 This proves an actual provider reply, configured required tools, automatic permissions and original transport cleanup in the isolated HTTP journey. It does not prove a loaded packaged customer UI, fresh browser authentication, provider switching, a subsequent Send, actual asset generation, import/upload, gameplay verification, descendant-process containment or the whole product. Automatic planning is not enabled for this one-turn greeting; the full planning/test/repair loop needs separate acceptance. Granting a capability does not prove a tool executed.
 
 The open customer window still runs the older447 build. Verifiedcdda is selected and installed; the user readiness question for closing that window remains pending. No forced close or authentication-dialog automation occurred.

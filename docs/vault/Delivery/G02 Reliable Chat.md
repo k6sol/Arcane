@@ -36,6 +36,8 @@ Scoped evidence: installed fa7d730 passes all seven hosted checks and one actual
 
 ## Next action
 
+Current action supersedes older5d checkpoints below: open the verified installed e813 runtime after the user saves/closes older447, verify exact process identity, then exercise new/old chat and model/provider/cancel/preview/restart continuity without replaying uncertain requests. Direct login and stationary numbered errors pass50 focused/browser cases; all seven original e813 hosted/package jobs pass and independent installed integrity passes. This is not loaded customer acceptance. See [[Sessions/2026-10-31 Native Chat Desktop Delivery]].
+
 Complete the loaded5d customer journey after user-chosen restart, then verify the caption-layout follow-up. Local compilation,201 focused cases,56 preload/host cases and eleven existing Edge journeys pass, plus a separate first-Send/reload browser fixture. Broader cancellation/model/provider/preview/restart and atomic cross-record crash recovery remain open.
 
 [[Delivery/Goal Board]] · [[Operations/Evidence Ledger]]

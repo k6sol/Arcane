@@ -7,6 +7,8 @@ tags: [arcane]
 
 ## Immediate action
 
+Latest delivery supersedes cdda: **e8139e1 is selected and independently verified installed**, manifest `2a9beb19f7bbf884981c3d131b9602876c6d44a75ddcfa6752a09b5a48e4d1a0`,4673 files/533194268 bytes. All seven original hosted jobs and both native623 jobs pass with all18 workflow inputs equal. Fetch, inspect, native/plugin/source checks, extraction, compatibility, distinct inactive-bundle preservation, stock install and independent integrity are completed once; do not replay them. Read [[Sessions/2026-10-31 Native Chat Desktop Delivery]]. Preserve older447's open window until saved-draft closure, then launch the exact stable executable once and verify the new process matches this latest selected manifest. Earlier cdda launch targets and pending-hosted instructions below are historical checkpoints, not current next actions.
+
 Await the current user readiness reply before replacing the open old447 window. The verifiedcdda8e4 update is already selected and installed; its visible update banner was observed in window1532040. Preserve the current draft/window. Once the user reports it closed, revalidate actual processes, invoke the stable launcher once by exact filesystem path, then verify that the actual executable belongs to selected manifest2282cb321d42dce923ce79b0a0858874da3f5ab2d735760d81cfc45208a00516. Do not use the computer-use app resolver: it previously launched an obsolete copy. Do not automate authentication dialogs or replay an uncertain prompt. Any authorized chat smoke must use new ownership; Studio remains prohibited.
 
 ## Completed operations: do not replay

@@ -13,6 +13,8 @@ tags: [arcane, dashboard]
 
 ## Delivery
 
+Latest selected runtime is now **e8139e1**: seven original component/package checks pass, native623 evidence verifies against18 unchanged inputs, and the original stock installation plus independent4673-file integrity check complete successfully. The old447 customer window remains open pending the user's saved-draft closure. See [[Sessions/2026-10-31 Native Chat Desktop Delivery]] for the current delivery and remaining acceptance boundaries; older cdda checkpoints below remain historical evidence.
+
 The [[Delivery/Goal Board|ten urgent goals]] track the path to a dependable customer release. Open a goal for its outcome, dependencies and acceptance criteria. Check it off only after recording evidence.
 
 Latest selected desktop update is SSH-verified `cdda8e4`, adding independent fresh-chat recovery to direct browser sign-in and stable numbered errors. All seven original hosted jobs pass. The stock installer completed with observed exit zero, both pipe EOFs and exact replacement proof; independent verification checked all4673 payload files. The current open window still runs old447 and shows the update banner. Preserve it until user readiness for the authorized reopen; loaded customer chat acceptance remains open. The older279 retention refusal and full restoration remain recorded. See [[Sessions/2026-10-31 Verified Chat Recovery Delivery]] and [[Delivery/Goal Board]].
