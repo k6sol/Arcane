@@ -508,6 +508,7 @@ export function validateSurfaceGlb(bytes: Buffer, request: AssetRequest, audit: 
 export async function validateManifestFiles(directory: string, value: unknown): Promise<AssetManifest> {
   const m = record(value, 'manifest');
   if ((m.schemaVersion !== 1 && m.schemaVersion !== 2) || typeof m.jobId !== 'string' || !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(m.jobId) || typeof m.templateSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(m.templateSha256)) throw new AssetError('MANIFEST', 'Unsupported manifest or worker digest.');
+  const schemaVersion=m.schemaVersion;
   const runtime = record(m.runtime, 'runtime'), capabilities = record(runtime.capabilities, 'runtime capabilities'), coordinates = record(m.coordinateSystem, 'coordinates');
   if (typeof runtime.executable !== 'string' || runtime.executable.length > 4096 || typeof runtime.version !== 'string' || runtime.version.length > 128 || typeof runtime.pythonVersion !== 'string' || runtime.pythonVersion.length > 128 || runtime.background !== true || ['glbExport', 'glbImport', 'fbxExport', 'fbxImport', 'cycles'].some(key => capabilities[key] !== true)) throw new AssetError('MANIFEST', 'Invalid runtime evidence.');
   if (coordinates.units !== 'meters' || coordinates.sceneUp !== 'Z' || coordinates.glbUp !== 'Y' || coordinates.fbxUp !== 'Y' || coordinates.pivot !== 'floor' || coordinates.robloxScaleVerified !== false) throw new AssetError('MANIFEST', 'Invalid coordinate-system evidence.');
@@ -518,25 +519,50 @@ export async function validateManifestFiles(directory: string, value: unknown): 
   if (typeof m.createdAt !== 'string' || !Number.isFinite(Date.parse(m.createdAt))) throw new AssetError('MANIFEST', 'Invalid manifest timestamp.');
   const names = new Set<string>(), hashes = new Map<string, string>();
   let totalBytes = 0;
-  for (const raw of m.artifacts) {
-    const a = record(raw, 'artifact'), path = artifactPath(directory, a.path);
-    if (names.has(String(a.path)) || typeof a.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(a.sha256)) throw new AssetError('MANIFEST', 'Duplicate artifact or invalid hash.');
-    if (roles[String(a.path)] !== a.role || !roles[String(a.path)]) throw new AssetError('MANIFEST', 'Artifact name/role is outside the fixed templates.');
-    // Only fixed own filenames may be reflected into a diagnostic.
-    const name = Object.hasOwn(roles, String(a.path)) ? String(a.path) : 'Artifact';
-    names.add(String(a.path));
-    try {
-      const bytes = await readRegularFile(path, 128 * 1024 * 1024, size => {
-        totalBytes += size;
-        if (totalBytes > 256 * 1024 * 1024 || a.bytes !== size) throw new AssetError('MANIFEST', `Artifact size changed or exceeded 268435456 total bytes; observed ${size}, manifest ${measuredNumber(a.bytes)}, total ${totalBytes}.`);
-      }), hash = sha256(bytes); hashes.set(String(a.path), hash);
-      if (a.sha256 !== hash) throw new AssetError('HASH', 'Artifact SHA-256 no longer matches its manifest.');
-      if (String(a.path).endsWith('.glb')) {
-        const geometry = inspectGlb(bytes), expected = audit.exports.find(e => e.path === a.path);
-        if (!expected || geometry.triangles !== expected.triangles) throw new AssetError('EXPORT', `GLB triangle count ${geometry.triangles} disagrees with export audit ${measuredNumber(expected?.triangles)}.`);
-        if (a.path === 'asset.glb' || a.path === 'asset-lod1.glb') validateSurfaceGlb(bytes, request, audit, a.path === 'asset-lod1.glb' ? 'lod1' : 'render', m.schemaVersion);
-      } else if (String(a.path).endsWith('.png')) inspectPng(bytes, request.renderResolution);
-    } catch (error) { artifactFailure(error, name); }
+  for (let index=0;index<m.artifacts.length;) {
+    const group:Promise<{path:string;size:number;hash:string}>[]=[];
+    let prefix=totalBytes;
+    for(let count=0;count<2&&index<m.artifacts.length;count++,index++) {
+      try {
+        const a = record(m.artifacts[index], 'artifact'),artifactName=a.path,path=artifactPath(directory,artifactName),expectedHash=a.sha256;
+        if (names.has(String(artifactName)) || typeof expectedHash !== 'string' || !/^[a-f0-9]{64}$/.test(expectedHash)) throw new AssetError('MANIFEST', 'Duplicate artifact or invalid hash.');
+        const role=a.role;
+        if (roles[String(artifactName)] !== role || !roles[String(artifactName)]) throw new AssetError('MANIFEST', 'Artifact name/role is outside the fixed templates.');
+        const declaredBytes=a.bytes;
+        // Only fixed own filenames may be reflected into a diagnostic.
+        const name = Object.hasOwn(roles, String(artifactName)) ? String(artifactName) : 'Artifact',expectedPrefix=prefix;
+        names.add(String(artifactName));
+        group.push((async()=>{
+          try {
+            const bytes = await readRegularFile(path, 128 * 1024 * 1024, size => {
+              const total=expectedPrefix+size;
+              if (total > 256 * 1024 * 1024 || declaredBytes !== size) throw new AssetError('MANIFEST', `Artifact size changed or exceeded 268435456 total bytes; observed ${size}, manifest ${measuredNumber(declaredBytes)}, total ${total}.`);
+            }), hash = sha256(bytes);
+            if (expectedHash !== hash) throw new AssetError('HASH', 'Artifact SHA-256 no longer matches its manifest.');
+            if (String(artifactName).endsWith('.glb')) {
+              const geometry = inspectGlb(bytes), expected = audit.exports.find(e => e.path === artifactName);
+              if (!expected || geometry.triangles !== expected.triangles) throw new AssetError('EXPORT', `GLB triangle count ${geometry.triangles} disagrees with export audit ${measuredNumber(expected?.triangles)}.`);
+              if (artifactName === 'asset.glb' || artifactName === 'asset-lod1.glb') validateSurfaceGlb(bytes, request, audit, artifactName === 'asset-lod1.glb' ? 'lod1' : 'render', schemaVersion);
+            } else if (String(artifactName).endsWith('.png')) inspectPng(bytes, request.renderResolution);
+            return {path:String(artifactName),size:bytes.length,hash};
+          } catch (error) { artifactFailure(error, name); }
+        })());
+        // An invalid declaration cannot provide a prefix for a later allocation.
+        // Its original opened-file/size refusal still owns this artifact's error.
+        if(typeof declaredBytes!=='number'||!Number.isSafeInteger(declaredBytes)||declaredBytes<1||declaredBytes>128*1024*1024){index++;break;}
+        prefix+=declaredBytes;
+      } catch(error) {group.push(Promise.reject(error));index++;break;}
+    }
+    // Observe every original read/close tail before choosing the first failure
+    // in manifest order, including a rejection whose reason is falsy.
+    const settled=await Promise.allSettled(group);
+    for(const result of settled)if(result.status==='rejected')throw result.reason;
+    let verifiedTotal=totalBytes;
+    for(const result of settled)if(result.status==='fulfilled'){
+      verifiedTotal+=result.value.size;
+      if(verifiedTotal>256*1024*1024)throw new AssetError('MANIFEST',`${result.value.path}: Artifact size changed or exceeded 268435456 total bytes; observed ${result.value.size}, manifest ${result.value.size}, total ${verifiedTotal}.`);
+    }
+    for(const result of settled)if(result.status==='fulfilled'){hashes.set(result.value.path,result.value.hash);totalBytes+=result.value.size;}
   }
   if ((request.recipe?.materials.some(material => material.surface) || request.procedural?.finish === 'natural') && !names.has('textures.py')) throw new AssetError('MANIFEST', 'Generated surface worker artifact is missing.');
   for (const required of ['asset.blend', 'blockout.blend', 'asset.glb', 'asset.fbx', 'collision.glb', 'preview-hero.png', 'preview-side.png', 'audit.json', 'request.json', 'asset_worker.py', 'audit.py', 'probe.py', ...(audit.totals.lod1Triangles ? ['asset-lod1.glb'] : []), ...(request.recipe ? ['assembly.py', 'assembly.json', 'input.json'] : []), ...(request.procedural ? ['procedural.py', 'input.json'] : []), ...(request.procedural?.variant ? ['variation.py'] : []), ...(request.procedural?.kind === 'spec' ? MODEL_WORKER_SCRIPTS : []), ...(usesMaterialLibrary(request) ? MATERIAL_WORKER_SCRIPTS : [])]) {

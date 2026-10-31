@@ -53,6 +53,7 @@ createInterface({input:process.stdin}).on('line',line=>{
 });`;
 type Wire={process:number;method?:string;params?:Record<string,unknown>};
 async function fixture(t:test.TestContext,options:{planning?:boolean;closeFailure?:{value:unknown};newThread?:(index:number)=>string;email?:(index:number)=>string}={}){
+  const started=Date.now();
   const boundary=await realpath(tmpdir()),root=await realpath(await mkdtemp(join(boundary,'arcane-normal-handoff-'))),project=join(root,'project');await mkdir(project);
   const projectPath=await realpath(project),registry=createNativeAssetRegistry({projectPath}),work=new WorkStore({directory:join(root,'work'),projectPath});
   const associations=new ConversationWorkStore({directory:join(root,'associations'),projectPath}),conversation={provider:'codex' as const,threadId:THREAD,sessionId:SESSION};
@@ -126,10 +127,15 @@ async function fixture(t:test.TestContext,options:{planning?:boolean;closeFailur
   const actor=(index:number)=>registry.capture(tokens[index]!,'mutate');
   const currentTask=()=>service.state().chatTasks!.at(-1)!;
   const waitNormal=async(index:number)=>{
-    await normalEntered[index]!.promise;await normalJoined[index];
+    t.diagnostic('Handoff '+(Date.now()-started)+'ms: waiting for normal entry '+index);
+    await normalEntered[index]!.promise;
+    t.diagnostic('Handoff '+(Date.now()-started)+'ms: waiting for original session join '+index);
+    await normalJoined[index];
+    t.diagnostic('Handoff '+(Date.now()-started)+'ms: waiting for host retained projection '+index);
     // The session join precedes the host's asset join and cached normal state.
     // Observe that complete original host handoff rather than one producer tail.
     await until(()=>!registry.recognizes(tokens[index]!)&&service.state().chatTasks!.some(row=>row.connectionId===clients[index]!.snapshot().connectionId&&row.retained===true));
+    t.diagnostic('Handoff '+(Date.now()-started)+'ms: original host handoff complete '+index);
   };
   const finish=(index:number)=>writeFile(join(root,'finish-'+index),'complete',{flag:'wx'});
   const plan=(taskId:string)=>service.taskPlan({connectionId:service.state().snapshot!.connectionId,threadId:THREAD,taskId});
@@ -191,8 +197,9 @@ test('normal plan/asset handoff retains human review and fresh same-chat Send wi
   await writeFile(join(f.project,'evidence-implementation.txt'),'changed after human review');
   enter('read original plan with changed evidence');
   assert.equal((await f.plan(a)).plan!.review!.state,'unavailable');
-  stage='following terminal and normal retirement';
-  const bId=f.currentTask().taskId;await f.finish(1);await f.waitNormal(1);stage='third native acknowledgement';assert.equal((await f.send('Third task')).record.state,'acknowledged');
+  enter('following terminal signal');
+  const bId=f.currentTask().taskId;await f.finish(1);enter('following normal retirement');await f.waitNormal(1);
+  enter('third native acknowledgement');assert.equal((await f.send('Third task')).record.state,'acknowledged');
   assert.equal((await f.plan(a)).plan!.state,'awaiting_review');assert.equal((await f.plan(bId)).plan!.state,'awaiting_review');
   assert.equal(f.events.filter(value=>value==='close:0').length,1);assert.equal(f.events.filter(value=>value==='close:1').length,1);
   stage='all semantic assertions completed';

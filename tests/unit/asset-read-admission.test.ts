@@ -16,15 +16,15 @@ async function directory(t: test.TestContext) {
   return root;
 }
 function observeOpenedReads(t: test.TestContext) {
-  const opened:{handle:FileHandle;reads:()=>number;closes:()=>number}[]=[],original=fs.open;
+  const opened:{path:string;handle:FileHandle;reads:()=>number;closes:()=>number}[]=[],original=fs.open;
   t.mock.method(fs,'open',async(...args:Parameters<typeof fs.open>)=>{
     const handle=await original(...args),read=t.mock.method(handle,'read'),close=t.mock.method(handle,'close');
-    opened.push({handle,reads:()=>read.mock.callCount(),closes:()=>close.mock.callCount()});return handle;
+    opened.push({path:String(args[0]),handle,reads:()=>read.mock.callCount(),closes:()=>close.mock.callCount()});return handle;
   });
   const allocation=t.mock.method(Buffer,'alloc');
   syncBuiltinESMExports();
   t.after(()=>{t.mock.restoreAll();syncBuiltinESMExports();});
-  return {opened,allocations:()=>allocation.mock.callCount()};
+  return {opened,allocations:()=>allocation.mock.callCount(),allocatedSizes:()=>allocation.mock.calls.map(call=>call.arguments[0])};
 }
 
 for(const refusal of [new Error('original metadata refusal'),null,undefined,false,0])
@@ -81,8 +81,11 @@ test('manifest opened-size admission preserves original mismatch diagnostics and
   try{await validateManifestFiles(root,mismatch);}catch(error){failure=error;}
   assert.ok(failure instanceof AssetError);assert.equal(failure.code,'MANIFEST');
   assert.ok(failure.message.includes(`Artifact size changed or exceeded 268435456 total bytes; observed ${actualSize}, manifest ${actualSize+1}, total ${actualSize}.`));
-  assert.equal(observed.allocations(),0);assert.equal(observed.opened.length,1);assert.equal(observed.opened[0]!.reads(),0);
-  assert.equal(observed.opened[0]!.closes(),1);assert.equal(observed.opened[0]!.handle.fd,-1);
+  const denied=observed.opened.find(entry=>entry.path===join(root,artifact.path));assert.ok(denied);
+  assert.equal(denied.reads(),0,'A mismatched artifact is refused before content reads');
+  // Another bounded group member can already be reading. All started files,
+  // including that independent artifact, must close before refusal returns.
+  for(const entry of observed.opened){assert.equal(entry.closes(),1);assert.equal(entry.handle.fd,-1);}
   const changed=join(root,manifest.artifacts[0]!.path),original=await fs.readFile(changed);await fs.writeFile(changed,Buffer.alloc(original.length,0x7f));
   await assert.rejects(validateManifestFiles(root,manifest),{code:'HASH'});
 });
@@ -93,5 +96,7 @@ test('manifest retains the 128MiB per-artifact cap before allocation or opened-s
   await fs.truncate(join(root,manifest.artifacts[0]!.path),128*1024*1024+1);
   const observed=observeOpenedReads(t);
   await assert.rejects(validateManifestFiles(root,manifest),{code:'ARTIFACT'});
-  assert.equal(observed.allocations(),0);assert.equal(observed.opened.length,0);
+  assert.ok(observed.opened.every(entry=>entry.path!==join(root,manifest.artifacts[0]!.path)));
+  assert.ok(observed.allocatedSizes().every(size=>size<=128*1024*1024));
+  for(const entry of observed.opened){assert.equal(entry.closes(),1);assert.equal(entry.handle.fd,-1);}
 });
