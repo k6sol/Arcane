@@ -54,14 +54,16 @@ export async function regularFile(path: string, limit: number): Promise<number> 
   return s.size;
 }
 
-/** Bound allocation and verify the opened regular file, including changes during the read. */
-export async function readRegularFile(path: string, limit: number): Promise<Buffer> {
+/** Bound allocation and verify the opened regular file, including changes during the read.
+ * A trusted synchronous admission may refuse its actual opened size before allocation or reads. */
+export async function readRegularFile(path: string, limit: number, admit?: (size: number) => undefined): Promise<Buffer> {
   await regularFile(path, limit);
   const before = await lstat(path);
   const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
   try {
     const initial = await handle.stat();
     if (!initial.isFile() || initial.nlink !== 1 || initial.size < 1 || initial.size > limit || initial.ino !== before.ino || initial.dev !== before.dev) throw new AssetError('ARTIFACT', 'Artifact changed or is not a bounded regular file.');
+    admit?.(initial.size);
     const bytes = Buffer.alloc(initial.size);
     let offset = 0;
     while (offset < bytes.length) {

@@ -526,9 +526,10 @@ export async function validateManifestFiles(directory: string, value: unknown): 
     const name = Object.hasOwn(roles, String(a.path)) ? String(a.path) : 'Artifact';
     names.add(String(a.path));
     try {
-      const size = await regularFile(path, 128 * 1024 * 1024); totalBytes += size;
-      if (totalBytes > 256 * 1024 * 1024 || a.bytes !== size) throw new AssetError('MANIFEST', `Artifact size changed or exceeded 268435456 total bytes; observed ${size}, manifest ${measuredNumber(a.bytes)}, total ${totalBytes}.`);
-      const bytes = await readRegularFile(path, 128 * 1024 * 1024), hash = sha256(bytes); hashes.set(String(a.path), hash);
+      const bytes = await readRegularFile(path, 128 * 1024 * 1024, size => {
+        totalBytes += size;
+        if (totalBytes > 256 * 1024 * 1024 || a.bytes !== size) throw new AssetError('MANIFEST', `Artifact size changed or exceeded 268435456 total bytes; observed ${size}, manifest ${measuredNumber(a.bytes)}, total ${totalBytes}.`);
+      }), hash = sha256(bytes); hashes.set(String(a.path), hash);
       if (a.sha256 !== hash) throw new AssetError('HASH', 'Artifact SHA-256 no longer matches its manifest.');
       if (String(a.path).endsWith('.glb')) {
         const geometry = inspectGlb(bytes), expected = audit.exports.find(e => e.path === a.path);

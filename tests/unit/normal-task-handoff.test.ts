@@ -78,7 +78,16 @@ async function fixture(t:test.TestContext,options:{planning?:boolean;closeFailur
       clients.push(client);await client.initialize();return client;
     }});
   service.attachPlaytestCancellation(Object.freeze({async cancelExact(){assert.fail('No fixture verification job allocated.');},async revalidateExact(){return'current' as const;}}));
-  const studio=new StudioStore({directory:join(root,'studio')}),grant=studio.createGrant({allowedRoots:['Workspace','ServerStorage'],allowWrites:true});
+  let requestContextPoll=()=>{};
+  const queuedContextIds=new Set<string>(),completedContextIds=new Set<string>();
+  class ControlledStudioStore extends StudioStore {
+    override enqueue(...input:Parameters<StudioStore['enqueue']>) {
+      const command=super.enqueue(...input);
+      if(command.method==='scene.import_context'){queuedContextIds.add(command.id);requestContextPoll();}
+      return command;
+    }
+  }
+  const studio=new ControlledStudioStore({directory:join(root,'studio')}),grant=studio.createGrant({allowedRoots:['Workspace','ServerStorage'],allowWrites:true});
   const pair=studio.pair({code:grant.code,protocolVersion:1,capabilities:[...READ_METHODS,...WRITE_METHODS,...ASSET_STAGE_METHODS],identity:{clientSessionId:'handoff-plugin',pluginVersion:'0.1.9',name:'Controlled import target',placeId:12,universeId:34}});
   const proof=()=>({sessionId:pair.sessionId,clientLifetimeId:'handoff-plugin',pluginArtifactHash:PLUGIN,markerName:'ArcaneTestProof_handoff',placeId:12,universeId:34,placeName:'Controlled import target',mode:'Edit' as const,playEpoch:0,continuitySupported:true,connected:true});
   studio.poll(pair.sessionId,proof());
@@ -96,13 +105,20 @@ async function fixture(t:test.TestContext,options:{planning?:boolean;closeFailur
     readSubject:(jobId,scope,guard)=>assets.modelReviewSubject(jobId,scope,guard)});
   assets=await createAssetService({cwd:root,projectPath,outputRoot:output,studioImport:importHost.hooks,modelReview:reviews});
   const errors:unknown[]=[];
-  const pump=setInterval(()=>{try{for(const command of studio.poll(pair.sessionId,proof())){
+  const pollContext=()=>{try{for(const command of studio.poll(pair.sessionId,proof())){
     assert.equal(command.method,'scene.import_context');studio.result({sessionId:pair.sessionId,commandId:command.id,state:'succeeded',result:context});
-  }}catch(error){errors.push(error);}},10);
-  t.after(async()=>{clearInterval(pump);try{
+    assert.equal(studio.command(command.id).state,'succeeded');completedContextIds.add(command.id);
+  }}catch(error){errors.push(error);}};
+  // Match the plugin's 2s heartbeat inside the unchanged 6s proof lifetime.
+  // Real enqueue schedules the controlled response; avoid FULL-sync empty polls
+  // every 10ms competing with the actual retained-file and review validation.
+  let contextPoll:ReturnType<typeof setImmediate>|null=null;
+  requestContextPoll=()=>{if(!contextPoll)contextPoll=setImmediate(()=>{contextPoll=null;pollContext();});};
+  const pump=setInterval(pollContext,2000);
+  t.after(async()=>{clearInterval(pump);if(contextPoll)clearImmediate(contextPoll);requestContextPoll=()=>{};try{
     if(expectedClose)await assert.rejects(service.close(),error=>Object.is(error,expectedClose!.value));else await service.close();
   }finally{importHost.close();await assets.close();await preparation.close();reviews.close();registry.close();work.close();associations.close();studio.close();
-    const part=relative(boundary,root);assert.ok(part.startsWith('arcane-normal-handoff-')&&!isAbsolute(part)&&!part.includes(sep));await rm(root,{recursive:true,force:true});assert.deepEqual(errors,[]);}});
+    const part=relative(boundary,root);assert.ok(part.startsWith('arcane-normal-handoff-')&&!isAbsolute(part)&&!part.includes(sep));await rm(root,{recursive:true,force:true});assert.deepEqual(errors,[]);assert.deepEqual(completedContextIds,queuedContextIds);}});
   const action=(action:string,fields:Record<string,unknown>={})=>service.action({requestId:randomUUID(),connectionId:action==='connect'?null:service.state().snapshot!.connectionId,action,...fields});
   const ready=async()=>{for(const [name,fields]of [['connect',{}],['select',{model:'fixture',effort:'low'}],['thread-start',{}]]as const)assert.equal((await action(name,fields)).record.state,'acknowledged');};
   const send=(text='Original task')=>action('turn-start',{threadId:service.state().snapshot!.thread!.threadId,text,allowAssets:true,allowWorkspaceWrites:true});
@@ -123,7 +139,7 @@ async function fixture(t:test.TestContext,options:{planning?:boolean;closeFailur
     scope:{projectId:associations.projectId,conversation},
     openReview:()=>reviews.prepare({jobId:JOB},humanRequest(),AUTH),
     readReview:()=>reviews.status({jobId:JOB},humanRequest(),AUTH),
-    async approveModel(){const opened=await reviews.prepare({jobId:JOB},humanRequest(),AUTH);assert.ok(opened.review);assert.ok(opened.openWitness);
+    async approveModel(opened:Awaited<ReturnType<typeof reviews.prepare>>){assert.ok(opened.review);assert.ok(opened.openWitness);
       return reviews.decide({reviewId:opened.review.reviewId,decision:'approved',idempotencyKey:randomUUID(),openWitness:opened.openWitness},humanRequest(),AUTH);},
     async approveWork(runId:string){for(const task of work.runById(runId).tasks){const claimed=work.claim({taskId:task.id,worker:'controlled evidence submitter'}),path='evidence-'+task.key+'.txt';
       await writeFile(join(projectPath,path),'actual evidence '+task.key);work.submit({taskId:task.id,leaseToken:claimed.leaseToken,evidence:[{path,note:'Controlled actual file'}]});work.review({taskId:task.id,approved:true,note:'Controlled genuine human review path'});}},
@@ -131,26 +147,55 @@ async function fixture(t:test.TestContext,options:{planning?:boolean;closeFailur
 }
 
 test('normal plan/asset handoff retains human review and fresh same-chat Send without cancelling original work',{timeout:20000},async t=>{
-  const f=await fixture(t);await f.ready();await f.send();const a=f.currentTask().taskId,old=f.actor(0),lease=acquireNativeAssetWork(old,'generation'),body=gate(),cleanup=gate(),inCleanup=gate();
-  const run=lease.run(async()=>{await body.promise;await writeFile(join(f.project,'asset-final-write.txt'),'retained original');inCleanup.resolve();await cleanup.promise;f.events.push('asset-closed');});lease.finish('closed');
+  const body=gate(),cleanup=gate(),inCleanup=gate();let run:Promise<void>|null=null,stage='fixture allocation';
+  const started=Date.now(),enter=(next:string)=>{stage=next;t.diagnostic('Handoff '+(Date.now()-started)+'ms: '+stage);};
+  // Release only the test-owned holds before fixture shutdown, including after
+  // an assertion failure. Otherwise teardown can hide the original failure by
+  // joining work whose release sits later in this same failed test body.
+  t.after(async()=>{t.diagnostic('Handoff teardown stage: '+stage);body.resolve();cleanup.resolve();if(run)await run;});
+  const f=await fixture(t);await f.ready();await f.send();const a=f.currentTask().taskId,old=f.actor(0),lease=acquireNativeAssetWork(old,'generation');
+  run=lease.run(async()=>{await body.promise;await writeFile(join(f.project,'asset-final-write.txt'),'retained original');inCleanup.resolve();await cleanup.promise;f.events.push('asset-closed');});lease.finish('closed');
+  stage='original model review';
   const pendingReview=await f.openReview();assert.equal(pendingReview.review!.status,'pending');
+  stage='original native terminal and normal retirement entry';
   await f.finish(0);await f.normalEntered[0]!.promise;assert.equal(lease.signal.aborted,false);assert.equal(f.registry.recognizes(f.tokens[0]!),false);
+  stage='following Send and original asset cleanup';
   const b=f.send('Following task');body.resolve();await inCleanup.promise;assert.equal(lease.signal.aborted,false);cleanup.resolve();await run;
+  stage='following native acknowledgement';
   assert.equal((await b).record.state,'acknowledged');assert.equal(f.clients.length,2);
   assert.ok(f.events.indexOf('close:0')>f.events.indexOf('asset-closed'));assert.equal(lease.signal.aborted,false);
   assert.throws(()=>assertNativeAssetActor(old,'mutate'),{code:'NATIVE_ASSET_AUTHORITY'});assertNativeAssetActor(f.actor(1),'mutate');
+  enter('read retained original plan before evidence submission');
   const prior=await f.plan(a);assert.equal(prior.plan!.state,'awaiting_review');assert.equal(prior.plan!.review!.state,'pending_submission');
-  await f.approveWork(prior.plan!.review!.runId!);assert.equal((await f.plan(a)).plan!.review!.state,'accepted');
+  enter('submit and approve original work evidence');
+  await f.approveWork(prior.plan!.review!.runId!);
+  enter('read retained original plan after evidence approval');
+  assert.equal((await f.plan(a)).plan!.review!.state,'accepted');
+  enter('read pending model review after work approval');
   const stillPending=await f.readReview();assert.equal(stillPending.review!.status,'pending','Work approval cannot approve a model.');
+  enter('prepare Studio import metadata through controlled context pump');
   const metadata=await f.assets.prepareStudioImport(JOB,f.actor(1));assert.equal(metadata.status,'prepared');
+  enter('read pending model review after metadata preparation');
   assert.equal((await f.readReview()).review!.status,'pending','Metadata preparation cannot approve a model or authorize native payload staging.');
+  enter('refuse payload preparation before model approval');
   await assert.rejects(f.assets.prepareStudioImportPayload(JOB,f.actor(1)),{code:'ASSET_REVIEW_REQUIRED'});
-  await f.approveModel();const {prepared}=await f.assets.prepareStudioImportPayload(JOB,f.actor(1));assert.equal(prepared.status,'prepared');assert.equal(prepared.manifest.revisionId,JOB);
+  enter('approve originally opened model review through human receipt');
+  // Decide freshly verifies the subject and human scope. Keep the original
+  // opening across task retirement instead of replacing its witness here.
+  await f.approveModel(pendingReview);
+  enter('prepare approved import payload through controlled context pump');
+  const {prepared}=await f.assets.prepareStudioImportPayload(JOB,f.actor(1));assert.equal(prepared.status,'prepared');assert.equal(prepared.manifest.revisionId,JOB);
+  enter('refuse payload preparation by retired original actor');
   await assert.rejects(f.assets.prepareStudioImportPayload(JOB,old),{code:'NATIVE_ASSET_AUTHORITY'});
-  await writeFile(join(f.project,'evidence-implementation.txt'),'changed after human review');assert.equal((await f.plan(a)).plan!.review!.state,'unavailable');
-  const bId=f.currentTask().taskId;await f.finish(1);await f.waitNormal(1);assert.equal((await f.send('Third task')).record.state,'acknowledged');
+  enter('mutate original evidence after human review');
+  await writeFile(join(f.project,'evidence-implementation.txt'),'changed after human review');
+  enter('read original plan with changed evidence');
+  assert.equal((await f.plan(a)).plan!.review!.state,'unavailable');
+  stage='following terminal and normal retirement';
+  const bId=f.currentTask().taskId;await f.finish(1);await f.waitNormal(1);stage='third native acknowledgement';assert.equal((await f.send('Third task')).record.state,'acknowledged');
   assert.equal((await f.plan(a)).plan!.state,'awaiting_review');assert.equal((await f.plan(bId)).plan!.state,'awaiting_review');
   assert.equal(f.events.filter(value=>value==='close:0').length,1);assert.equal(f.events.filter(value=>value==='close:1').length,1);
+  stage='all semantic assertions completed';
 });
 
 test('Stop during the original normal asset join aborts it once and suppresses a waiting fresh Send',{timeout:15000},async t=>{
