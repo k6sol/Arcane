@@ -27,13 +27,14 @@ const CODES:Readonly<Record<string,UserErrorNumber>>=Object.freeze({
   LOGIN_UNCONFIRMED:414,DISCONNECTED:415,CONNECTION_UNAVAILABLE:415,STALE_CONNECTION:416,STALE_CONTEXT:416,
   OUTCOME_UNKNOWN:421,TIMEOUT:422,DEADLINE:422,REQUEST_TIMEOUT:422,JOURNAL_FAILURE:423,STORAGE_UNAVAILABLE:423,
   MESH_AUDIT:432,MESH_REPAIR:432,MESH_MATERIAL_NODE:433,MESH_MATERIAL_LINK:433,MESH_MATERIAL_SURFACE:433,MESH_MATERIAL_PBR:433,
+  FOLIAGE_ATTACHMENT:432,CONVERSION_COLLISION:432,RENDER_CONTENT:437,CONVERSION_RENDER:437,
   EXPORT_ROUNDTRIP:435,IMPORT_IDENTITY:435,STUDIO_STAGE_CONTINUITY:436,IMPORT_FAILED:436,PERMISSION_DENIED:438,APPROVAL_REJECTED:438,
 });
 export function userError(code:unknown,area:'general'|'model'|'preview'|'import'='general',stage?:unknown):UserError {
   if(typeof code==='string'&&Object.hasOwn(CODES,code))return USER_ERRORS[CODES[code]!];
   if(area==='preview')return USER_ERRORS[437];
   if(area==='import')return USER_ERRORS[436];
-  if(area==='model')return USER_ERRORS[stage==='texture-authoring'?434:stage==='export'||stage==='export-roundtrip'||stage==='export-identity'?435:431];
+  if(area==='model')return USER_ERRORS[stage==='mesh-validation'?432:stage==='texture-authoring'?434:stage==='review-render'?437:stage==='export'||stage==='export-roundtrip'||stage==='export-identity'?435:431];
   return USER_ERRORS[499];
 }
 export const userErrorLabel=(error:UserError):string=>'Error '+error.number+' · '+error.title;

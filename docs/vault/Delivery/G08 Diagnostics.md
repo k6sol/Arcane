@@ -36,6 +36,8 @@ Current work adds finite staging phase/reason details and preserves unknown/no-r
 
 ## Scoped connection evidence verified
 
+Model-stage follow-up: generic host/worker failures at `mesh-validation` now retain Error432, and `review-render` retains Error437 rather than claiming generation failed. Exact foliage-attachment/collision and empty-render reasons also use those references when stage metadata is absent. More specific timeout, storage, material and permission reasons take precedence. Unknown stage/code substrings remain generic. The new regression first fails on the original catalogue; strict658-source compilation and115 focused error, tool-row, provider/browser-login and asset UI cases then pass with zero skips and unchanged source/compiled snapshots. This is controlled source evidence, not installed customer acceptance or remote collector configuration.
+
 - [x] Exact host-owned Claude/Credits terminal failures have a one-shot nonblocking route into the existing encrypted outbox, correlated to the original turn UUID. Controlled verification passes194 cases across provider hosts, asset lifetimes, diagnostic storage and main composition, with strict649-source compilation and zero skips. The original two regression cases first demonstrated missing reports. Intentional Stop/closed/interrupted/consent/steps outcomes and unmatched provider text remain excluded. Original ownership is rechecked across account reads; stale same-path project replacement stores nothing. OS keychain, hosted collector and authenticated customer acceptance remain separate.
 
 - [x] Original transport frame-limit failures retain finite direction, byte-bound observation, pending-method mask and actual connect phase without payload content.

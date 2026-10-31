@@ -33,3 +33,21 @@ test('unknown data cannot inject a reference, explanation or private provider ou
   assert.equal(new Set(numbers).size,numbers.length);
   for(const error of Object.values(USER_ERRORS)){assert.match(userErrorLabel(error),/^Error \d{3} · /);assert.ok(error.explanation&&error.nextStep);}
 });
+
+test('worker validation and review failures retain their stage instead of claiming generation failed',()=>{
+  assert.equal(userError('HOST_FAILURE','model','mesh-validation'),USER_ERRORS[432]);
+  assert.equal(userError('WORKER_EXIT','model','review-render'),USER_ERRORS[437]);
+  // These actual worker reasons can arrive without a stage in live/saved tool failures.
+  assert.equal(userError('FOLIAGE_ATTACHMENT'),USER_ERRORS[432]);
+  assert.equal(userError('RENDER_CONTENT'),USER_ERRORS[437]);
+  assert.equal(userError('CONVERSION_RENDER'),USER_ERRORS[437]);
+  assert.equal(userError('CONVERSION_COLLISION'),USER_ERRORS[432]);
+  // A known reason is more specific than the surrounding stage; never hide it.
+  assert.equal(userError('TIMEOUT','model','review-render'),USER_ERRORS[422]);
+  assert.equal(userError('JOURNAL_FAILURE','model','mesh-validation'),USER_ERRORS[423]);
+  assert.equal(userError('PERMISSION_DENIED','model','review-render'),USER_ERRORS[438]);
+  assert.equal(userError('MESH_MATERIAL_LINK','model','mesh-validation'),USER_ERRORS[433]);
+  assert.equal(userError('UNKNOWN','model','mesh-validation-extra'),USER_ERRORS[431]);
+  assert.equal(userError('UNKNOWN','model','review-render-extra'),USER_ERRORS[431]);
+  assert.equal(userError('private-RENDER_CONTENT'),USER_ERRORS[499]);
+});

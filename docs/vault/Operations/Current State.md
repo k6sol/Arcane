@@ -25,7 +25,9 @@ The matching plugin archive and canonical generated source verify; no plugin ins
 
 ## Remaining product work
 
-A boulder-only joint-weathering candidate reduces connected cellular outlines using an existing world-space field without new random draws. Seven actual Blender NumPy controls, two complete local production jobs and independent exact GLB/UV comparisons pass. Both views were reviewed as a narrow material improvement; overall rock form/detail and UV quality remain unaccepted. Fresh pinned native and hosted delivery are pending; the installed chat runtime remainscdda8e4. See [[Bugs/Boulder Joint Weathering]].
+A boulder-only joint-weathering candidate reduces connected cellular outlines using an existing world-space field without new random draws. Seven actual Blender NumPy controls, two complete local production jobs and independent exact GLB/UV comparisons pass. Both original pinned5.2 Windows/Linux native jobs now pass; six original review archives verify, and all four new rock views were inspected. Overall rock form/detail and UV quality remain unaccepted. Hosted package completion and delivery remain pending; the installed chat runtime remainscdda8e4. See [[Bugs/Boulder Joint Weathering]].
+
+The model-error catalogue now retains mesh-validation and review-render stages rather than labelling both generation failures, while specific known causes take precedence. Strict658-source compilation and115 focused cases pass with zero skips. This source follow-up is not yet installed. See [[Delivery/G08 Diagnostics]].
 
 All ten whole-product goals remain open. Loaded chat/model/provider/cancel/preview/restart acceptance, historical continuations, connected import/upload, gameplay and public account/billing setup remain incomplete or unverified. Tree structure/foliage appearance, visible leaf contact, remaining UV concerns, realistic rocks and finished environment composition remain unaccepted. Native Codex and in-app Claude/Credits have different actual authoring capabilities; instructions alone do not add missing tools or train a model.
 
