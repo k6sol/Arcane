@@ -5,6 +5,14 @@ tags: [arcane, chat, diagnostics]
 ---
 # Browser sign-in and error references
 
+## Verified delivery
+
+Signed source `ff18a9d` passes all seven original [release jobs41173957116](https://github.com/k6sol/Arcane/actions/runs/41173957116), including packaged Windows startup/shutdown, without reruns. The authenticated final package installed successfully with observed exit zero, both output streams closed and no retained lock or staging. Independent stock verification checked all4667 payload files against the selected manifest. One inactive code bundle was reversibly preserved; no files were deleted, the32-release limit stayed unchanged and all31 unrelated release records remained unchanged. Canonical plugin verification passed without operating Studio.
+
+The selected update and loaded window are separate: the actual window still runs4472706 and shows its update banner. The user has been asked to close it when ready so the authorized updated reopen can proceed without interrupting current work. Actual browser authentication and usable customer chat remain unverified. The following implementation checkpoints retain their original historical scope.
+
+Read-only recovery inspection found three unknown tasks recorded as `application_closed`, all originally permitting workspace writes and assets. Two recorded native turn completion; none has a later acknowledged same-connection disconnect receipt. Turn completion does not prove resource closure. Keep their records unchanged. A prospective fresh-session recovery must isolate old task/thread/credential authority, retain filesystem-write restrictions and account conservatively for unresolved worker and import custody. This recovery design is not implemented or accepted.
+
 ## Required outcome
 
 Connect Codex opens the supported ChatGPT sign-in flow rather than Settings. Reuse a genuinely verified saved account, retain it when a new login is cancelled, and distinguish successful authentication from a blocked workspace connection. Errors must not move the page. Show stable numbers and explanations, with correlation IDs under Technical details.

@@ -19,7 +19,7 @@ Latest installed and reopened runtime is SSH-verified `4472706`, combining respo
 
 ## Build with knowledge
 
-Current source work adds direct ChatGPT browser sign-in and numbered error details without shifting the sign-in page. Local checks are recorded in [[Sessions/2026-10-31 Browser Sign-in and Error References]]; hosted delivery and resolution of three legacy unknown tasks remain open. [[Architecture/Error References]] documents the public numbers separately from technical correlation IDs.
+The selected desktop update `ff18a9d` adds direct ChatGPT browser sign-in and numbered error details without shifting the sign-in page. All seven original release jobs pass and4667 installed files are independently verified. The older window remains open pending user readiness to restart; usable customer chat and resolution of three legacy unknown tasks remain open. See [[Sessions/2026-10-31 Browser Sign-in and Error References]]. [[Architecture/Error References]] documents the public numbers separately from technical correlation IDs.
 
 - [[Skills/Development Skills|Build Arcane]] — development, debugging, task lifetimes, asset integration, release evidence and knowledge maintenance.
 - [[Skills/Skill Catalog|Build with Arcane]] — the existing Arcane skill pack and its real approval status.
