@@ -9,6 +9,7 @@ const path = require('node:path');
 
 const PYX_PATH = '/pyx-bar';
 const PYX_SIZE = Object.freeze({ width: 772, height: 244 }); // pyx-bar.css: 740px bar + 16px margins; bubble row, 60px bar, one suggestion row, shadow room
+const PYX_PICKER_HEIGHT=460;
 /** Where the painted bar sits inside the transparent window (pyx-bar.css): x 16..756, bubble from y 16, bar y 80..140, suggestions to ~180. */
 const PYX_SOLID = Object.freeze({ left: 16, top: 16, right: 16, bottom: 56 });
 const PYX_BAR_BOTTOM = 140; // the 60px bar row ends 140px into the window
@@ -16,6 +17,20 @@ const PYX_PET_X = 17; // the pet's left edge inside the window, aligned over the
 const ANSWER_MS = 6000, CLOSE_FALLBACK_MS = 420, SHOW_FALLBACK_MS = 2500, NUDGE_MAX = 64, GAP = 12;
 const STORE_FILE = 'pyx-bar.v1.json', STORE_MAX_DISPLAYS = 8, STORE_MAX_BYTES = 8192;
 const PHASES = ['idle', 'working', 'done', 'error', 'offline'], PROVIDERS = ['claude', 'codex', 'arcane'];
+const exact=(v,keys)=>!!v&&typeof v==='object'&&!Array.isArray(v)&&[Object.prototype,null].includes(Object.getPrototypeOf(v))&&Reflect.ownKeys(v).length===keys.length&&Reflect.ownKeys(v).every(k=>typeof k==='string'&&keys.includes(k)&&Object.getOwnPropertyDescriptor(v,k)?.enumerable&&Object.hasOwn(Object.getOwnPropertyDescriptor(v,k),'value'));
+const bounded=(v,n)=>typeof v==='string'&&v.length>0&&v.length<=n&&!/[\x00-\x1f\x7f]/.test(v);
+const revision=v=>typeof v==='string'&&/^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(v);
+function readModelChoice(v){return exact(v,['revision','provider','model','effort'])&&revision(v.revision)&&PROVIDERS.includes(v.provider)&&bounded(v.model,256)&&bounded(v.effort,64)?{...v}:null;}
+function readModels(v){
+  try{
+    if(!exact(v,['revision','selectable','message','selected','models'])||!revision(v.revision)||typeof v.selectable!=='boolean'||!(v.message===null||bounded(v.message,300))||!Array.isArray(v.models)||v.models.length>768||Buffer.byteLength(JSON.stringify(v))>32768)return null;
+    const seen=new Set(),models=[];for(const r of v.models){if(!exact(r,['provider','id','label','efforts'])||!PROVIDERS.includes(r.provider)||!bounded(r.id,256)||!bounded(r.label,96)||!Array.isArray(r.efforts)||!r.efforts.length||r.efforts.length>16||r.efforts.some(e=>!bounded(e,64))||new Set(r.efforts).size!==r.efforts.length)return null;
+      const k=JSON.stringify([r.provider,r.id]);if(seen.has(k))return null;seen.add(k);models.push({provider:r.provider,id:r.id,label:r.label,efforts:[...r.efforts]});}
+    if(v.selected!==null&&(!exact(v.selected,['provider','model','effort'])||!models.some(r=>r.provider===v.selected.provider&&r.id===v.selected.model&&r.efforts.includes(v.selected.effort))))return null;
+    return{revision:v.revision,selectable:v.selectable,message:v.message,selected:v.selected?{...v.selected}:null,models};
+  }catch{return null;}
+}
+function readModelResult(v){return exact(v,['state',...(v&&Object.hasOwn(v,'message')?['message']:[])])&&['applied','rejected','unknown'].includes(v.state)&&(!Object.hasOwn(v,'message')||bounded(v.message,300))?{...v}:null;}
 
 /** A bounded, plain copy of the workspace's snapshot (pyx-bar.ts re-validates everything again). */
 function readSnapshot(value) {
@@ -147,7 +162,7 @@ function createPositionStore(directory) {
 
 // ------------------------------------------------------------------------------------------------ the window ----
 function createPyxBar({ BrowserWindow, screen, preload, partition = 'arcane-workspace', getMain, getOrigin, available, devTools = false, store = null, timers = globalThis }) {
-  let bar = null, snapshot = null, disposed = false, open = false, shown = false, ready = false, closeTimer = null, drag = null, saved = null, placed = false, lastPushed = '';
+  let bar = null, snapshot = null, disposed = false, open = false, shown = false, ready = false, closeTimer = null, drag = null, saved = null, placed = false, lastPushed = '',pickerExpanded=false;
   let layout = null; // the main window's composer, in its viewport's CSS pixels (pyx-link.ts)
   const pending = new Map(), visibilityListeners = new Set();
   const barUrl = () => getOrigin() + PYX_PATH;
@@ -176,7 +191,15 @@ function createPyxBar({ BrowserWindow, screen, preload, partition = 'arcane-work
       return rectOf({ x: content.x + layout.x * zoom, y: content.y + layout.y * zoom, width: layout.width * zoom, height: layout.height * zoom });
     } catch { return null; }
   };
-  const setPosition = p => { if (live(bar)) bar.setBounds({ x: p.x, y: p.y, width: PYX_SIZE.width, height: PYX_SIZE.height }); };
+  const setPosition = p => { if (live(bar)) bar.setBounds({ x: p.x, y: p.y, width: PYX_SIZE.width, height:bar.getBounds().height }); };
+  const pickerSize=expanded=>{
+    if(!live(bar)||expanded===pickerExpanded)return;
+    if(!expanded)toMain({type:'models-close'});
+    const b=bar.getBounds(),display=displayFor(displays(),b,b),area=rectOf(display?.workArea);
+    const height=expanded?Math.max(PYX_SIZE.height,Math.min(PYX_PICKER_HEIGHT,area?.height??PYX_PICKER_HEIGHT)):PYX_SIZE.height;
+    const p=area?clampToArea({x:b.x,y:b.y-(height-b.height)},area,{width:PYX_SIZE.width,height}):{x:b.x,y:b.y-(height-b.height)};
+    pickerExpanded=expanded;bar.setBounds({x:p.x,y:p.y,width:PYX_SIZE.width,height});
+  };
   const place = () => {
     const main = getMain(), visibleMain = live(main) && main.isVisible?.() !== false && main.isMinimized?.() !== true;
     const p = pyxPlacement({ displays: displays(), main: visibleMain ? main.getBounds() : null, composer: visibleMain ? composerOnScreen(main) : null, saved: positions() });
@@ -186,14 +209,14 @@ function createPyxBar({ BrowserWindow, screen, preload, partition = 'arcane-work
   /** After a display change, the bar is kept inside the work area of the display nearest to it. */
   const reclamp = () => {
     if (!live(bar)) return;
-    const b = bar.getBounds(), list = displays(), display = displayFor(list, b);
+    const b = bar.getBounds(), list = displays(), display = displayFor(list, b,b);
     if (!display) return;
-    const p = clampToArea(b, display.workArea);
+    const p = clampToArea(b, display.workArea,b);
     if (p.x !== b.x || p.y !== b.y) setPosition(p);
   };
   const remember = () => {
     if (!live(bar)) return;
-    const b = bar.getBounds(), display = displayFor(displays(), b), key = displayKey(display); if (!key) return;
+    const actual=bar.getBounds(),b={...actual,y:actual.y+actual.height-PYX_SIZE.height,height:PYX_SIZE.height}, display = displayFor(displays(), b), key = displayKey(display); if (!key) return;
     const area = rectOf(display.workArea);
     saved = rememberPosition(positions(), key, b.x - area.x, b.y - area.y);
     try { store?.write?.(saved); } catch { /* the position is still remembered for this session */ }
@@ -228,6 +251,7 @@ function createPyxBar({ BrowserWindow, screen, preload, partition = 'arcane-work
     return w;
   }
   const hideNow = () => {
+    pickerSize(false);
     if (closeTimer) { timers.clearTimeout(closeTimer); closeTimer = null; }
     drag = null;
     if (live(bar) && shown) { bar.hide(); shown = false; }
@@ -262,7 +286,7 @@ function createPyxBar({ BrowserWindow, screen, preload, partition = 'arcane-work
     onVisibility(listener) { visibilityListeners.add(listener); return () => visibilityListeners.delete(listener); },
     hide() { open = false; hideNow(); announce(); },
     /** Workspace navigated, reloaded, switched project or lost its runtime: the bar goes honestly offline. */
-    reset() { snapshot = null; layout = null; for (const [id, p] of pending) { timers.clearTimeout(p.timer); p.resolve({ accepted: false, message: 'Arcane reloaded. Your text is still here.' }); pending.delete(id); } push(true); },
+    reset() {pickerSize(false); snapshot = null; layout = null; for (const [id, p] of pending) { timers.clearTimeout(p.timer); p.resolve(p.kind==='models-read'?null:p.kind==='models-select'?{state:'unknown',message:'Arcane reloaded. Review its current model before selecting again.'}:{ accepted: false, message: 'Arcane reloaded. Your text is still here.' }); pending.delete(id); } push(true); },
     dispose() {
       disposed = true; api.reset(); open = false; hideNow(); if (live(bar)) bar.destroy(); bar = null;
       for (const type of ['display-added', 'display-removed', 'display-metrics-changed']) { try { screen.removeListener?.(type, onDisplays); } catch { /* optional */ } }
@@ -279,9 +303,29 @@ function createPyxBar({ BrowserWindow, screen, preload, partition = 'arcane-work
       });
       ipcMain.on('arcane:pyx-answer', (event, value) => {
         if (!trusted(event) || !value || typeof value.id !== 'string') return;
-        const p = pending.get(value.id); if (!p) return; pending.delete(value.id); timers.clearTimeout(p.timer);
+        const p = pending.get(value.id); if (!p||p.kind) return; pending.delete(value.id); timers.clearTimeout(p.timer);
         p.resolve(value.accepted === true ? { accepted: true } : { accepted: false, message: typeof value.message === 'string' ? value.message.slice(0, 300) : 'Arcane didn’t take that.' });
       });
+      ipcMain.on('arcane:pyx-model-answer',(event,value)=>{
+        if(!trusted(event)||!exact(value,['id','result'])||!bounded(value.id,64))return;
+        const p=pending.get(value.id);if(!p?.kind)return;
+        const result=p.kind==='models-read'?(value.result===null?null:readModels(value.result)):readModelResult(value.result);
+        if(result===null&&!(p.kind==='models-read'&&value.result===null))return;
+        pending.delete(value.id);timers.clearTimeout(p.timer);p.resolve(result);
+      });
+      const modelRequest=(kind,fields)=>{
+        if(pending.size>=4)return Promise.resolve(kind==='models-read'?null:{state:'rejected',message:'Pyx is waiting for the current request.'});
+        const id=randomUUID();return new Promise(resolve=>{
+          const timer=timers.setTimeout(()=>{pending.delete(id);resolve(kind==='models-read'?null:{state:'unknown',message:'Model selection is unconfirmed. Review it in Arcane; nothing was retried.'});},ANSWER_MS);
+          pending.set(id,{resolve,timer,kind});
+          if(!toMain({type:kind,id,...fields})){pending.delete(id);timers.clearTimeout(timer);resolve(kind==='models-read'?null:{state:'rejected',message:'Arcane is unavailable.'});}
+        });
+      };
+      ipcMain.handle('arcane:pyx-models',(event,...args)=>fromBar(event)&&!args.length&&open?modelRequest('models-read',{}):null);
+      ipcMain.handle('arcane:pyx-select-model',(event,...args)=>{
+        const choice=args.length===1?readModelChoice(args[0]):null;return fromBar(event)&&open&&choice?modelRequest('models-select',choice):{state:'rejected',message:'Choose a model from the current list.'};
+      });
+      ipcMain.on('arcane:pyx-picker-open',(event,...args)=>{if(fromBar(event)&&open&&shown&&args.length===1&&typeof args[0]==='boolean')pickerSize(args[0]);});
       // ---- from the bar (fromBar: exact main frame of the bar window at origin + /pyx-bar)
       ipcMain.handle('arcane:pyx-snapshot', event => fromBar(event) ? snapshot : null);
       ipcMain.handle('arcane:pyx-submit', (event, text) => {
@@ -300,7 +344,6 @@ function createPyxBar({ BrowserWindow, screen, preload, partition = 'arcane-work
       ipcMain.on('arcane:pyx-close', event => { if (!fromBar(event)) return; if (open) { open = false; announce(false); } hideNow(); }); // the bar closed itself: no echo back, so a quick reopen is never undone
       const focusMain = () => { const main = getMain(); if (!live(main)) return; if (main.isMinimized()) main.restore(); main.show(); main.focus(); };
       ipcMain.on('arcane:pyx-expand', event => { if (!fromBar(event)) return; focusMain(); api.close(); });
-      ipcMain.on('arcane:pyx-model-picker', event => { if (!fromBar(event)) return; focusMain(); toMain({ type: 'model-picker' }); });
       ipcMain.on('arcane:pyx-interactive', (event, on) => { if (fromBar(event) && !drag) bar.setIgnoreMouseEvents(on !== true, { forward: true }); });
       // Moving: the bar only says start / move / end; the host reads the cursor itself, so a renderer can never place the
       // window anywhere the user's pointer is not. The bar stays inside the work area of the display under the cursor.
@@ -313,8 +356,8 @@ function createPyxBar({ BrowserWindow, screen, preload, partition = 'arcane-work
         } else if (phase === 'move' && drag) {
           let cursor; try { cursor = screen.getCursorScreenPoint(); } catch { return; }
           const target = { x: drag.x + cursor.x - drag.cx, y: drag.y + cursor.y - drag.cy };
-          let display = null; try { display = screen.getDisplayNearestPoint(cursor); } catch { display = displayFor(displays(), target); }
-          setPosition(clampToArea(target, display?.workArea)); drag.moved = true;
+          let display = null; try { display = screen.getDisplayNearestPoint(cursor); } catch { display = displayFor(displays(), target,bar.getBounds()); }
+          setPosition(clampToArea(target, display?.workArea,bar.getBounds())); drag.moved = true;
         } else if (phase === 'end' || phase === 'cancel') {
           const moved = drag?.moved === true; drag = null;
           if (moved) { reclamp(); remember(); }
@@ -325,11 +368,11 @@ function createPyxBar({ BrowserWindow, screen, preload, partition = 'arcane-work
         if (!fromBar(event) || !open || !shown || !value || typeof value !== 'object') return;
         const dx = Number.isSafeInteger(value.dx) ? Math.max(-NUDGE_MAX, Math.min(NUDGE_MAX, value.dx)) : 0, dy = Number.isSafeInteger(value.dy) ? Math.max(-NUDGE_MAX, Math.min(NUDGE_MAX, value.dy)) : 0;
         if (!dx && !dy) return;
-        const b = bar.getBounds(), target = { x: b.x + dx, y: b.y + dy }, display = displayFor(displays(), target);
-        setPosition(clampToArea(target, display?.workArea)); remember();
+        const b = bar.getBounds(), target = { x: b.x + dx, y: b.y + dy }, display = displayFor(displays(), target,b);
+        setPosition(clampToArea(target, display?.workArea,bar.getBounds())); remember();
       });
     },
   };
   return api;
 }
-module.exports = { createPyxBar, createPositionStore, readSnapshot, readPositions, rememberPosition, pyxPlacement, clampToArea, displayKey, PYX_PATH, PYX_SIZE, PYX_SOLID, STORE_FILE };
+module.exports = { createPyxBar, createPositionStore, readSnapshot,readModels,readModelChoice,readModelResult, readPositions, rememberPosition, pyxPlacement, clampToArea, displayKey, PYX_PATH, PYX_SIZE,PYX_PICKER_HEIGHT, PYX_SOLID, STORE_FILE };

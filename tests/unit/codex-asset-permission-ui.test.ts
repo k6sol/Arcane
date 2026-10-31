@@ -286,6 +286,24 @@ test('Models is a closed initial-Send field and its final pre-dispatch check can
   await assert.rejects(api.action(input,undefined,()=>false),error=>error instanceof CodexHttpError&&!error.unknown);assert.equal(posts,0);
 });
 
+test('Pyx actual Codex picker capture selects through the existing action and preserves the unsent draft without turns or grants',async t=>{
+  const initial=state();initial.snapshot!.models.push({id:'second',model:'second',displayName:'Second fixture',efforts:['low','high'],defaultEffort:'high',entitlement:'unverified'});
+  const f=await fixture(t,initial),draft='Unsent draft stays in the main composer';f.el('codex-composer').value=draft;
+  const capture=f.chat.captureModelPicker()!;assert.ok(capture.selectable);assert.ok(capture.models.some(row=>row.id==='second'&&row.efforts.includes('high')));
+  f.handler(async input=>{assert.equal(input.action,'select');const next=f.observed();next.snapshot!.selection={model:'second',effort:'high'};next.snapshot!.thread!.selection={model:'second',effort:'high'};f.set(next);return response(input,next);});
+  assert.equal(await capture.select('second','high'),'applied');assert.equal(await capture.select('second','high'),'rejected');
+  assert.deepEqual(f.posts.map(input=>input.action),['select']);assert.equal(f.el('codex-composer').value,draft);assert.equal(f.observed().snapshot!.thread!.writeGranted,false);assert.equal(f.observed().nativeAssets!.granted,false);
+});
+
+test('Pyx actual Codex picker refuses provider and catalogue ABA, and unknown selection never retries',async t=>{
+  const initial=state();initial.snapshot!.models.push({id:'second',model:'second',displayName:'Second fixture',efforts:['high'],defaultEffort:'high',entitlement:'unverified'});
+  const f=await fixture(t,initial);const provider=f.chat.captureModelPicker()!;f.chat.yieldSurface(true);f.chat.yieldSurface(false);assert.equal(await provider.select('second','high'),'rejected');assert.equal(provider.catalogueCurrent(),true,'a read-only catalogue witness cannot select a changed source');
+  const catalogue=f.chat.captureModelPicker()!,changed=f.observed();changed.snapshot!.models[1]!.displayName='Changed catalogue';f.set(changed);await f.chat.refresh();f.set(initial);await f.chat.refresh();assert.equal(await catalogue.select('second','high'),'rejected');assert.equal(catalogue.catalogueCurrent(),false);assert.equal(f.posts.length,0);
+  const account=f.chat.captureModelPicker()!,notified=f.observed();notified.snapshot!.events=[{type:'account-changed',seq:1},{type:'account-changed',seq:2}];notified.snapshot!.lastEventSeq=2;f.set(notified);await f.chat.refresh();assert.equal(await account.select('second','high'),'rejected');assert.equal(f.posts.length,0,'equal public plan metadata cannot erase a native account-change notification');
+  f.handler(async input=>response(input,f.observed(),{state:'unknown',errorCode:'TIMEOUT'}));const active=f.chat.captureModelPicker()!;assert.equal(await active.select('second','high'),'unknown');assert.equal(await active.select('second','high'),'rejected');
+  assert.deepEqual(f.posts.map(input=>input.action),['select']);assert.equal(f.chat.captureModelPicker()!.selectable,false);
+});
+
 test('Human Send opens its exact new chat before requesting one-shot assets on that Send only',async t=>{
   const initial=state();initial.snapshot!.thread=null;initial.nativeAssets=assets({sealed:false});
   const f=await fixture(t,initial);f.el('codex-model').value='fixture';f.el('codex-effort').value='low';f.el('codex-composer').value='Human new-chat build';

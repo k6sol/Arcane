@@ -12,7 +12,8 @@ const CSP = "default-src 'self'; script-src 'self'; style-src 'self'; connect-sr
 // says when the bar is open; the bar reports ready, close, moves and nudges. It records intents; nothing reaches a provider.
 const FAKE_BRIDGE = `(() => {
   const states = new Set(), offers = new Set(), seen = new Set(); let current = { phase: 'idle', provider: 'claude', model: 'Opus 5.5', modelTitle: 'Claude Opus 5.5', effort: 'high' }, offered = [], visible = null;
-  const calls = []; window.__pyx = { calls, push: s => { current = s; states.forEach(l => l(s)); }, offer: s => { offered = s; offers.forEach(l => l(s)); },
+  const catalog={revision:'453f0fb4-f28b-434a-aee5-605261af915f',selectable:true,message:null,selected:{provider:'claude',model:'opus',effort:'high'},models:[{provider:'claude',id:'opus',label:'Opus 5.5',efforts:['low','high']},{provider:'claude',id:'sonnet',label:'Sonnet 5.5',efforts:['low','high']},{provider:'codex',id:'fixture-sol',label:'Sol fixture',efforts:['low','high']}]};
+  const calls = []; window.__pyx = { calls, catalog, selection:{state:'applied'},push: s => { current = s; states.forEach(l => l(s)); }, offer: s => { offered = s; offers.forEach(l => l(s)); },
     show: open => { visible = open; seen.forEach(l => l(open)); }, next: { accepted: true } };
   window.arcaneDesktop = { pyx: Object.freeze({ version: 1,
     submit: text => { calls.push(['submit', text]); return Promise.resolve(window.__pyx.next); },
@@ -21,7 +22,9 @@ const FAKE_BRIDGE = `(() => {
     onVisibility: l => { seen.add(l); if (visible !== null) l(visible); return () => seen.delete(l); },
     ready: () => calls.push(['ready']), drag: phase => calls.push(['drag', phase]), nudge: (dx, dy) => calls.push(['nudge', dx, dy]),
     close: () => calls.push(['close']), expandToMain: () => calls.push(['expandToMain']), stop: () => calls.push(['stop']),
-    openModelPicker: () => calls.push(['openModelPicker']), setInteractive: on => calls.push(['setInteractive', on]) }) };
+    models:()=>{calls.push(['models']);return Promise.resolve(window.__pyx.catalog);},
+    selectModel:choice=>{calls.push(['selectModel',choice]);const result=window.__pyx.selection;if(result.state==='applied'){const row=catalog.models.find(r=>r.provider===choice.provider&&r.id===choice.model);catalog.selected={provider:choice.provider,model:choice.model,effort:choice.effort};current={...current,provider:choice.provider,model:row.label,modelTitle:row.label,effort:choice.effort};states.forEach(l=>l(current));}return Promise.resolve(result);},
+    pickerOpen:on=>calls.push(['pickerOpen',on]),setInteractive: on => calls.push(['setInteractive', on]) }) };
 })();`;
 
 test('real Edge Pyx bar: pop open/close, ×, Escape, moving, no clipping, moods, suggestions only fill, steering, honest offline, reduced motion, CSP', { skip: !process.env.ARCANE_UI_BROWSER_MODULE, timeout: 120000 }, async t => {
@@ -55,7 +58,7 @@ test('real Edge Pyx bar: pop open/close, ×, Escape, moving, no clipping, moods,
     await page.waitForFunction(() => document.getElementById('pyx')?.classList.contains('is-ready'));
     return { context, page, errors };
   };
-  const quiet = ['setInteractive', 'drag', 'ready', 'nudge'];
+  const quiet = ['setInteractive', 'drag', 'ready', 'nudge','pickerOpen'];
   const calls = (page: any) => page.evaluate((q: string[]) => (window as any).__pyx.calls.filter((c: unknown[]) => !q.includes(c[0] as string)), quiet);
   const allCalls = (page: any) => page.evaluate(() => (window as any).__pyx.calls.slice());
   const clearCalls = (page: any) => page.evaluate(() => { (window as any).__pyx.calls.length = 0; });
@@ -270,10 +273,29 @@ test('real Edge Pyx bar: pop open/close, ×, Escape, moving, no clipping, moods,
     await page.keyboard.press('Escape');
     assert.equal(await page.evaluate(() => document.getElementById('pyx')!.dataset.open), 'false');
     await page.waitForFunction(() => (window as any).__pyx.calls.some((c: unknown[]) => c[0] === 'close'));
-    // Pyx and the chip still reach the main window.
+    // The model chip opens inside Pyx; only Pyx's explicit Open Arcane gesture reaches the main window.
     await shownAgain(page);
-    await page.locator('#pyx-model').click(); await page.locator('#pyx-pet').click();
-    assert.deepEqual((await calls(page)).slice(-2), [['openModelPicker'], ['expandToMain']]);
+    await page.setViewportSize({width:772,height:460});await page.locator('#pyx-model').click();await page.waitForFunction(()=>!document.getElementById('pyx-model-picker')!.hidden);
+    assert.equal(await page.locator('#pyx-model-options').getByRole('option').count(),3);assert.equal(await page.locator('#pyx-input').inputValue(),'Keep this draft');
+    if(shots)await page.screenshot({path:join(shots,'pyx-model-selector.png')});
+    assert.equal((await calls(page)).some((c:unknown[])=>c[0]==='expandToMain'||c[0]==='submit'),false);
+    await page.locator('#pyx-model-search').fill('Sonnet');await page.keyboard.press('ArrowDown');await page.keyboard.press('Enter');
+    await page.waitForFunction(()=>document.getElementById('pyx-model-picker')!.hidden);
+    const selections=(await calls(page)).filter((c:unknown[])=>c[0]==='selectModel');assert.equal(selections.length,1);assert.deepEqual(selections[0]![1],{revision:'453f0fb4-f28b-434a-aee5-605261af915f',provider:'claude',model:'sonnet',effort:'high'});
+    assert.equal(await page.locator('#pyx-input').inputValue(),'Keep this draft');assert.equal(await page.evaluate(()=>document.activeElement?.id),'pyx-model');
+    await page.locator('#pyx-model').click();await page.waitForFunction(()=>!document.getElementById('pyx-model-effort')!.hasAttribute('disabled'));
+    await page.locator('#pyx-model-effort').focus();await page.keyboard.press('ArrowUp');await page.waitForFunction(()=>document.getElementById('pyx-model-picker')!.hidden);
+    const reasoning=(await calls(page)).filter((c:unknown[])=>c[0]==='selectModel');assert.equal(reasoning.length,2);
+    assert.deepEqual(reasoning.at(-1)![1],{revision:'453f0fb4-f28b-434a-aee5-605261af915f',provider:'claude',model:'sonnet',effort:'low'});assert.equal(await page.locator('#pyx-input').inputValue(),'Keep this draft');
+    await page.locator('#pyx-model').click();await page.setViewportSize({width:480,height:460});
+    const rect=await page.locator('#pyx-model-picker').boundingBox();assert.ok(rect&&rect.x>=0&&rect.x+rect.width<=480&&rect.y>=0&&rect.y+rect.height<=460);
+    if(shots)await page.screenshot({path:join(shots,'pyx-model-selector-narrow.png')});
+    await page.keyboard.press('Escape');assert.equal(await page.locator('#pyx-model-picker').isVisible(),false);assert.equal(await page.evaluate(()=>document.getElementById('pyx')!.dataset.open),'true');
+    assert.equal(await page.evaluate(()=>document.activeElement?.id),'pyx-model');
+    await page.evaluate(()=>(window as any).__pyx.selection={state:'unknown',message:'Synthetic unobserved selection. Review it in Arcane.'});await page.locator('#pyx-model').click();await page.locator('#pyx-model-options').getByRole('option').first().click();
+    await page.waitForFunction(()=>document.getElementById('pyx-model-notice')!.textContent!.includes('unobserved'));assert.equal(await page.locator('#pyx-model-options').getByRole('option').first().isDisabled(),true);
+    assert.equal((await calls(page)).some((c:unknown[])=>c[0]==='submit'||c[0]==='expandToMain'),false);await page.keyboard.press('Escape');
+    await page.locator('#pyx-pet').click();assert.deepEqual((await calls(page)).at(-1),['expandToMain']);
     assert.deepEqual(errors, []); assert.equal(await page.evaluate(() => (window as any).__csp ?? 0), 0, 'no CSP violations');
     await context.close();
   }

@@ -2,14 +2,42 @@
 // submit state) and publishes a small snapshot for the bar; it answers the bar's requests by using the main composer's
 // own controls, so a Pyx instruction takes exactly the path a typed one does (send, queue or steer, per the active chat).
 // It never calls a provider, never stores anything and never sends on its own.
-import type { PyxBarState, PyxPhase, PyxProvider, PyxSubmitResult, PyxSuggestion } from './pyx-bar.js';
+import type { PyxBarState, PyxPhase, PyxProvider, PyxSubmitResult, PyxSuggestion,PyxModelsView,PyxModelChoice,PyxModelResult } from './pyx-bar.js';
 import { STARTER_PROMPTS, type StarterPrompt } from './starter-prompts.js';
+import type {ComposerPickerCapture} from './codex-chat.js';
 
 export interface PyxHostSnapshot { readonly state: PyxBarState; readonly suggestions: readonly PyxSuggestion[] }
 export type PyxHostRequest =
   | { readonly type: 'submit'; readonly id: string; readonly text: string }
   | { readonly type: 'stop' }
-  | { readonly type: 'model-picker' };
+  | {readonly type:'models-read';readonly id:string}
+  | {readonly type:'models-close'}
+  | ({readonly type:'models-select';readonly id:string}&PyxModelChoice);
+export interface PyxModelCapture {
+  readonly models:PyxModelsView['models'];readonly selected:PyxModelsView['selected'];readonly selectable:boolean;
+  current():boolean;select(choice:Omit<PyxModelChoice,'revision'>,owns:()=>boolean):Promise<PyxModelResult['state']>;
+}
+type PyxModelPeer={captureModelPicker():ComposerPickerCapture|null}|null;
+/** Actual boot seam: the source owns selection; inactive providers contribute only reported catalogue data. */
+export function capturePyxModels(options:{project():string|null;epoch():number;provider():PyxProvider;
+  peers:Readonly<Record<PyxProvider,PyxModelPeer>>;
+  handoff(provider:PyxProvider,model:string,effort:string,owns:()=>boolean):Promise<boolean>}):PyxModelCapture|null {
+  const project=options.project(),epoch=options.epoch(),provider=options.provider();
+  const captures=new Map((Object.entries(options.peers) as [PyxProvider,PyxModelPeer][]).flatMap(([provider,peer])=>{const capture=peer?.captureModelPicker();return capture?[[provider,capture] as const]:[];}));
+  const source=captures.get(provider);if(!project||!source)return null;
+  const current=()=>options.epoch()===epoch&&options.project()===project&&options.provider()===provider&&source.current();
+  return {models:Object.freeze([...captures].flatMap(([provider,capture])=>capture.models.map(row=>Object.freeze({provider,...row})))),
+    selected:source.selected?{provider,...source.selected}:null,selectable:source.selectable,current,
+    async select(choice,owns){
+      const target=captures.get(choice.provider);if(!source.selectable||!owns()||!current()||!target?.catalogueCurrent()||!target.models.some(row=>row.id===choice.model&&row.efforts.includes(choice.effort)))return 'rejected';
+      if(choice.provider===provider)return await source.select(choice.model,choice.effort);
+      // Preparation may choose another exact target draft. Its old catalogue
+      // can remain current; its old selection capture cannot gain that draft.
+      if(!await options.handoff(choice.provider,choice.model,choice.effort,()=>owns()&&current()&&target.catalogueCurrent()))return 'rejected';
+      if(epoch!==options.epoch()||project!==options.project()||options.provider()!==choice.provider)return 'rejected';
+      const selected=options.peers[choice.provider]?.captureModelPicker();return selected?await selected.select(choice.model,choice.effort):'rejected';
+    }};
+}
 /** Main preload: window.arcaneDesktop.pyx (preload.cjs). */
 export interface PyxHostBridge {
   readonly version: 1;
@@ -18,6 +46,7 @@ export interface PyxHostBridge {
   publish(snapshot: PyxHostSnapshot): void;
   onRequest(listener: (request: unknown) => void): () => void;
   answer(id: string, result: PyxSubmitResult): void;
+  answerModels?(id:string,result:PyxModelsView|PyxModelResult|null):void;
   /** Whether the bar is open, now and on every change (the perch's aria-expanded follows it). */
   onVisibility?(listener: (open: boolean) => void): () => void;
   /** Whether the bar is open right now (asked once, after this window loads). */
@@ -52,6 +81,9 @@ export interface PyxLinkOptions {
   now?: () => number;
   /** How long a submit may take to be taken by the chat before Pyx reports that it was not. */
   acceptWindowMs?: number;
+  models?:()=>PyxModelCapture|null;
+  /** Real project/provider lifetimes, including away-and-back changes. */
+  subscribeModelScope?:(invalidate:()=>void)=>()=>void;
 }
 export interface PyxLink { refresh(): void; stop(): void }
 
@@ -83,6 +115,9 @@ export function startPyxLink(doc: Document, options: PyxLinkOptions): PyxLink {
   const now = options.now ?? (() => Date.now()), acceptWindow = options.acceptWindowMs ?? 4000;
   const $ = <T extends HTMLElement>(id: string) => doc.getElementById(id) as T | null;
   let workingSince: number | null = null, lastPhase: PyxPhase = 'idle', lastKey = '', timer: ReturnType<typeof setTimeout> | null = null, stopped = false;
+  let modelEpoch=0,modelCapture:{revision:string;epoch:number;capture:PyxModelCapture}|null=null,modelSelecting=false;
+  const invalidateModels=()=>{modelEpoch++;modelCapture=null;};
+  const answerModels=(id:string,result:PyxModelsView|PyxModelResult|null)=>{try{options.bridge.answerModels?.(id,result);}catch{/* The window may have closed. */}};
 
   const articles = () => [...(doc.getElementById('codex-messages')?.querySelectorAll<HTMLElement>('article[data-role]') ?? [])];
   const snapshot = (): PyxHostSnapshot => {
@@ -143,11 +178,26 @@ export function startPyxLink(doc: Document, options: PyxLinkOptions): PyxLink {
     answer({ accepted: false, message: PYX_NOT_TAKEN });
   };
   const onRequest = (request: unknown) => {
-    if (stopped || !request || typeof request !== 'object') return;
+    if (stopped || !request || typeof request !== 'object'||Array.isArray(request)) return;
     const r = request as Record<string, unknown>;
+    const exact=(keys:readonly string[])=>Reflect.ownKeys(r).length===keys.length&&Reflect.ownKeys(r).every(k=>typeof k==='string'&&keys.includes(k)&&!!Object.getOwnPropertyDescriptor(r,k)?.enumerable&&Object.hasOwn(Object.getOwnPropertyDescriptor(r,k)!,'value'));
     if (r.type === 'submit' && typeof r.id === 'string' && /^[A-Za-z0-9-]{1,64}$/.test(r.id) && typeof r.text === 'string' && r.text.trim() && r.text.length <= 131072) void submitFromPyx(r.id, r.text);
     else if (r.type === 'stop') { const submit = $<HTMLButtonElement>('codex-submit'); if (submit?.dataset.taskState === 'active' && !submit.disabled) submit.click(); }
-    else if (r.type === 'model-picker') { const trigger = $<HTMLButtonElement>('codex-model-trigger'); if (trigger && trigger.getAttribute('aria-expanded') !== 'true') trigger.click(); trigger?.focus(); }
+    else if(r.type==='models-close'&&exact(['type']))invalidateModels();
+    else if(r.type==='models-read'&&exact(['type','id'])&&typeof r.id==='string'&&/^[A-Za-z0-9-]{1,64}$/.test(r.id)){
+      invalidateModels();const capture=options.models?.();if(!capture||!capture.current()){answerModels(r.id,null);return;}
+      const revision=crypto.randomUUID();modelCapture={revision,epoch:modelEpoch,capture};
+      answerModels(r.id,{revision,models:capture.models,selected:capture.selected,selectable:capture.selectable,message:capture.selectable?null:'Finish setup or review the current request in Arcane before changing models.'});
+    }else if(r.type==='models-select'&&exact(['type','id','revision','provider','model','effort'])&&typeof r.id==='string'&&/^[A-Za-z0-9-]{1,64}$/.test(r.id)){
+      const owned=modelCapture,requestId=r.id;modelCapture=null;
+      if(modelSelecting||!owned||owned.revision!==r.revision||owned.epoch!==modelEpoch||!owned.capture.selectable||!owned.capture.current()||
+        !owned.capture.models.some(row=>row.provider===r.provider&&row.id===r.model&&row.efforts.includes(r.effort as string))){answerModels(r.id,{state:'rejected',message:'The model list changed. Reopen it to choose from the current conversation.'});return;}
+      modelSelecting=true;void(async()=>{
+        let state:PyxModelResult['state']='unknown';try{state=await owned.capture.select({provider:r.provider as PyxProvider,model:r.model as string,effort:r.effort as string},()=>!stopped&&owned.epoch===modelEpoch);}catch{/* An unobserved selection is never retried. */}
+        finally{modelSelecting=false;}
+        answerModels(requestId,{state,message:state==='applied'?'Model selected for the next message.':state==='unknown'?'Model selection is unconfirmed. Review it in Arcane; nothing was sent again.':'The conversation or catalogue changed. Reopen the model list.'});refresh();
+      })();
+    }
   };
   const off = options.bridge.onRequest(onRequest);
   const observer = typeof doc.defaultView?.MutationObserver === 'function' ? new doc.defaultView.MutationObserver(refresh) : null;
@@ -157,6 +207,7 @@ export function startPyxLink(doc: Document, options: PyxLinkOptions): PyxLink {
   watch('codex-model-trigger', { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['hidden'] });
   watch('codex-composer', { attributes: true, attributeFilter: ['disabled'] });
   const offSurface = options.subscribeSurface?.(refresh);
+  const offModelScope=options.subscribeModelScope?.(invalidateModels);
   const tick = setInterval(() => { if (workingSince !== null) refresh(); }, 5000);
   // The perch reflects the bar: aria-expanded and "Open Pyx" / "Close Pyx".
   let offVisibility: (() => void) | undefined;
@@ -184,9 +235,10 @@ export function startPyxLink(doc: Document, options: PyxLinkOptions): PyxLink {
   return {
     refresh,
     stop() {
-      stopped = true; observer?.disconnect(); resizer?.disconnect(); view?.removeEventListener('resize', layoutSoon); clearInterval(tick);
+      stopped = true;invalidateModels(); observer?.disconnect(); resizer?.disconnect(); view?.removeEventListener('resize', layoutSoon); clearInterval(tick);
       if (timer) clearTimeout(timer); if (layoutTimer) clearTimeout(layoutTimer);
       try { off(); } catch { /* gone */ } try { offSurface?.(); } catch { /* gone */ } try { offVisibility?.(); } catch { /* gone */ }
+      try{offModelScope?.();}catch{/* Already detached. */}
     },
   };
 }

@@ -2555,6 +2555,16 @@ export interface ComposerModelGroup {
   /** A short line under the column heading (e.g. the Arcane Credits balance). */
   note?:string;
 }
+/** Private renderer capture for the Pyx picker; only its bounded view crosses IPC. */
+export interface ComposerPickerModel {readonly id:string;readonly label:string;readonly efforts:readonly string[]}
+export interface ComposerPickerCapture {
+  readonly provider:ComposerProvider;readonly models:readonly ComposerPickerModel[];readonly selected:{readonly model:string;readonly effort:string}|null;
+  readonly selectable:boolean;
+  current():boolean;
+  /** Read-only catalogue witness; it cannot authorize a selection on another tab. */
+  catalogueCurrent():boolean;
+  select(model:string,effort:string):Promise<'applied'|'rejected'|'unknown'>;
+}
 /** The other providers' sections of the model list. Choosing from one switches provider explicitly; it never starts a turn. */
 export interface CrossProviderModels {
   group():ComposerModelGroup|null;
@@ -2760,6 +2770,10 @@ export class CodexChat {
   private modelSourceOwnerRevision=0;
   private modelSourceAccountSignature:string|null=null;
   private messageLifetime = 0;
+  private pickerCaptureEpoch=0;
+  private pickerCaptureSignature='';
+  private pickerCatalogueEpoch=0;
+  private pickerCatalogueSignature='';
   private restoredWorkflowDraft = false;
   private readonly tabDraftContexts = new Map<string,{origins:WorkflowDraftProvenance[];reviewed:ReviewedDraft|null;restored:boolean}>();
   private readonly stateListeners = new Set<()=>void>();
@@ -2921,6 +2935,7 @@ export class CodexChat {
     if(yielded===this.surfaceYielded)return;
     this.modelSourceRevision++;this.modelSourceOwnerRevision++;
     this.savedRecordingRead?.abort();this.savedRecordingRead=null;
+    this.pickerCaptureEpoch++;
     if(yielded){this.pauseQueue('Paused while another provider is shown. Choose Send next to resume.');this.closePicker();this.flushDraft();this.pendingSelection=null;this.yieldedComposer=this.el<HTMLTextAreaElement>('codex-composer').value;this.surfaceYielded=true;}
     else {this.surfaceYielded=false;this.el<HTMLTextAreaElement>('codex-composer').value=this.yieldedComposer;this.yieldedComposer='';this.messageSignature='';this.pickerSignature='';this.selectionSignature='';}
     this.render();
@@ -2958,6 +2973,32 @@ export class CodexChat {
     const models=signedIn&&s?.connected&&s.ready?s.models.map(row=>({id:row.model,label:this.api.safe(row.displayName),title:this.api.safe(row.model)})):[];
     const note=signedIn?usageLimitPickerNote(this.usageLimit()):null;
     return {provider:'codex',label:'ChatGPT',available:signedIn,hint:signedIn?'Connect to choose a model':'Sign in to use',models,...(note?{note}:{})};
+  }
+  private pickerCaptureScope():string {
+    const s=this.snapshot(),tab=this.tabs?.active();
+    return JSON.stringify([this.state?.projectPath,tab?.localId,this.providerPreference(),this.surfaceYielded,s?.thread?.threadId,s?.thread?.sessionId,this.pickerCatalogueScope()]);
+  }
+  private pickerCatalogueScope():string {
+    const s=this.snapshot();return JSON.stringify([this.state?.projectPath,s?.connectionId,s?.connected,s?.ready,s?.account,s?.events.filter(event=>event.type==='account-changed').map(event=>event.seq),s?.droppedEvents,s?.models]);
+  }
+  captureModelPicker():ComposerPickerCapture|null {
+    const s=this.snapshot();if(this.stopped||!this.fresh||!s?.connected||!s.ready||s.account?.auth!=='subscription')return null;
+    const scope=this.pickerCaptureScope(),epoch=this.pickerCaptureEpoch,catalogue=this.pickerCatalogueScope(),catalogueEpoch=this.pickerCatalogueEpoch,selection=this.displaySelection();let used=false;
+    const models=Object.freeze(s.models.map(row=>Object.freeze({id:row.model,label:this.api.safe(row.displayName).slice(0,96),efforts:Object.freeze([...row.efforts])})));
+    const current=()=>!used&&!this.stopped&&this.fresh&&epoch===this.pickerCaptureEpoch&&scope===this.pickerCaptureScope();
+    return Object.freeze({provider:'codex' as const,models,selected:selection?Object.freeze({...selection}):null,selectable:this.canSelectModel(),current,
+      catalogueCurrent:()=>!this.stopped&&this.fresh&&catalogueEpoch===this.pickerCatalogueEpoch&&catalogue===this.pickerCatalogueScope(),
+      select:async(model:string,effort:string)=>{
+        if(!current()||!this.canSelectModel()||!models.some(row=>row.id===model&&row.efforts.includes(effort)))return 'rejected' as const;used=true;
+        const selected=this.displaySelection();if(selected?.model===model&&selected.effort===effort)return 'applied' as const;
+        const local=!!this.tabs&&(this.tabs.active()?.kind==='draft'||!this.tabs.bound(this.state)||!this.normal()||!IDLE.includes(this.snapshot()?.thread?.turnStatus??''));
+        const dispatch=this.dispatch('select',{model,effort}),localEpoch=this.pickerCaptureEpoch;
+        const receipt=await dispatch;
+        if(receipt?.state==='unknown'||receipt?.state==='pending')return 'unknown' as const;
+        if(!local&&receipt===undefined)return 'unknown' as const;
+        if(scope!==this.pickerCaptureScope()||!this.fresh||this.stopped)return receipt?.state==='rejected'?'rejected' as const:'unknown' as const;
+        const after=this.displaySelection();return after?.model===model&&after.effort===effort&&(receipt?.state==='acknowledged'||local&&receipt===undefined&&this.pickerCaptureEpoch===localEpoch)?'applied' as const:'rejected' as const;
+      }});
   }
   /** Fresh evidence that the signed-in ChatGPT account is out of usage (presentation only; see codexUsageLimit). */
   /** Shows a '12k tokens (~$0.31)' line under each finished reply, as the Claude chat does. Presentation only. */
@@ -3180,6 +3221,8 @@ export class CodexChat {
         text:this.api.safe(message.text),source:message.source??'live',at:message.receipt?.createdAt??null,model:message.receipt?.model??null}))});
   }
   private publishState():void {
+    const catalogueScope=this.pickerCatalogueScope();if(catalogueScope!==this.pickerCatalogueSignature){this.pickerCatalogueSignature=catalogueScope;this.pickerCatalogueEpoch++;}
+    const pickerScope=JSON.stringify([this.pickerCaptureScope(),this.displaySelection(),this.generation,[...this.pending.keys()],[...this.uncertain.keys()]]);if(pickerScope!==this.pickerCaptureSignature){this.pickerCaptureSignature=pickerScope;this.pickerCaptureEpoch++;}
     this.attachments?.syncScope();
     const signature=JSON.stringify([this.state?.projectPath??null,this.tabs?.active()?.key??null,this.workflowConversation(),this.workflowModelSelection()]);
     if(signature!==this.contextSignature){this.contextSignature=signature;for(const listener of this.workflowContextListeners){try{listener();}catch{}}}

@@ -27,6 +27,13 @@
    <button id="pyx-send" class="pyx-send" type="submit" aria-label="Send to Pyx"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg></button>
    <button id="pyx-close" class="pyx-close" type="button" aria-label="Close Pyx"><svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false"><path d="M6 6l12 12"/><path d="M18 6L6 18"/></svg></button>
   </form>
+  <section id="pyx-model-picker" class="pyx-model-picker pyx-hit" role="dialog" aria-labelledby="pyx-model-heading" hidden>
+   <header class="pyx-picker-head"><h2 id="pyx-model-heading">Choose a model</h2><button id="pyx-model-close" type="button" aria-label="Close model selector">×</button></header>
+   <label for="pyx-model-search" class="pyx-sr">Search models</label><input id="pyx-model-search" class="pyx-model-search" type="search" maxlength="128" placeholder="Search models" autocomplete="off">
+   <div id="pyx-model-options" class="pyx-model-options" role="listbox" aria-label="Available models"></div>
+   <label id="pyx-reasoning-label" class="pyx-reasoning" hidden>Reasoning<select id="pyx-model-effort" aria-label="Reasoning for the selected model"></select></label>
+   <p id="pyx-model-notice" class="pyx-model-notice" role="status" aria-live="polite"></p>
+  </section>
   <div id="pyx-suggestions" class="pyx-suggestions" role="group" aria-label="Suggestions. Clicking one fills the box; nothing sends until you press Send." hidden></div>
   <p id="pyx-announce" class="pyx-sr" role="status" aria-live="polite"></p>
  </main>

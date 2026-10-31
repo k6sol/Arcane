@@ -2780,10 +2780,14 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   window.addEventListener('pagehide', () => composerChrome?.stop());
   // Pyx pop-out bar, workspace side: publish what the workspace shows and route the bar's instructions through the main
   // composer's own controls (send, queue or steer exactly as Enter here). Dynamic import keeps the static module list unchanged.
-  if (pyxHost && typeof (pyxHost as { publish?: unknown }).publish === 'function') void import('./pyx-link.js').then(({ startPyxLink }) => {
+  if (pyxHost && typeof (pyxHost as { publish?: unknown }).publish === 'function') void import('./pyx-link.js').then(({ startPyxLink,capturePyxModels }) => {
+    let projectEpoch=0;const projectChanged=workbench.subscribeProjectChange(()=>{projectEpoch++;});
     const link = startPyxLink(document, { bridge: pyxHost as unknown as import('./pyx-link.js').PyxHostBridge,
-      surface: () => providerSetup.chatSurface(), subscribeSurface: listener => providerSetup.subscribeChatSurface(listener) });
-    window.addEventListener('pagehide', () => link.stop());
+      surface: () => providerSetup.chatSurface(), subscribeSurface: listener => providerSetup.subscribeChatSurface(listener),
+      subscribeModelScope:invalidate=>{const project=workbench.subscribeProjectChange(invalidate),provider=providerSetup.subscribeChatSurface(invalidate);return()=>{project();provider();};},
+      models:()=>capturePyxModels({project:()=>workbench.historyProjectPath()||null,epoch:()=>projectEpoch,provider:()=>providerSetup.chatSurface(),
+        peers:{codex:codexChat,claude:claudeChat,arcane:arcaneChat},handoff:(provider,model,effort,owns)=>chatLink?.chooseModel(provider,model,effort,owns)??Promise.resolve(false)})});
+    window.addEventListener('pagehide', () => {link.stop();projectChanged();});
   }).catch(() => { /* Pyx is optional; the workspace is unaffected. */ });
   window.addEventListener('pageshow', event => { if (event.persisted) composerChrome?.resume(); });
   // C31 motion: keyed FLIP for the chat library and the composer queues (presentation only; nothing with reduced motion).

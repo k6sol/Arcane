@@ -30,6 +30,13 @@ export interface PyxBarState {
 }
 export interface PyxSuggestion { readonly label: string; readonly text: string }
 export type PyxSubmitResult = { readonly accepted: true } | { readonly accepted: false; readonly message?: string };
+export interface PyxModelChoice {readonly revision:string;readonly provider:PyxProvider;readonly model:string;readonly effort:string}
+export interface PyxModelsView {
+  readonly revision:string;readonly selectable:boolean;readonly message:string|null;
+  readonly selected:{readonly provider:PyxProvider;readonly model:string;readonly effort:string}|null;
+  readonly models:readonly {readonly provider:PyxProvider;readonly id:string;readonly label:string;readonly efforts:readonly string[]}[];
+}
+export interface PyxModelResult {readonly state:'applied'|'rejected'|'unknown';readonly message?:string}
 /**
  * The only channel between the bar and its host (preload: window.arcaneDesktop.pyx). Every method is an intent; the host
  * owns routing, providers, queueing, auth and the window itself.
@@ -48,8 +55,11 @@ export interface PyxBarBridge {
   expandToMain(): void;
   /** Stop the running turn, as the main composer's Stop does. */
   stop?(): void;
-  /** Open the main window's model picker. Absent: the chip expands to the main window. */
-  openModelPicker?(): void;
+  /** Read/select the main composer's actual catalogue without focusing its window. */
+  models?():Promise<unknown>;
+  selectModel?(choice:PyxModelChoice):Promise<unknown>;
+  /** Only a boolean intent; the host owns the fixed picker size and screen bounds. */
+  pickerOpen?(open:boolean):void;
   /** Transparent areas pass clicks through to the app below; true while the pointer is over the bar's parts. */
   setInteractive?(interactive: boolean): void;
   /**
@@ -93,6 +103,26 @@ const text = (value: unknown, max: number): string | null => {
 };
 const count = (value: unknown): number | null => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= 100000 ? value : null;
 export const PYX_OFFLINE_STATE: PyxBarState = Object.freeze({ phase: 'offline', provider: null, model: null, modelTitle: null, effort: null, reply: null, progress: null, message: null, canStop: false });
+const pyxExact=(value:unknown,keys:readonly string[]):value is Record<string,unknown>=>{
+  if(!value||typeof value!=='object'||Array.isArray(value)||![Object.prototype,null].includes(Object.getPrototypeOf(value)))return false;
+  const own=Reflect.ownKeys(value);return own.length===keys.length&&own.every(key=>typeof key==='string'&&keys.includes(key)&&!!Object.getOwnPropertyDescriptor(value,key)?.enumerable&&Object.hasOwn(Object.getOwnPropertyDescriptor(value,key)!,'value'));
+};
+const pyxBounded=(value:unknown,max:number):value is string=>typeof value==='string'&&value.length>0&&value.length<=max&&!/[\u0000-\u001f\u007f]/.test(value);
+/** Model data is display-only. Selection still requires the original private main-renderer capture. */
+export function readPyxModels(value:unknown):PyxModelsView|null {
+  try{
+    if(!pyxExact(value,['revision','selectable','message','selected','models'])||!pyxBounded(value.revision,64)||!/^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(value.revision)||typeof value.selectable!=='boolean'||!(value.message===null||pyxBounded(value.message,300))||!Array.isArray(value.models)||value.models.length>768||new TextEncoder().encode(JSON.stringify(value)).length>32768)return null;
+    const rows:PyxModelsView['models'][number][]=[],seen=new Set<string>();
+    for(const row of value.models){
+      if(!pyxExact(row,['provider','id','label','efforts'])||!['codex','claude','arcane'].includes(String(row.provider))||!pyxBounded(row.id,256)||!pyxBounded(row.label,96)||!Array.isArray(row.efforts)||!row.efforts.length||row.efforts.length>16||row.efforts.some(x=>!pyxBounded(x,64))||new Set(row.efforts).size!==row.efforts.length)return null;
+      const key=JSON.stringify([row.provider,row.id]);if(seen.has(key))return null;seen.add(key);
+      rows.push(Object.freeze({provider:row.provider as PyxProvider,id:row.id,label:row.label,efforts:Object.freeze([...row.efforts]) as readonly string[]}));
+    }
+    const selected=value.selected;
+    if(selected!==null&&(!pyxExact(selected,['provider','model','effort'])||!rows.some(row=>row.provider===selected.provider&&row.id===selected.model&&row.efforts.includes(selected.effort as string))))return null;
+    return Object.freeze({revision:value.revision,selectable:value.selectable,message:value.message as string|null,selected:selected?Object.freeze({...selected}) as PyxModelsView['selected']:null,models:Object.freeze(rows)});
+  }catch{return null;}
+}
 
 /** Copies a host state into a bounded, well-typed value; anything malformed is dropped rather than shown. */
 export function readPyxState(value: unknown): PyxBarState {
@@ -201,6 +231,7 @@ export function startPyxBar(doc: Document, options: PyxBarOptions = {}): PyxBarC
   const bubble = $('pyx-bubble'), bubbleText = $('pyx-bubble-text'), bubbleOpen = $<HTMLButtonElement>('pyx-bubble-open'), status = $<HTMLButtonElement>('pyx-status');
   const statusTitle = $('pyx-status-title'), statusCount = $('pyx-status-count'), live = $('pyx-live-dot'), progress = $('pyx-progress'), fill = $('pyx-progress-fill');
   const chip = $<HTMLButtonElement>('pyx-model'), chipLogo = doc.getElementById('pyx-model-logo'), chipName = $('pyx-model-name'), pips = $('pyx-model-pips');
+  const picker=$('pyx-model-picker'),modelOptions=$('pyx-model-options'),modelNotice=$('pyx-model-notice'),modelClose=$<HTMLButtonElement>('pyx-model-close'),modelSearch=$<HTMLInputElement>('pyx-model-search'),modelEffort=$<HTMLSelectElement>('pyx-model-effort'),reasoningLabel=$('pyx-reasoning-label');
   const closeButton = $<HTMLButtonElement>('pyx-close'), stopButton = $<HTMLButtonElement>('pyx-stop'), send = $<HTMLButtonElement>('pyx-send'), chips = $('pyx-suggestions'), announcer = $('pyx-announce'), moodText = $('pyx-mood');
   const sprite = doc.getElementById('pyx-sprite'), badge = doc.getElementById('pyx-badge');
   if (!root || !form || !input || !pet || !bubble || !bubbleText || !status || !statusTitle || !statusCount || !progress || !fill || !chip || !chipName || !pips || !send || !chips || !announcer || !sprite)
@@ -220,6 +251,58 @@ export function startPyxBar(doc: Document, options: PyxBarOptions = {}): PyxBarC
   const typing = () => doc.activeElement === input && input.value.trim().length > 0;
   const working = () => state.phase === 'working';
   const motionOn = () => !reduced() && doc.visibilityState !== 'hidden';
+  let modelView:PyxModelsView|null=null,pickerShown=false,pickerBusy=false,pickerUnknown=false,pickerGeneration=0;
+  chip.setAttribute('aria-haspopup','dialog');chip.setAttribute('aria-controls','pyx-model-picker');chip.setAttribute('aria-expanded','false');
+  const closePicker=(restore=true)=>{
+    pickerGeneration++;pickerShown=false;pickerBusy=false;modelView=null;root.dataset.pickerOpen='false';if(picker)picker.hidden=true;chip.setAttribute('aria-expanded','false');
+    try{bridge?.pickerOpen?.(false);}catch{/* Host may have closed. */}if(restore&&!stopped)chip.focus({preventScroll:true});
+  };
+  const renderModels=()=>{
+    if(!modelOptions||!modelNotice||!modelEffort||!reasoningLabel)return;modelOptions.replaceChildren();
+    const query=(modelSearch?.value??'').trim().toLowerCase(),rows=modelView?.models.filter(row=>(row.label+' '+row.id+' '+PROVIDER_NAMES[row.provider]).toLowerCase().includes(query))??[];
+    for(const row of rows){
+      const selected=modelView?.selected,effort=selected&&row.efforts.includes(selected.effort)?selected.effort:row.efforts[0]!;
+      const button=doc.createElement('button');button.type='button';button.className='pyx-model-option';button.setAttribute('role','option');button.setAttribute('aria-selected',String(selected?.provider===row.provider&&selected.model===row.id));
+      button.disabled=pickerBusy||pickerUnknown||!modelView?.selectable;button.dataset.model=row.id;button.dataset.provider=row.provider;
+      const name=doc.createElement('span');name.textContent=row.label;const detail=doc.createElement('small');detail.textContent=PROVIDER_NAMES[row.provider]+' · '+effort;button.append(name,detail);
+      button.addEventListener('click',event=>{if(event.isTrusted&&!button.disabled)void selectModel(row.provider,row.id,effort);});modelOptions.append(button);
+    }
+    const selected=modelView?.selected,row=selected?modelView?.models.find(row=>row.provider===selected.provider&&row.id===selected.model):null;
+    reasoningLabel.hidden=!row;modelEffort.replaceChildren();for(const effort of row?.efforts??[]){const option=doc.createElement('option');option.value=effort;option.textContent=effort;modelEffort.append(option);}
+    modelEffort.value=selected?.effort??'';modelEffort.disabled=pickerBusy||pickerUnknown||!modelView?.selectable;
+    if(modelView&&!rows.length&&!pickerBusy&&!pickerUnknown)modelNotice.textContent=query?'No reported models match this search.':modelView.message??'No models are currently reported.';
+  };
+  const selectModel=async(provider:PyxProvider,model:string,effort:string)=>{
+    const view=modelView,generation=pickerGeneration;if(!view||!pickerShown||pickerBusy||pickerUnknown||!view.selectable||!bridge?.selectModel)return;
+    pickerBusy=true;if(modelNotice)modelNotice.textContent='Selecting model…';renderModels();
+    let result:PyxModelResult={state:'unknown',message:'Model selection is unconfirmed. Review it in Arcane; nothing was retried.'};
+    try{const response=await bridge.selectModel({revision:view.revision,provider,model,effort});
+      if(pyxExact(response,['state',...(response&&typeof response==='object'&&Object.hasOwn(response,'message')?['message']:[])])&&['applied','rejected','unknown'].includes(String(response.state))&&(!Object.hasOwn(response,'message')||pyxBounded(response.message,300)))result=response as unknown as PyxModelResult;
+    }catch{/* Never retry an unobserved selection. */}
+    if(stopped||generation!==pickerGeneration||!pickerShown)return;pickerBusy=false;
+    if(result.state==='applied'){closePicker();announcer.textContent='Model selected for the next message.';return;}
+    pickerUnknown=true;if(modelNotice)modelNotice.textContent=result.message??'The model list changed. Close and reopen it to review the current conversation.';renderModels();
+  };
+  const openPicker=async()=>{
+    if(stopped||!open)return;if(pickerShown){closePicker();return;}
+    if(!picker||!modelNotice||!modelOptions||!bridge?.models||!bridge.selectModel){localError='Model selection is unavailable here. Open Arcane to choose a model.';refresh();return;}
+    const generation=++pickerGeneration;pickerShown=true;pickerBusy=true;pickerUnknown=false;modelView=null;picker.hidden=false;root.dataset.pickerOpen='true';chip.setAttribute('aria-expanded','true');
+    if(modelSearch)modelSearch.value='';modelNotice.textContent='Reading current models…';renderModels();try{bridge.pickerOpen?.(true);}catch{/* Fixed host geometry is optional in previews. */}
+    let view:PyxModelsView|null=null;try{view=readPyxModels(await bridge.models());}catch{/* An unavailable read has no selection effect. */}
+    if(stopped||generation!==pickerGeneration||!pickerShown)return;pickerBusy=false;modelView=view;modelNotice.textContent=view?.message??(view?'Choose a model for the next message.':'The current model list is unavailable. Open Arcane to finish setup or review the current request.');renderModels();modelSearch?.focus({preventScroll:true});
+  };
+  modelClose?.addEventListener('click',()=>closePicker());modelSearch?.addEventListener('input',renderModels);
+  modelEffort?.addEventListener('change',event=>{const selected=modelView?.selected;if(event.isTrusted&&selected&&!modelEffort.disabled)void selectModel(selected.provider,selected.model,modelEffort.value);});
+  picker?.addEventListener('keydown',event=>{
+    const key=(event as KeyboardEvent).key;if(!['ArrowDown','ArrowUp','Home','End'].includes(key))return;
+    const target=event.target as Node|null,inList=!!target&&!!modelOptions?.contains(target);
+    // Native reasoning selects and search caret keys keep their own keyboard
+    // behavior. Only the actual model list owns Home/End navigation.
+    if(!inList&&!(target===modelSearch&&(key==='ArrowDown'||key==='ArrowUp')))return;
+    const buttons=[...(modelOptions?.querySelectorAll<HTMLButtonElement>('button')??[])].filter(button=>!button.disabled);if(!buttons.length)return;
+    event.preventDefault();const at=buttons.indexOf(doc.activeElement as HTMLButtonElement),next=key==='Home'?0:key==='End'?buttons.length-1:at<0?(key==='ArrowDown'?0:buttons.length-1):key==='ArrowDown'?(at+1)%buttons.length:(at-1+buttons.length)%buttons.length;buttons[next]!.focus({preventScroll:true});buttons[next]!.scrollIntoView({block:'nearest'});
+  });
+  doc.addEventListener('pointerdown',event=>{const target=event.target as Node|null;if(pickerShown&&target&&!picker?.contains(target)&&!chip.contains(target))closePicker(false);});
 
   // Chip: the provider mark in white, the model name, a divider, the reasoning pips and a chevron.
   const paintChip = () => {
@@ -345,6 +428,7 @@ export function startPyxBar(doc: Document, options: PyxBarOptions = {}): PyxBarC
 
   const applyState = (value: unknown) => {
     const previous = state; state = readPyxState(value);
+    if(pickerShown&&(state.provider!==previous.provider||state.phase==='offline'))closePicker(false);
     if (state.phase !== 'error') localError = null;
     const finished = state.phase === 'done' || previous.phase === 'working' && state.phase === 'idle';
     if (finished && previous.phase !== 'done') {
@@ -379,7 +463,8 @@ export function startPyxBar(doc: Document, options: PyxBarOptions = {}): PyxBarC
   status.addEventListener('click', () => { steering = true; refresh(); input.focus(); });
   // Typing while a turn runs opens the box for steering; the first key lands in it.
   doc.addEventListener('keydown', event => {
-    if (ESCAPE_ONLY.has(event.key)) { if (event.isComposing) return; event.preventDefault(); if (press?.moving) { endPress('cancel'); return; } requestClose(); return; }
+    if (ESCAPE_ONLY.has(event.key)) { if (event.isComposing) return; event.preventDefault();if(pickerShown){closePicker();return;} if (press?.moving) { endPress('cancel'); return; } requestClose(); return; }
+    if(pickerShown&&picker?.contains(event.target as Node))return;
     if (working() && !steering && event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey && doc.activeElement !== input && !(doc.activeElement instanceof (win?.HTMLButtonElement ?? HTMLButtonElement) && event.key === ' ')) {
       event.preventDefault(); steering = true; input.value = (input.value + event.key).slice(0, PYX_INPUT_MAX); refresh(); input.focus(); const end = input.value.length; input.setSelectionRange(end, end); refresh();
     }
@@ -394,7 +479,7 @@ export function startPyxBar(doc: Document, options: PyxBarOptions = {}): PyxBarC
   });
   closeButton?.addEventListener('click', () => requestClose());
   bubbleOpen?.addEventListener('click', () => { try { bridge?.expandToMain(); } catch { /* the host owns the window */ } });
-  chip.addEventListener('click', () => { try { if (bridge?.openModelPicker) bridge.openModelPicker(); else bridge?.expandToMain(); } catch { /* the host owns the window */ } });
+  chip.addEventListener('click',event=>{if(event.isTrusted)void openPicker();});
   stopButton?.addEventListener('click', () => { try { bridge?.stop?.(); } catch { /* the host owns the turn */ } });
   // Transparent margins pass the pointer through to whatever is under the bar.
   const pointer = (event: Event) => {
@@ -465,6 +550,7 @@ export function startPyxBar(doc: Document, options: PyxBarOptions = {}): PyxBarC
   /** × , Escape, or the host closing it (the perch): pop out, then hide. Nothing in the box is lost. */
   const requestClose = () => {
     if (stopped) return;
+    closePicker(false);
     const finish = () => { closeTimer = null; try { bridge?.close(); } catch { /* the host owns the window */ } };
     if (!open) { finish(); return; }
     setOpen(false);
@@ -489,6 +575,7 @@ export function startPyxBar(doc: Document, options: PyxBarOptions = {}): PyxBarC
     state: () => state,
     isOpen: () => open,
     stop() {
+      closePicker(false);
       stopped = true; if (closeTimer) clearTimeout(closeTimer);
       for (const off of unsubscribe.splice(0)) { try { off(); } catch { /* already gone */ } }
       if (frameTimer) clearTimeout(frameTimer); if (doneTimer) clearTimeout(doneTimer); if (clock) clearInterval(clock);
@@ -531,7 +618,11 @@ export function createFakePyxBridge(initial?: Partial<PyxBarState> & { phase: Py
     fake.nudge = (dx, dy) => { fake.calls.push({ method: 'nudge', args: [dx, dy] }); };
   }
   if (options.stop !== false) fake.stop = () => { fake.calls.push({ method: 'stop', args: [] }); };
-  if (options.picker) fake.openModelPicker = () => { fake.calls.push({ method: 'openModelPicker', args: [] }); };
+  if (options.picker){
+    fake.models=async()=>{fake.calls.push({method:'models',args:[]});return {revision:'453f0fb4-f28b-434a-aee5-605261af915f',selectable:true,message:null,selected:null,models:[]};};
+    fake.selectModel=async choice=>{fake.calls.push({method:'selectModel',args:[choice]});return{state:'applied'};};
+    fake.pickerOpen=on=>{fake.calls.push({method:'pickerOpen',args:[on]});};
+  }
   return fake;
 }
 

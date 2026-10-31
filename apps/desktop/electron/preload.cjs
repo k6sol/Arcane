@@ -972,6 +972,7 @@ const pyx = Object.freeze({ version: 1,
   },
   answer: (id, result) => ipcRenderer.send('arcane:pyx-answer', { id: String(id).slice(0, 64), accepted: result?.accepted === true,
     message: typeof result?.message === 'string' ? result.message.slice(0, 300) : null }),
+  answerModels:(id,result)=>{try{if(typeof id!=='string'||!/^[A-Za-z0-9-]{1,64}$/.test(id)||JSON.stringify(result).length>32768)return;ipcRenderer.send('arcane:pyx-model-answer',{id,result:JSON.parse(JSON.stringify(result))});}catch{/* Invalid optional picker data is not relayed. */}},
 });
 // Window chrome: the native window buttons' background follows the surface shown ('workspace' or the sign-in 'page').
 const windowChrome = Object.freeze({ version: 1,

@@ -29,7 +29,14 @@ const pyx = Object.freeze({ version: 1,
   close: () => ipcRenderer.send('arcane:pyx-close'),
   expandToMain: () => ipcRenderer.send('arcane:pyx-expand'),
   stop: () => ipcRenderer.send('arcane:pyx-stop'),
-  openModelPicker: () => ipcRenderer.send('arcane:pyx-model-picker'),
+  models:(...args)=>args.length?Promise.resolve(null):ipcRenderer.invoke('arcane:pyx-models').catch(()=>null),
+  selectModel:(...args)=>{
+    const c=args[0],keys=['revision','provider','model','effort'];
+    if(args.length!==1||!c||typeof c!=='object'||Array.isArray(c)||![Object.prototype,null].includes(Object.getPrototypeOf(c))||Reflect.ownKeys(c).length!==4||!Reflect.ownKeys(c).every(k=>typeof k==='string'&&keys.includes(k)&&Object.getOwnPropertyDescriptor(c,k)?.enumerable&&Object.hasOwn(Object.getOwnPropertyDescriptor(c,k),'value'))||
+      typeof c.revision!=='string'||!/^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(c.revision)||!['codex','claude','arcane'].includes(c.provider)||typeof c.model!=='string'||!c.model||c.model.length>256||typeof c.effort!=='string'||!c.effort||c.effort.length>64||/[\x00-\x1f\x7f]/.test(c.model+c.effort))return Promise.resolve({state:'rejected',message:'Choose a model from the current list.'});
+    return ipcRenderer.invoke('arcane:pyx-select-model',{...c}).then(r=>r&&['applied','rejected','unknown'].includes(r.state)?{state:r.state,...(typeof r.message==='string'?{message:r.message.slice(0,300)}:{})}:{state:'unknown',message:'Model selection is unconfirmed. Review it in Arcane.'},()=>({state:'unknown',message:'Model selection is unconfirmed. Review it in Arcane.'}));
+  },
+  pickerOpen:(...args)=>{if(args.length===1&&typeof args[0]==='boolean')ipcRenderer.send('arcane:pyx-picker-open',args[0]);},
   setInteractive: on => ipcRenderer.send('arcane:pyx-interactive', on === true),
   drag: phase => { if (phase === 'start' || phase === 'move' || phase === 'end' || phase === 'cancel') ipcRenderer.send('arcane:pyx-drag', phase); },
   nudge: (dx, dy) => ipcRenderer.send('arcane:pyx-nudge', { dx: Number.isSafeInteger(dx) ? dx : 0, dy: Number.isSafeInteger(dy) ? dy : 0 }),

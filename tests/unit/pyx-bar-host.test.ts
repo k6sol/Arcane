@@ -239,3 +239,38 @@ test('submit round trip through the host: the workspace answers, the bar gets th
   const n = count(); publish(r.fromMain, snapshot); publish(r.fromMain, snapshot);
   assert.equal(count(), n + 1);
 });
+
+test('bar-local model IPC relays only exact frame requests and original replies without focusing the main window',async()=>{
+  const r=rig();await r.invoke('arcane:pyx-toggle');r.barReady();const w=r.barWindow()!,event={sender:w.webContents,senderFrame:w.webContents.mainFrame};
+  const view={revision:'453f0fb4-f28b-434a-aee5-605261af915f',selectable:true,message:null,selected:{provider:'codex',model:'fixture',effort:'low'},models:[{provider:'codex',id:'fixture',label:'Fixture',efforts:['low','high']}]};
+  const read=r.ipc.handlers.get('arcane:pyx-models')!(event),request=r.main.webContents.sent.at(-1)![1] as {id:string;type:string};assert.equal(request.type,'models-read');
+  r.ipc.listeners.get('arcane:pyx-model-answer')!({sender:{}},{id:request.id,result:view});
+  r.ipc.listeners.get('arcane:pyx-model-answer')!(r.fromMain,{id:request.id,result:view});assert.deepEqual(await read,view);
+  const choice={revision:view.revision,provider:'codex',model:'fixture',effort:'high'},selected=r.ipc.handlers.get('arcane:pyx-select-model')!(event,choice),select=r.main.webContents.sent.at(-1)![1] as {id:string;type:string};
+  assert.equal(select.type,'models-select');r.ipc.listeners.get('arcane:pyx-model-answer')!(r.fromMain,{id:select.id,result:{state:'applied'}});assert.deepEqual(await selected,{state:'applied'});
+  assert.equal(r.main.focused,0);assert.equal(r.main.webContents.sent.some(([,v])=>(v as {type?:string})?.type==='model-picker'),false);
+  const count=r.main.webContents.sent.length;
+  for(const bad of [{...choice,token:'forged'},{...choice,revision:'-'.repeat(36)},{...choice,effort:'high\n'}])assert.equal((await r.ipc.handlers.get('arcane:pyx-select-model')!(event,bad)).state,'rejected');
+  assert.equal(await r.ipc.handlers.get('arcane:pyx-models')!({sender:w.webContents,senderFrame:{...w.webContents.mainFrame}}),null);assert.equal(r.main.webContents.sent.length,count);
+});
+
+test('model picker geometry is a fixed owned size, clamped and restored with the painted bar anchor',async()=>{
+  const r=rig();await r.invoke('arcane:pyx-toggle');r.barReady();const w=r.barWindow()!,base=w.getBounds();
+  r.send('arcane:pyx-picker-open',true);let expanded=w.getBounds();assert.equal(expanded.width,PYX_SIZE.width);assert.equal(expanded.height,host.PYX_PICKER_HEIGHT);
+  assert.equal(expanded.y+expanded.height-PYX_SIZE.height,base.y);assert.equal(r.main.focused,0);
+  r.send('arcane:pyx-picker-open',{height:9999});assert.deepEqual(w.getBounds(),expanded);
+  r.screen.displays=[display(1,{x:0,y:0,width:1100,height:640},40,true)];r.screen.emit('display-metrics-changed');expanded=w.getBounds();
+  assert.ok(expanded.y>=0&&expanded.y+expanded.height<=600);r.send('arcane:pyx-nudge',{dx:16,dy:0});assert.equal(w.getBounds().height,host.PYX_PICKER_HEIGHT);
+  r.send('arcane:pyx-picker-open',false);assert.equal(w.getBounds().height,PYX_SIZE.height);assert.ok(w.getBounds().y+w.getBounds().height<=600);
+  r.send('arcane:pyx-picker-open',true);r.bar.hide();assert.equal(w.getBounds().height,PYX_SIZE.height);assert.equal(w.visible,false);
+});
+
+test('lost selection acknowledgement stays unknown and reset closes model admission without replay',async()=>{
+  const r=rig();await r.invoke('arcane:pyx-toggle');r.barReady();const w=r.barWindow()!,event={sender:w.webContents,senderFrame:w.webContents.mainFrame};
+  const choice={revision:'453f0fb4-f28b-434a-aee5-605261af915f',provider:'codex',model:'fixture',effort:'high'};
+  const pending=r.ipc.handlers.get('arcane:pyx-select-model')!(event,choice),before=r.main.webContents.sent.length;r.clock.advance(6000);
+  assert.equal((await pending).state,'unknown');assert.equal(r.main.webContents.sent.length,before);
+  const read=r.ipc.handlers.get('arcane:pyx-models')!(event),select=r.ipc.handlers.get('arcane:pyx-select-model')!(event,choice);r.bar.reset();
+  assert.equal(await read,null);assert.equal((await select).state,'unknown');assert.equal(r.main.focused,0);
+  assert.equal(host.readModelResult({state:'applied',accepted:true}),null);
+});

@@ -27,7 +27,22 @@ button,input{font:inherit;color:inherit;margin:0}
 
 /* Window: 772 × 244. The bar row sits at a fixed height so a reply above or suggestions below never move it. */
 .pyx-window{width:100vw;height:100vh;padding:16px;display:flex;justify-content:center}
-.pyx{width:740px;max-width:100%;display:grid;grid-template-rows:56px 60px auto;row-gap:8px;align-content:start;transform-origin:35px 94px}
+.pyx{position:relative;width:740px;max-width:100%;display:grid;grid-template-rows:56px 60px auto;row-gap:8px;align-content:start;transform-origin:35px 94px}
+.pyx[data-picker-open=true]{padding-top:max(0px,calc(100vh - 244px))}
+.pyx[data-picker-open=true] .pyx-bubble,.pyx[data-picker-open=true] .pyx-suggestions{visibility:hidden}
+.pyx-model-picker{position:absolute;z-index:3;right:0;top:0;width:min(420px,100%);max-height:calc(max(0px,100vh - 244px) + 60px);display:flex;flex-direction:column;gap:8px;padding:12px;border:1px solid var(--pyx-line);border-radius:16px;background:var(--pyx-surface);box-shadow:var(--pyx-shadow);cursor:default;overflow:hidden}
+.pyx-model-picker[hidden]{display:none}
+.pyx-picker-head{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.pyx-picker-head h2{margin:0;font-size:14px;font-weight:600}
+.pyx-picker-head button{flex:none;width:32px;height:32px;border:0;border-radius:8px;background:var(--pyx-raised);color:var(--pyx-ink);font:inherit;cursor:pointer}
+.pyx-model-search{flex:none;width:100%;height:32px;padding:6px 10px;border:1px solid var(--pyx-line);border-radius:9px;background:var(--pyx-raised);color:var(--pyx-ink);font:13px var(--pyx-font);user-select:text}
+.pyx-model-options{min-height:0;overflow:auto;overscroll-behavior:contain;display:flex;flex-direction:column;gap:3px}
+.pyx-model-option{flex:none;display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:38px;padding:8px 10px;text-align:left;border:1px solid transparent;border-radius:9px;background:transparent;color:var(--pyx-ink);font:13px var(--pyx-font);cursor:pointer}
+.pyx-model-option:hover,.pyx-model-option[aria-selected=true]{background:var(--pyx-raised);border-color:var(--pyx-line)}
+.pyx-model-option span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pyx-model-option small{flex:none;color:var(--pyx-ink-meta);font-size:12px}
+.pyx-model-option:disabled{opacity:.55;cursor:default}.pyx-reasoning{display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:12px;color:var(--pyx-ink-meta)}
+.pyx-reasoning[hidden]{display:none}.pyx-reasoning select{max-width:180px;padding:5px 8px;border:1px solid var(--pyx-line);border-radius:8px;background:var(--pyx-raised);color:var(--pyx-ink);font:12px var(--pyx-font)}
+.pyx-model-notice{flex:none;margin:0;color:var(--pyx-ink-meta);font-size:12px;line-height:1.4;overflow-wrap:anywhere}
 /* Closed (also the state the window first paints and is hidden in): nothing visible, nothing to click. */
 .pyx[data-open=false]{opacity:0;transform:translateY(10px) scale(.9);pointer-events:none}
 .pyx-bubble-slot{display:flex;align-items:flex-end;padding-left:64px;min-width:0}

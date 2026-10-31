@@ -2711,6 +2711,41 @@ test('actual Claude held Models preparation refuses draft ABA and never consumes
   await f.chat.send('A different queued message');assert.equal(Object.hasOwn(sends(b).at(-1) as object,'modelSource'),false);
 });
 
+test('Pyx actual Claude picker changes only the exact reported preference and preserves unsent text',async t=>{
+  const b=fakeBridge(),f=mount(b.bridge);t.after(()=>f.chat.stop());await f.chat.refresh();f.type('Unsent Claude draft');
+  const capture=f.chat.captureModelPicker()!;assert.equal(capture.selectable,true);assert.equal(await capture.select('opus','max'),'applied');assert.equal(await capture.select('opus','max'),'rejected');
+  assert.equal(f.input.value,'Unsent Claude draft');assert.equal(f.chat.openTabs().find(tab=>tab.model==='opus')?.effort,'max');assert.equal(sends(b).length,0);assert.equal(b.calls.some(call=>call[0]==='stop'),false);
+});
+
+test('Pyx actual Claude picker fences provider ABA and never invents missing model or effort choices',async t=>{
+  const b=fakeBridge(),f=mount(b.bridge);t.after(()=>f.chat.stop());await f.chat.refresh();f.type('Keep this draft');
+  const old=f.chat.captureModelPicker()!;f.chat.deactivate();f.chat.activate();await settle();assert.equal(await old.select('opus','max'),'rejected');
+  const current=f.chat.captureModelPicker()!;assert.equal(await current.select('unreported-model','max'),'rejected');assert.equal(await current.select('opus','unreported-effort'),'rejected');
+  assert.equal(f.input.value,'Keep this draft');assert.equal(sends(b).length,0);
+});
+
+test('Pyx provider handoff rechecks the original private owner after held conversation preparation',async t=>{
+  let release!:(value:boolean)=>void,owned=true;const gate=new Promise<boolean>(resolve=>{release=resolve;}),b=fakeBridge();
+  const f=linked('codex',chatgpt(),b.bridge,{beforeProviderSwitch:()=>gate});t.after(()=>{f.link.stop();f.chat.stop();});await f.chat.refresh();f.input.value='Preserve this original source draft';
+  const selecting=f.link.chooseModel('claude','opus','max',()=>owned);await tick();owned=false;release(true);assert.equal(await selecting,false);
+  assert.deepEqual(f.requests,[]);assert.equal(f.input.value,'Preserve this original source draft');assert.equal(sends(b).length,0);assert.equal(f.calls.some(call=>call[0]==='take'),false);
+});
+
+test('Pyx cannot mistake a foreign same-target provider switch for its refused held handoff',async t=>{
+  let release!:(value:boolean)=>void;const gate=new Promise<boolean>(resolve=>{release=resolve;}),b=fakeBridge();
+  const f=linked('codex',chatgpt(),b.bridge,{beforeProviderSwitch:()=>gate});t.after(()=>{f.link.stop();f.chat.stop();});await f.chat.refresh();f.input.value='Original Codex draft';
+  const selecting=f.link.chooseModel('claude','opus','max',()=>true);await tick();f.setSurface('claude');release(true);
+  assert.equal(await selecting,false);assert.deepEqual(f.requests,[]);assert.equal(f.chat.openTabs().some(tab=>tab.model==='opus'),false);assert.equal(sends(b).length,0);
+  f.setSurface('codex');assert.equal(f.input.value,'Original Codex draft');
+});
+
+test('Pyx inactive Claude catalogue survives exact draft preparation but cannot select that new draft',async t=>{
+  let reported={...signedIn};const b=fakeBridge({status:async()=>reported}),f=mount(b.bridge);t.after(()=>f.chat.stop());await f.chat.refresh();f.type('Earlier unsent draft');f.chat.deactivate();
+  const prior=f.chat.captureModelPicker()!;f.chat.newChat();await tick();assert.equal(prior.current(),false);assert.equal(prior.catalogueCurrent(),true);assert.equal(await prior.select('opus','max'),'rejected');
+  f.chat.activate();await settle();assert.equal(await f.chat.captureModelPicker()!.select('opus','max'),'applied');assert.equal(sends(b).length,0);
+  const catalogue=f.chat.captureModelPicker()!;reported={...signedIn,models:['sonnet']};await f.chat.refresh();reported={...signedIn};await f.chat.refresh();assert.equal(catalogue.catalogueCurrent(),false,'same final catalogue cannot erase an observed intervening account/catalogue change');
+});
+
 test('durability: provider preparation gates overlapping switches and retains the source when refused',async t=>{
   let resolveGate!:(value:boolean)=>void,calls=0;
   const f=linked('codex',chatgpt(),fakeBridge().bridge,{beforeProviderSwitch:()=>{calls++;return new Promise(resolve=>{resolveGate=resolve;});}});

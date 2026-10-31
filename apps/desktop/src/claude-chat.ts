@@ -9,7 +9,7 @@ import {
   restoreRequestText, revealEarlier, toolDetailText, toolResultImage, transcriptWindowStart, formatUsageReset, usageLimitActive, usageLimitPickerNote,boundRecordedChatTranscript,publicChatText,renderChatQueueStrip,ChatQueueJournal,chatQueueScope,
   markEntered, renderLiveUsage, renderReplyUsage, LIVE_USAGE_WORKING_TEXT,
 } from './codex-chat.js';
-import type { BeforeMessageSubmit,RecordedChatTranscript, ChoiceBlockOptions, ComposerModelGroup, ComposerProvider, CrossProviderModels, ProviderUsageLimit, ToolChange,ChatQueueRow,ChatQueueAction } from './codex-chat.js';
+import type { BeforeMessageSubmit,RecordedChatTranscript, ChoiceBlockOptions, ComposerModelGroup, ComposerProvider, CrossProviderModels, ProviderUsageLimit, ToolChange,ChatQueueRow,ChatQueueAction,ComposerPickerCapture } from './codex-chat.js';
 import type {ChatQueueBridge,StoredChatQueueRow} from '../../../packages/protocol/src/chat-queue.js';
 import type {ModelSourceConsentPort,ModelSourceContext,ModelSourceTicket} from './toolbox-policy.js';
 import type { ChatAttachmentsController, ChatAttachmentsOwner } from './chat-attachments.js';
@@ -439,6 +439,8 @@ export class ClaudeChat {
   private modelSourceProject:(()=>string|null)|null=null;
   private modelSourceRevision=0;
   private preparingSend=false;
+  private pickerCaptureEpoch=0;
+  private pickerCatalogueEpoch=0;
   /** New chat pressed while a message is still being handed to the bridge: it opens as soon as that hand-off settles. */
   private newChatAfterSend=false;
   private newChatAfterSendCreated:((source:{projectPath:string;localId:string})=>void)|undefined;
@@ -674,6 +676,7 @@ export class ClaudeChat {
   deactivate(): void {
     if (!this.active) return;
     this.modelSourceRevision++;
+    this.pickerCaptureEpoch++;
     this.pauseQueue('Paused while another provider is shown. Choose Send next to resume.');
     const tab = this.activeTab(), input = this.input();
     if (tab && input) tab.draft = input.value;
@@ -731,7 +734,7 @@ export class ClaudeChat {
     if (this.refreshing) return this.refreshing;
     const bridge = this.bridge;
     this.refreshing = (async () => {
-      try { const next=this.profile.readStatus(await bridge.status());if(JSON.stringify(next)!==JSON.stringify(this.state))this.modelSourceRevision++;this.state=next; this.statusError = null; }
+      try { const next=this.profile.readStatus(await bridge.status());if(JSON.stringify(next)!==JSON.stringify(this.state)){this.modelSourceRevision++;this.pickerCaptureEpoch++;this.pickerCatalogueEpoch++;}this.state=next; this.statusError = null; }
       catch { this.state = null; this.statusError = this.profile.engine + ' status is unavailable. Reopen the chat to try again.'; }
       this.applyDefaults();
       this.applyPendingChoice();
@@ -795,6 +798,19 @@ export class ClaudeChat {
   }
   /** Effort of the active Claude tab, carried to the other provider when the user switches from the model list. */
   currentEffort(): string | null { return this.activeTab()?.effort || null; }
+  captureModelPicker():ComposerPickerCapture|null {
+    if(this.nativeDisposed||!this.state?.signedIn||!this.state.installed)return null;
+    const scope=()=>JSON.stringify([this.active,this.preferenceStore?.projectPath,this.activeKey,this.viewEpoch,this.state,this.activeTab()?.model,this.activeTab()?.effort]);
+    const original=scope(),epoch=this.pickerCaptureEpoch,catalogueEpoch=this.pickerCatalogueEpoch,catalogue=JSON.stringify(this.state),tab=this.activeTab();let used=false;
+    const models=Object.freeze(this.models().map(id=>Object.freeze({id,label:this.modelLabel(id).short.slice(0,96),efforts:Object.freeze([...this.efforts()])})));
+    const current=()=>!used&&!this.nativeDisposed&&epoch===this.pickerCaptureEpoch&&scope()===original;
+    return Object.freeze({provider:this.profile.provider,models,selected:tab?Object.freeze({model:tab.model,effort:tab.effort}):null,selectable:this.active&&this.pickerEnabled()&&!this.loading&&!this.preparingSend&&!this.nativeHydrating&&!this.rewinding&&this.turn?.turnId!==null,current,
+      catalogueCurrent:()=>!this.nativeDisposed&&catalogueEpoch===this.pickerCatalogueEpoch&&catalogue===JSON.stringify(this.state),
+      select:async(model:string,effort:string)=>{
+        if(!current()||!this.active||!tab||!this.pickerEnabled()||this.loading||this.preparingSend||this.nativeHydrating||this.rewinding||this.turn?.turnId===null||!models.some(row=>row.id===model&&row.efforts.includes(effort)))return 'rejected' as const;
+        used=true;this.applyChoice(tab,model,effort);this.saveChoice(tab);this.showModels(false);this.render();return 'applied' as const;
+      }});
+  }
   /** Moves the unsent composer text out of Claude for a provider switch; the Claude tab keeps an empty draft. */
   takeComposerDraft(): string {
     const input = this.input(), tab = this.activeTab();
@@ -1842,6 +1858,7 @@ export class ClaudeChat {
   }
   private saveChoice(tab: Tab): void {
     this.modelSourceRevision++;
+    this.pickerCaptureEpoch++;
     this.lastChoice={model:tab.model,effort:tab.effort};
     this.preferenceEdits++;this.queueNativePreferences();
     try { this.storage?.setItem(this.profile.keys.choice, JSON.stringify({ model: tab.model, effort: tab.effort })); } catch { /* Only the remembered choice is lost. */ }
@@ -2332,6 +2349,8 @@ export interface ChatProviderLink {
   stop(): void;
   /** Adds (or removes) the Arcane Credits chat as a third provider; it loads after the workspace. */
   setArcane(chat: ClaudeChat | null): void;
+  /** Explicit Pyx choice uses the existing guarded provider handoff; never sends. */
+  chooseModel(provider:ComposerProvider,model:string,effort:string,current:()=>boolean):Promise<boolean>;
 }
 const HANDOFF_MS = 120000;
 const PROVIDER_NAMES: Record<ComposerProvider, string> = { codex: 'ChatGPT', claude: 'Claude', arcane: 'Arcane Credits' };
@@ -2367,23 +2386,24 @@ export function linkChatProviders(options: { codex: CodexComposerPeer; claude: C
   let arcaneRemovers: (() => void)[] = [];
   const chatOf = (target: ComposerProvider | null): ClaudeChat | null => target === 'claude' ? claude : target === 'arcane' ? arcane : null;
   const chats = (): ClaudeChat[] => arcane ? [claude, arcane] : [claude];
-  const request = async (target: ComposerProvider, model: string, effort: string | null) => {
-    if (stopped||preparingSwitch) return;
+  const request = async (target: ComposerProvider, model: string, effort: string | null,owns:()=>boolean=()=>true) => {
+    if (stopped||preparingSwitch||!owns()) return false;
     const source=provider.chatSurface(),generation=switchGeneration;
     if(source!==target&&options.beforeProviderSwitch){
       preparingSwitch=true;
       let allowed=false;
       try{allowed=await options.beforeProviderSwitch(source,target);}catch{/* The source conversation stays selected. */}
       finally{preparingSwitch=false;}
-      if(stopped||generation!==switchGeneration||provider.chatSurface()!==source)return;
+      if(stopped||generation!==switchGeneration||provider.chatSurface()!==source||!owns())return false;
       if(!allowed){const message='This conversation could not be switched. Your current chat, model and draft are retained.';
-        if(source==='codex')codex.showConversationNotice?.(message);else chatOf(source)?.showConversationNotice(message);return;}
+        if(source==='codex')codex.showConversationNotice?.(message);else chatOf(source)?.showConversationNotice(message);return false;}
     }
     pending = { target, model: model || null, effort, at: Date.now() };
-    if (provider.chatSurface() === target) { sync(); return; }
+    if (provider.chatSurface() === target) { sync(); return true; }
     let signedIn = false;
     try { signedIn = !!(target === 'codex' ? codex.modelGroup() : chatOf(target)?.modelGroup())?.available; } catch { signedIn = false; }
-    if (!(signedIn ? provider.requestProvider(target, { signedIn: true }) : provider.requestProvider(target))) pending = null;
+    const accepted=signedIn ? provider.requestProvider(target, { signedIn: true }) : provider.requestProvider(target);
+    if(!accepted)pending=null;return accepted;
   };
   /** Every provider's section except the owner's, in display order; Arcane only while its chat reports one. */
   const groupsFor = (owner: ComposerProvider): ComposerModelGroup[] => [owner === 'codex' ? null : codex.modelGroup(), owner === 'claude' ? null : claude.modelGroup(),
@@ -2523,6 +2543,7 @@ export function linkChatProviders(options: { codex: CodexComposerPeer; claude: C
   attachArcane();
   sync();
   return {
+    async chooseModel(target,model,effort,owns){const accepted=await request(target,model,effort,owns);return accepted&&!stopped&&provider.chatSurface()===target;},
     sync() { stopped = false; sync(); },
     stop() { stopped = true;switchGeneration++; pending = null; current = null; renderNotice(); },
     setArcane(chat: ClaudeChat | null) {
