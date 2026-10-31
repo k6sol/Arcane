@@ -1,18 +1,19 @@
 import { access, realpath, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { basename, isAbsolute } from 'node:path';
+import { types } from 'node:util';
 import { CodexSession, type ProjectInstructions } from './session.js';
 import { prepareCodexDiscoveryProcess, prepareCodexProcess } from './mcp-profile.js';
 import { arcaneIsolationOverrides } from './mcp-isolation.js';
 import { exact, fail, limits, str } from './validation.js';
-import { validateNativeAssetHooks, type ConnectOptions, type Limits, type NativeAssetHooks } from './types.js';
+import { validateNativeAssetHooks, type ConnectOptions, type Limits, type NativeAssetHooks, type NativeConnectionLifecycle } from './types.js';
 import type { InternalProcess } from './transport.js';
 import type { LocalUse, LimitOptions, Selection, Snapshot } from './types.js';
 import { nativeEnvironment, annotateNativeConnectFrame, type NativeConnectFramePhase } from './transport.js';
 import { collectProposalResult, PROPOSAL_DURATION_MS, type ProposalResult } from './proposal-result.js';
 export type {ProposalResult} from './proposal-result.js';
 export { CODEX_LIMITS, CodexClientError } from './types.js';
-export type { Account, ArcaneMcpLaunchProfile, Approval, ConnectOptions, FileChangePreview, HumanAction, LimitOptions, LocalUse, Model, NativeAssetHooks, NativeAssetIntent, Operation, Selection, SessionEvent, SessionEventValue, Snapshot, ThreadState } from './types.js';
+export type { Account, ArcaneMcpLaunchProfile, Approval, ConnectOptions, FileChangePreview, HumanAction, LimitOptions, LocalUse, Model, NativeAssetHooks, NativeAssetIntent, NativeConnectionLifecycle, Operation, Selection, SessionEvent, SessionEventValue, Snapshot, ThreadState } from './types.js';
 export type { McpToolCallArgs, McpToolCallRef, McpToolCallSummary } from './types.js';
 export { MCP_TOOL_SUMMARY_LIMITS, summarizeMcpToolCall } from './tool-call.js';
 export type CodexClient = CodexSession;
@@ -141,9 +142,47 @@ class ArcaneCodexSession extends CodexSession {
   }
 }
 
+function connectionLifecycleOption(options:ConnectOptions):NativeConnectionLifecycle|undefined {
+  function invalid():never {return fail('ARGUMENTS','Connection lifecycle must be an exact frozen own-data synchronous callback object.');}
+  if(options===null||typeof options!=='object'||types.isProxy(options)||Array.isArray(options))invalid();
+  const field=Object.getOwnPropertyDescriptor(options,'connectionLifecycle');
+  if(field&&!Object.hasOwn(field,'value'))invalid();
+  // Inspect descriptors, never inherited getters or proxy traps. Legacy option
+  // prototypes remain accepted when they do not supply this host-only port.
+  for(let prototype=Object.getPrototypeOf(options);prototype!==null;prototype=Object.getPrototypeOf(prototype)) {
+    if(types.isProxy(prototype)||Object.getOwnPropertyDescriptor(prototype,'connectionLifecycle'))invalid();
+  }
+  const value:unknown=field?.value;
+  if(value===undefined)return undefined;
+  if(value===null||typeof value!=='object'||types.isProxy(value)||Array.isArray(value)||!Object.isFrozen(value)||
+      ![Object.prototype,null].includes(Object.getPrototypeOf(value)))invalid();
+  const names=['beforeProcessAllocation','failedInitializationClosed'],keys=Reflect.ownKeys(value),descriptors=Object.getOwnPropertyDescriptors(value);
+  if(keys.length!==names.length||keys.some(key=>typeof key!=='string'||!names.includes(key))||names.some(name=>{
+    const descriptor=descriptors[name];
+    return !descriptor||!Object.hasOwn(descriptor,'value')||typeof descriptor.value!=='function'||types.isProxy(descriptor.value)||types.isAsyncFunction(descriptor.value);
+  }))invalid();
+  return value as NativeConnectionLifecycle;
+}
+
 /** Host-code API only. Never map executable paths or lifecycle actions directly from an unauthenticated request. */
 export async function connectCodexClient(options: ConnectOptions): Promise<CodexClient> {
-  exact(options, ['command','cwd','use','limits','arcaneMcp','nativeAssetHooks','projectInstructions']);
+  const lifecycle=connectionLifecycleOption(options);
+  const constructed=new Set<CodexSession>();let unrecoverableConstructor=false;
+  const allocate=(construct:()=>CodexSession):CodexSession=>{
+    const observation=lifecycle?.beforeProcessAllocation();
+    if(observation!==undefined){
+      if(types.isPromise(observation))void Promise.prototype.then.call(observation,undefined,()=>{});
+      fail('ARGUMENTS','Connection allocation observation must complete synchronously with no return value.');
+    }
+    // A constructor can throw after spawn but before returning its transport.
+    // That boundary is deliberately not classified as no-start or closed.
+    unrecoverableConstructor=true;
+    const session=construct();
+    unrecoverableConstructor=false;constructed.add(session);return session;
+  };
+  const closeConstructed=async(session:CodexSession):Promise<void>=>{await session.close();constructed.delete(session);};
+  try {
+  exact(options, ['command','cwd','use','limits','arcaneMcp','nativeAssetHooks','projectInstructions','connectionLifecycle']);
   if (options.projectInstructions !== undefined && typeof options.projectInstructions !== 'function') fail('ARGUMENTS', 'Project instructions must be a host callback.');
   const projectInstructions = options.projectInstructions;
   const hookField = Object.getOwnPropertyDescriptor(options, 'nativeAssetHooks');
@@ -157,7 +196,7 @@ export async function connectCodexClient(options: ConnectOptions): Promise<Codex
   const profile = hooks ? { ...options.arcaneMcp! } : options.arcaneMcp;
   let processSpec = await prepareCodexProcess(executable, workspace, profile);
   const discoverySpec = profile ? prepareCodexDiscoveryProcess(executable, workspace) : processSpec;
-  let session = new CodexSession(discoverySpec, bounds, 'installed-cli', profile ? 'arcane-only' : 'native-config');
+  let session = allocate(()=>new CodexSession(discoverySpec, bounds, 'installed-cli', profile ? 'arcane-only' : 'native-config'));
   let hooksAttached = false;
   let framePhase: NativeConnectFramePhase = profile ? 'discovery-initialize' : 'direct-initialize';
   try {
@@ -177,7 +216,7 @@ export async function connectCodexClient(options: ConnectOptions): Promise<Codex
       let overrides = arcaneIsolationOverrides(inventory, profile.nodeExecutable, profile.agentToken);
       const historySpec = { ...discoverySpec, args: [...discoverySpec.args, ...overrides], env: { ...discoverySpec.env } };
       framePhase = 'discovery-close';
-      await session.close();
+      await closeConstructed(session);
       if (hooks) {
         const validatedSpec = processSpec;
         let credential: unknown;
@@ -200,7 +239,7 @@ export async function connectCodexClient(options: ConnectOptions): Promise<Codex
         processSpec.env.ARCANE_ASSET_AUDIENCE = 'native-session';
       }
       processSpec.args.push(...overrides);
-      session = new ArcaneCodexSession(processSpec, bounds, historySpec, hooks, projectInstructions);
+      session = allocate(()=>new ArcaneCodexSession(processSpec, bounds, historySpec, hooks, projectInstructions));
       hooksAttached = true;
       framePhase = 'final-initialize';
       await session.initialize();
@@ -208,7 +247,18 @@ export async function connectCodexClient(options: ConnectOptions): Promise<Codex
   } catch (error) {
     annotateNativeConnectFrame(error, framePhase);
     if (hooks && !hooksAttached) { try { hooks.retired(); } catch { /* Preserve the original failure and close discovery. */ } }
-    await session.close(); throw error;
+    await closeConstructed(session); throw error;
   }
   return session;
+  }catch(error){
+    if(!unrecoverableConstructor&&constructed.size===0){
+      // A failure observer cannot replace the original operational/cleanup
+      // rejection. Its owner retains any persistence fault separately.
+      try{
+        const observation=lifecycle?.failedInitializationClosed();
+        if(types.isPromise(observation))void Promise.prototype.then.call(observation,undefined,()=>{});
+      }catch{/* Preserve the original factory failure. */}
+    }
+    throw error;
+  }
 }

@@ -12,3 +12,5 @@ Separate ordinary request failure from physical/owned cleanup failure. Preserve 
 Normal retirement must not abort accepted work. Explicit Stop must still escalate the same original lifecycle without self-joining, double cancellation or dropping late work. Unknown ACK/custody/worker outcomes remain held; an empty map, timeout, Edit mode or reconstructed IDs are not closure proof.
 
 Use held-operation schedules to prove ordering, not timing guesses. Cover reentrant callbacks, late allocation/publication, persistence failures, exact identity, unrelated tasks and repeated cached close. Do not increase caps or release pins to hide a leak.
+
+For native connection recovery, inspect `apps/daemon/src/native-session-custody.ts` and the original factory lifecycle. A finished task or normal retirement cannot settle native transport custody. Missing older leases are missing proof, not closure. Keep proposal-worker, descendant-process, Studio and Blender custody separate; recording future native evidence alone does not authorize independent-session recovery.

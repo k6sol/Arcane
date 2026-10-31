@@ -320,10 +320,10 @@ test('persisted unknown task ownership blocks reviewing an otherwise exact unbou
 
 test('v3 notice migration preserves original actions and a future journal is refused before mutable setup',async t=>{
   const f=await connectNoticeFixture(t);await f.lab.close();const path=join(f.directory,'codex-actions.sqlite');
-  const legacy=new DatabaseSync(path);legacy.exec('DROP TABLE reviewed_connect_notices; PRAGMA user_version=3;');legacy.close();
+  const legacy=new DatabaseSync(path);legacy.exec('DROP TABLE native_session_custody; DROP TABLE reviewed_connect_notices; PRAGMA user_version=3;');legacy.close();
   let starts=0;const migrated=createCodexService({directory:f.directory,projectPath:ROOT,connect:async()=>{starts++;throw new Error('Migration cannot connect.');}});
   try{assert.deepEqual(migrated.state().actions,[f.original.record]);assert.deepEqual(migrated.state().connectNotices,[f.candidate]);assert.equal(starts,0);}finally{await migrated.close();}
-  const future=new DatabaseSync(path);assert.equal((future.prepare('PRAGMA user_version').get() as {user_version:number}).user_version,4);future.exec('PRAGMA user_version=5;');future.close();
+  const future=new DatabaseSync(path);assert.equal((future.prepare('PRAGMA user_version').get() as {user_version:number}).user_version,5);future.exec('PRAGMA user_version=6;');future.close();
   const before=await readFile(path);assert.throws(()=>createCodexService({directory:f.directory,projectPath:ROOT,connect:async()=>{starts++;throw new Error('Future journal cannot connect.');}}),
     (error:unknown)=>error instanceof CodexClientError&&error.code==='MIGRATION');assert.deepEqual(await readFile(path),before);assert.equal(starts,0);
 });

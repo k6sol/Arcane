@@ -25,6 +25,8 @@ import { SubmittedChatStore, type SubmittedChatTranscript } from '../../../packa
 import { TASK_PLAN_REVIEW_TASK_STATES, type TaskPlanView, type TaskPlanReviewView, type TaskPlanReviewTaskState } from '../../../packages/protocol/src/chat-task-plan.js';
 import {codexActionFailureEvent,type FailureReporter} from './diagnostic-reporter.js';
 import {readNativeFrameEvidence} from '../../../packages/codex-client/src/transport.js';
+import {NativeSessionCustody} from './native-session-custody.js';
+import type {NativeConnectionLifecycle} from '../../../packages/codex-client/src/types.js';
 
 const uuid = z.string().uuid();
 const identifier = z.string().min(1).max(256).refine(value => !/[\x00-\x1f]/.test(value));
@@ -182,7 +184,12 @@ export function createCodexService(options: CodexServiceOptions) {
   catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
   const db = new DatabaseSync(sqliteTransportPath(filename), { timeout: 2000, allowExtension: false });
   const version = Number((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version);
-  if (version > 4) { db.close(); throw new CodexClientError('MIGRATION', 'Native journal is newer than this build.'); }
+  if (!Number.isInteger(version)||version<0||version > 5) { db.close(); throw new CodexClientError('MIGRATION', 'Native journal version is unsupported by this build.'); }
+  if(version<5&&db.prepare("SELECT name FROM sqlite_master WHERE name='native_session_custody'").get()){
+    db.close();throw new CodexClientError('MIGRATION','Legacy native journal contains unexpected custody metadata.');
+  }
+  let existingCustody:NativeSessionCustody|undefined;
+  if(version===5)try{existingCustody=new NativeSessionCustody(db,true);}catch(error){db.close();throw error;}
   db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
     CREATE TABLE IF NOT EXISTS actions(id TEXT PRIMARY KEY, hash TEXT NOT NULL, payload TEXT NOT NULL) STRICT;
     CREATE TABLE IF NOT EXISTS native_history(
@@ -201,7 +208,10 @@ export function createCodexService(options: CodexServiceOptions) {
       receipt_fingerprint TEXT NOT NULL CHECK(length(receipt_fingerprint)=64 AND receipt_fingerprint NOT GLOB '*[^a-f0-9]*'),
       reviewed_at TEXT NOT NULL, PRIMARY KEY(project_path,request_id)
     ) STRICT;
-    PRAGMA user_version=4;`);
+    `);
+  let custody:NativeSessionCustody;
+  try{db.exec('BEGIN IMMEDIATE');custody=existingCustody??new NativeSessionCustody(db);db.exec('PRAGMA user_version=5;COMMIT;');}
+  catch(error){try{db.exec('ROLLBACK');}catch{/* Keep original migration failure. */}db.close();throw error;}
   if(version<3)db.exec(`UPDATE native_threads SET selection=(
     SELECT json_object('model',json_extract(a.payload,'$.model'),'effort',json_extract(a.payload,'$.effort'))
     FROM actions a WHERE json_extract(a.payload,'$.state')='acknowledged'
@@ -227,14 +237,18 @@ export function createCodexService(options: CodexServiceOptions) {
   catch(error){db.close();throw error;}
   let saturatedClose: Promise<void> | null = null;
   let journalFault: Promise<void> | null = null;
-  const factory = async (nativeAssetHooks?: NativeAssetHooks) => {
+  const factory = async (nativeAssetHooks?: NativeAssetHooks,connectionLifecycle?:NativeConnectionLifecycle) => {
     if (options.connect) return options.connect(nativeAssetHooks);
-    const command = await locateNativeCli('codex');
+    let entered=false;
+    try{const command = await locateNativeCli('codex');
     if (!command) throw new CodexClientError('CLI_MISSING', 'The native Codex executable is unavailable.');
-    return connectCodexClient({ command, cwd: projectPath, use: 'personal-local', ...(options.arcaneMcp ? { arcaneMcp: options.arcaneMcp() } : {}), ...(nativeAssetHooks ? {nativeAssetHooks} : {}),
+    const profile=options.arcaneMcp?.();entered=true;
+    return await connectCodexClient({ command, cwd: projectPath, use: 'personal-local', ...(profile ? { arcaneMcp: profile } : {}), ...(nativeAssetHooks ? {nativeAssetHooks} : {}),...(connectionLifecycle?{connectionLifecycle}:{}),
       // Project memory (ARCANE.md) is read fresh per thread start/resume and follows the fixed task instructions.
       projectInstructions: async (cwd: string) => projectMemorySection((await readProjectMemory(cwd)).text) + learnedPreferenceSection(await options.learnedContext?.().catch(() => '')) });
+    }catch(error){if(!entered)try{connectionLifecycle?.failedInitializationClosed();}catch{/* Custody latches the fault; preserve the original no-start failure. */}throw error;}
   };
+  const openNative=(hooks?:NativeAssetHooks)=>custody.open(lifecycle=>factory(hooks,lifecycle),owned=>owned.snapshot().connectionId);
   const proposalFactory: ChatTaskProposalFactory | null = options.proposalWorker ?? (options.connect ? null : async input => {
     const command = await locateNativeCli('codex');
     if (!command) throw new CodexClientError('CLI_MISSING', 'The native Codex executable is unavailable.');
@@ -260,7 +274,7 @@ export function createCodexService(options: CodexServiceOptions) {
       !!thread?.configured&&!!tasks?.belongs(context.taskId,thread.threadId,thread.sessionId);
   }
   function closeOwnedClient(owned:CodexHostClient,context=clientContexts.get(owned),plannedNormal=false):Promise<void> {
-    if(!context)return owned.close();
+    if(!context)return custody.close(owned);
     if(context.ownerClient!==owned)throw new CodexClientError('TASK_SCOPE','Only the original owned client may close.');
     if(context.closePromise)return context.closePromise;
     let resolve!:()=>void,reject!:(error:unknown)=>void;
@@ -269,7 +283,7 @@ export function createCodexService(options: CodexServiceOptions) {
     // A genuine close failure is still joined and propagated below.
     context.closeIntent=context.cancelRequested||plannedNormal&&context.normal?.state==='succeeded';
     const run=async()=>{
-      try{await owned.close();context.handle?.transportClosed();}
+      try{await custody.close(owned);context.handle?.transportClosed();}
       finally{context.closeIntent=false;}
     };
     void run().then(resolve,reject);return promise;
@@ -459,6 +473,7 @@ export function createCodexService(options: CodexServiceOptions) {
   const inFlight = new Set<Promise<CodexActionOutcome>>();
   async function runAction(input: unknown): Promise<CodexActionOutcome> {
     if (closed) throw new CodexClientError('CLOSED','Native workflow is closed.');
+    if(custody.faulted){try{await fenceJournalFailure();}catch{/* Shutdown retains the original close failure. */}throw new CodexClientError('JOURNAL_FAILURE','Native session custody requires inspection. No new action was sent.');}
     if (journalFault) throw new CodexClientError('JOURNAL_FAILURE','Native journal failed. Restart only after reviewing retained receipts; no action was retried.');
     const parsed = codexActionInput.safeParse(input);
     if (!parsed.success) throw new CodexClientError('ARGUMENTS','Supply an exact bounded native action envelope.');
@@ -518,7 +533,7 @@ export function createCodexService(options: CodexServiceOptions) {
         connecting = true;
         try {
           const context = newAssets();
-          pendingConnect = factory(context?.hooks);
+          pendingConnect = openNative(context?.hooks);
           let connected: CodexHostClient;
           try { connected = await pendingConnect;rememberClient(context,connected); } catch(error) { retireAssets(context); throw error; }
           if (closed || generation !== epoch) { retireAssets(context); await closeOwnedClient(connected); throw new CodexClientError('STALE_CONNECTION','Connection was cancelled before acknowledgement.'); }
@@ -587,7 +602,7 @@ export function createCodexService(options: CodexServiceOptions) {
               const resumed = selected.snapshot().thread;
               if (!resumed || resumed.threadId !== owned.threadId || resumed.sessionId !== owned.sessionId || resumed.writeGranted) {
                 retireAssets();
-                await selected.close();
+                await closeOwnedClient(selected);
                 throw new CodexClientError('HISTORY_SCOPE','Resumed native identity or permissions changed; inspect recorded state.',true);
               }
               break;
@@ -616,7 +631,7 @@ export function createCodexService(options: CodexServiceOptions) {
               try{context.nextIntent=null;context.manualAssets=false;context.handle!.cancelWork('incarnation');context.handle!.revokeGrant();}
               finally{if(stopped)await stopped;}break;
             }
-            case 'grant-writes': selected.grantThreadWrites({initiatedBy:'human',threadId:value.threadId});if(currentAssets)currentAssets.manualWrites=true; break;
+            case 'grant-writes': custody.writesPossible(selected);selected.grantThreadWrites({initiatedBy:'human',threadId:value.threadId});if(currentAssets)currentAssets.manualWrites=true; break;
             case 'revoke-writes': {
               // Validate scope before touching owned workers. Cancellation must
               // precede fallible native cleanup, including approval-delivery IO.
@@ -662,7 +677,7 @@ export function createCodexService(options: CodexServiceOptions) {
                   const freshContext=newAssets()!;
                   let fresh:CodexHostClient|null=null;
                   try {
-                    pendingConnect=factory(freshContext.hooks);fresh=await pendingConnect;rememberClient(freshContext,fresh);
+                    pendingConnect=openNative(freshContext.hooks);fresh=await pendingConnect;rememberClient(freshContext,fresh);
                     if(closed || generation!==epoch || fresh.taskAccountIdentity?.()!==identity)throw new CodexClientError('ACCOUNT_IDENTITY','Fresh task account changed or its identity is unavailable.');
                     fresh.selectModel({initiatedBy:'human',...thread.selection});
                     await fresh.resumeThread({initiatedBy:'human',threadId:thread.threadId});
@@ -676,12 +691,13 @@ export function createCodexService(options: CodexServiceOptions) {
                     try{save(record);}catch{await fenceJournalFailure();throw new CodexClientError('JOURNAL_FAILURE','Fresh task binding could not be persisted. No task turn was sent.');}
                     client=fresh;currentAssets=freshContext;selected=fresh;actionClient=fresh;
                     if(context.manualAssets){freshContext.handle!.grant({connectionId:resumed.connectionId,threadId:thread.threadId});freshContext.manualAssets=true;}
-                    if(context.manualWrites){fresh.grantThreadWrites({initiatedBy:'human',threadId:thread.threadId});freshContext.manualWrites=true;}
+                    if(context.manualWrites){custody.writesPossible(fresh);fresh.grantThreadWrites({initiatedBy:'human',threadId:thread.threadId});freshContext.manualWrites=true;}
                   } catch(error) {retireAssets(freshContext);if(fresh)await closeOwnedClient(fresh,freshContext);throw error;}
                   finally {pendingConnect=null;}
                 }
               }
               const context=currentAssets,authority=context?.handle;
+              if(allowWrites||selected.snapshot().thread?.writeGranted)custody.writesPossible(selected);
               if(value.modelSource){
                 if(!managed||!context||!authority||!allowAssets)throw new CodexClientError('ASSET_AUTHORITY','This message has no original managed model-source admission.');
               }
@@ -711,7 +727,7 @@ export function createCodexService(options: CodexServiceOptions) {
                         scope.assertActive();const snapshot=owned.snapshot(),thread=snapshot.thread!;
                         if(!task.allowAssets&&ownedContext.manualAssets)throw new CodexClientError('TASK_SCOPE','Task asset scope cannot expand after the original Send.');
                         if(task.allowAssets)ownedContext.nextIntent={connectionId:snapshot.connectionId,threadId:thread.threadId,sessionId:thread.sessionId,operationId:null};
-                        try{return await native.incorporate(text,acknowledge);}finally{ownedContext.nextIntent=null;}
+                        try{if(task.allowWorkspaceWrites||owned.snapshot().thread?.writeGranted)custody.writesPossible(owned);return await native.incorporate(text,acknowledge);}finally{ownedContext.nextIntent=null;}
                       }});
                     },
                     repair:async(report:StudioTestTaskSettled)=>{
@@ -720,7 +736,7 @@ export function createCodexService(options: CodexServiceOptions) {
                       if(!allowAssets&&ownedContext.manualAssets)throw new CodexClientError('TASK_SCOPE','Task asset scope cannot expand after the original Send.');
                       if(value.modelSource)ownedContext.handle!.advanceModelSourceAfterOwnedPlay(report);
                       if(allowAssets)ownedContext.nextIntent={connectionId:snapshot.connectionId,threadId:thread.threadId,sessionId:thread.sessionId,operationId:null};
-                      try {await owned.continueTask!({continuation,text:repairPrompt(report)});}
+                      try {if(allowWrites||thread.writeGranted)custody.writesPossible(owned);await owned.continueTask!({continuation,text:repairPrompt(report)});}
                       finally {ownedContext.nextIntent=null;}
                     },isOwnedCloseRequestError:error=>owned.isOwnedCloseRequestError?.(error)===true,
                     ...(typeof owned.retireManagedTask==='function'?{retire:()=>normalRetire(owned,ownedContext,continuation)}:{}),
@@ -785,7 +801,7 @@ export function createCodexService(options: CodexServiceOptions) {
               catch(error){if(error instanceof ChatTaskProposalError)throw new CodexClientError(error.code,error.message);throw error;}
               break;
             }
-            case 'approval': selected.respondApproval({initiatedBy:'human',connectionId:value.connectionId,threadId:value.threadId,turnId:value.turnId,handle:value.handle,decision:value.decision}); break;
+            case 'approval': if(value.decision==='accept')custody.writesPossible(selected);selected.respondApproval({initiatedBy:'human',connectionId:value.connectionId,threadId:value.threadId,turnId:value.turnId,handle:value.handle,decision:value.decision}); break;
           }
           if (closed || generation !== epoch) throw new CodexClientError('STALE_CONNECTION','Native lifecycle changed while awaiting acknowledgement.',true);
           const snapshot = selected.snapshot(); const thread = snapshot.thread;
@@ -840,6 +856,7 @@ export function createCodexService(options: CodexServiceOptions) {
         if (transaction) { try { db.exec('ROLLBACK'); } catch { /* Retain uncertain journal; never retry. */ } }
         await fenced; throw new CodexClientError('JOURNAL_FAILURE','Native acknowledgement could not be committed. Authority retired; no retry.',true);
       }
+      if(custody.faulted)try{await fenceJournalFailure();}catch{/* Preserve this action's original outcome; shutdown also joins the retained fault. */}
       if (record.state === 'acknowledged' && (value.action === 'thread-start' || value.action === 'thread-resume') && currentAssets?.handle) {
         const snapshot = actionClient?.snapshot(), thread = snapshot?.thread;
         try {

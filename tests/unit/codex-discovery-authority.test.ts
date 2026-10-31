@@ -11,7 +11,7 @@ import { nativeEnvironment, type NativeFrameEvidence } from '../../packages/code
 import { ARCANE_TOOL_NAMES } from '../../packages/protocol/src/arcane-tools.js';
 import { proposalThreadIsIsolated } from '../../packages/codex-client/src/mcp-isolation.js';
 // Include the exact public factory in scoped compiler inputs; importing it never launches a child.
-import {connectCodexProposalWorker} from '../../packages/codex-client/src/index.js';
+import {connectCodexClient,connectCodexProposalWorker,type ConnectOptions} from '../../packages/codex-client/src/index.js';
 
 const TOKEN = 'a4'.repeat(32), AMBIENT = 'b5'.repeat(32);
 const DAEMON = 'http://127.0.0.1:47831';
@@ -36,8 +36,11 @@ interface FixtureOptions {
   historyAction?: HistoryAction; historyResponse?: HistoryResponse; repeatHistory?: boolean;
   proposal?: boolean; dispatch?: boolean; repeatProposal?: boolean;
   parentRetirement?:ParentRetirement;
+  lifecycle?:boolean; allocationFailure?:1|2; failedClosureObserverThrows?:boolean;
+  heldClosure?:1|2; unconfirmedClosure?:1|2; partialConstructor?:1|2;
 }
 interface Receipt {
+  count?:number; sameError?:boolean; failureObservations?:number;
   frame?: Readonly<NativeFrameEvidence> | null; dispatched?: boolean;
   event: string; launch?: number; args?: string[]; envKeys?: string[]; tokenHash?: string | null;
   daemonUrl?: string | null; method?: string; params?: Record<string, unknown>; cwd?: string; envHasEntry?: boolean;
@@ -61,6 +64,7 @@ record({ event: 'child', args, cwd: process.cwd(), envKeys: Object.keys(process.
   envHasEntry: Object.values(process.env).some(value => value.includes(require('node:path').join(process.cwd(), 'apps', 'mcp', 'src', 'main.js'))),
   tokenHash: process.env.ARCANE_LOCAL_TOKEN ? createHash('sha256').update(process.env.ARCANE_LOCAL_TOKEN).digest('hex') : null,
   daemonUrl: process.env.ARCANE_DAEMON_URL || null });
+if(scenario.heldClosure===launch||scenario.unconfirmedClosure===launch)setInterval(()=>{},1000);
 let batch = null;
 const send = value => batch ? batch.push(value) : process.stdout.write(JSON.stringify(value) + '\n');
 const result = (id, value) => send({ id, result: value });
@@ -186,6 +190,19 @@ const owner={signal:controller.signal,assertActive:()=>{
   if(!parentActive)throw new Error('SYNTHETIC_PRIVATE_PARENT_DETAIL');
 }};
 let client;
+let allocationCount=0;
+const allocationFailure=Object.assign(new Error('Synthetic allocation observation refused.'),{code:'SYNTHETIC_ALLOCATION_REFUSAL'});
+globalThis.arcaneLifecycleFailureObservations=0;
+const lifecycle=Object.freeze({
+  beforeProcessAllocation(){
+    record({event:'before-allocation',count:++allocationCount});
+    if(scenario.allocationFailure===allocationCount)throw allocationFailure;
+  },
+  failedInitializationClosed(){
+    record({event:'failed-initialization-closed',count:++globalThis.arcaneLifecycleFailureObservations});
+    if(scenario.failedClosureObserverThrows)throw new Error('Synthetic failure observation persistence fault.');
+  }
+});
 try {
   const profile = { nodeExecutable: process.execPath, serverEntry: join(root, 'apps', 'mcp', 'src', 'main.js'),
     projectRoot: root, daemonUrl: 'http://127.0.0.1:47831', agentToken: 'a4'.repeat(32) };
@@ -196,7 +213,7 @@ try {
   };
   client = scenario.proposal ? await connectCodexProposalWorker({...options,
     accountIdentity:(await import('node:crypto')).createHash('sha256').update('codex-reported-account\0synthetic@example.test').digest('hex'),
-    selection:{model:'fixture-model',effort:'low'},owner}) : await connectCodexClient({...options,...(scenario.profile ? { arcaneMcp: profile } : {})});
+    selection:{model:'fixture-model',effort:'low'},owner}) : await connectCodexClient({...options,...(scenario.profile ? { arcaneMcp: profile } : {}),...(scenario.lifecycle?{connectionLifecycle:lifecycle}:{})});
   record({ event: 'connected', snapshot: client.snapshot(), node: await realpath(process.execPath) });
   if(scenario.proposal) {
     record({event:'surface',keys:Object.keys(client)});
@@ -253,9 +270,9 @@ try {
   }
 } catch (error) {
   if (scenario.framePhase) record({ event: 'frame-error', frame: readNativeFrameEvidence(error), dispatched: error.dispatched });
-  record({ event: 'error', code: error.code });
+  record({ event: 'error', code: error.code,...(scenario.lifecycle?{sameError:error===allocationFailure||error===globalThis.arcaneFixtureConstructorError,failureObservations:globalThis.arcaneLifecycleFailureObservations}:{}) });
 }
-finally { await client?.close(); }
+finally {try{await client?.close();}finally{await globalThis.arcaneFixtureReleaseProcesses?.();}}
 `;
 
 async function privateDirectory(t: test.TestContext): Promise<string> {
@@ -292,7 +309,7 @@ async function fixture(t: test.TestContext, options: FixtureOptions = {}) {
     "import { join } from 'node:path';",
     'const root = ' + JSON.stringify(dir) + ', audit = ' + JSON.stringify(audit) + ', scenario = ' + JSON.stringify(scenario) + ';',
     "const record = value => appendFileSync(audit, JSON.stringify(value) + '\\n');",
-    "const peer = readFileSync(join(root, 'peer.cjs'), 'utf8'); let launch = 0;",
+    "const peer = readFileSync(join(root, 'peer.cjs'), 'utf8'); let launch = 0;const cleanup=[];globalThis.arcaneFixtureReleaseProcesses=()=>Promise.all(cleanup.map(close=>close()));",
     'export function spawn(command, args, options) {',
     '  if (command !== ' + JSON.stringify(await realpath(command)) + ') throw new Error("Only the synthetic executable path is allowed.");',
     '  const id = ++launch; record({ event: "spawn", launch: id, args });',
@@ -304,7 +321,12 @@ async function fixture(t: test.TestContext, options: FixtureOptions = {}) {
     '    if(scenario.mode==="proposal-deadline"&&id===2&&request?.method==="turn/start"){const now=Date.now();Date.now=()=>now+120000;}',
     '    if(request&&(stage==="discovery-init"&&id===1&&request.method==="initialize"||stage==="discovery-inventory"&&id===1&&request.method==="mcpServerStatus/list"||stage==="final-init"&&id===2&&request.method==="initialize"||stage==="thread-inventory"&&id===2&&request.method==="mcpServerStatus/list"&&request.inventoryReads===1||stage==="turn-inventory"&&id===2&&request.method==="mcpServerStatus/list"&&request.inventoryReads===2||stage==="active"&&id===2&&request.method==="turn/start"))globalThis.arcaneFixtureRetire();',
     '  }});',
-    '  child.once("close", () => {record({ event: "close", launch: id });if(id===2&&scenario.parentRetirement==="joined-close")globalThis.arcaneFixtureRetire();}); return child;',
+    '  let physicallyClosed=false;child.once("close", () => {physicallyClosed=true;record({ event: "close", launch: id });if(id===2&&scenario.parentRetirement==="joined-close")globalThis.arcaneFixtureRetire();});',
+    '  if(scenario.heldClosure===id||scenario.unconfirmedClosure===id||scenario.partialConstructor===id){',
+    '    const kill=child.kill.bind(child);cleanup.push(()=>physicallyClosed?Promise.resolve():new Promise(resolve=>{child.once("close",resolve);record({event:"test-cleanup-release",launch:id});kill("SIGKILL");}));',
+    '    if(scenario.partialConstructor===id){const on=child.stdout.on.bind(child.stdout);child.stdout.on=(event,...args)=>{if(event==="data"){globalThis.arcaneFixtureConstructorError=Object.assign(new Error("Synthetic constructor failure after actual spawn."),{code:"SYNTHETIC_CONSTRUCTOR_FAILURE"});throw globalThis.arcaneFixtureConstructorError;}return on(event,...args);};}',
+    '    else {let held=false;child.kill=()=>{if(!held){held=true;record({event:"close-held",launch:id,failureObservations:globalThis.arcaneLifecycleFailureObservations});if(scenario.heldClosure===id)setTimeout(()=>{record({event:"close-released",launch:id,failureObservations:globalThis.arcaneLifecycleFailureObservations});kill("SIGKILL");},50);}return true;};}',
+    '  }return child;',
     '}',
   ].join('\n');
   await writeFile(join(dir, 'boundary.mjs'), boundary);
@@ -334,6 +356,101 @@ function assertSecretFree(row: Receipt) {
   for (const key of ['CODEX_HOME', 'OPENAI_API_KEY', 'NODE_OPTIONS']) assert.ok(!row.envKeys?.includes(key));
   assert.ok(!JSON.stringify(row.args).includes(TOKEN));
 }
+
+test('connection lifecycle rejects accessors, inheritance and proxies without invoking host fields or allocating',async()=>{
+  let reads=0,observations=0;
+  const callbacks={beforeProcessAllocation(){observations++;},failedInitializationClosed(){observations++;}};
+  const valid=Object.freeze({...callbacks});
+  const base={command:join(process.cwd(),process.platform==='win32'?'codex.exe':'codex'),cwd:process.cwd(),use:'personal-local' as const};
+  const invalidPorts:unknown[]=[
+    {...callbacks},Object.freeze({beforeProcessAllocation:callbacks.beforeProcessAllocation}),
+    Object.freeze({...callbacks,extra:true}),Object.freeze({...callbacks,[Symbol('extra')]:true}),
+    Object.freeze(Object.create(valid)),
+    Object.freeze({get beforeProcessAllocation(){reads++;return callbacks.beforeProcessAllocation;},failedInitializationClosed:callbacks.failedInitializationClosed}),
+    new Proxy(valid,{get(){reads++;throw new Error('Do not read proxy properties.');},ownKeys(){reads++;throw new Error('Do not enumerate proxy properties.');}}),
+    Object.freeze({...callbacks,beforeProcessAllocation:new Proxy(callbacks.beforeProcessAllocation,{apply(){observations++;}})}),
+    Object.freeze({...callbacks,beforeProcessAllocation:async()=>{observations++;}}),
+  ];
+  for(const connectionLifecycle of invalidPorts)
+    await assert.rejects(connectCodexClient({...base,connectionLifecycle} as ConnectOptions),{code:'ARGUMENTS'});
+  const invalidOptions:unknown[]=[
+    {...base,get connectionLifecycle(){reads++;return valid;}},
+    Object.assign(Object.create({get connectionLifecycle(){reads++;return valid;}}),base),
+    new Proxy({...base,connectionLifecycle:valid},{get(){reads++;throw new Error('Do not read proxy options.');},ownKeys(){reads++;throw new Error('Do not enumerate proxy options.');}}),
+  ];
+  for(const options of invalidOptions)await assert.rejects(connectCodexClient(options as ConnectOptions),{code:'ARGUMENTS'});
+  assert.equal(reads,0);assert.equal(observations,0);
+});
+
+for(const profile of [false,true])test('connection lifecycle observes each actual constructor before allocation, profile='+profile,async t=>{
+  const {records}=await fixture(t,{profile,lifecycle:true});
+  const count=profile?2:1;
+  assert.equal(events(records,'before-allocation').length,count);assert.equal(events(records,'spawn').length,count);
+  assert.equal(events(records,'close').length,count);assert.equal(events(records,'connected').length,1);
+  assert.equal(events(records,'failed-initialization-closed').length,0,'normal returned-client closure is not initialization failure');
+  for(let i=1;i<=count;i++)assert.ok(records.findIndex(row=>row.event==='before-allocation'&&row.count===i)<records.findIndex(row=>row.event==='spawn'&&row.launch===i));
+  if(profile)assert.ok(records.findIndex(row=>row.event==='close'&&row.launch===1)<records.findIndex(row=>row.event==='before-allocation'&&row.count===2));
+  assert.equal(calls(records,'turn/start').length,0);
+});
+
+test('failed initialization lifecycle observes genuine profile refusal before any process allocation',async t=>{
+  const {records}=await fixture(t,{lifecycle:true,invalidProfile:true});
+  assert.equal(events(records,'error')[0]?.code,'MCP_PROFILE');
+  assert.equal(events(records,'spawn').length,0);assert.equal(events(records,'before-allocation').length,0);
+  assert.equal(events(records,'failed-initialization-closed').length,1);assert.equal(events(records,'connected').length,0);
+});
+
+for(const launch of [1,2] as const)test('allocation observer refusal before constructor '+launch+' preserves original failure and proven cleanup',async t=>{
+  const {records}=await fixture(t,{lifecycle:true,allocationFailure:launch,failedClosureObserverThrows:true});
+  assert.equal(events(records,'error')[0]?.code,'SYNTHETIC_ALLOCATION_REFUSAL');assert.equal(events(records,'error')[0]?.sameError,true);
+  assert.equal(events(records,'before-allocation').length,launch);assert.equal(events(records,'spawn').length,launch-1);
+  assert.equal(events(records,'close').length,launch-1);assert.equal(events(records,'failed-initialization-closed').length,1);
+  assert.equal(events(records,'connected').length,0);assert.equal(calls(records,'turn/start').length,0);
+});
+
+for(const launch of [1,2] as const)test('failed initialization waits for original held physical close, constructor '+launch,{timeout:15_000},async t=>{
+  const {records}=await fixture(t,{lifecycle:true,mode:launch===1?'discovery-init-failure':'final-init-failure',heldClosure:launch});
+  assert.equal(events(records,'error')[0]?.code,'REMOTE_REJECTED');
+  assert.equal(events(records,'close-held')[0]?.failureObservations,0);assert.equal(events(records,'close-released')[0]?.failureObservations,0);
+  assert.equal(events(records,'close').length,launch);assert.equal(events(records,'failed-initialization-closed').length,1);
+  const settled=records.findIndex(row=>row.event==='failed-initialization-closed');
+  assert.ok(settled>records.findIndex(row=>row.event==='close'&&row.launch===launch));
+  assert.equal(events(records,'spawn').length,launch);assert.equal(events(records,'connected').length,0);
+  assert.equal(calls(records,'thread/start').length,0);assert.equal(calls(records,'turn/start').length,0);
+});
+
+for(const launch of [1,2] as const)test('unconfirmed original physical close never reports initialization closed, constructor '+launch,{timeout:15_000},async t=>{
+  const {records}=await fixture(t,{lifecycle:true,mode:launch===1?'normal':'final-init-failure',unconfirmedClosure:launch});
+  assert.equal(events(records,'error')[0]?.code,'PROCESS_EXIT_UNCONFIRMED');
+  assert.equal(events(records,'failed-initialization-closed').length,0);assert.equal(events(records,'error')[0]?.failureObservations,0);
+  assert.equal(events(records,'before-allocation').length,launch);assert.equal(events(records,'spawn').length,launch);
+  assert.equal(events(records,'connected').length,0);assert.equal(events(records,'test-cleanup-release').length,1);
+  assert.ok(records.findIndex(row=>row.event==='error')<records.findIndex(row=>row.event==='test-cleanup-release'));
+  assert.equal(events(records,'close').length,launch,'the test subsequently closes its actual held peer without minting a factory receipt');
+  assert.equal(calls(records,'turn/start').length,0);
+});
+
+for(const launch of [1,2] as const)test('constructor failure after actual spawn cannot fabricate no-start or physical closure, constructor '+launch,async t=>{
+  const {records}=await fixture(t,{lifecycle:true,partialConstructor:launch});
+  assert.equal(events(records,'error')[0]?.code,'SYNTHETIC_CONSTRUCTOR_FAILURE');assert.equal(events(records,'error')[0]?.sameError,true);
+  assert.equal(events(records,'before-allocation').length,launch);assert.equal(events(records,'spawn').length,launch);
+  assert.equal(events(records,'failed-initialization-closed').length,0);assert.equal(events(records,'connected').length,0);
+  assert.equal(events(records,'test-cleanup-release').length,1);assert.equal(events(records,'close').length,launch);
+  assert.ok(records.findIndex(row=>row.event==='error')<records.findIndex(row=>row.event==='test-cleanup-release'));
+  assert.equal(calls(records,'turn/start').length,0);
+});
+
+test('failure observer fault preserves actual initialization rejection and cannot create another process',async t=>{
+  const {records}=await fixture(t,{lifecycle:true,mode:'final-init-failure',failedClosureObserverThrows:true});
+  assert.equal(events(records,'error')[0]?.code,'REMOTE_REJECTED');assert.equal(events(records,'failed-initialization-closed').length,1);
+  assert.equal(events(records,'spawn').length,2);assert.equal(events(records,'close').length,2);assert.equal(events(records,'connected').length,0);
+});
+
+test('a failure after successful factory return is not a failed-initialization closure observation',async t=>{
+  const {records}=await fixture(t,{lifecycle:true,mode:'final-null',thread:true});
+  assert.equal(events(records,'connected').length,1);assert.equal(events(records,'error')[0]?.code,'MCP_ISOLATION');
+  assert.equal(events(records,'failed-initialization-closed').length,0);assert.equal(events(records,'spawn').length,2);assert.equal(events(records,'close').length,2);
+});
 
 test('no-profile public factory leaves launch and generic history helper behavior untouched', async t => {
   const { records } = await fixture(t, { profile: false, history: true });

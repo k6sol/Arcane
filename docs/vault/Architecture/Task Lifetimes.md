@@ -7,6 +7,8 @@ tags: [arcane]
 
 Task status, original request completion, worker closure, resource cleanup and human acceptance are separate facts.
 
+[[Architecture/Native Session Custody]] records original native allocation, possible write capability and physical transport closure across restarts. Normal task retirement cannot settle that journal. Older tasks without closure evidence remain retained; resource-specific worker/import accounting is still required before independent-session recovery.
+
 Register original work before allocation or its first asynchronous effect. Join allocation, publication, persistence and original cleanup tails. Normal retirement fences new work while allowing accepted work to finish; explicit Stop must still cancel the original owned work. Preserve exact first failures, including falsy thrown values, without confusing normal interrupted requests with failed cleanup.
 
 Unknown acknowledgement, worker ownership or physical closure remains retained and must not trigger replay. Genuine completed work can release bookkeeping only under its actual ownership and capacity rules. JSON state or copied IDs cannot reconstruct a live capability. Human review and later Keep/import decisions must remain independently available where supported.

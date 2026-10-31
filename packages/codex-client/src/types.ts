@@ -23,8 +23,15 @@ export interface NativeAssetHooks {
   ended(intent: NativeAssetIntent): void;
   retired(): void;
 }
+/** Trusted host observation only: an exact frozen object with two own synchronous callbacks.
+ * Closure covers the original constructed transports, never descendant-process containment. */
+export interface NativeConnectionLifecycle {
+  beforeProcessAllocation(): void;
+  failedInitializationClosed(): void;
+}
 export interface ConnectOptions {
   command: string; cwd: string; use: LocalUse; limits?: LimitOptions; arcaneMcp?: ArcaneMcpLaunchProfile; nativeAssetHooks?: NativeAssetHooks;
+  connectionLifecycle?: NativeConnectionLifecycle;
   /** Host callback: text appended after the fixed task instructions on each Arcane thread start/resume (project memory). */
   projectInstructions?: (cwd: string) => Promise<string> | string;
 }
