@@ -5,6 +5,8 @@ tags: [arcane]
 ---
 # Current state
 
+Latest functionality: [[Bugs/Chat Organization]] adds actual folder drag-and-drop and hides unsent drafts from the sidebar without deleting their state. Strict 660-source compilation and 41 frozen compiled/browser cases pass with zero skips, including real Edge mouse drags and rejected external payloads. These changes await publication/package/customer acceptance. Original e649 Windows release failure is a second extracted startup fixture missing the canonical helper; retain that failure and correct the managed-Luau fixture next. Loaded e813 and the unsent synthetic greeting remain unchanged.
+
 ## Installed and running
 
 Current loaded app is now verified e813, matching selected manifest `2a9beb19f7bbf884981c3d131b9602876c6d44a75ddcfa6752a09b5a48e4d1a0`. The user closed old447; one exact stable-launcher invocation reopened the selected app. Saved login recovered into history and the Sol6.1low model menu works. One new-chat greeting Send is refused by shared project/draft readiness, with its text retained; it was not retried. This supersedes the old-window/readiness paragraphs below. See [[Sessions/2026-10-31 Loaded Update Check]]. Fix that live customer blocker next without weakening ownership/persistence guards.

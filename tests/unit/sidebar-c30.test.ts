@@ -55,7 +55,9 @@ test('Edge: folder tree, folder menu, Show all and the footer menu use the exist
     const P='C:/Fixture',at=i=>new Date(Date.UTC(2026,9,20)-i*3600e3).toISOString();
     const conv=(id,folderId,i,provider='claude')=>({id,title:'Chat '+id,folderId,bindings:[{provider,conversationId:'n-'+id,sessionId:null}],messages:[{provider,conversationId:'n-'+id,id:'m-'+id,role:'user',text:'Chat '+id,at:at(i),model:null}]});
     const library={version:1,projectPath:P,activeId:'a',folders:[{id:'forest',name:'Forest'},{id:'shop',name:'Shop'}],expandedFolderIds:['forest'],
-      conversations:[conv('a','forest',1),conv('b','shop',2),...[1,2,3,4,5,6,7].map(i=>conv('u'+i,null,10+i,i%2?'codex':'arcane'))]};
+      conversations:[conv('a','forest',1),conv('b','shop',2),...[1,2,3,4,5,6,7].map(i=>conv('u'+i,null,10+i,i%2?'codex':'arcane')),
+        {id:'unsent',title:'Unsent draft',folderId:null,bindings:[],messages:[]},
+        {...conv('no-user','shop',0),messages:[{provider:'claude',conversationId:'n-no-user',id:'err',role:'error',text:'Not submitted',at:at(0),model:null}]}]};
     window.saves=[];window.opened=[];
     const peer=p=>({recordedTranscript:()=>({provider:p,projectPath:P,conversationId:null,sessionId:null,messages:[]}),conversationSource:()=>({projectPath:P,localId:p+'-fixture'}),isDraftConversation:()=>false,subscribeTranscriptChange:()=>()=>{},setBeforeMessageSubmit(){},showConversationNotice(){},open:async id=>{window.opened.push(id);return true;},openDraftConversation:async()=>false,newChat:async()=>true});
     window.shell=startWorkspaceShell(document);
@@ -81,6 +83,7 @@ test('Edge: folder tree, folder menu, Show all and the footer menu use the exist
   assert.equal(await page.locator('#library-folder-0').isVisible(), true); assert.equal(await page.locator('#library-folder-1').isVisible(), false);
   // Five most recent unfiled chats, then Show all 7.
   assert.equal(await page.locator('#library-chats .library-chat').count(), 5);
+  assert.equal(await page.locator('[data-library-focus="unsent"],[data-library-focus="no-user"]').count(),0);
   await page.locator('.library-show-all').click(); assert.equal(await page.locator('#library-chats .library-chat').count(), 7);
   assert.equal(await page.locator('.library-show-all').getAttribute('aria-expanded'), 'true');
   // Expand/collapse persists through the host bridge (never browser storage).
@@ -130,6 +133,21 @@ test('Edge: folder tree, folder menu, Show all and the footer menu use the exist
   assert.equal(await page.locator('#' + await glyph.getAttribute('aria-describedby')).textContent(), 'Chats in this folder share memory and context');
   assert.match(await page.locator('.library-folder[aria-label="Shop screens"]').evaluate(n => getComputedStyle(n).backgroundImage), /gradient/);
   assert.match(await page.locator('.library-folder[aria-label="Shop screens"] .library-folder-totals').textContent() ?? '', /^2 chats · active \d+(m|h|d|w|mo) ago$/);
+  // Actual browser mouse drags move a saved chat into a folder, then back to Chats.
+  const beforeDrag=await saved(),chat=page.locator('[data-library-focus="u1"]'),target=page.locator('.library-folder[aria-label="Shop screens"]');
+  await chat.dragTo(target.locator('.library-folder-toggle'));
+  await page.waitForFunction(()=>((window as unknown as {saves:{conversations:{id:string;folderId:string|null}[]}[]}).saves.at(-1)?.conversations.find(c=>c.id==='u1')?.folderId)==='shop');
+  assert.equal(await target.locator('[data-library-focus="u1"]').count(),1);
+  assert.equal(await target.locator('.library-folder-toggle').getAttribute('aria-expanded'),'true');
+  await target.locator('[data-library-focus="u1"]').dragTo(page.locator('#library-chats-heading'));
+  await page.waitForFunction(()=>((window as unknown as {saves:{conversations:{id:string;folderId:string|null}[]}[]}).saves.at(-1)?.conversations.find(c=>c.id==='u1')?.folderId)===null);
+  assert.equal((await saved())?.conversations.length,beforeDrag?.conversations.length,'drafts remain stored');
+  assert.equal(await page.evaluate(()=>(window as unknown as {opened:string[]}).opened.includes('n-u1')),false,'dragging never opens a native chat');
+  // A foreign payload without an in-app drag cannot move a chat.
+  const external=await page.evaluateHandle(()=>{const transfer=new DataTransfer();transfer.setData('application/x-arcane-chat','u1');return transfer;});
+  await target.dispatchEvent('drop',{dataTransfer:external});await external.dispose();
+  assert.equal((await saved())?.conversations.find(c=>c.id==='u1')?.folderId,null);
+  assert.equal(await page.locator('[data-drop-target]').count(),0);
   // Footer menu: Project and History, then Escape back to the toggle; the gear opens Settings.
   await page.locator('#sidebar-menu-toggle').click();
   assert.equal(await page.locator('#sidebar-menu').isVisible(), true);

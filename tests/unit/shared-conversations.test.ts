@@ -123,49 +123,26 @@ function emptyRows(){
   const recorded=library.active()!,inactive=library.newConversation(),active=library.newConversation();
   return{snapshot:library.snapshot(),recorded,inactive,active};
 }
-test('sidebar closes inactive and active empty rows during unavailable provider state without touching provider drafts or history',async t=>{
+test('sidebar hides active and inactive drafts without deleting their saved links or text',async t=>{
   const rows=emptyRows(),doc=new SidebarDocument(),f=fixture(rows.snapshot,{sidebar:doc,drafts:true});t.after(()=>f.controller.cleanup());await settle();
-  f.codex.refuse=true;f.claude.refuse=true;f.codex.unsent='Keep my Codex draft';f.claude.unsent='Keep my Claude draft';
-  const close=doc.close(rows.inactive)!;assert.ok(close);assert.equal(close.tagName,'BUTTON');assert.equal(close.type,'button');assert.equal(close.tabIndex,0);assert.equal(close.getAttribute('aria-label'),'Close empty chat: New chat');assert.equal(close.textContent,'×');
-  assert.equal(doc.close(rows.recorded.id),undefined);close.focus();close.click();await settle();await f.controller.prepareForRestart();
-  assert.equal(f.saved()!.activeId,rows.active);assert.deepEqual(f.saved()!.conversations.map(c=>c.id),[rows.recorded.id,rows.active]);
-  doc.close(rows.active)!.click();await settle();await f.controller.prepareForRestart();
-  assert.equal(f.saved()!.activeId,null);assert.deepEqual(f.saved()!.conversations,[rows.recorded]);
-  assert.equal(await f.codex.hook!('A separate unsent request'),'A separate unsent request');
-  assert.equal(f.codex.unsent,'Keep my Codex draft');assert.equal(f.claude.unsent,'Keep my Claude draft');
-  assert.deepEqual(f.codex.opens,[]);assert.deepEqual(f.claude.opens,[]);assert.equal(f.codex.newCalls+f.claude.newCalls,0);assert.deepEqual(f.providerRequests,[]);assert.equal(f.provider(),'codex');
-  assert.equal(doc.activeElement?.dataset.libraryFocus,'new-folder','keyboard focus returns to a visible control without opening a native conversation');
-});
-test('refresh, provider sync, explicit provider choice and reload do not recreate dismissed empty sidebar rows',async t=>{
-  const rows=emptyRows(),doc=new SidebarDocument(),f=fixture(rows.snapshot,{sidebar:doc,drafts:true});t.after(()=>f.controller.cleanup());await settle();
-  doc.close(rows.inactive)!.click();doc.close(rows.active)!.click();await settle();
-  for(const provider of['claude','codex','claude','codex'] as const){f.setProvider(provider);for(const listener of f.codex.listeners)listener();for(const listener of f.claude.listeners)listener();await settle();f.controller.resume();}
-  await f.controller.prepareForRestart();assert.deepEqual(f.saved()!.conversations,[rows.recorded]);assert.equal(f.saved()!.activeId,null);
-  assert.equal(await f.controller.beforeProviderSwitch('codex','claude'),true);f.setProvider('claude');await f.controller.prepareForRestart();
-  assert.deepEqual(f.saved()!.conversations,[rows.recorded]);assert.equal(f.saved()!.activeId,null);assert.equal(f.claude.newCalls,1,'only the explicit provider choice invokes the existing provider setup');
+  f.codex.unsent='Keep this unsent task';await f.controller.prepareForRestart();
+  assert.equal(doc.mount.querySelectorAll('.library-chat').length,1);
+  assert.equal(doc.mount.querySelectorAll('.library-chat')[0]!.dataset.libraryFocus,rows.recorded.id);
+  assert.equal(doc.close(rows.active),undefined);assert.equal(doc.close(rows.inactive),undefined);
+  assert.deepEqual(f.saved(),rows.snapshot);assert.equal(f.codex.unsent,'Keep this unsent task');
   const reopened=fixture(f.saved()!,{sidebar:new SidebarDocument(),drafts:true});t.after(()=>reopened.controller.cleanup());await settle();await reopened.controller.prepareForRestart();
-  assert.deepEqual(reopened.saved(),f.saved());assert.equal(reopened.codex.newCalls+reopened.claude.newCalls,0);assert.deepEqual(reopened.codex.opens,[]);assert.deepEqual(reopened.claude.opens,[]);
+  assert.deepEqual(reopened.saved(),f.saved());assert.deepEqual(f.codex.opens,[]);assert.deepEqual(f.claude.opens,[]);
 });
-test('stale empty-row close control cannot dismiss a subsequently bound conversation',async t=>{
-  const library=new ConversationLibrary(project),empty=library.newConversation(),doc=new SidebarDocument(),f=fixture(library.snapshot(),{sidebar:doc,drafts:true});t.after(()=>f.controller.cleanup());await settle();
-  const stale=doc.close(empty)!;assert.ok(stale);
-  assert.equal(await f.controller.beforeProviderSwitch('codex','claude'),true);f.setProvider('claude');f.claude.value.conversationId='new-claude';f.claude.message('new','Keep this actual recorded message');await settle();await f.controller.prepareForRestart();
-  const before=f.saved()!;assert.equal(before.activeId,empty);assert.equal(before.conversations[0]!.bindings[0]!.conversationId,'new-claude');assert.equal(doc.close(empty),undefined);
-  stale.click();await settle();await f.controller.prepareForRestart();assert.deepEqual(f.saved(),before);assert.deepEqual(f.providerRequests,[]);assert.deepEqual(f.codex.opens,[]);assert.deepEqual(f.claude.opens,[]);
-});
-test('empty-row dismissal stays blocked during provider preparation and after stop',async t=>{
-  const library=new ConversationLibrary(project),empty=library.newConversation(),doc=new SidebarDocument(),f=fixture(library.snapshot(),{sidebar:doc,drafts:true});t.after(()=>f.controller.cleanup());await settle();
-  let release!:()=>void;f.claude.newChatGate=new Promise<void>(resolve=>{release=resolve;});
-  const switching=f.controller.beforeProviderSwitch('codex','claude');await settle();const close=doc.close(empty)!;close.click();
-  release();assert.equal(await switching,true);await f.controller.prepareForRestart();assert.equal(f.saved()!.activeId,empty);
-  f.controller.stop();close.click();f.controller.resume();await f.controller.prepareForRestart();assert.equal(f.saved()!.activeId,empty);assert.ok(doc.close(empty));
-});
-test('failed empty-row dismissal persistence keeps the existing error notice and remains restart-blocking until saved',async t=>{
-  const rows=emptyRows(),doc=new SidebarDocument(),f=fixture(rows.snapshot,{sidebar:doc,drafts:true});t.after(()=>f.controller.cleanup());await settle();f.setFail(true);
-  doc.close(rows.active)!.click();await settle();assert.ok(doc.mount.textContent.includes('Chat organisation has not been saved.'));assert.deepEqual(f.saved(),rows.snapshot);
-  await assert.rejects(f.controller.prepareForRestart(),/could not be saved/);assert.deepEqual(f.saved(),rows.snapshot);
-  f.setFail(false);await f.controller.prepareForRestart();assert.equal(f.saved()!.activeId,null);assert.deepEqual(f.saved()!.conversations.map(c=>c.id),[rows.recorded.id,rows.inactive]);
-  assert.ok(!doc.mount.textContent.includes('Chat organisation has not been saved.'));assert.deepEqual(f.codex.opens,[]);assert.deepEqual(f.claude.opens,[]);assert.equal(f.codex.newCalls+f.claude.newCalls,0);assert.deepEqual(f.providerRequests,[]);
+
+test('sidebar reveals the exact draft only after its first submitted user message',async t=>{
+  const doc=new SidebarDocument(),f=fixture(undefined,{sidebar:doc,drafts:true});t.after(()=>f.controller.cleanup());await settle();
+  f.controller.beginNewConversation('codex',f.codex.conversationSource()!);await f.controller.prepareForRestart();const id=f.saved()!.activeId!;
+  assert.equal(doc.mount.querySelectorAll('.library-chat').length,0);
+  await f.codex.hook!('Build a clearing');await f.controller.prepareForRestart();
+  assert.equal(doc.mount.querySelectorAll('.library-chat').length,0,'preparation is not a submitted message');
+  f.codex.value.conversationId='accepted-thread';f.codex.message('accepted','Build a clearing');await settle();await f.controller.prepareForRestart();
+  assert.equal(doc.mount.querySelectorAll('.library-chat').length,1);assert.equal(doc.mount.querySelectorAll('.library-chat')[0]!.dataset.libraryFocus,id);
+  assert.equal(f.saved()!.conversations.length,1);assert.equal(f.saved()!.draftLinks,undefined);
 });
 
 test('first native Send binds the original third draft row and leaves the other empty rows unchanged',async t=>{
@@ -199,7 +176,7 @@ test('an old draft association never captures another selected draft or resurrec
   await f.codex.newChat();f.controller.beginNewConversation('codex',f.codex.conversationSource()!);await f.controller.prepareForRestart();
   const original=f.saved()!.activeId!,originalLocal=f.codex.localId;
   await f.codex.newChat();f.controller.beginNewConversation('codex',f.codex.conversationSource()!);await f.controller.prepareForRestart();const other=f.saved()!.activeId!;
-  doc.close(original)!.click();await settle();
+  f.controller['dismissEmpty'](original);await settle();
   f.codex.localId=originalLocal;f.codex.value.conversationId='late-original';f.codex.message('late','Original accepted prompt');await settle();await f.controller.prepareForRestart();
   assert.equal(f.saved()!.conversations.some(row=>row.id===original),false);
   assert.deepEqual(f.saved()!.conversations.find(row=>row.id===other)!.bindings,[]);
@@ -218,11 +195,11 @@ test('held context preparation rejects draft, provider and lifecycle away-and-ba
   }
 });
 
-test('clicking a linked empty sidebar row selects only its exact local draft',async t=>{
+test('opening a retained draft association selects only its exact local draft',async t=>{
   const doc=new SidebarDocument(),f=fixture(undefined,{sidebar:doc,drafts:true});t.after(()=>f.controller.cleanup());await settle();
   await f.codex.newChat();f.controller.beginNewConversation('codex',f.codex.conversationSource()!);await f.controller.prepareForRestart();const first=f.saved()!.activeId!,localId=f.codex.localId;
   await f.codex.newChat();f.controller.beginNewConversation('codex',f.codex.conversationSource()!);await f.controller.prepareForRestart();
-  doc.mount.querySelectorAll('[data-library-focus]').find(node=>node.dataset.libraryFocus===first)!.click();await settle();await f.controller.prepareForRestart();
+  await f.controller['open'](first);await settle();await f.controller.prepareForRestart();
   assert.equal(f.codex.localId,localId);assert.equal(f.saved()!.activeId,first);assert.equal(f.saved()!.conversations.length,2);
   assert.deepEqual(f.codex.opens,[]);assert.deepEqual(f.claude.opens,[]);assert.deepEqual(f.providerRequests,[]);
 });
@@ -244,14 +221,14 @@ test('a refused linked draft open preserves the prior sidebar and actual provide
   const doc=new SidebarDocument(),f=fixture(undefined,{sidebar:doc,drafts:true});t.after(()=>f.controller.cleanup());await settle();
   f.controller.beginNewConversation('codex',f.codex.conversationSource()!);await f.controller.prepareForRestart();const first=f.saved()!.activeId!;
   await f.codex.newChat();f.controller.beginNewConversation('codex',f.codex.conversationSource()!);await f.controller.prepareForRestart();const second=f.saved()!.activeId!,source=f.codex.localId;
-  f.codex.refuse=true;doc.mount.querySelectorAll('[data-library-focus]').find(node=>node.dataset.libraryFocus===first)!.click();await settle();await f.controller.prepareForRestart();
+  f.codex.refuse=true;await f.controller['open'](first);await settle();await f.controller.prepareForRestart();
   assert.equal(f.saved()!.activeId,second);assert.equal(f.codex.localId,source);assert.match(f.codex.notice,/current chat and draft were retained/);
 });
 
 test('a refused linked draft open restores an original null sidebar selection',async t=>{
   const library=new ConversationLibrary(project),id=library.newConversation({provider:'codex',localId:'other-local'});library.select(null);
   const doc=new SidebarDocument(),f=fixture(library.snapshot(),{sidebar:doc,drafts:true});t.after(()=>f.controller.cleanup());await settle();
-  f.codex.refuse=true;doc.mount.querySelectorAll('[data-library-focus]').find(node=>node.dataset.libraryFocus===id)!.click();await settle();await f.controller.prepareForRestart();
+  f.codex.refuse=true;await f.controller['open'](id);await settle();await f.controller.prepareForRestart();
   assert.equal(f.saved()!.activeId,null);assert.equal(f.codex.localId,'codex-local');assert.match(f.codex.notice,/current chat and draft were retained/);
 });
 
@@ -274,7 +251,7 @@ test('held draft-link saves cannot release a Send after dismissal, provider swit
     f.controller.beginNewConversation('codex',f.codex.conversationSource()!);
     let release!:()=>void;f.setSaveGate(new Promise(resolve=>{release=resolve;}));t.after(()=>release());
     const sending=Promise.resolve(f.codex.hook!('Retain unsent text'));await settle();assert.equal(f.savesStarted(),1);
-    if(boundary==='dismiss')doc.mount.querySelectorAll('[data-library-focus]').find(node=>node.dataset.libraryFocus?.startsWith('close-empty:'))!.click();
+    if(boundary==='dismiss')f.controller['dismissEmpty'](f.saved()?.activeId??(f.controller as unknown as {library:ConversationLibrary}).library.active()!.id);
     else if(boundary==='provider'){f.setProvider('claude');for(const listener of f.codex.listeners)listener();f.setProvider('codex');for(const listener of f.codex.listeners)listener();}
     else if(boundary==='project'){f.codex.value.projectPath='C:/OtherProject';for(const listener of f.codex.listeners)listener();f.codex.value.projectPath=project;for(const listener of f.codex.listeners)listener();}
     else if(boundary==='draft'){f.codex.localId='other-local';for(const listener of f.codex.listeners)listener();}

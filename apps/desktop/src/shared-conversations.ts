@@ -66,6 +66,7 @@ export class SharedConversations {
   private pendingFocus:string|null=null;
   private rendering=false;
   private lastActive:string|null=null;
+  private dragged:{id:string;projectPath:string;token:string}|null=null;
   private bridge:LibraryBridge|null;
   constructor(private readonly doc:Document,private readonly options:SharedConversationsOptions){
     this.providerSeen=options.provider();
@@ -224,6 +225,21 @@ export class SharedConversations {
   }
   private edit(action:()=>void):void{if(!this.library||this.suspended)return;try{action();this.persist();this.flush();this.render();}catch(error){this.notice(error instanceof Error?error.message:'Chat organisation could not be saved.');}}
   private node<K extends keyof HTMLElementTagNameMap>(tag:K,text?:string):HTMLElementTagNameMap[K]{const node=this.doc.createElement(tag);if(text!==undefined)node.textContent=text;return node;}
+  private clearDrag():void{
+    this.dragged=null;
+    for(const node of Array.from(this.doc.getElementById('conversation-library')?.querySelectorAll<HTMLElement>('[data-drop-target]')??[]))node.removeAttribute('data-drop-target');
+  }
+  private dropTarget(node:HTMLElement,folderId:string|null):void{
+    const eligible=()=>!this.stopped&&!this.suspended&&this.dragged?.projectPath===this.library?.snapshot().projectPath&&
+      !!this.library?.snapshot().conversations.some(c=>c.id===this.dragged?.id&&c.folderId!==folderId&&c.messages.some(m=>m.role==='user'));
+    node.addEventListener('dragover',event=>{if(!eligible()||!event.dataTransfer?.types.includes('application/x-arcane-chat'))return;event.preventDefault();event.stopPropagation();event.dataTransfer.dropEffect='move';node.setAttribute('data-drop-target','true');});
+    node.addEventListener('dragleave',event=>{if(!event.relatedTarget||!node.contains(event.relatedTarget as Node))node.removeAttribute('data-drop-target');});
+    node.addEventListener('drop',event=>{
+      if(!eligible()||!event.dataTransfer||event.dataTransfer.getData('application/x-arcane-chat')!==this.dragged?.token)return;
+      event.preventDefault();event.stopPropagation();const id=this.dragged!.id;this.clearDrag();
+      this.edit(()=>{this.library!.move(id,folderId);if(folderId!==null)this.library!.setFolderExpanded(folderId,true);});
+    });
+  }
   private button(label:string,action:()=>void):HTMLButtonElement{const b=this.node('button',label);b.type='button';b.addEventListener('click',action);return b;}
   private svg(paths:string[],className:string,filled=false):SVGSVGElement{
     const ns='http://www.w3.org/2000/svg',icon=this.doc.createElementNS(ns,'svg');
@@ -294,6 +310,8 @@ export class SharedConversations {
     const mount=this.doc.getElementById('conversation-library');if(!mount)return;
     let state=this.library?.snapshot();
     if(state&&this.ready&&!this.suspended&&this.followActive(state))state=this.library!.snapshot();
+    // Draft links remain durable, but a sidebar chat starts with a submitted user message.
+    if(state)state={...state,conversations:state.conversations.filter(c=>c.messages.some(m=>m.role==='user'))};
     this.renderHistory();
     const totals=state?this.totals(state):{};
     const signature=JSON.stringify([state?.activeId,state?.folders,state?.expandedFolderIds,state?.conversations.map(c=>({id:c.id,title:c.title,folderId:c.folderId,bindings:c.bindings,last:lastMessage(c)})),this.persistenceError,this.ready,this.showAll,this.creating,this.renaming,this.menuFor,totals]);
@@ -322,6 +340,7 @@ export class SharedConversations {
     s.folders.forEach((folder,index)=>{
       const rows=s.conversations.filter(c=>c.folderId===folder.id),expanded=open.has(folder.id),current=rows.some(c=>c.id===active),total=totals[folder.id];
       const group=this.node('div');group.className='library-folder';group.setAttribute('role','group');group.setAttribute('aria-label',folder.name);group.dataset.expanded=String(expanded);group.dataset.current=String(current);
+      this.dropTarget(group,folder.id);
       const row=this.node('div'),bodyId='library-folder-'+index;row.className='library-folder-row';
       if(this.renaming===folder.id){
         row.append(this.nameInput(this.renameDraft,'Folder name','rename:'+folder.id,v=>{this.renameDraft=v;},name=>{this.renaming=null;this.focusLater('folder:'+folder.id);if(name&&name!==folder.name)this.edit(()=>{this.library!.renameFolder(folder.id,name);});else this.render();},()=>{this.renaming=null;this.focusLater('folder:'+folder.id);this.render();}));
@@ -359,8 +378,9 @@ export class SharedConversations {
     });
     mount.append(folders.node);
     const unfiled=s.conversations.map((c,i)=>({c,i,at:lastMessage(c)})).filter(r=>r.c.folderId===null).sort((a,b)=>(b.at??-1)-(a.at??-1)||b.i-a.i).map(r=>r.c);
-    if(unfiled.length||!s.conversations.length){
+    {
       const chats=section('library-chats-heading','Chats'),list=this.node('div');list.className='library-list';list.id='library-chats';chats.node.append(chats.heading,list);
+      this.dropTarget(chats.node,null);
       const visible=this.showAll?unfiled:unfiled.filter((c,i)=>i<RECENT_CHATS||c.id===active);
       for(const c of visible)list.append(this.chatRow(c,active,true));
       if(!unfiled.length){
@@ -408,6 +428,13 @@ export class SharedConversations {
   private chatRow(c:LibraryConversation,active:string|null,mark:boolean):HTMLElement{
     const b=this.button('',()=>{void this.open(c.id);}),title=this.node('span',c.title);
     b.className='library-chat';b.dataset.libraryFocus=c.id;b.setAttribute('aria-current',String(c.id===active));title.className='library-chat-title';
+    b.draggable=true;
+    b.addEventListener('dragstart',event=>{
+      const state=this.library?.snapshot();if(this.stopped||this.suspended||!state||!event.dataTransfer){event.preventDefault();return;}
+      this.clearDrag();this.dragged={id:c.id,projectPath:state.projectPath,token:crypto.randomUUID()};
+      event.dataTransfer.effectAllowed='move';event.dataTransfer.setData('application/x-arcane-chat',this.dragged.token);event.stopPropagation();
+    });
+    b.addEventListener('dragend',()=>this.clearDrag());
     const providers=c.bindings.map(x=>PROVIDER_NAMES[x.provider]);b.title=c.title+(providers.length?' · '+providers.join(' · '):'');
     const provider=c.messages.at(-1)?.provider??c.bindings.at(-1)?.provider;
     if(mark){const icon=provider?this.svg([PROVIDER_PATHS[provider]],'library-provider provider-logo',true):this.svg(['M20 12a8 8 0 0 1-11.6 7.1L4 20l1-4.2A8 8 0 1 1 20 12Z'],'library-provider');if(provider)icon.setAttribute('data-provider',provider);b.append(icon);}
@@ -428,7 +455,7 @@ export class SharedConversations {
     const signature=JSON.stringify([c.id,c.messages]);if(signature===this.historySignature)return;this.historySignature=signature;list.replaceChildren();
     for(const m of c.messages){const article=this.node('article');article.className='shared-history-message';article.setAttribute('role','listitem');article.dataset.role=m.role;const meta=this.node('small',(m.provider==='codex'?'Codex':m.provider==='claude'?'Claude':'Arcane')+' · '+m.role+(m.model?' · '+m.model:''));meta.className='shared-history-meta';article.append(meta,this.node('p',m.text));list.append(article);}
   }
-  stop():void{this.flush();this.stopped=true;this.navigationRevision++;this.pendingNew=null;}
+  stop():void{this.clearDrag();this.flush();this.stopped=true;this.navigationRevision++;this.pendingNew=null;}
   resume():void{this.stopped=false;this.observe();this.flush();}
   cleanup():void{this.stop();this.closeMenuListener();for(const remove of this.removers)remove();for(const peer of Object.values(this.options.peers))peer.setBeforeMessageSubmit(null);}
 }

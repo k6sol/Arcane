@@ -3820,6 +3820,8 @@ body.arcane-app #app-sidebar .conversation-library .library-list{display:flex;fl
 body.arcane-app #app-sidebar .conversation-library .library-list>.library-chat{background:var(--sb-bubble);box-shadow:inset 0 0 0 1px var(--sb-bubble-rim)}
 body.arcane-app #app-sidebar .conversation-library .library-chat{position:relative;display:flex;align-items:center;gap:10px;width:100%;min-width:0;height:32px;min-height:32px;margin:0;padding:0 8px 0 12px;border:0;border-radius:10px;background:transparent;box-shadow:none;color:var(--sb-ink-2);font:400 14px/20px var(--font-ui);text-align:left;overflow:hidden;white-space:nowrap}
 body.arcane-app #app-sidebar .conversation-library .library-folder-body .library-chat{padding-left:32px}
+body.arcane-app #app-sidebar .conversation-library .library-chat[draggable=true]{-webkit-app-region:no-drag;cursor:grab}
+body.arcane-app #app-sidebar .conversation-library [data-drop-target=true]{outline:2px solid var(--sb-ink-2);outline-offset:-2px;border-radius:10px;background:var(--sb-bubble)}
 body.arcane-app #app-sidebar .conversation-library .library-chat[aria-current=true]{background:var(--sb-current);border-color:transparent;box-shadow:inset 0 0 0 1px var(--sb-current-ring);color:var(--sb-ink-strong);font-weight:500}
 body.arcane-app #app-sidebar .conversation-library .library-chat-title{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 body.arcane-app #app-sidebar .conversation-library .library-provider{flex:none;width:16px;height:16px;color:var(--sb-ink)}
