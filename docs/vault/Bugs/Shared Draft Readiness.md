@@ -7,6 +7,8 @@ tags: [arcane, chat, persistence]
 
 ## Latest follow-up
 
+The subsequent original e649 Windows release job exposes the same missing helper in the separate managed-Luau root-project fixture. That fixture now extracts the actual canonical helper alongside startup, using its real owned directories and policy. All 94 Windows managed-compiler, compiler-isolation and desktop-host cases pass with zero skips/cancellations, including the actual bundled compiler. The original hosted failure remains recorded; fresh exact-source checks are required.
+
 Original component run 41216643275 exposed a compiler-only cold-start VM that extracted `startDaemon` without its new canonical-path dependency. The fixture now supplies an explicit already-canonical directory double and witnesses that boundary; the real path identity/replacement tests remain in the desktop host suite. Both complete offline suites pass: 80 tests, zero skips/cancellations. The original failed job is retained; no workflow rerun is used as evidence.
 
 A private read-only Electron diagnostic reaches Windows decryption but cannot read the saved workspace record, including with a private copy of the application's encrypted Local State. Original record and Local State bytes remain unchanged; no plaintext is logged. This separate Electron version/profile is diagnostic evidence only, not proof of the loaded app's exact failure. The first isolated-profile result is inconclusive because its encryption context differs. Customer Send remains open, and the one unsent synthetic message is preserved. Ordinary conversation notices still need the separate layout-shift correction.

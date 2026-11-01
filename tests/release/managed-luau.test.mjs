@@ -209,7 +209,7 @@ test('saved settings appearing during managed preparation fail closed before for
 
 test('actual root-project cold-start bootstrap emits managed adapter fields with normal owned directories', windows, async t => {
   const f = fixture(t), source = read('apps/desktop/electron/main.cjs').toString();
-  const begin = source.indexOf('async function startDaemon('), end = source.indexOf('function makeWindow()', begin);
+  const begin = source.indexOf('async function canonicalProjectPath('), end = source.indexOf('function makeWindow()', begin);
   assert.ok(begin >= 0 && end > begin);
   const moduleLoad = "await import(require('node:url').pathToFileURL(join(productRoot, 'scripts/managed-luau-compiler.mjs')).href)";
   const bootstrap = source.slice(begin, end); assert.ok(bootstrap.includes(moduleLoad));
