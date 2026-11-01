@@ -230,6 +230,29 @@ test('Edge: the chip opens its switcher under itself and closes on an outside pr
   await page.waitForFunction(() => document.getElementById('codex-heading')?.textContent === 'Lighting pass');
 });
 
+test('Edge: ordinary notices and expanded errors never shift the transcript or composer', browserOptions, async t => {
+  const page=await fixture(t);
+  for(const width of[1440,980,540,375]){
+    await page.setViewportSize({width,height:900});
+    await page.evaluate(()=>{document.getElementById('codex-notice')!.textContent='';document.getElementById('codex-notice-actions')!.hidden=true;(document.getElementById('codex-notice-details') as HTMLDetailsElement).open=false;});
+    await page.waitForFunction(()=>document.querySelector('.chat-topline')?.getAttribute('data-notice')==='empty');
+    const geometry=()=>page.evaluate(()=>['.conversation-scroll','#codex-composer','#codex-submit'].map(selector=>{const r=document.querySelector(selector)!.getBoundingClientRect();return{x:r.x,y:r.y,width:r.width,height:r.height};}));
+    const before=await geometry();
+    await page.locator('#codex-composer').fill('Preserve this draft');
+    await page.evaluate(()=>{document.getElementById('codex-notice')!.textContent='Error 423: Saved state unavailable. Your draft is retained.';document.getElementById('codex-notice-actions')!.hidden=false;document.getElementById('codex-notice-detail')!.textContent='Technical context '.repeat(80);});
+    await page.waitForFunction(()=>document.querySelector('.chat-topline')?.getAttribute('data-notice')==='shown');
+    assert.deepEqual(await geometry(),before,'showing a notice at '+width);
+    assert.equal(await page.locator('#codex-composer').inputValue(),'Preserve this draft');
+    assert.equal(await page.locator('#codex-composer').evaluate(n=>n===document.activeElement),true);
+    await page.locator('#codex-notice-details > summary').click();
+    assert.deepEqual(await geometry(),before,'expanding details at '+width);
+    const bounds=await page.locator('.chat-topline').boundingBox();assert.ok(bounds&&bounds.x>=0&&bounds.x+bounds.width<=width&&bounds.height<=240);
+    await page.locator('#codex-notice-copy').scrollIntoViewIfNeeded();
+    assert.equal(await page.locator('#codex-notice-copy').isVisible(),true);
+    assert.deepEqual(await geometry(),before,'scrolling technical details at '+width);
+  }
+});
+
 test('Edge: a request notice keeps Review and Details; a plain status rests out of view', browserOptions, async t => {
   const page = await fixture(t);
   const line = page.locator('#codex-panel .chat-topline');

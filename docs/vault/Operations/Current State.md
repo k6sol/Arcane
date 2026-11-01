@@ -5,6 +5,8 @@ tags: [arcane]
 ---
 # Current state
 
+[[Bugs/Conversation Notice Layout]] keeps ordinary notices and expanded details out of transcript/composer flow. Strict 660-source compile and 52 frozen compiled/browser cases pass, zero skips/cancellations; four-width geometry and draft preservation are proved, and all 37 fixture connections close. No live Studio or customer window operation occurs. Original 065 component/package run 41359555354 was observed live; inspect its final result before delivery. Installed e813 and its retained unsent draft remain separate.
+
 The managed-Luau startup fixture correction now passes all 94 Windows compiler/host cases with zero skips, including the real bundled compiler. Observe fresh original hosted checks before packaging the chat organization change. The earlier fixture failure below is retained history, not a claim that the correction is still pending. No installed/customer acceptance is inferred from local tests.
 
 Latest functionality: [[Bugs/Chat Organization]] adds actual folder drag-and-drop and hides unsent drafts from the sidebar without deleting their state. Strict 660-source compilation and 41 frozen compiled/browser cases pass with zero skips, including real Edge mouse drags and rejected external payloads. These changes await publication/package/customer acceptance. Original e649 Windows release failure is a second extracted startup fixture missing the canonical helper; retain that failure and correct the managed-Luau fixture next. Loaded e813 and the unsent synthetic greeting remain unchanged.

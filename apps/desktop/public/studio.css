@@ -3631,6 +3631,9 @@ body.arcane-app.shell-compact .workspace-topbar{min-height:48px;padding:12px 24p
 
 /* Status line under the header: a new notice shows; it then rests out of view (still read by assistive tech). */
 .arcane-app .workspace-stage .chat-topline{flex-wrap:wrap;gap:4px 12px;min-height:0;padding:8px 0 0;border-bottom:0;background:transparent}
+.arcane-app .workspace-stage .codex-panel>.chat-topline[data-notice=shown]{position:absolute;top:72px;inset-inline:var(--chat-col-inset);z-index:var(--z-popover,40);box-sizing:border-box;margin:0;padding:12px;max-height:min(240px,30vh);overflow:auto;border:1px solid var(--tb-line-control);border-radius:12px;background:var(--raised)}
+.arcane-app .workspace-stage .codex-panel>.chat-topline[data-notice=shown]>[role=status]{white-space:normal;overflow-wrap:anywhere}
+@media(max-width:640px){.arcane-app .workspace-stage .codex-panel>.chat-topline[data-notice=shown]{top:8px;inset-inline:8px}}
 .arcane-app .workspace-stage .chat-topline:is([data-notice=empty],[data-notice=rest]){position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
 .arcane-app .workspace-stage .chat-topline>[role=status]{flex:1 1 280px;min-width:0;margin:0;color:var(--tb-ink-62);font-size:12px;line-height:18px}
 .arcane-app .chat-topline .notice-actions{display:flex;align-items:center;flex-wrap:wrap;gap:8px}
