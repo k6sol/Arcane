@@ -617,7 +617,7 @@ test('preload exposes immutable identity and only the bounded Luau verification 
   assert.equal(Object.isFrozen(exposed.toolDrafts), true);
   assert.deepEqual(Object.keys(exposed.toolDrafts).sort(), ['read', 'save', 'version']);
   assert.deepEqual(Object.keys(exposed.claudePreferences).sort(), ['read', 'save', 'version']);
-  assert.deepEqual(Object.keys(exposed.workspacePreferences).sort(), ['read', 'save', 'version']);
+  assert.deepEqual(Object.keys(exposed.workspacePreferences).sort(), ['read', 'recover', 'save', 'version']);
   assert.deepEqual(Object.keys(exposed.studioKeys).sort(), ['copy', 'forget', 'list', 'remember', 'replace', 'reveal', 'version']);
   assert.deepEqual(Object.keys(exposed.providerSetup).sort(),['install','launch','login','status','version']);
   assert.deepEqual(Object.keys(exposed.codeVerification).sort(), ['configure', 'status', 'version']);
