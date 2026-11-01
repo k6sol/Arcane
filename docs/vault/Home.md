@@ -13,7 +13,7 @@ tags: [arcane, dashboard]
 
 ## Delivery
 
-Latest selected runtime is now **e8139e1**: seven original component/package checks pass, native623 evidence verifies against18 unchanged inputs, and the original stock installation plus independent4673-file integrity check complete successfully. The old447 customer window remains open pending the user's saved-draft closure. See [[Sessions/2026-10-31 Native Chat Desktop Delivery]] for the current delivery and remaining acceptance boundaries; older cdda checkpoints below remain historical evidence.
+The verified installed and running desktop is **e8139e1**; the authorized reopen is complete. Saved login and the model menu work, while actual customer Send remains blocked by unavailable draft preferences. New source adds [[Bugs/Chat Organization|chat dragging and hidden unsent drafts]], [[Bugs/Conversation Notice Layout|stable error notices]] and [[Bugs/Draft Storage Recovery|explicit draft storage recovery]]. These changes need exact-source hosted/package verification and delivery before customer acceptance. See [[Operations/Current State]]; older delivery checkpoints below are historical evidence.
 
 The [[Delivery/Goal Board|ten urgent goals]] track the path to a dependable customer release. Open a goal for its outcome, dependencies and acceptance criteria. Check it off only after recording evidence.
 

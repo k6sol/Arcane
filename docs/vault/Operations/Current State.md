@@ -5,6 +5,8 @@ tags: [arcane]
 ---
 # Current state
 
+[[Bugs/Draft Storage Recovery]] adds explicit retention of unreadable preference bytes before securely saving open drafts. The final 660-source compile, 61 host/preload cases and 150 frozen compiled/browser cases pass with zero skips/cancellations. Lost recovery replies use one exact read-only checkpoint inspection, never a repeated write or Send. A fresh process inspection still identifies the running e813 bundle; no customer record/window was changed. Observe fresh exact-source hosted/package checks before delivery and actual recovery/Send acceptance. Earlier live Send blocker remains open at customer scope.
+
 [[Bugs/Conversation Notice Layout]] keeps ordinary notices and expanded details out of transcript/composer flow. Strict 660-source compile and 52 frozen compiled/browser cases pass, zero skips/cancellations; four-width geometry and draft preservation are proved, and all 37 fixture connections close. No live Studio or customer window operation occurs. Original 065 component/package run 41359555354 was observed live; inspect its final result before delivery. Installed e813 and its retained unsent draft remain separate.
 
 The managed-Luau startup fixture correction now passes all 94 Windows compiler/host cases with zero skips, including the real bundled compiler. Observe fresh original hosted checks before packaging the chat organization change. The earlier fixture failure below is retained history, not a claim that the correction is still pending. No installed/customer acceptance is inferred from local tests.

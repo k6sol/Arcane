@@ -420,7 +420,7 @@ function createWorkspacePreferences({ safeStorage, getSession, enabled = true, r
       });
     }
     }
-    for (const action of ['read', 'save']) {
+    for (const action of ['read', 'save', ...(record === 'workspace' ? ['recover'] : [])]) {
       ipcMain.handle(recordChannel + action, async (event, ...args) => {
         let ownsBusy = false, snapshot;
         try {
@@ -438,6 +438,47 @@ function createWorkspacePreferences({ safeStorage, getSession, enabled = true, r
           // Pin paths before yielding; recheck owner/main frame/project/origin before access.
           await Promise.resolve(); guard(scope, event);
           if (!available()) fail(); guard(scope, event);
+          if (action === 'recover') {
+            // Recovery is an explicit presentation checkpoint, never a read/save fallback.
+            // Keep the exact unreadable ciphertext before replacing the active record.
+            const opened = openPin(paths.full, fileLimit);
+            snapshot = { ...paths, pin: opened.pin };
+            guard(scope, event); checkSnapshot(snapshot); unlocked(snapshot);
+            let readable = false;
+            try {
+              const existing = readSnapshot(scope, event, paths);
+              try { readable = true; } finally { if (existing.pin) fs.closeSync(existing.pin.fd); }
+            } catch { /* Only the pinned bytes below may be retained and replaced. */ }
+            guard(scope, event); checkSnapshot(snapshot); unlocked(snapshot); if (!available() || readable) fail();
+            const retained = paths.full + '.retained-' + hash(opened.bytes);
+            let archiveFd;
+            try {
+              if (missing(retained)) {
+                archiveFd = fs.openSync(retained, 'wx+', 0o600);
+                const chain = checkedPath(retained, 'file');
+                if (!sameFile(chain.at(-1).stat, fs.fstatSync(archiveFd, { bigint: true }))) fail();
+                let offset = 0;
+                while (offset < opened.bytes.length) {
+                  guard(scope, event); checkSnapshot(snapshot); unlocked(snapshot);
+                  const count = fs.writeSync(archiveFd, opened.bytes, offset, opened.bytes.length - offset);
+                  if (!Number.isSafeInteger(count) || count < 1 || count > opened.bytes.length - offset) fail();
+                  offset += count;
+                }
+                fs.fsyncSync(archiveFd);
+                const after = checkedPath(retained, 'file');
+                if (!sameNode(chain.at(-1).stat, after.at(-1).stat) || !sameFile(after.at(-1).stat, fs.fstatSync(archiveFd, { bigint: true })) || !readBounded(archiveFd, fileLimit).equals(opened.bytes)) fail();
+              }
+            } finally { if (archiveFd !== undefined) fs.closeSync(archiveFd); }
+            const archive = openPin(retained, fileLimit);
+            try {
+              if (!archive.bytes.equals(opened.bytes)) fail();
+              guard(scope, event); checkSnapshot(snapshot); unlocked(snapshot);
+              // Pin the retained copy through the existing atomic encrypted save.
+              checkPin(archive.pin); persist(scope, event, snapshot, input); checkPin(archive.pin);
+              guard(scope, event); if (!available()) fail();
+              return { saved: true, preserved: true };
+            } finally { fs.closeSync(archive.pin.fd); }
+          }
           snapshot = readSnapshot(scope, event, paths); guard(scope, event); checkSnapshot(snapshot); unlocked(snapshot);
           if (action === 'read') return { available: true, ...(record !== 'workspace' ? { projectPath: scope.projectPath } : {}), preferences: snapshot.preferences };
           persist(scope, event, snapshot, input); guard(scope, event);

@@ -201,6 +201,10 @@ const workspacePreferenceInvoke = async (action, args, record = 'workspace') => 
       }
       return { available: value.available, preferences: value.preferences === null ? null : workspacePreferenceSnapshot(value.preferences) };
     }
+    if (action === 'recover') {
+      workspacePreferenceFields(value, ['saved', 'preserved']); if (value.saved !== true || value.preserved !== true) workspacePreferenceError();
+      return { saved: true, preserved: true };
+    }
     workspacePreferenceFields(value, ['saved']); if (value.saved !== true) workspacePreferenceError();
     return { saved: true };
   } catch { workspacePreferenceError(); }
@@ -293,6 +297,7 @@ const conversationLibrary=Object.freeze({version:1,read:(...args)=>conversationL
 
 const workspacePreferences = Object.freeze({ version: 1,
   read: (...args) => workspacePreferenceInvoke('read', args), save: (...args) => workspacePreferenceInvoke('save', args),
+  recover: (...args) => workspacePreferenceInvoke('recover', args),
 });
 const claudePreferences = Object.freeze({ version: 1,
   read: (...args) => workspacePreferenceInvoke('read', args, 'claude'), save: (...args) => workspacePreferenceInvoke('save', args, 'claude'),

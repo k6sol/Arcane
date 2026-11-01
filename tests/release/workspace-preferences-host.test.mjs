@@ -279,13 +279,62 @@ function fixture({ disk = filesystemDouble(), safeStorage = encryptedTestDouble(
   };
 }
 
-test('production wiring and preload expose only frozen version 1 read/save; installation is inert', () => {
+test('explicit recovery retains unreadable ciphertext before saving current drafts through host and preload',async()=>{
+  const f=fixture(),input=snapshot({tabs:[tab(1,{draft:'Current private draft'})]});
+  await f.call('save',snapshot());const old=Buffer.from(f.disk.node(win32.join(f.stateRoot,'workspace-preferences.v1.json')).bytes);
+  const decrypt=f.safeStorage.decryptString;f.safeStorage.decryptString=bytes=>{if(bytes.equals(Buffer.from(JSON.parse(old).ciphertext,'base64')))throw Error('Old key unavailable');return decrypt(bytes);};
+  await assert.rejects(f.call('read'),ERROR);await assert.rejects(f.call('save',input),ERROR);
+  assert.deepEqual(json(await f.call('recover',input)),{saved:true,preserved:true});
+  const full=win32.join(f.stateRoot,'workspace-preferences.v1.json'),retained=full+'.retained-'+hash(old);
+  assert.deepEqual(f.disk.node(retained).bytes,old);assert.deepEqual(json((await f.call('read')).preferences),input);
+  assert.equal(f.disk.node(full).bytes.includes(Buffer.from('Current private draft')),false);assert.equal(f.disk.descriptors.size,0);
+  await assert.rejects(f.call('recover',snapshot()),ERROR,'a readable checkpoint cannot be replaced through recovery');assert.deepEqual(f.disk.node(retained).bytes,old);
+});
+
+test('recovery refuses missing records, foreign owners, locks and conflicting retained bytes without replacing data',async()=>{
+  for(const failure of['missing','foreign','locked','archive-conflict','encryption']){
+    const f=fixture(),full=win32.join(f.stateRoot,'workspace-preferences.v1.json'),raw=Buffer.from('{unreadable}\n');
+    if(failure!=='missing')f.disk.put(full,{kind:'file',bytes:raw});
+    if(failure==='foreign')f.setState({window:{...f.window,webContents:{...f.window.webContents}}});
+    if(failure==='locked')f.disk.put(full+'.lock',{kind:'file',bytes:Buffer.from('foreign')});
+    if(failure==='archive-conflict')f.disk.put(full+'.retained-'+hash(raw),{kind:'file',bytes:Buffer.from('foreign archive')});
+    if(failure==='encryption')f.safeStorage.setAvailable(false);
+    await assert.rejects(f.call('recover',snapshot()),ERROR);
+    if(failure!=='missing')assert.deepEqual(f.disk.node(full).bytes,raw,failure);
+    assert.equal(f.disk.descriptors.size,0,failure);
+  }
+});
+
+test('failed recovery encryption preserves both original and verified retained bytes for a later explicit attempt',async()=>{
+  const f=fixture(),full=win32.join(f.stateRoot,'workspace-preferences.v1.json'),raw=Buffer.from('{unreadable}\n');f.disk.put(full,{kind:'file',bytes:raw});
+  const encrypt=f.safeStorage.encryptString;f.safeStorage.encryptString=()=>{throw Error('Encryption unavailable');};
+  await assert.rejects(f.call('recover',snapshot()),ERROR);assert.deepEqual(f.disk.node(full).bytes,raw);assert.deepEqual(f.disk.node(full+'.retained-'+hash(raw)).bytes,raw);
+  f.safeStorage.encryptString=encrypt;await f.call('recover',snapshot());assert.deepEqual(json((await f.call('read')).preferences),snapshot());assert.equal(f.disk.descriptors.size,0);
+});
+
+test('recovery cannot replace the active record after owner loss during retention',async()=>{
+  const f=fixture(),full=win32.join(f.stateRoot,'workspace-preferences.v1.json'),raw=Buffer.from('{unreadable}\n');f.disk.put(full,{kind:'file',bytes:raw});
+  f.disk.filesystem.fsyncSync=()=>{f.setState({closing:true});};
+  await assert.rejects(f.call('recover',snapshot()),ERROR);assert.deepEqual(f.disk.node(full).bytes,raw);assert.equal(f.disk.descriptors.size,0);
+});
+
+test('recovery rejects redirected or hardlinked retained files and malformed preservation acknowledgements',async()=>{
+  for(const replacement of[{kind:'link'},{kind:'file',nlink:2n}]){
+    const f=fixture(),full=win32.join(f.stateRoot,'workspace-preferences.v1.json'),raw=Buffer.from('{unreadable}\n');f.disk.put(full,{kind:'file',bytes:raw});
+    f.disk.put(full+'.retained-'+hash(raw),{...replacement,bytes:raw});
+    await assert.rejects(f.call('recover',snapshot()),ERROR);assert.deepEqual(f.disk.node(full).bytes,raw);assert.equal(f.disk.descriptors.size,0);
+  }
+  const f=fixture();f.handlers.set('arcane:workspace-preferences-recover',async()=>({saved:true}));
+  await assert.rejects(f.call('recover',snapshot()),ERROR);assert.equal(f.disk.writes.length,0);
+});
+
+test('production wiring and preload expose only frozen version 1 read/save/recover; installation is inert', () => {
   const f = fixture();
   assert.equal(f.disk.reads, 0); assert.equal(f.disk.writes.length, 0); assert.deepEqual(f.safeStorage.calls, []);
   assert.equal(Object.isFrozen(f.exposed), true); assert.equal(Object.isFrozen(f.exposed.workspacePreferences), true);
   assert.equal(f.exposed.workspacePreferences.version, 1);
-  assert.deepEqual(Object.keys(f.exposed.workspacePreferences).sort(), ['read', 'save', 'version']);
-  assert.deepEqual([...f.handlers.keys()].sort(), ['arcane:setup-checklist-read', 'arcane:setup-checklist-save', 'arcane:welcome-tour-dismiss', 'arcane:welcome-tour-read', ...['read', 'save'].map(a => 'arcane:workspace-preferences-' + a)]);
+  assert.deepEqual(Object.keys(f.exposed.workspacePreferences).sort(), ['read', 'recover', 'save', 'version']);
+  assert.deepEqual([...f.handlers.keys()].sort(), ['arcane:setup-checklist-read', 'arcane:setup-checklist-save', 'arcane:welcome-tour-dismiss', 'arcane:welcome-tour-read', ...['read', 'recover', 'save'].map(a => 'arcane:workspace-preferences-' + a)]);
   assert.match(mainSource, /partition: 'arcane-workspace'/);
   assert.match(mainSource, /workspacePreferences: \{ enabled: false,[^\n]+encryptionRoundTripTested: false \}/);
 });

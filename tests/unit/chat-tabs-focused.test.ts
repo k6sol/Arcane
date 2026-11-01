@@ -196,6 +196,36 @@ test('validated snapshot/context subscriptions are read-only, redact keys, isola
   assert.throws(()=>readCodexState({...changed,nativeThreads:[{provider:'codex',projectPath:PROJECT,threadId:'foreign',sessionId:null,selection:null}]}));
 });
 
+test('explicit draft recovery preserves composer text and restores its source without submitting any native action',async t=>{
+  const f=controller();t.after(()=>f.chat.stop());const recovered:ChatTabPreferences[]=[],saved:ChatTabPreferences[]=[];
+  await f.chat.enableChatTabs({preferences:{read:async()=>{throw Error('Unreadable sealed record');},save:async value=>{saved.push(value);},recover:async value=>{recovered.push(structuredClone(value));}}});
+  await f.chat.start();assert.equal(f.chat.conversationSource(),null);assert.equal(recovered.length,0);
+  const composer=f.doc.getElementById('codex-composer');composer.value='Keep this open draft';composer.dispatchEvent(new Event('input'));
+  const button=f.doc.getElementById('codex-preferences-recover');assert.equal(button.hidden,false);assert.equal(button.disabled,false);
+  button.dispatchEvent(new Event('click'));await tick();await tick();
+  assert.equal(recovered.length,1);assert.equal(recovered[0]!.tabs.find(row=>row.localId===recovered[0]!.activeTabId)?.draft,'Keep this open draft');
+  assert.equal(composer.value,'Keep this open draft');assert.ok(f.chat.conversationSource());assert.equal(button.hidden,true);assert.match(f.doc.getElementById('codex-notice').textContent,/Nothing was sent/);
+  assert.ok(f.calls.every(call=>call.endsWith(':GET')));assert.equal(saved.length,0,'the recovery acknowledgement is its checkpoint');
+});
+
+test('failed draft recovery stays unavailable and edits during successful recovery are checkpointed afterwards',async()=>{
+  const doc=new DocumentFixture(),saved:ChatTabPreferences[]=[];let fail=true,release!:()=>void;
+  const tabs=new ChatTabs(doc.asDocument(),value=>value,callbacks,{preferences:{read:async()=>{throw Error();},save:async value=>{saved.push(value);},recover:async()=>{if(fail)throw Error();await new Promise<void>(resolve=>{release=resolve;});}}});
+  await tabs.initializePreferences(PROJECT);tabs.sync(state());tabs.updateDraft('Original open text');
+  assert.equal(await tabs.recoverPreferences(),false);assert.equal(tabs.persistenceStatus(),'native-error');assert.equal(tabs.active()!.draft,'Original open text');
+  fail=false;const recovering=tabs.recoverPreferences();assert.equal(tabs.canRecoverPreferences(),false);tabs.updateDraft('Edited while recovery was saving');release();assert.equal(await recovering,true);await tick();
+  assert.equal(tabs.persistenceStatus(),'native');assert.equal(tabs.active()!.draft,'Edited while recovery was saving');assert.equal(saved.at(-1)!.tabs[0]!.draft,'Edited while recovery was saving');
+});
+
+test('a lost recovery acknowledgement is resolved only by an exact checkpoint read, never a repeated recovery write',async()=>{
+  for(const mismatch of[false,true]){
+    const doc=new DocumentFixture();let reads=0,recoveries=0,checkpoint:ChatTabPreferences|null=null;
+    const tabs=new ChatTabs(doc.asDocument(),value=>value,callbacks,{preferences:{read:async()=>{reads++;if(!checkpoint)throw Error();return mismatch?{...checkpoint,projectPath:PROJECT+'-other'}:{tabs:checkpoint.tabs,activeTabId:checkpoint.activeTabId,provider:checkpoint.provider,projectPath:checkpoint.projectPath,version:checkpoint.version};},save:async()=>{},recover:async value=>{recoveries++;checkpoint=structuredClone(value);throw Error('Lost reply');}}});
+    await tabs.initializePreferences(PROJECT);tabs.sync(state());tabs.updateDraft('Retain exactly');
+    assert.equal(await tabs.recoverPreferences(),!mismatch);assert.equal(recoveries,1);assert.equal(reads,2);assert.equal(tabs.active()!.draft,'Retain exactly');assert.equal(tabs.persistenceStatus(),mismatch?'native-error':'native');
+  }
+});
+
 test('native preference restoration awaits read acknowledgement, fences canonical project and does not use origin storage',async()=>{
   const doc=new DocumentFixture(),localId=randomUUID(),saved:ChatTabPreferences={version:1,projectPath:PROJECT,provider:'codex',activeTabId:localId,tabs:[{localId,title:'Restored draft',provider:'codex',threadId:null,sessionId:null,draft:'Native saved draft',modelId:'fixture-alt',effort:'high',tool:'all',previewOpen:true}]};
   let release!:(value:unknown)=>void;const writes:ChatTabPreferences[]=[];

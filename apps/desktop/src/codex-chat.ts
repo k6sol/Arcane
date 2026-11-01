@@ -3129,7 +3129,7 @@ export class CodexChat {
     if(this.tabs)return;
     this.tabs=tabs;this.syncTabs();tabs.mount();this.loadTabDraft();this.render();this.enableTaskProposals();this.publishState();
     this.preferenceController=module.connectChatTabPreferences(this.doc,this);
-    if(tabs.persistenceStatus()==='native-error')this.text('codex-notice','Native chat preferences could not be verified. Local drafts are available; EXE persistence is unavailable.');
+    if(tabs.persistenceStatus()==='native-error')this.text('codex-notice','Error 423: Saved state unavailable. Save open drafts to resume. The previous unreadable draft record will be retained; nothing will be sent.');
   }
   /** A native preference save failed or recovered: show it and republish the unsaved state. */
   private persistenceChanged(tabs:ChatTabs):void {
@@ -3138,6 +3138,21 @@ export class CodexChat {
     if(tabs.persistenceStatus()==='native-error')this.text('codex-notice',failed);
     else if(this.el('codex-notice').textContent===failed)this.text('codex-notice','Chat preferences saved.');
     this.publishState();
+  }
+  private preferenceRecoveryBusy=false;
+  private renderPreferenceRecovery():void {
+    const button=this.doc.getElementById('codex-preferences-recover') as HTMLButtonElement|null;if(!button)return;
+    button.hidden=!this.tabs?.canRecoverPreferences?.()&&!this.preferenceRecoveryBusy;
+    button.disabled=this.stopped||!this.fresh||this.preferenceRecoveryBusy;
+    button.textContent=this.preferenceRecoveryBusy?'Saving open drafts…':'Save open drafts';
+  }
+  private async recoverOpenDrafts():Promise<void>{
+    const tabs=this.tabs;if(this.stopped||!this.fresh||this.preferenceRecoveryBusy||!tabs?.canRecoverPreferences())return;
+    this.stashTabDraft();this.preferenceRecoveryBusy=true;this.renderPreferenceRecovery();
+    const recovered=await tabs.recoverPreferences();this.preferenceRecoveryBusy=false;
+    if(this.stopped||this.tabs!==tabs)return;
+    this.text('codex-notice',recovered?'Open drafts saved. Nothing was sent.':'Error 423: Saved state unavailable. Your open text is retained; recovery could not be confirmed.');
+    this.renderControls();this.publishState();
   }
   private draftView(tab:ChatTabView|null):ChatTabView|null {
     return tab&&this.draftDirty&&tab.key===this.tabs?.active()?.key?{...tab,draft:this.value('codex-composer'),workflowDraft:!!this.workflowDraftOrigins.length||this.restoredWorkflowDraft}:tab;
@@ -4251,6 +4266,7 @@ export class CodexChat {
     this.on('codex-disconnect','click',()=>void this.dispatch('disconnect'));
     this.on('codex-select','click',()=>void this.dispatch('select',{model:this.value('codex-model'),effort:this.value('codex-effort')}));
     this.on('codex-model','change',()=>{this.modelSourceRevision++;this.modelSourceOwnerRevision++;this.populateEfforts();this.renderControls();});
+    this.on('codex-preferences-recover','click',()=>{void this.recoverOpenDrafts();});
     this.on('codex-effort','change',()=>{this.modelSourceRevision++;this.modelSourceOwnerRevision++;this.renderControls();});
     const startConversation = (event: Event) => this.startConversation(event);
     this.on('codex-thread-start', 'click', startConversation);
@@ -4760,6 +4776,7 @@ export class CodexChat {
     if(explanation)explanation.textContent=this.api.safe(taskHold?error.nextStep:error.explanation+' '+error.nextStep);
   }
   private renderControls() {
+    this.renderPreferenceRecovery();
     this.renderUsage();
     this.renderAssets();
     const s=this.snapshot(),t=s?.thread,activeThread=(!this.tabs||this.tabs.bound(this.state))?t:null,

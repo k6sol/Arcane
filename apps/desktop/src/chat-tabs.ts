@@ -15,7 +15,7 @@ export interface ChatTabView {
 interface Tab extends ChatTabView { selection: ChatSelection | null; draft: string; workflowDraft: boolean }
 export interface ChatTabsOptions {
   storage?: Pick<Storage, 'getItem' | 'setItem'>;
-  preferences?: { read(): Promise<unknown>; save(value: ChatTabPreferences): Promise<unknown> };
+  preferences?: { read(): Promise<unknown>; save(value: ChatTabPreferences): Promise<unknown>; recover?(value:ChatTabPreferences):Promise<unknown> };
   /** Opt in only when the parent has settled the legacy WorkspaceShell handshake. */
   captureLegacyNewChat?: boolean;
   /** Presentation-only navigation hook; never starts or grants native work. */
@@ -130,6 +130,38 @@ export class ChatTabs {
   }
   persistenceStatus(): 'native'|'native-loading'|'native-error'|'browser-origin'|'memory' {
     return this.options.preferences ? this.nativeError||this.nativeSaveFailed?'native-error':this.nativeReady?'native':'native-loading' : this.storage?'browser-origin':'memory';
+  }
+  private recoveringPreferences=false;
+  canRecoverPreferences():boolean{return !!this.options.preferences?.recover&&this.nativeError&&!this.recoveringPreferences&&!this.nativeSaving;}
+  private nativeSnapshot():ChatTabPreferences {
+    return {version:1,projectPath:this.projectPath!,provider:this.preferredProvider,activeTabId:this.rows.find(row=>row.key===this.activeKey)?.localId??null,
+      tabs:this.rows.map(row=>({localId:row.localId,title:row.title,provider:'codex',threadId:row.threadId,sessionId:row.sessionId,draft:row.draft,modelId:row.selection?.model??null,effort:row.selection?.effort??null,tool:row.tool,previewOpen:row.previewOpen,workflowDraft:row.workflowDraft===true}))};
+  }
+  private matchesCheckpoint(value:unknown,expected:ChatTabPreferences):boolean{
+    if(!exact(value,['version','projectPath','provider','activeTabId','tabs'])||['version','projectPath','provider','activeTabId'].some(key=>value[key]!==expected[key as keyof ChatTabPreferences])||!Array.isArray(value.tabs)||value.tabs.length!==expected.tabs.length||Reflect.ownKeys(value.tabs).length!==value.tabs.length+1)return false;
+    for(let i=0;i<expected.tabs.length;i++){
+      const descriptor=Object.getOwnPropertyDescriptor(value.tabs,String(i));if(!descriptor?.enumerable||!Object.hasOwn(descriptor,'value'))return false;
+      const row=descriptor.value,reference=expected.tabs[i]!,keys=Object.keys(reference);if(!exact(row,keys)||keys.some(key=>row[key]!==reference[key as keyof typeof reference]))return false;
+    }
+    return true;
+  }
+  /** Explicit presentation recovery only: retain the old sealed record and save the current window. Never sends. */
+  async recoverPreferences():Promise<boolean>{
+    if(!this.canRecoverPreferences()||!this.projectPath)return false;
+    this.persist();const value=this.nativeSnapshot(),serialized=JSON.stringify(value),generation=this.nativeGeneration;
+    if(this.clean(serialized)!==serialized||bytes(serialized)>CHAT_TAB_LIMITS.preferencesBytes)return false;
+    this.recoveringPreferences=true;this.notifyPersistence();
+    try{
+      try{await this.options.preferences!.recover!(value);}
+      catch{
+        // A lost recovery acknowledgement may follow a durable checkpoint. Inspect once;
+        // never repeat the recovery write or adopt a different project/draft snapshot.
+        if(!this.matchesCheckpoint(await this.options.preferences!.read(),value))return false;
+      }
+      if(generation!==this.nativeGeneration||this.projectPath!==value.projectPath)return false;
+      this.nativeError=false;this.nativeSaveFailed=false;this.nativeReady=true;this.nativeProject=value.projectPath;this.nativeSaved=serialized;this.nativeLast=serialized;
+      this.persistenceDirty=true;this.persist();return true;
+    }catch{return false;}finally{this.recoveringPreferences=false;this.notifyPersistence();}
   }
   providerPreference(): 'codex'|'claude' {return this.preferredProvider;}
   preferencesSaved():boolean {return !this.preferencesDirty&&!this.persistenceDirty&&!this.nativeSaving&&this.nativeQueued===null&&!this.nativeError&&this.persistenceStatus()!=='native-loading'&&this.persistenceStatus()!=='memory';}
@@ -626,6 +658,7 @@ export function restoreChatSwitchFocus(menu:HTMLDetailsElement,match:((node:HTML
 
 export interface WorkspacePreferencesBridge {
   readonly version:1; read():Promise<unknown>; save(value:ChatTabPreferences):Promise<unknown>;
+  recover?(value:ChatTabPreferences):Promise<unknown>;
 }
 export interface StartChatTabsOptions extends ChatTabsOptions {
   chat: Pick<CodexChat,'enableChatTabs'|'currentStateView'|'setChatProviderPreference'|'subscribeStateChange'>;
@@ -641,9 +674,10 @@ export function readWorkspacePreferencesBridge(doc:Document,options:{nativeBridg
   try {
     const supplied=Object.getOwnPropertyDescriptor(options,'nativeBridge');
     const candidate=supplied?('value' in supplied?supplied.value:undefined):ownData(ownData(doc.defaultView,'arcaneDesktop'),'workspacePreferences');
-    if(!exact(candidate,['version','read','save'])||!Object.isFrozen(candidate)||candidate.version!==1||typeof candidate.read!=='function'||typeof candidate.save!=='function')return null;
+    const recover=ownData(candidate,'recover');
+    if(!exact(candidate,['version','read','save',...(recover!==undefined?['recover']:[])])||!Object.isFrozen(candidate)||candidate.version!==1||typeof candidate.read!=='function'||typeof candidate.save!=='function'||recover!==undefined&&typeof recover!=='function')return null;
     const read=candidate.read as WorkspacePreferencesBridge['read'],save=candidate.save as WorkspacePreferencesBridge['save'];
-    return Object.freeze({version:1,read:()=>Reflect.apply(read,candidate,[]),save:(value:ChatTabPreferences)=>Reflect.apply(save,candidate,[value])});
+    return Object.freeze({version:1,read:()=>Reflect.apply(read,candidate,[]),save:(value:ChatTabPreferences)=>Reflect.apply(save,candidate,[value]),...(typeof recover==='function'?{recover:(value:ChatTabPreferences)=>Reflect.apply(recover,candidate,[value])}:{})});
   }catch{return null;}
 }
 export const CHAT_PREFERENCES_RESTORED_EVENT='workspace:preferencesrestored';
@@ -657,7 +691,10 @@ export function workspacePreferencesAdapter(doc:Document,options:{nativeBridge?:
   },save:async(value:ChatTabPreferences)=>{
     const acknowledgement=await native.save(value);
     if(!exact(acknowledgement,['saved'])||acknowledgement.saved!==true)throw new Error('Native chat preference save was not acknowledged.');
-  }}:undefined;
+  },...(native.recover?{recover:async(value:ChatTabPreferences)=>{
+    const acknowledgement=await native.recover!(value);
+    if(!exact(acknowledgement,['saved','preserved'])||acknowledgement.saved!==true||acknowledgement.preserved!==true)throw new Error('Draft recovery was not acknowledged. Your open text is retained.');
+  }}:{})}:undefined;
 }
 const preferenceControllers=new WeakMap<Document,{chat:StartChatTabsOptions['chat'];controller:ChatTabsController}>();
 /** Provider restore is presentation only, never authentication. One listener owner per chat. */

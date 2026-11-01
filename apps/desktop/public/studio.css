@@ -3638,6 +3638,7 @@ body.arcane-app.shell-compact .workspace-topbar{min-height:48px;padding:12px 24p
 .arcane-app .workspace-stage .chat-topline>[role=status]{flex:1 1 280px;min-width:0;margin:0;color:var(--tb-ink-62);font-size:12px;line-height:18px}
 .arcane-app .chat-topline .notice-actions{display:flex;align-items:center;flex-wrap:wrap;gap:8px}
 .arcane-app .chat-topline .notice-actions[hidden],.arcane-app .chat-topline #codex-notice[hidden]~.notice-actions{display:none}
+.arcane-app .chat-topline #codex-notice[hidden]~#codex-preferences-recover{display:none}
 .arcane-app .chat-topline .notice-action{display:inline-flex;align-items:center;height:28px;min-height:28px;padding:0 10px;border:1px solid var(--tb-line-control);border-radius:8px;background:transparent;box-shadow:none;color:var(--tb-ink-76);font-size:12px;font-weight:500;line-height:16px}
 .arcane-app .chat-topline .notice-details>summary{display:inline-flex;align-items:center;height:28px;padding:0 4px;color:var(--tb-ink-55);font-size:12px;cursor:pointer}
 .arcane-app .chat-topline .notice-details[open]{flex:1 0 100%}

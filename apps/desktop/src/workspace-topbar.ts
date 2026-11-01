@@ -95,7 +95,7 @@ export function startWorkspaceTopbar(doc: Document, options: WorkspaceTopbarOpti
   let lastNotice = '', restTimer: unknown = null;
   const clearRest = () => { if (restTimer !== null) { timers.clear(restTimer); restTimer = null; } };
   const setLine = (state: NoticeLineState) => { if (topline && topline.getAttribute('data-notice') !== state) topline.setAttribute('data-notice', state); };
-  const sticky = () => !!actions && !actions.hidden && !doc.getElementById('codex-notice')?.hidden;
+  const sticky = () => !doc.getElementById('codex-notice')?.hidden&&((!!actions&&!actions.hidden)||doc.getElementById('codex-preferences-recover')?.hidden===false);
   const engaged = () => { try { return !!topline?.matches(':hover, :focus-within'); } catch { return false; } };
   const rest = () => {
     restTimer = null;
