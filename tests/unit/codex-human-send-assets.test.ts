@@ -35,11 +35,16 @@ createInterface({input:process.stdin}).on('line',line=>{
    checks++;let tools=scenario.tools;
    if(scenario.mode==='preflight-fail'&&checks>1)tools=tools.filter(name=>name!==(scenario.native?'assets_start':'work_create'));
    const result={data:[{name:'arcane',runtimeStatus:'connected',toolsError:null,pluginId:null,tools:Object.fromEntries(tools.map(name=>[name,{}]))}],nextCursor:null};
-   if(scenario.mode==='hold-preflight'&&checks>1)return setTimeout(()=>reply(id,result),200);
+   if(scenario.mode==='hold-preflight'&&checks>1){
+     const timer=setInterval(()=>{if(!existsSync(scenario.preflightGate))return;clearInterval(timer);reply(id,result);},5);return;
+   }
    return reply(id,result);
  }
  if(method==='turn/start'){
    turns++;const turn={id:'send.turn:'+turns,status:'inProgress'};
+   if(scenario.mode==='hold-turn-ack'){
+     const timer=setInterval(()=>{if(!existsSync(scenario.turnAckGate))return;clearInterval(timer);reply(id,{turn});},5);return;
+   }
    if(scenario.mode==='reject-first'&&turns===1)return send({id,error:{code:-32602,message:'Synthetic rejection'}});
    if(scenario.mode==='unknown')return reply(id,{});
    if(scenario.mode==='disconnect')return process.exit(0);
@@ -77,10 +82,10 @@ async function fixture(t:test.TestContext,mode='normal',native=true){
        dispatched.push({operationId:value.operationId,granted:handle.status().granted,actor});},
      ended(id:string){handle.ended(id);ended.push({id,granted:handle.status().granted});}});
  }});
- const audit=join(root,'wire.jsonl'),gate=join(root,'finish');
+ const audit=join(root,'wire.jsonl'),gate=join(root,'finish'),preflightGate=join(root,'release-preflight'),turnAckGate=join(root,'release-turn-ack');
  const service=createCodexService({directory:join(root,'journal'),projectPath:project,...(native?{assetRegistry:observedRegistry}:{}),connect:async hooks=>{
    if(hooks){assert.deepEqual(Object.keys(hooks).sort(),['dispatched','ended','finalCredential','retired']);token=hooks.finalCredential();}
-   client=new CodexSession({command:process.execPath,args:['-e',PEER,JSON.stringify({mode,native,gate,tools:native?ARCANE_NATIVE_TOOL_NAMES:ARCANE_TOOL_NAMES}),audit],cwd:project,env:nativeEnvironment()},
+   client=new CodexSession({command:process.execPath,args:['-e',PEER,JSON.stringify({mode,native,gate,preflightGate,turnAckGate,tools:native?ARCANE_NATIVE_TOOL_NAMES:ARCANE_TOOL_NAMES}),audit],cwd:project,env:nativeEnvironment()},
      limits({requestTimeoutMs:5000}),'spawned-node-fixture','arcane-only',hooks);
    await client.initialize();return client;
  }});
@@ -96,7 +101,7 @@ async function fixture(t:test.TestContext,mode='normal',native=true){
  const action=(action:string,fields:Record<string,unknown>={})=>post({requestId:randomUUID(),connectionId:action==='connect'?null:service.state().snapshot!.connectionId,action,...fields});
  const ready=async()=>{assert.equal((await action('connect')).status,200);assert.equal((await action('select',{model:'fixture',effort:'low'})).status,200);assert.equal((await action('thread-start')).status,200);};
  const wire=async():Promise<Wire[]>=>(await readFile(audit,'utf8')).trim().split('\n').map(line=>JSON.parse(line) as Wire);
- return {service,registry,dispatched,ended,action,post,ready,wire,control,generic,origin,project,finish:(turn=1)=>writeFile(gate+'-'+turn,'complete',{flag:'wx'}),get token(){return token;},get client(){return client!;}};
+ return {service,registry,dispatched,ended,action,post,ready,wire,control,generic,origin,project,releasePreflight:()=>writeFile(preflightGate,'release',{flag:'wx'}),finish:(turn=1)=>writeFile(gate+'-'+turn,'complete',{flag:'wx'}),get token(){return token;},get client(){return client!;}};
 }
 
 async function until(check:()=>boolean|Promise<boolean>){
@@ -148,7 +153,7 @@ test('revocation during actual preflight prevents the pending human Send from re
  const f=await fixture(t,'hold-preflight');await f.ready();const pending=f.action('turn-start',{threadId:THREAD,text:'Human Send',allowAssets:true});
  const end=Date.now()+4000;while((await f.wire()).filter(row=>row.method==='mcpServerStatus/list').length<2){assert.ok(Date.now()<end);await delay(5);}
  assert.equal(f.service.state().nativeAssets?.granted,false);assert.throws(()=>f.registry.capture(f.token,'mutate'),denied);
- assert.equal((await f.action('revoke-assets',{threadId:THREAD})).status,200);assert.equal((await pending).status,200);
+ assert.equal((await f.action('revoke-assets',{threadId:THREAD})).status,200);await f.releasePreflight();assert.equal((await pending).status,200);
  assert.equal(f.dispatched[0]!.granted,false);assert.throws(()=>f.registry.capture(f.token,'mutate'),denied);
 });
 
@@ -222,8 +227,21 @@ test('revoking workspace writes during real MCP preflight prevents dispatch and 
  await until(async()=>(await f.wire()).filter(row=>row.method==='mcpServerStatus/list').length===2);
  assert.equal(f.service.state().snapshot!.thread!.writeGranted,false);
  assert.equal((await f.action('revoke-writes',{threadId:THREAD})).data.record.state,'acknowledged');
+ assert.equal((await f.wire()).filter(row=>row.method==='turn/start').length,0,'the peer is still holding preflight after the real revocation acknowledgement');
+ await f.releasePreflight();
  assert.equal((await pending).data.record.state,'rejected');assert.equal((await f.wire()).filter(row=>row.method==='turn/start').length,0);
  assert.equal(f.service.state().snapshot!.thread!.writeGranted,false);
+});
+
+test('revoking writes after witnessed dispatch retains an unknown Send and never replays or regrants it',async t=>{
+ const f=await fixture(t,'hold-turn-ack',false);await f.ready();
+ const pending=f.action('turn-start',{threadId:THREAD,text:'Dispatched human task',allowWorkspaceWrites:true});
+ await until(async()=>(await f.wire()).filter(row=>row.method==='turn/start').length===1);
+ assert.equal(f.service.state().snapshot!.thread!.writeGranted,true);
+ assert.equal((await f.action('revoke-writes',{threadId:THREAD})).data.record.state,'acknowledged');
+ assert.equal((await pending).data.record.state,'unknown');assert.equal(f.service.state().snapshot!.thread!.writeGranted,false);
+ assert.equal((await f.action('turn-start',{threadId:THREAD,text:'No automatic recovery',allowWorkspaceWrites:true})).data.record.state,'rejected');
+ assert.equal((await f.wire()).filter(row=>row.method==='turn/start').length,1);
 });
 
 test('one-turn workspace writes still require explicit review and end before a later approval can be accepted',async t=>{

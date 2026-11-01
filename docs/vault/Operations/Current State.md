@@ -7,7 +7,7 @@ tags: [arcane]
 
 ## Release and customer state
 
-Runtime implementation is signed **95d54be**. Release candidate **4edfe9f** changes only the exact preload capability test inventory; runtime inputs remain unchanged. Original [component/package run 41361990846](https://github.com/k6sol/Arcane/actions/runs/41361990846) is the release gate, last observed active. No candidate archive has been selected, downloaded or installed. The original 95 Linux whitelist failure is preserved, not rerun for green.
+Runtime implementation is signed **95d54be**. Candidate **4edfe9f** passes Linux but its original Windows unit2 job125014122741 fails a timer-dependent preflight ordering assertion. [[Bugs/Preflight Revocation Ordering]] replaces that timer with an explicit gate and verifies both pre-dispatch rejection and post-dispatch uncertainty: strict660 compile and all28 focused cases pass, zero skips/cancellations. Production code and timeout limits remain unchanged. Retain original [run41361990846](https://github.com/k6sol/Arcane/actions/runs/41361990846); require a fresh exact-source gate for this correction. No archive has been selected, downloaded or installed.
 
 The verified installed and loaded desktop remains **e8139e1**. Its authorized reopen completed: saved login/history and the GPT-6.1 Sol low model menu work. One synthetic new-chat Send was refused before acceptance by shared draft readiness; its text remains in the current window. Do not repeat that gesture, overwrite its record or force-close the window. Actual customer recovery and successful Send remain open.
 
