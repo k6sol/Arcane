@@ -9,7 +9,7 @@ tags: [arcane, dashboard]
 
 [[Operations/Current State|Current state]] · [[Operations/Next Session|Resume work]] · [[Delivery/Goal Board|Ten release goals]] · [[Arcane Map.canvas|Explore the map]]
 
-The verified loaded desktop is **e8139e1**. Saved login and the model menu work; actual customer Send remains blocked by draft preferences. New source adds chat dragging, hidden unsent drafts, stable error notices and explicit draft-storage recovery. The next candidate includes [[Bugs/Preflight Revocation Ordering|deterministic revocation verification]] after the original4ed timing-fixture failure; fresh hosted/package checks and verified delivery remain required. All whole-product goals remain open.
+The verified loaded desktop is **e8139e1**. Saved login and the model menu work; actual customer Send remains blocked by draft preferences. Candidate **7d3aa19** adds chat dragging, hidden unsent drafts, stable error notices and explicit draft-storage recovery, with [[Bugs/Preflight Revocation Ordering|deterministic revocation verification]]. Its [original release run](https://github.com/k6sol/Arcane/actions/runs/41363957277) and verified delivery remain required. All whole-product goals remain open.
 
 - [[Operations/Requirements Ledger|Customer requirements]] — preserve the complete brief and acceptance scope.
 - [[Skills/Development Skills|Build Arcane]] · [[Skills/Production Upgrade|Upgrade product skills]] · [[Skills/Skill Catalog|Skill evidence and status]].
