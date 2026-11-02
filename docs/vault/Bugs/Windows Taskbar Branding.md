@@ -14,3 +14,7 @@ The legacy stable launcher's embedded ICO is deliberately unchanged in this patc
 The generated PNG was visually inspected. JavaScript syntax and execution of the actual taskbar-property statement confirm Windows receives the existing packaged icon path and other platforms do not invoke the Windows API. All three focused offline packaging cases pass, including exact ICO payload copying, optional-icon compatibility and rejection of an outer-manifest-rehashed icon that differs from the verified product snapshot. The initial packaging run exposed the missing controlled-source inventory entry; that entry was corrected before the passing run. No native app or provider was launched by these fixtures. Actual updated Windows taskbar acceptance requires a verified package and restart; the running2d app remains unchanged and still shows its separate native connection failure.
 
 [[Bugs/Native Discovery Shutdown]] ? [[Operations/Next Session]]
+
+## Recovery-window host coverage
+
+The original623 release job exposed an incomplete VM host fixture: makeWindow now reads process.platform and invokes setAppDetails on Windows, but that fixture supplied neither. The harness now supplies the platform and records the actual API call. All five recovery cases pass, preserving the existing handoff/failure/deadline/quit assertions and adding exact app ID/icon path checks on both old and replacement owners, plus Linux/macOS exclusion. This is host-contract coverage, not actual Windows shell acceptance.

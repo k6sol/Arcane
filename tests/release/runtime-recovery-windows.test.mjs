@@ -6,12 +6,13 @@ const load=main.slice(main.indexOf('async function loadWorkspace()'),main.indexO
 assert.ok(block.startsWith('function installClipboardForWindow(owner)')&&load.startsWith('async function loadWorkspace()'));
 assert.ok(clearSelection.startsWith('function clearHumanAssetSelection()'),'Execute the actual navigation selection-clear helper.');
 const settle=async()=>{for(let n=0;n<15;n++)await Promise.resolve();};
-function fixture(mode='ok'){
+function fixture(mode='ok',platform='win32'){
  const calls=[],windows=[],timers=new Map();let context,timerId=0,release=()=>{};const gate=new Promise(done=>release=done);
  class Window extends EventEmitter{
   constructor(){super();this.dead=false;this.webContents=new EventEmitter();const contents=this.webContents;contents.mainFrame={url:''};contents.isDestroyed=()=>this.dead;contents.setWindowOpenHandler=()=>{};
    contents.session={setDevicePermissionHandler(){},webRequest:{onBeforeRequest(){}},clipboard:null};windows.push(this);
   }
+  setAppDetails(value){this.appDetails=JSON.parse(JSON.stringify(value));calls.push(['app-details',this,this.appDetails]);}
   isDestroyed(){return this.dead;}show(){calls.push(['show',this]);}setTitle(title){calls.push(['title',this,title]);}
   destroy(){if(this.dead)return;this.dead=true;this.webContents.emit('destroyed');this.emit('closed');calls.push(['destroy',this]);}
   async loadURL(url){this.webContents.mainFrame.url=url;this.webContents.emit('did-start-navigation',{},url,false,true);calls.push(['load',this]);
@@ -22,7 +23,7 @@ function fixture(mode='ok'){
  context=vm.createContext({window:null,pyxBar:{reset:()=>calls.push(['pyx-reset']),hide:()=>calls.push(['pyx-hide'])},recoveryWindow:null,recoveryWindowFailure:null,deferWindowShow:false,child:{exitCode:null,signalCode:null},switching:true,closing:false,smoke:false,
   assetSelectionGeneration:7,assetSelectionReady:true,appAssets:{selectHumanConversation(value){calls.push(['asset-selection',value]);return Promise.resolve();}},
   origin:'http://127.0.0.1:45871',token:'replacement-token',projectPath:'C:\\Project',projectSession:Object.freeze({id:'fixture'}),firstReadyMs:0,started:0,
-  BrowserWindow:Window,join,basename,__dirname:'C:/Fixture/app',performance:{now:()=>0},Promise,
+  process:{platform},BrowserWindow:Window,join,basename,__dirname:'C:/Fixture/app',performance:{now:()=>0},Promise,
   setTimeout:(fn,ms)=>{const id=++timerId;timers.set(id,{fn,ms});return id;},clearTimeout:id=>timers.delete(id),
   policy:{installClipboardPermissions:(session,getSession)=>{session.clipboard=getSession;calls.push(['clipboard',session]);},requestAllowed:()=>false,navigationAllowed:()=>true},
   runtimeRecovery:{waitForRenderer:async()=>true,cancelRenderer:()=>{},invalidate:owner=>calls.push(['invalidate',owner]),preferences:()=>null},nativeHandoff:null,providerSetup:null,
@@ -45,4 +46,10 @@ test('a hidden replacement never appears while loading and a deadline prevents l
 });
 test('closing the retained window during replacement honours the user quit instead of opening another app window',async()=>{
  const f=fixture('hold'),pending=f.reload(),rejected=assert.rejects(pending);await settle();f.previous.destroy();assert.equal(f.calls.filter(row=>row[0]==='quit').length,1);f.release();await rejected;assert.equal(f.context.window,null);assert.equal(f.windows[1].isDestroyed(),true);assert.equal(f.calls.filter(row=>row[0]==='show').length,0);
+});
+
+test('every Windows owner binds the packaged Arcane taskbar icon and other platforms skip the Windows API',async()=>{
+ const f=fixture();await f.reload();
+ for(const owner of f.windows)assert.deepEqual(owner.appDetails,{appId:'com.arcane.desktop',appIconPath:join('C:/Fixture/app','taskbar.ico'),appIconIndex:0});
+ for(const platform of ['linux','darwin']){const other=fixture('ok',platform);await other.reload();assert.ok(other.windows.every(owner=>owner.appDetails===undefined));assert.equal(other.calls.filter(row=>row[0]==='app-details').length,0);}
 });

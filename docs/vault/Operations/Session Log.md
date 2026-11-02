@@ -5,6 +5,10 @@ tags: [arcane]
 ---
 # Session log
 
+## 2026-11-02 ? Full metadata factory and recovery host checks
+
+[[Bugs/Native Discovery Shutdown]] now includes actual complete factory metadata evidence: both original processes and output streams closed normally without kill, with saved subscription/eight models and no thread/prompt/Studio. All35 remaining Windows focused cases passed locally unchanged; original hosted stalls remain unexplained. [[Bugs/Windows Taskbar Branding]] records the platform/API recovery-host fixture correction and five passing cases. Customer app connection and actual taskbar acceptance remain open.
+
 ## 2026-11-02 ? Native discovery closure and CSS cascade
 
 The actual installed-CLI metadata-only check in [[Bugs/Native Discovery Shutdown]] passed with the saved subscription/eight models and original child exit0/close/both stream EOFs after one stdin end and no kill. No model prompt, thread, bearer or Studio call. [[Bugs/Submitted Image Review]] records the CI-revealed final reduced-motion cascade correction and26 passing affected contracts. Other original Windows timeout/continuity failures remain open; customer app connection is not accepted by the discovery-only check.
