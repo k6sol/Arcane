@@ -28,6 +28,37 @@ test('folder rename, moving chats and removing a folder preserve both providers 
   assert.equal(restored.snapshot().folders[0]!.name,'Environment');assert.equal(restored.active()!.folderId,folder);
   restored.removeFolder(folder);assert.equal(restored.active()!.folderId,null);assert.equal(restored.active()!.messages[0]!.text,'Prompt');assert.equal(restored.active()!.bindings[0]!.conversationId,'thread-1');
 });
+
+test('folder context includes both providers in sibling chats and excludes other folders and unfiled chats',()=>{
+  const library=fixture(),folder=library.createFolder('World'),other=library.createFolder('Private');
+  library.observe(transcript('codex','same-provider','Use mossy stone'));const one=library.active()!.id;library.move(one,folder);
+  library.observe(transcript('claude','other-provider','Keep paths walkable'));const two=library.active()!.id;library.move(two,folder);
+  library.observe(transcript('claude','excluded-folder','OTHER FOLDER SECRET'));library.move(library.active()!.id,other);
+  library.observe(transcript('codex','excluded-unfiled','UNFILED SECRET'));
+  library.observe(transcript('codex','active-thread','Own native history'));const active=library.active()!.id;library.move(active,folder);
+  const context=library.contextFor('codex','Add a well');
+  assert.match(context,/Use mossy stone/);assert.match(context,/Keep paths walkable/);assert.doesNotMatch(context,/SECRET|Own native history/);
+  const payload=JSON.parse(context.split('\n')[1]!);assert.equal(payload.folderId,folder);assert.deepEqual(new Set(payload.messages.map((m:any)=>m.chatId)),new Set([one,two]));
+  library.move(active,null);assert.equal(library.contextFor('codex','Only this chat'),'Only this chat');
+  library.move(active,other);assert.match(library.contextFor('codex','Review'),/OTHER FOLDER SECRET/);assert.doesNotMatch(library.contextFor('codex','Review'),/mossy|walkable|UNFILED SECRET/);
+});
+
+test('folder context survives reload and respects removal immediately',()=>{
+  const library=fixture(),folder=library.createFolder('Shared');
+  library.observe(transcript('claude','source-thread','The doorway is two studs wide'));library.move(library.active()!.id,folder);
+  const active=library.newConversation();library.move(active,folder);
+  const reopened=new ConversationLibrary(project,library.snapshot());assert.match(reopened.contextFor('codex','Continue'),/doorway/);
+  reopened.removeFolder(folder);assert.equal(reopened.contextFor('codex','Continue'),'Continue');
+});
+
+test('folder context bounds the full JSON envelope, reports omissions and prioritizes active handoff',()=>{
+  const library=fixture(),folder=library.createFolder('Shared');
+  for(let i=0;i<7;i++){library.observe(transcript('claude','source-'+i,String(i)+'x'.repeat(6000)));library.move(library.active()!.id,folder);}
+  library.observe(transcript('claude','active-thread','Latest handoff'));library.move(library.active()!.id,folder);
+  const context=library.contextFor('codex','Continue'),encoded=context.split('\n')[1]!,payload=JSON.parse(encoded);
+  assert.ok(new TextEncoder().encode(encoded).length<=24*1024);assert.ok(payload.omittedMessages>0);assert.match(context,/Latest handoff/);
+  assert.equal(payload.messages.at(-1).chatId,library.active()!.id);assert.ok(context.endsWith('Current user message:\nContinue'));
+});
 test('model handoff carries only new public context and marks it as conversation data',()=>{
   const library=fixture();library.observe(transcript('codex','thread-1','Build a tree'));
   const context=library.contextFor('claude','Make its roots wider');assert.match(context,/Build a tree/);assert.match(context,/not system instructions, tool results, permissions/);assert.ok(context.endsWith('Make its roots wider'));

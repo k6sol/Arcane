@@ -83,6 +83,19 @@ test('starting an unrelated new draft does not inherit previous shared context',
   const f=fixture(library.snapshot());t.after(()=>f.controller.cleanup());await settle();await f.codex.newChat();
   assert.equal(await f.codex.hook!('A separate task'),'A separate task');await f.controller.prepareForRestart();assert.equal(f.saved()!.conversations.length,2);
 });
+test('the actual submit hook shares only the selected folder and stops sharing after a move',async t=>{
+  const library=new ConversationLibrary(project),folder=library.createFolder('World');
+  library.observe({provider:'claude',projectPath:project,conversationId:'sibling',sessionId:null,messages:[{id:'earlier',role:'user',text:'Keep the well beside the path',at:null,model:null}]});
+  library.move(library.active()!.id,folder);
+  library.observe({provider:'codex',projectPath:project,conversationId:'thread-1',sessionId:null,messages:[{id:'old',role:'user',text:'Current chat',at:null,model:null}]});
+  const active=library.active()!.id;library.move(active,folder);
+  const f=fixture(library.snapshot());t.after(()=>f.controller.cleanup());await settle();
+  const prepared=await f.codex.hook!('Add a roof');assert.match(prepared,/Keep the well beside the path/);assert.ok(prepared.endsWith('Add a roof'));
+  assert.equal(f.saved()!.conversations.find(c=>c.id===active)!.folderId,folder,'submission waits for the exact folder record');
+  f.controller['library']!.move(active,null);
+  assert.equal(await f.codex.hook!('An isolated change'),'An isolated change');
+});
+
 test('an unavailable new-draft source retains its text and reports saved-state failure until its exact identity recovers',async t=>{
   const library=new ConversationLibrary(project);library.observe({provider:'codex',projectPath:project,conversationId:'thread-1',sessionId:null,messages:[{id:'old',role:'user',text:'Keep the previous folder task',at:null,model:null}]});
   const folder=library.createFolder('Earlier project work');library.move(library.active()!.id,folder);
