@@ -85,3 +85,7 @@ Work in Arcane only; do not operate Roblox Studio or work on ArchLiquid. Preserv
 ## Pinned archive follow-up
 
 Signed8475cd9 has original Windows native success through actual Blender conversion, foliage/boulder/tree review and reopen. Ubuntu failed its original official archive acquisition with HTTP403 before conversion; preserve that failed outcome. [[Bugs/Pinned Blender Archive Cache]] adds verified archive reuse with21 isolated cases passing and no HTTP retry or cached test result. The hosted cache and packaged customer journey remain unaccepted.
+
+## Preview floor clearance
+
+[[Bugs/Orthographic Preview Floor]] records a measured camera fix with17 focused cases and an actual completed Blender4.5 fixture comparison. The same-view camera translation removes the reproduced dark strip without changing model geometry. The boulder material remains visually unaccepted. Original daf native41532520047 passes both platforms; its component jobs remain pending. Earlier8475 Windows unit failures remain retained and need investigation.

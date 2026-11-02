@@ -297,6 +297,23 @@ def environment(request, mats):
     return main, [], proxies
 
 
+
+def review_camera_offset(offset, span, ortho_scale):
+    """Keep the whole orthographic ray origin plane above the preview floor.
+
+    Translating along the same view axis changes neither silhouette nor projected scale.
+    A low side angle otherwise puts the bottom image rays inside/below PreviewGround.
+    """
+    if (not all(math.isfinite(value) for value in (*offset, span, ortho_scale)) or
+            span <= 0 or ortho_scale <= 0 or offset[2] <= 0):
+        raise ValueError("Invalid preview camera framing")
+    length = math.sqrt(sum(value * value for value in offset))
+    vertical = offset[2] / length
+    up_height = math.hypot(offset[0], offset[1]) / length
+    distance = max(length * span, (ortho_scale * .5 * up_height + span * .1) / vertical)
+    return tuple(value * distance / length for value in offset)
+
+
 def lookdev(main, request):
     scene = bpy.context.scene
     scene.render.engine = "CYCLES"
@@ -352,6 +369,7 @@ def lookdev(main, request):
     scene.camera = camera
     data.type = 'ORTHO'
     data.ortho_scale = span * 1.8
+    data.clip_start = max(.000001, min(.1, span * .001))
     return camera, target, span
 
 
@@ -603,7 +621,8 @@ def main():
         renders, review = spec_review(request, directory, camera, target, span, render_metrics)
     for name, offset in [] if review is not None else [("preview-hero.png", (2.6, -3.5, 2.3)), ("preview-side.png", (-4.0, 0, 0.5))]:
         event("review-render", name)
-        camera.location = target + Vector(offset) * span
+        camera.location = target + Vector(review_camera_offset(offset, span, camera.data.ortho_scale))
+        camera.data.clip_end = max(1000, (camera.location - target).length + span * 2)
         camera.rotation_euler = (target - camera.location).to_track_quat('-Z', 'Y').to_euler()
         scene.render.filepath = str(directory / name)
         bpy.ops.render.render(write_still=True)

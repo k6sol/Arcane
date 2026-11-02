@@ -18,6 +18,7 @@ on:
       - 'scripts/compile-product.mjs'
       - 'tests/native/**'
       - 'tests/unit/tree_structure_review_test.py'
+      - 'tests/unit/asset_preview_camera_test.py'
       - 'tests/unit/uv_engine_test.py'
       - 'tests/fixtures/uv/**'
       - 'tests/unit/rock_joints_test.py'
@@ -45,6 +46,7 @@ on:
       - 'scripts/compile-product.mjs'
       - 'tests/native/**'
       - 'tests/unit/tree_structure_review_test.py'
+      - 'tests/unit/asset_preview_camera_test.py'
       - 'tests/unit/uv_engine_test.py'
       - 'tests/fixtures/uv/**'
       - 'tests/unit/rock_joints_test.py'
@@ -111,6 +113,11 @@ jobs:
           PYTHONDONTWRITEBYTECODE: '1'
           PYTHONUTF8: '1'
         run: python tests/native/conversion_fidelity_policy_test.py
+      - name: Verify orthographic review floor clearance
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+          PYTHONUTF8: '1'
+        run: python tests/unit/asset_preview_camera_test.py
       - name: Verify same-job tree review identity and state restoration
         env:
           PYTHONDONTWRITEBYTECODE: '1'
