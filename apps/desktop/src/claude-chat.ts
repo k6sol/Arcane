@@ -560,6 +560,7 @@ export class ClaudeChat {
     for(const listener of this.transcriptListeners){try{listener();}catch{/* Presentation subscribers never affect a chat turn. */}}
   }
   showConversationNotice(message:string):void{this.notice=message;this.render();}
+  conversationNotice():string{return this.notice;}
   running(): boolean { return !!this.turn; }
   /** Sub-agents (Claude Code Task/Agent calls) in the shown chat's latest turn, for the composer's agents count. Presentation only. */
   subagents(): ClaudeSubagentView[] {

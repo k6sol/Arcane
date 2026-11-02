@@ -10,6 +10,8 @@ export interface SharedConversationPeer {
   subscribeTranscriptChange(listener:()=>void):()=>void;
   setBeforeMessageSubmit(callback:BeforeMessageSubmit|null):void;
   showConversationNotice(text:string):void;
+  /** Current renderer-safe explanation; cleared before a new saved native open. */
+  conversationNotice?():string;
   open(id:string):Promise<boolean>;
   openDraftConversation(localId:string):Promise<boolean>;
   newChat():Promise<boolean>;
@@ -204,10 +206,12 @@ export class SharedConversations {
     if(!binding&&!link){this.render();return;}
     this.suspended++;
     try{
-      const provider=binding?.provider??link!.provider,peer=this.peer(provider),ok=!!peer&&(binding?await peer.open(binding.conversationId):await peer.openDraftConversation(link!.localId));
+      const provider=binding?.provider??link!.provider,peer=this.peer(provider);
+      if(binding&&peer?.conversationNotice)peer.showConversationNotice('');
+      const ok=!!peer&&(binding?await peer.open(binding.conversationId):await peer.openDraftConversation(link!.localId));
       const source=link?this.source(provider):null;
       if(this.stopped||navigation!==this.navigationRevision||this.options.provider()!==current||this.library.active()?.id!==id)return;
-      if(!ok||link&&(source?.projectPath!==this.library.snapshot().projectPath||source.localId!==link.localId||peer?.isDraftConversation()!==true)){restore();this.notice('This saved conversation could not be opened. Your current chat and draft were retained.');return;}
+      if(!ok||link&&(source?.projectPath!==this.library.snapshot().projectPath||source.localId!==link.localId||peer?.isDraftConversation()!==true)){restore();this.notice(binding&&peer?.conversationNotice?.()||'This saved conversation could not be opened. Your current chat and draft were retained.');return;}
       if(provider!==current&&!this.options.requestProvider(provider)){restore();return;}
       this.persist();
     }catch{if(!this.stopped&&navigation===this.navigationRevision&&this.library.active()?.id===id){restore();this.notice('This saved conversation could not be opened. Try again after checking the provider connection.');}}

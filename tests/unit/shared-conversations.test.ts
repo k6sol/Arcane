@@ -9,6 +9,7 @@ class Peer implements SharedConversationPeer {
   value:LibraryTranscript;hook:((draft:string)=>string|Promise<string>)|null=null;listeners=new Set<()=>void>();opens:string[]=[];refuse=false;notice='';draft=false;sourceAvailable=true;unsent='';newCalls=0;newChatGate:Promise<void>|null=null;
   constructor(provider:'codex'|'claude',conversationId:string|null){this.localId=provider+'-local';this.value={provider,projectPath:project,conversationId,sessionId:null,messages:[]};this.draft=conversationId===null;}
   recordedTranscript(){return structuredClone(this.value);}
+  conversationNotice(){return this.notice;}
   conversationSource(){return this.sourceAvailable&&this.value.projectPath?{projectPath:this.value.projectPath,localId:this.localId}:null;}
   isDraftConversation(){return this.draft;}
   subscribeTranscriptChange(f:()=>void){this.listeners.add(f);return()=>{this.listeners.delete(f);};}
@@ -215,6 +216,22 @@ test('unsent provider handoff reopens each exact linked draft rather than creati
   assert.equal(f.claude.localId,claudeId);assert.equal(f.claude.unsent,'Unsent Claude task');
   await f.controller.prepareForRestart();assert.equal(f.saved()!.conversations.length,1);assert.equal(f.saved()!.draftLinks!.length,2);
   assert.equal(f.codex.newCalls,0);assert.equal(f.claude.newCalls,1);assert.deepEqual(f.codex.opens,[]);assert.deepEqual(f.claude.opens,[]);
+});
+
+test('saved native open retains its new provider refusal and never reuses a stale explanation',async t=>{
+  const library=new ConversationLibrary(project);
+  library.observe({provider:'codex',projectPath:project,conversationId:'other-thread',sessionId:null,messages:[{id:'old',role:'user',text:'Saved task',at:null,model:null}]});
+  const target=library.snapshot().activeId!;
+  const f=fixture(library.snapshot());t.after(()=>f.controller.cleanup());await settle();await f.controller.prepareForRestart();
+  const previous=f.saved()!.activeId;f.codex.unsent='Retain this draft';f.codex.notice='Stale provider error';
+  f.codex.open=async()=>{f.codex.notice='The saved session needs recovery before it can resume.';return false;};
+  await f.controller['open'](target);await f.controller.prepareForRestart();
+  assert.equal(f.codex.notice,'The saved session needs recovery before it can resume.');
+  assert.equal(f.saved()!.activeId,previous);assert.equal(f.codex.unsent,'Retain this draft');assert.equal(f.codex.value.conversationId,'thread-1');
+  f.codex.open=async()=>false;
+  await f.controller['open'](target);await f.controller.prepareForRestart();
+  assert.match(f.codex.notice,/current chat and draft were retained/);assert.doesNotMatch(f.codex.notice,/needs recovery|Stale provider/);
+  assert.equal(f.saved()!.activeId,previous);assert.equal(f.codex.unsent,'Retain this draft');
 });
 
 test('a refused linked draft open preserves the prior sidebar and actual provider draft',async t=>{

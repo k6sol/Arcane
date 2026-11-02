@@ -3280,6 +3280,7 @@ export class CodexChat {
     return !!tab&&await this.selectChat(tab.key);
   }
   showConversationNotice(message:string):void{this.text('codex-notice',message);}
+  conversationNotice():string{return this.doc.getElementById('codex-notice')?.textContent??'';}
   recordedTranscript():RecordedChatTranscript {
     const active=this.tabs?.active();
     if(active?.kind==='draft')return {provider:'codex',projectPath:this.state?.projectPath??null,conversationId:null,sessionId:null,earlierCount:0,messages:[]};
