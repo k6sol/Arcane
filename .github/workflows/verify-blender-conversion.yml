@@ -150,11 +150,23 @@ jobs:
           python tests/unit/procedural_generator_test.py
           GeneratorContract.test_natural_broadleaf_is_deterministic_with_baselined_counts
           GeneratorContract.test_natural_wood_cap_uv_winding_preserves_geometry_and_other_authored_uvs
+      - name: Restore checksum-pinned Blender archive
+        id: blender-archive-cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ runner.temp }}/arcane-blender-archives
+          key: arcane-blender-5.2.3-${{ runner.os }}-${{ hashFiles('scripts/blender-test-runtime.py') }}
       - name: Acquire and verify the pinned official Blender runtime
         env:
           PYTHONDONTWRITEBYTECODE: '1'
           PYTHONUTF8: '1'
         run: python scripts/blender-test-runtime.py --github-env
+      - name: Retain verified official Blender archive
+        if: ${{ steps.blender-archive-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ runner.temp }}/arcane-blender-archives
+          key: ${{ steps.blender-archive-cache.outputs.cache-primary-key }}
       - name: Verify real source conversion and owned cancellation
         id: native-conversion
         run: node --test --test-concurrency=1 tests/native/blender-conversion.test.mjs

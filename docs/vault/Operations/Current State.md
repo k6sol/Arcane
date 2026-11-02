@@ -81,3 +81,7 @@ Work in Arcane only; do not operate Roblox Studio or work on ArchLiquid. Preserv
 ## Native query and fixture verification
 
 [[Bugs/Windows Native Worker Query]] removes the PowerShell host from default Windows worker checks with a reviewed5.6KB helper. Strict660,81 frozen worker/recovery cases, five isolated actual-runtime pin guards and final198 release cases pass; actual Node/Unicode/exit observations are91-111ms locally. The original2e Windows native failure remains retained, and new hosted verification is still required. [[Bugs/Browser Fixture Asset Loading]] addresses the separate281 Windows release navigation fixture with eight passing browser cases and unchanged deadlines. All seven original2e component/package jobs passed; that does not erase its native failure or accept customer startup.
+
+## Pinned archive follow-up
+
+Signed8475cd9 has original Windows native success through actual Blender conversion, foliage/boulder/tree review and reopen. Ubuntu failed its original official archive acquisition with HTTP403 before conversion; preserve that failed outcome. [[Bugs/Pinned Blender Archive Cache]] adds verified archive reuse with21 isolated cases passing and no HTTP retry or cached test result. The hosted cache and packaged customer journey remain unaccepted.

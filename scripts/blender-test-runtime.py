@@ -181,6 +181,66 @@ def download(path, name, expected_bytes, expected_sha):
     return {"url": url, "bytes": count, "sha256": digest.hexdigest()}
 
 
+
+def copy_verified_archive(source, target, expected_bytes, expected_sha):
+    """Copy immutable archive bytes; a cache hit never supplies trusted metadata."""
+    source, target = Path(source), Path(target)
+    named = no_links(source)
+    require(named.st_size == expected_bytes, "cached runtime archive length mismatch")
+    no_links(target.parent, directory=True)
+    digest, count, started = hashlib.sha256(), 0, time.monotonic()
+    with source.open("rb") as reader, target.open("xb") as output:
+        opened = os.fstat(reader.fileno())
+        require((opened.st_dev, opened.st_ino) == (named.st_dev, named.st_ino) and
+                stat.S_ISREG(opened.st_mode) and opened.st_nlink == 1,
+                "runtime archive identity changed")
+        while True:
+            require(time.monotonic() - started <= 180, "runtime archive verification deadline exceeded")
+            chunk = reader.read(64 * 1024)
+            if not chunk:
+                break
+            count += len(chunk)
+            require(count <= expected_bytes, "runtime archive byte limit exceeded")
+            output.write(chunk)
+            digest.update(chunk)
+        after, current = os.fstat(reader.fileno()), no_links(source)
+        # Windows Python can report creation ctime from lstat and change ctime from fstat.
+        # Compare ctime only through the same open handle; named identity still binds the file.
+        identity = lambda info: (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+        require(identity(after) == identity(opened) == identity(current) and
+                after.st_ctime_ns == opened.st_ctime_ns, "runtime archive changed during verification")
+    require(count == expected_bytes and digest.hexdigest() == expected_sha, "runtime archive integrity mismatch")
+    no_links(target)
+
+
+def acquire_archive(path, cache_directory, name, expected_bytes, expected_sha):
+    cache_directory = Path(cache_directory)
+    cache_directory.mkdir(exist_ok=True)
+    no_links(cache_directory, directory=True)
+    cached = cache_directory / name
+    try:
+        cached.lstat()
+    except FileNotFoundError:
+        evidence = download(path, name, expected_bytes, expected_sha)
+        # Publish only after the original official download has passed its exact pins.
+        staged = cache_directory / (name + ".verified")
+        copy_verified_archive(path, staged, expected_bytes, expected_sha)
+        # Atomic no-overwrite publication; never expose unverified bytes as a cache entry.
+        os.link(staged, cached)
+        staged.unlink()
+        no_links(cached)
+        source = "download"
+    else:
+        # Invalid cache entries fail closed, without replacement or a network retry.
+        copy_verified_archive(cached, path, expected_bytes, expected_sha)
+        evidence = {"url": "https://download.blender.org/release/Blender5.2/" + name,
+                    "bytes": expected_bytes, "sha256": expected_sha}
+        source = "cache"
+    print(json.dumps({"kind": "arcane-blender-archive-acquisition", "source": source,
+                      "bytes": evidence["bytes"], "sha256": evidence["sha256"]}), flush=True)
+    return evidence
+
+
 def append_environment(filename, values):
     path = Path(filename)
     no_links(path)
@@ -206,7 +266,7 @@ def main():
     no_links(owned, directory=True)
     name, size, checksum, executable_name = PINS[sys.platform]
     archive = owned / name
-    archive_evidence = download(archive, name, size, checksum)
+    archive_evidence = acquire_archive(archive, temp / "arcane-blender-archives", name, size, checksum)
     extracted = owned / "runtime"
     extracted.mkdir()
     root = "blender-5.2.3-windows-x64" if sys.platform == "win32" else "blender-5.2.3-linux-x64"

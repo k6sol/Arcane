@@ -146,6 +146,103 @@ class RuntimeArchiveTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 runtime.download(self.root / "wrong-size.zip", "fixture.zip", 3, hashlib.sha256(b"data").hexdigest())
 
+    def test_verified_archive_cache_hit_does_not_contact_network(self):
+        cache = self.root / "cache"
+        cache.mkdir()
+        (cache / "fixture.zip").write_bytes(b"data")
+        with patch.object(runtime, "download", side_effect=AssertionError("network must not run")):
+            evidence = runtime.acquire_archive(self.root / "copied.zip", cache, "fixture.zip", 4, hashlib.sha256(b"data").hexdigest())
+        self.assertEqual((self.root / "copied.zip").read_bytes(), b"data")
+        self.assertEqual(evidence, {"url": "https://download.blender.org/release/Blender5.2/fixture.zip", "bytes": 4, "sha256": hashlib.sha256(b"data").hexdigest()})
+
+    def test_cold_cache_publishes_only_the_verified_original_download(self):
+        def original(path, name, size, checksum):
+            Path(path).write_bytes(b"data")
+            return {"url": "https://download.blender.org/release/Blender5.2/" + name, "bytes": size, "sha256": checksum}
+        cache = self.root / "cache"
+        with patch.object(runtime, "download", side_effect=original) as download:
+            runtime.acquire_archive(self.root / "download.zip", cache, "fixture.zip", 4, hashlib.sha256(b"data").hexdigest())
+        self.assertEqual(download.call_count, 1)
+        self.assertEqual((cache / "fixture.zip").read_bytes(), b"data")
+        self.assertEqual((cache / "fixture.zip").stat().st_nlink, 1)
+
+    def test_bad_cache_fails_without_download_or_replacement(self):
+        cache = self.root / "cache"
+        cache.mkdir()
+        cached = cache / "fixture.zip"
+        cached.write_bytes(b"evil")
+        with patch.object(runtime, "download", side_effect=AssertionError("no fallback")), self.assertRaisesRegex(ValueError, "integrity mismatch"):
+            runtime.acquire_archive(self.root / "bad.zip", cache, "fixture.zip", 4, hashlib.sha256(b"data").hexdigest())
+        self.assertEqual(cached.read_bytes(), b"evil")
+
+    def test_cache_rejects_wrong_size_hardlinks_and_directories(self):
+        cache = self.root / "cache"
+        cache.mkdir()
+        (cache / "short.zip").write_bytes(b"bad")
+        original = self.root / "linked-original.zip"
+        original.write_bytes(b"data")
+        os.link(original, cache / "linked.zip")
+        (cache / "directory.zip").mkdir()
+        with patch.object(runtime, "download", side_effect=AssertionError("no fallback")):
+            for name in ["short.zip", "linked.zip", "directory.zip"]:
+                with self.subTest(name=name), self.assertRaises(ValueError):
+                    runtime.acquire_archive(self.root / ("copy-" + name), cache, name, 4, hashlib.sha256(b"data").hexdigest())
+                self.assertFalse((self.root / ("copy-" + name)).exists())
+
+    def test_failed_official_download_is_not_retried_or_published(self):
+        import urllib.error
+        cache = self.root / "cache"
+        class Opener:
+            calls = 0
+            def open(self, request, timeout):
+                self.calls += 1
+                raise urllib.error.HTTPError(request.full_url, 403, "Forbidden", {}, None)
+        opener = Opener()
+        with patch.object(runtime.urllib.request, "build_opener", return_value=opener), self.assertRaises(urllib.error.HTTPError) as failure:
+            runtime.acquire_archive(self.root / "failed.zip", cache, "fixture.zip", 4, hashlib.sha256(b"data").hexdigest())
+        failure.exception.close()
+        self.assertEqual(opener.calls, 1)
+        self.assertEqual(list(cache.iterdir()), [])
+        self.assertFalse((self.root / "failed.zip").exists())
+
+    def test_cache_change_during_verification_is_refused(self):
+        cache = self.root / "cache"
+        cache.mkdir()
+        cached = cache / "fixture.zip"
+        cached.write_bytes(b"data")
+        actual, reads = runtime.no_links, 0
+        def changed(path, directory=False):
+            nonlocal reads
+            if Path(path) == cached:
+                reads += 1
+                if reads == 2:
+                    info = cached.stat()
+                    os.utime(cached, ns=(info.st_atime_ns, info.st_mtime_ns + 1000000000))
+            return actual(path, directory)
+        with patch.object(runtime, "no_links", side_effect=changed), patch.object(runtime, "download", side_effect=AssertionError("no fallback")), self.assertRaisesRegex(ValueError, "changed during verification"):
+            runtime.acquire_archive(self.root / "changed.zip", cache, "fixture.zip", 4, hashlib.sha256(b"data").hexdigest())
+
+    def test_download_must_revalidate_before_entering_cache(self):
+        def changed_download(path, name, size, checksum):
+            Path(path).write_bytes(b"evil")
+            return {"url": "https://download.blender.org/release/Blender5.2/" + name, "bytes": size, "sha256": checksum}
+        cache = self.root / "cache"
+        with patch.object(runtime, "download", side_effect=changed_download), self.assertRaisesRegex(ValueError, "integrity mismatch"):
+            runtime.acquire_archive(self.root / "changed-download.zip", cache, "fixture.zip", 4, hashlib.sha256(b"data").hexdigest())
+        # No workflow save step runs after acquisition fails. Retain partial bytes for evidence.
+        self.assertFalse((cache / "fixture.zip").exists())
+        self.assertEqual((cache / "fixture.zip.verified").read_bytes(), b"evil")
+
+    def test_existing_owned_archive_is_not_overwritten_on_cache_hit(self):
+        cache = self.root / "cache"
+        cache.mkdir()
+        (cache / "fixture.zip").write_bytes(b"data")
+        target = self.root / "keep.zip"
+        target.write_bytes(b"keep")
+        with patch.object(runtime, "download", side_effect=AssertionError("no fallback")), self.assertRaises(FileExistsError):
+            runtime.acquire_archive(target, cache, "fixture.zip", 4, hashlib.sha256(b"data").hexdigest())
+        self.assertEqual(target.read_bytes(), b"keep")
+
     def test_environment_append_writes_fixed_lines_and_refuses_newlines(self):
         target = self.root / "github-env"
         target.write_bytes(b"")
