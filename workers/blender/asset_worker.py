@@ -304,6 +304,15 @@ def lookdev(main, request):
     scene.cycles.samples = request["renderSamples"]
     scene.cycles.seed = request["seed"]
     scene.cycles.use_denoising = True
+    # A closed cutout card consumes two transparent intersections. The default
+    # depth of eight turns overlapping leaf sprays black before a ray reaches
+    # the sky. Keep opaque previews at their established depth; only a connected
+    # authored cutout graph needs the bounded foliage setting.
+    cutout = any(mat and mat.use_nodes and
+                 any(link.from_node == mat.node_tree.nodes.get("Arcane_AlphaClip") and link.to_socket.name == "Alpha"
+                     for link in mat.node_tree.links)
+                 for obj in main for mat in obj.data.materials)
+    scene.cycles.transparent_max_bounces = 32 if cutout else 8
     scene.render.resolution_x = request["renderResolution"]
     scene.render.resolution_y = request["renderResolution"]
     scene.render.resolution_percentage = 100

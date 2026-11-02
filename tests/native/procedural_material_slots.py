@@ -12,7 +12,7 @@ import worker_paths
 import bpy
 import procedural
 from audit import mesh_metrics
-from asset_worker import mesh_audit_reason
+from asset_worker import mesh_audit_reason, lookdev
 
 
 def geometry(mesh):
@@ -86,9 +86,30 @@ for union in (inherited_slots, lambda *_: None):
         mesh.materials.clear()
         mesh.materials.append(authored)
 procedural.union_wood = original_union
+# Exercise the full production lookdev on actual Blender nodes. An unused
+# cutout node cannot change the policy, and a later opaque preview resets it.
+preview_request = {"seed": 31, "renderSamples": 16, "renderResolution": 512}
+obj = main[0]
+before_preview = geometry(obj.data)
+mat = obj.data.materials[0]
+clip = mat.node_tree.nodes.new("ShaderNodeMath")
+clip.name, clip.operation = "Arcane_AlphaClip", "ROUND"
+bpy.context.scene.cycles.transparent_max_bounces = 64
+lookdev([obj], preview_request)
+assert bpy.context.scene.cycles.transparent_max_bounces == 8
+shader = mat.node_tree.nodes.get("Principled BSDF")
+link = mat.node_tree.links.new(clip.outputs["Value"], shader.inputs["Alpha"])
+lookdev([obj], preview_request)
+assert bpy.context.scene.cycles.transparent_max_bounces == 32
+assert bpy.context.scene.cycles.samples == 16
+assert bpy.context.scene.render.resolution_x == bpy.context.scene.render.resolution_y == 512
+mat.node_tree.links.remove(link)
+lookdev([obj], preview_request)
+assert bpy.context.scene.cycles.transparent_max_bounces == 8
+assert geometry(obj.data) == before_preview
 import oak_spray_layout_test
 spray_suite = unittest.defaultTestLoader.loadTestsFromModule(oak_spray_layout_test)
 spray_result = unittest.TextTestRunner().run(spray_suite)
 assert spray_result.wasSuccessful() and spray_result.testsRun == 4 and not spray_result.skipped
-print("ARCANE_GENERATED_MATERIAL_SLOTS_OK " + json.dumps({"cases": 2, "diagnosticCases": 1,
+print("ARCANE_GENERATED_MATERIAL_SLOTS_OK " + json.dumps({"cases": 2, "diagnosticCases": 1, "previewCases": 3,
       "oakSprayCases": spray_result.testsRun, "blender": bpy.app.version_string}))
