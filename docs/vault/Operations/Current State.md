@@ -15,6 +15,8 @@ The verified installed and loaded desktop remains **e8139e1**. Its authorized re
 
 - [[Bugs/Mesh Keep Preparation]] prepares all procedural replacement appearances before publishing any mesh. Second-clone failure and late allocation revocation preserve original ownership and returned upload IDs; all23 focused standalone Luau/compiler cases pass. PBR image persistence and native Studio acceptance remain open.
 
+- The same keep path now restores exact original ownership after a controlled mid-publication failure. Source edits refuse publication; unexpected authored children are retained under the cleanup-failure fence. Failed recording closure is not retried or labelled kept. The expanded23-case standalone selection passes; hosted delivery and native acceptance remain distinct.
+
 - [[Bugs/Shared Draft Readiness]] uses one canonical Windows project identity without weakening exact shared-draft ownership or save gates. This fixes a controlled mismatch, not a claim that the customer's directory was aliased.
 - [[Bugs/Chat Organization]] adds native browser chat dragging into folders/back to Chats. Unsent drafts remain stored and accessible as drafts; sidebar chats require a submitted user message. External drag payloads are rejected; the existing move menu remains available.
 - [[Bugs/Conversation Notice Layout]] keeps notices and expanded details out of transcript/composer flow, verified at four widths.

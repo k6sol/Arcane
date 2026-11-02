@@ -7,7 +7,7 @@
   "entry": "ArcaneLocalBridge",
   "runtimeIdentity": {
     "scheme": "arcane-plugin-source-v1",
-    "sha256": "ddc7b4b466517a9ab5fc0b10337368305f900ea349a7feaf07a0e3d568b4b3c2"
+    "sha256": "dea8cb1be755ef067091101db742c9c2e9153d2437800d07d517977815fe14f5"
   },
   "sources": [
     {
@@ -87,8 +87,8 @@
     },
     {
       "path": "src/AssetPlacement.luau",
-      "bytes": 98379,
-      "sha256": "57c96aefbb8064d4f097823dcc2cbe4eda59a3698a96b1bf5cea15f064d00e48"
+      "bytes": 101300,
+      "sha256": "45ba3cc4ff6f1129c16dc954017e4c4fd1f5f6837a08839009fd953e5c738861"
     },
     {
       "path": "src/TerrainGen.luau",
@@ -100,14 +100,14 @@
     {
       "name": "ArcaneLocalBridge.rbxm",
       "format": "roblox-xml-v4",
-      "bytes": 553232,
-      "sha256": "16cc846a680d9cfb06e93e3b917b53ae1fca82047cb0008da43bafa5b4b7e0f8"
+      "bytes": 556153,
+      "sha256": "94a51e353b3ddb97507c2ea74caf5dd699c6d717789fa680fb92cddc8f5a0dad"
     },
     {
       "name": "ArcaneLocalBridge.rbxmx",
       "format": "roblox-xml-v4",
-      "bytes": 553232,
-      "sha256": "16cc846a680d9cfb06e93e3b917b53ae1fca82047cb0008da43bafa5b4b7e0f8"
+      "bytes": 556153,
+      "sha256": "94a51e353b3ddb97507c2ea74caf5dd699c6d717789fa680fb92cddc8f5a0dad"
     }
   ]
 }

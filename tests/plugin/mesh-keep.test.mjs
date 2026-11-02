@@ -32,7 +32,7 @@ local enums = {AssetType = category("AssetType", {"Mesh", "Image"}), AssetCreato
 local function editable(): any return {ClassName = "EditableMesh", IsA = function(_self: any, name: string): boolean return name == "EditableMesh" end} end
 
 local function setup(meshCount: number): any
-  local s: any = {uploads = {}, parts = 0, freshParts = {}, commits = 0, userId = 78, nextId = 9000, rejectAt = nil, throwAt = nil, partFails = false}
+  local s: any = {uploads = {}, parts = 0, freshParts = {}, commits = 0, publishCalls = 0, userId = 78, nextId = 9000, rejectAt = nil, throwAt = nil, partFails = false}
   local folder = Instance.new("Folder")
   local model = Instance.new("Model"); model.Parent = folder
   local owner: any = {meshes = {}, placed = model, retired = false}
@@ -52,7 +52,19 @@ local function setup(meshCount: number): any
     if s.partFails then error("asset not ready") end
     s.parts += 1
     local part = Instance.new("MeshPart"); part._properties.MeshContent = content; part._properties.Options = options
+    local base = getmetatable(part)
+    local wrapped = table.clone(base)
+    wrapped.__newindex = function(self: any, key: string, value: any): ()
+      if key == "Parent" and value == model then
+        s.publishCalls += 1
+        if s.failPublishAt == s.publishCalls then error("injected publication failure") end
+      end
+      base.__newindex(self, key, value)
+      if key == "Parent" and value == model and s.afterPublish then s.afterPublish(self) end
+    end
+    setmetatable(part, wrapped)
     table.insert(s.freshParts, part)
+    if s.afterCreate then s.afterCreate(part) end
     return part
   end
   s.engine = {service = service, AssetUpload = AssetUpload, enums = enums,
@@ -240,6 +252,53 @@ for index, resource in ipairs(s.owner.meshes) do
   check(resource.part == beforeParts[index] and resource.part.Parent == s.model and resource.keptAssetId == nil, "late clone guard preserves original parts")
   check(receipt.meshes[index].assetId == 9000 + index and s.freshParts[index]._destroyed and s.appearanceClones[index + 2]._destroyed, "late clone guard retains IDs and retires allocated parts and appearances")
 end
+
+-- Publication of the second part can fail after the first was replaced.
+s = setup(2); material = scalarMaterial(s)
+beforeParts = {s.owner.meshes[1].part, s.owner.meshes[2].part}
+beforeAppearances = {s.owner.meshes[1].appearance, s.owner.meshes[2].appearance}
+placedOwner = s.ops.registry.owned[s.model]
+s.failPublishAt = 2
+receipt = AssetPlacement.keep(s.ops, s.owner, digest, args(), guard, s.engine)
+check(receipt.state == "uploaded" and receipt.swapped == 0, "publication failure rolls back earlier replacements")
+check(s.ops.registry.owned[s.model] == placedOwner and placedOwner.placed.count == 4, "publication rollback preserves placement ownership")
+for index, resource in ipairs(s.owner.meshes) do
+  check(resource.part == beforeParts[index] and resource.appearance == beforeAppearances[index] and resource.keptAssetId == nil, "publication rollback restores every resource")
+  check(resource.part.Parent == s.model and resource.appearance.Parent == resource.part, "publication rollback restores source hierarchy")
+  check(receipt.meshes[index].assetId == 9000 + index and not receipt.meshes[index].swapped and s.freshParts[index]._destroyed, "publication rollback retains IDs and retires replacements")
+end
+s.failPublishAt = nil
+receipt = AssetPlacement.keep(s.ops, s.owner, digest, args({finish = true, assetIds = V.array({9001, 9002})}), guard, s.engine)
+check(receipt.state == "kept" and receipt.swapped == 2 and #s.uploads == 2, "finish after publication rollback never reuploads")
+
+-- A failed commit is not a successful keep and must never be retried.
+s = setup(2); material = scalarMaterial(s)
+beforeParts = {s.owner.meshes[1].part, s.owner.meshes[2].part}
+local closeCalls = 0
+s.ops.history.FinishRecording = function(): () closeCalls += 1; error("injected commit failure") end
+receipt = AssetPlacement.keep(s.ops, s.owner, digest, args(), guard, s.engine)
+check(closeCalls == 1 and s.ops.assetCleanupFailed and receipt.state == "uploaded" and receipt.swapped == 0, "uncertain recording close is fenced without retry or false keep")
+for index, resource in ipairs(s.owner.meshes) do
+  check(resource.part == beforeParts[index] and resource.part.Parent == s.model and receipt.meshes[index].assetId == 9000 + index, "failed recording retains original parts and uploaded IDs")
+end
+
+-- Authored content added during publication cannot be destroyed by rollback cleanup.
+s = setup(2); material = scalarMaterial(s)
+local authored = Instance.new("Attachment")
+s.afterPublish = function(part: any): () if s.publishCalls == 1 then authored.Parent = part end end
+s.failPublishAt = 2
+receipt = AssetPlacement.keep(s.ops, s.owner, digest, args(), guard, s.engine)
+check(s.ops.assetCleanupFailed and receipt.state ~= "kept", "unsafe rollback fences subsequent commands")
+check(authored.Parent == s.freshParts[1] and not authored._destroyed and not s.freshParts[1]._destroyed and not s.freshParts[2]._destroyed, "unsafe rollback preserves unexpected authored content and all replacements")
+check(receipt.meshes[1].assetId == 9001 and receipt.meshes[2].assetId == 9002, "unsafe rollback preserves uploaded asset IDs")
+
+-- A native allocation yield can let the person edit an earlier source part.
+s = setup(2); material = scalarMaterial(s)
+beforeParts = {s.owner.meshes[1].part, s.owner.meshes[2].part}
+s.afterCreate = function(): () if s.parts == 2 then beforeParts[1].Name = "User edited name" end end
+receipt = AssetPlacement.keep(s.ops, s.owner, digest, args(), guard, s.engine)
+check(receipt.state == "uploaded" and receipt.swapped == 0 and s.commits == 0 and beforeParts[1].Name == "User edited name", "source edits during preparation refuse publication without overwriting the edit")
+for index, resource in ipairs(s.owner.meshes) do check(resource.part == beforeParts[index] and resource.part.Parent == s.model and s.freshParts[index]._destroyed, "source conflict retains placed parts and retires replacements") end
 print("Arcane mesh keep checks passed: " .. count)
 `;
 

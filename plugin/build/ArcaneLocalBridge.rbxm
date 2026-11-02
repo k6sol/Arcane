@@ -8890,11 +8890,15 @@ function AssetPlacement.keep(ops: any, owner: any, digest: string, args: any, gu
 		swapped,convertedObservation=keepConverted(ops,convertedState,owner,entries,guard,engine,attemptId)
 	elseif complete then
 		local fresh: {any}, copies: {any} = {}, {}
+		local oldParts: {any}, oldAppearances: {any}, oldIds: {any}, parents: {any} = {}, {}, {}, {}
+		local replacementUncertain = false
 		pcall(function()
 			guard()
 			if model.Parent == nil then V.fail("STATE", "The placed model was removed.") end
 			for index, resource in ipairs(meshes) do
 				local old, id = resource.part, entries[index].assetId
+				oldParts[index], oldAppearances[index], oldIds[index] = old, resource.appearance, resource.keptAssetId
+				parents[index] = if old then old.Parent else nil
 				if resource.keptAssetId == id and old ~= nil and old.Parent ~= nil then fresh[index] = false -- already persistent (earlier finish)
 				else
 					if old == nil or old.Parent == nil or not old:IsDescendantOf(model) then V.fail("STATE", "A session part was removed from the model.") end
@@ -8918,8 +8922,19 @@ function AssetPlacement.keep(ops: any, owner: any, digest: string, args: any, gu
 				end
 			end
 			guard()
+			if owner.retired or owner.placed ~= model or model.Parent == nil then V.fail("SCOPE", "The placed model changed while preparing replacements.") end
+			for index, resource in ipairs(meshes) do
+				if resource.part ~= oldParts[index] or resource.appearance ~= oldAppearances[index] or resource.keptAssetId ~= oldIds[index] or oldParts[index].Parent ~= parents[index] then
+					V.fail("CONFLICT", "A session part changed while preparing replacements.")
+				end
+				if fresh[index] then
+					if oldAppearances[index] and oldAppearances[index].Parent ~= oldParts[index] then V.fail("CONFLICT", "Session appearance moved while preparing replacements.") end
+					for _, field in ipairs(SWAP_FIELDS) do if oldParts[index][field] ~= fresh[index][field] then V.fail("CONFLICT", "Session mesh properties changed while preparing replacements.") end end
+				end
+			end
 			local recording = ops.history:TryBeginRecording("Arcane.keep." .. attemptId, "Arcane keep mesh")
 			if not recording then V.fail("HISTORY", "Cannot begin an undo recording.") end
+			local closeAttempted = false
 			local done = pcall(function()
 				for index, resource in ipairs(meshes) do
 					local part = fresh[index]
@@ -8932,18 +8947,49 @@ function AssetPlacement.keep(ops: any, owner: any, digest: string, args: any, gu
 					end
 					entries[index].swapped = true
 				end
+				closeAttempted = true
+				if not pcall(function() ops.history:FinishRecording(recording, Enum.FinishRecordingOperation.Commit) end) then
+					ops.assetCleanupFailed = true
+					V.fail("HISTORY", "The persistent mesh recording could not be committed.")
+				end
 			end)
-			pcall(function() ops.history:FinishRecording(recording, Enum.FinishRecordingOperation.Commit) end)
-			if not done then V.fail("ENGINE", "The part swap stopped part-way.") end
+			if not done then
+				-- Publication is synchronous, but property writes may still fail.
+				-- Restore original private identities before retiring replacements.
+				local restored = pcall(function()
+					-- Inspect the whole replacement set before touching rollback state.
+					for index, resource in ipairs(meshes) do
+						local part = fresh[index]
+						if part then
+							if (resource.part ~= oldParts[index] and resource.part ~= part) or (part.Parent ~= nil and part.Parent ~= parents[index]) or (oldParts[index].Parent ~= nil and oldParts[index].Parent ~= parents[index]) then
+								V.fail("CONFLICT", "Persistent replacement ownership changed during rollback.")
+							end
+							for _, child in ipairs(part:GetChildren()) do if child ~= copies[index] then V.fail("CONFLICT", "Persistent replacement gained an authored child.") end end
+						end
+					end
+					for index = #meshes, 1, -1 do
+						local resource, part = meshes[index], fresh[index]
+						if part then
+							part.Parent = nil
+							oldParts[index].Parent = parents[index]
+							resource.part, resource.appearance, resource.keptAssetId = oldParts[index], oldAppearances[index], oldIds[index]
+						end
+						entries[index].swapped = false
+					end
+				end)
+				if not restored then replacementUncertain = true; ops.assetCleanupFailed = true end
+				if not closeAttempted and not pcall(function() ops.history:FinishRecording(recording, Enum.FinishRecordingOperation.Commit) end) then ops.assetCleanupFailed = true end
+				V.fail("ENGINE", "The persistent mesh swap failed; uploaded asset IDs were retained.")
+			end
 		end)
 		-- Preserve uploaded IDs while retiring only unswapped detached replacements.
 		for index, part in pairs(fresh) do
-			if part and meshes[index].part ~= part and part.Parent == nil then
+			if not replacementUncertain and part and meshes[index].part ~= part and part.Parent == nil then
 				if not pcall(function() part:Destroy() end) then ops.assetCleanupFailed = true end
 			end
 		end
 		for index, copy in pairs(copies) do
-			if meshes[index].appearance ~= copy and copy.Parent == nil then
+			if not replacementUncertain and meshes[index].appearance ~= copy and copy.Parent == nil then
 				if not pcall(function() copy:Destroy() end) then ops.assetCleanupFailed = true end
 			end
 		end
