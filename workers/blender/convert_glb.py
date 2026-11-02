@@ -734,7 +734,16 @@ def roundtrip(bpy, directory, mapping, request, expected, reopened, proxy_hash, 
         bpy.context.view_layer.update()
 
 
-def review_renders(bpy, directory, objects, request):
+def preview_transparency_depth(source_doc, expected):
+    """Use the exact mapped source materials, never imported node names or unused materials."""
+    for evidence in expected.values():
+        index = evidence["material"]
+        if index is not None and audit.ref(source_doc.get("materials", []), index).get("alphaMode", "OPAQUE") in ("MASK", "BLEND"):
+            return 32
+    return 8
+
+
+def review_renders(bpy, directory, objects, request, source_doc, expected):
     from mathutils import Vector
     scene = bpy.context.scene
     points = [obj.matrix_world @ vertex.co for obj in objects.values() for vertex in obj.data.vertices]
@@ -750,6 +759,9 @@ def review_renders(bpy, directory, objects, request):
     scene.render.engine = "CYCLES"
     scene.cycles.device = "CPU"
     scene.cycles.samples = request["renderSamples"]
+    # Match authored cutout previews without altering imported/exported material
+    # graphs. Source alpha mode was already validated before native import.
+    scene.cycles.transparent_max_bounces = preview_transparency_depth(source_doc, expected)
     scene.render.threads_mode = "FIXED"; scene.render.threads = 2
     scene.render.resolution_x = scene.render.resolution_y = request["renderResolution"]
     scene.render.resolution_percentage = 100
@@ -911,7 +923,7 @@ def run():
     if collision_raw is not None:
         audit.require(audit.read_owned(directory / "collision.glb", audit.EXPORT_BYTES, 20) == collision_raw, "SOURCE")
     event("review-render")
-    renders = review_renders(bpy, directory, objects, request)
+    renders = review_renders(bpy, directory, objects, request, source_doc, expected)
     event("audit-write")
     # Inputs remain immutable through actual reopen/export/render; no source or
     # request can be replaced while an observation is being assembled.

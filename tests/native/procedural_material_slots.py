@@ -3,6 +3,7 @@ import hashlib
 import json
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 
 sys.dont_write_bytecode = True
@@ -107,9 +108,26 @@ mat.node_tree.links.remove(link)
 lookdev([obj], preview_request)
 assert bpy.context.scene.cycles.transparent_max_bounces == 8
 assert geometry(obj.data) == before_preview
+from convert_glb import review_renders
+from conversion_audit import material_graph
+before_material = material_graph(mat)
+conversion_cases = 0
+for mode, expected_depth in (("MASK", 32), ("OPAQUE", 8)):
+    owned_before = set(bpy.data.objects)
+    with tempfile.TemporaryDirectory(prefix="arcane-conversion-preview-") as temporary:
+        frames = review_renders(bpy, Path(temporary), {"selected": obj}, {"renderSamples": 4, "renderResolution": 128},
+                                {"materials": [{"alphaMode": mode}]}, {"selected": {"material": 0}})
+        assert bpy.context.scene.cycles.transparent_max_bounces == expected_depth
+        assert len(frames) == 2 and all(frame["width"] == frame["height"] == 128 for frame in frames)
+        assert bpy.context.scene.cycles.samples == 4
+        assert geometry(obj.data) == before_preview and material_graph(mat) == before_material
+        conversion_cases += 1
+    for helper in list(bpy.data.objects):
+        if helper not in owned_before:
+            bpy.data.objects.remove(helper, do_unlink=True)
 import oak_spray_layout_test
 spray_suite = unittest.defaultTestLoader.loadTestsFromModule(oak_spray_layout_test)
 spray_result = unittest.TextTestRunner().run(spray_suite)
 assert spray_result.wasSuccessful() and spray_result.testsRun == 4 and not spray_result.skipped
-print("ARCANE_GENERATED_MATERIAL_SLOTS_OK " + json.dumps({"cases": 2, "diagnosticCases": 1, "previewCases": 3,
+print("ARCANE_GENERATED_MATERIAL_SLOTS_OK " + json.dumps({"cases": 2, "diagnosticCases": 1, "previewCases": 3, "conversionPreviewCases": conversion_cases,
       "oakSprayCases": spray_result.testsRun, "blender": bpy.app.version_string}))

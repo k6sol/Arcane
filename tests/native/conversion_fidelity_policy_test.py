@@ -381,6 +381,21 @@ def collision_module(mode="ordinary"):
 
 
 class ConversionFidelityPolicyTests(unittest.TestCase):
+    def test_preview_depth_uses_only_exact_mapped_source_alpha_modes(self):
+        source = {"materials": [{"alphaMode": "MASK"}, {}, {"alphaMode": "BLEND"},
+                                {"alphaMode": "OPAQUE", "pbrMetallicRoughness": {"baseColorFactor": [1, 1, 1, .1]}}]}
+        before = deepcopy(source)
+        for index, depth in [(None, 8), (0, 32), (1, 8), (2, 32), (3, 8)]:
+            with self.subTest(index=index):
+                self.assertEqual(worker.preview_transparency_depth(source, {"selected": {"material": index}}), depth)
+        self.assertEqual(worker.preview_transparency_depth(source, {}), 8)
+        self.assertEqual(worker.preview_transparency_depth(source, {"first": {"material": 1}, "second": {"material": 0}}), 32)
+        self.assertEqual(worker.preview_transparency_depth({}, {"unmaterialed": {"material": None}}), 8)
+        for index in (-1, 4, "0", False):
+            with self.subTest(invalid=index), self.assertRaises(audit.ConversionFailure):
+                worker.preview_transparency_depth(source, {"selected": {"material": index}})
+        self.assertEqual(source, before)
+
     def refused(self, reason, callback):
         with self.assertRaises(audit.ConversionFailure) as failure: callback()
         self.assertEqual(failure.exception.reason, reason)

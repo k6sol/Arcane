@@ -17,6 +17,7 @@ test('generated union and fallback meshes bind their sole authored material', { 
   assert.equal(result.cases, 2);
   assert.equal(result.diagnosticCases, 1);
   assert.equal(result.previewCases, 3);
+  assert.equal(result.conversionPreviewCases, 2);
   assert.equal(result.oakSprayCases, 4);
   assert.match(result.blender, /^5\.2\.3\b/);
 });
