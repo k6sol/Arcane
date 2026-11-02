@@ -18,6 +18,7 @@ export const LOG_ENDS = ['cut', 'broken', 'mixed'] as const;
 export const STUMP_TOPS = ['cut', 'broken'] as const;
 /** Natural rock forms: weathered boulder, steep cliff-face outcrop (front -Y), outcrop with a recessed cave mouth. Omitted keeps the legacy rock. */
 export const ROCK_FORMS = ['boulder', 'outcrop', 'cave'] as const;
+export const ROCK_TEXTURE_RESOLUTIONS = [512, 1024] as const;
 export const PROCEDURAL_FINISHES = ['natural', 'flat'] as const;
 export const PROCEDURAL_SURFACE_RESOLUTION = 256;
 /** Natural oak/birch/pine: species bark tile and leaf/needle-spray cutout atlas (glTF MASK leaves) at 512 px. */
@@ -109,10 +110,15 @@ export function normalizeProcedural(value: unknown): ProceduralSpec {
       secondaryColor: color(r.secondaryColor, 'secondaryColor') ?? [...SPECIES[species].leaves] as Vec3 });
   }
   if (kind === 'rock') {
-    const r = fields(value, ['kind', 'size', 'roughness', 'form', 'moss', 'finish']);
+    const r = fields(value, ['kind', 'size', 'roughness', 'form', 'moss', 'finish', 'textureResolution']);
     const rock = { kind, size: vec(r.size, PROCEDURAL_LIMITS.rockSize, [1.6, 1.2, 0.9], 'Rock size (m)'), roughness: num(r.roughness, [0, 1], 0.5, 'roughness') };
-    // Without a form (or moss) the legacy rock keeps its exact canonical bytes.
-    return finished(r, r.form === undefined && r.moss === undefined ? rock : { ...rock, form: choice(r.form, ROCK_FORMS, 'boulder', 'Rock form'), moss: flag(r.moss, 'moss') });
+    const resolution = r.textureResolution;
+    if (resolution !== undefined && (typeof resolution !== 'number' || !(ROCK_TEXTURE_RESOLUTIONS as readonly number[]).includes(resolution) || r.finish !== 'natural'))
+      fail('Rock textureResolution requires natural finish and must be 512 or 1024.');
+    // Omitted options preserve the exact legacy/default canonical request.
+    return finished(r, r.form === undefined && r.moss === undefined && resolution === undefined ? rock : { ...rock,
+      form: choice(r.form, ROCK_FORMS, 'boulder', 'Rock form'), moss: flag(r.moss, 'moss'),
+      ...(resolution === undefined ? {} : { textureResolution: resolution as 512 | 1024 }) });
   }
   if (kind === 'column') {
     const r = fields(value, ['kind', 'radius', 'height', 'flutes', 'base', 'capital', 'finish']);
@@ -155,7 +161,7 @@ export function proceduralSurfaceMaterials(spec: ProceduralSpec, primary: Vec3, 
     : spec.kind === 'rock' ? [['Rock', 'stone', primary, .88]] : spec.kind === 'column' ? [['Stone', 'weathered', primary, .8]]
     : [['Foliage', 'leaf', primary, .8]];
   const keys = proceduralRenderSourceKeys(spec, manifestVersion);
-  const resolution = (spec.kind === 'tree' && PATTERN_SPECIES.includes(spec.species)) || spec.kind === 'log' || spec.kind === 'stump' || (spec.kind === 'rock' && spec.form !== undefined)
+  const resolution = spec.kind === 'rock' && spec.textureResolution !== undefined ? spec.textureResolution : (spec.kind === 'tree' && PATTERN_SPECIES.includes(spec.species)) || spec.kind === 'log' || spec.kind === 'stump' || (spec.kind === 'rock' && spec.form !== undefined)
     ? PROCEDURAL_TREE_SURFACE_RESOLUTION : PROCEDURAL_SURFACE_RESOLUTION;
   return rows.filter(([id]) => keys.includes(id.toLowerCase())).map(([id, profile, color, roughness]) => ({ id, color: [...color] as Vec3, metallic: 0, roughness,
     surface: { profile, resolution } }));

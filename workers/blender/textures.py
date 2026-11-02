@@ -62,13 +62,13 @@ def author_surfaces(request, directory, objects, *, normal_relief=.035):
         if not surface:
             continue
         profile, size = surface["profile"], surface["resolution"]
-        if profile not in ["bark", "stone", "leaf", "weathered"] or size not in [128, 256, 512]:
+        pattern = data.get("pattern")
+        stone = isinstance(pattern, str) and pattern.startswith("rock-")
+        if profile not in ["bark", "stone", "leaf", "weathered"] or (size not in [128, 256, 512] and not (stone and size == 1024)):
             raise ValueError("Unsupported bounded texture profile")
         seed = int.from_bytes(hashlib.sha256((str(request["seed"]) + ":" + data["id"]).encode()).digest()[:8], "big")
         # Natural oak/birch/pine, deadwood and rock forms only (procedural.surface_materials): species bark tiles, leaf atlases, baked rock textures.
-        pattern = data.get("pattern")
-        stone = pattern is not None and pattern.startswith("rock-")
-        if pattern is not None and (pattern not in TREE_PATTERNS or size != 512 or stone != (profile == "stone") or (not stone and pattern.endswith("leaves") == (profile == "bark"))):
+        if pattern is not None and (pattern not in TREE_PATTERNS or size not in ((512, 1024) if stone else (512,)) or stone != (profile == "stone") or (not stone and pattern.endswith("leaves") == (profile == "bark"))):
             raise ValueError("Unsupported natural tree pattern")
         cutout = pattern is not None and pattern.endswith("leaves")
         phases = [random.Random(seed + index).random() * math.tau for index in range(4)]
@@ -967,37 +967,46 @@ def _rasterise(np, bake, size):
     texels = None
     for grow in (0.0, 1.5):
         low = np.floor(uvs.min(axis=1) - grow).astype(np.int64)
-        span = np.ceil(uvs.max(axis=1) + grow).astype(np.int64) - low + 1
+        high = np.ceil(uvs.max(axis=1) + grow).astype(np.int64)
+        if size > 512:
+            # High-resolution full-tile triangles may cross the pixel boundary.
+            low, high = np.maximum(low, 0), np.minimum(high, size - 1)
+        span = high - low + 1
         extent = span.max(axis=1)
         # Batches of triangles by bounding box size, rasterised together.
-        for bucket in (4, 8, 16, 32, 64, 128, 256, 512):
+        for bucket in (4, 8, 16, 32, 64, 128, 256, 512) + ((1024,) if size > 512 else ()):
             pick = np.nonzero((extent <= bucket) & (extent > bucket // 2) if bucket > 4 else extent <= 4)[0]
             for start in range(0, len(pick), max(1, 400000 // (bucket * bucket))):
                 ids = pick[start:start + max(1, 400000 // (bucket * bucket))]
-                gy, gx = np.mgrid[0:bucket, 0:bucket]
-                x = low[ids, 0][:, None, None] + gx
-                y = low[ids, 1][:, None, None] + gy
-                dx, dy = x - uvs[ids, 0, 0][:, None, None], y - uvs[ids, 0, 1][:, None, None]
-                a = area[ids][:, None, None]
-                b1 = (dx * e2[ids, 1][:, None, None] - dy * e2[ids, 0][:, None, None]) / a
-                b2 = (e1[ids, 0][:, None, None] * dy - e1[ids, 1][:, None, None] * dx) / a
-                b0 = 1 - b1 - b2
-                slack = (grow * lengths[ids] / np.abs(area[ids])[:, None] if grow else np.full((len(ids), 3), 1e-9))[:, :, None, None]
-                inside = (b0 >= -slack[:, 0]) & (b1 >= -slack[:, 1]) & (b2 >= -slack[:, 2]) & (x >= 0) & (y >= 0) & (x < size) & (y < size)
-                t, yy, xx = np.nonzero(inside)
-                index = y[t, yy, xx] * size + x[t, yy, xx]
-                if grow:
-                    fresh = ~filled[index]
-                    t, yy, xx, index = t[fresh], yy[fresh], xx[fresh], index[fresh]
-                weights = np.stack([b0[t, yy, xx], b1[t, yy, xx], b2[t, yy, xx]], axis=1)
-                corner = channels[faces[ids[t]]]
-                out[index] = np.concatenate([(weights[:, :, None] * corner).sum(axis=1), metric[ids[t]]], axis=1)
-                filled[index] = True
+                # Preserve the existing <=512 raster batches. A 1024-wide
+                # triangle is tiled, never a new million-sample scratch grid.
+                tile = min(bucket, 512)
+                for tile_y in range(0, bucket, tile):
+                    for tile_x in range(0, bucket, tile):
+                        gy, gx = np.mgrid[tile_y:tile_y + tile, tile_x:tile_x + tile]
+                        x = low[ids, 0][:, None, None] + gx
+                        y = low[ids, 1][:, None, None] + gy
+                        dx, dy = x - uvs[ids, 0, 0][:, None, None], y - uvs[ids, 0, 1][:, None, None]
+                        a = area[ids][:, None, None]
+                        b1 = (dx * e2[ids, 1][:, None, None] - dy * e2[ids, 0][:, None, None]) / a
+                        b2 = (e1[ids, 0][:, None, None] * dy - e1[ids, 1][:, None, None] * dx) / a
+                        b0 = 1 - b1 - b2
+                        slack = (grow * lengths[ids] / np.abs(area[ids])[:, None] if grow else np.full((len(ids), 3), 1e-9))[:, :, None, None]
+                        inside = (b0 >= -slack[:, 0]) & (b1 >= -slack[:, 1]) & (b2 >= -slack[:, 2]) & (x >= 0) & (y >= 0) & (x < size) & (y < size)
+                        t, yy, xx = np.nonzero(inside)
+                        index = y[t, yy, xx] * size + x[t, yy, xx]
+                        if grow:
+                            fresh = ~filled[index]
+                            t, yy, xx, index = t[fresh], yy[fresh], xx[fresh], index[fresh]
+                        weights = np.stack([b0[t, yy, xx], b1[t, yy, xx], b2[t, yy, xx]], axis=1)
+                        corner = channels[faces[ids[t]]]
+                        out[index] = np.concatenate([(weights[:, :, None] * corner).sum(axis=1), metric[ids[t]]], axis=1)
+                        filled[index] = True
         if texels is None:
             texels = filled.copy()
     # Nearest fill over the rest of each gutter: propagate the source texel index outward.
     source = np.where(filled, np.arange(size * size), -1).reshape(size, size)
-    for _ in range(ROCK_GUTTER_FILL):
+    for _ in range(ROCK_GUTTER_FILL * size // 512):
         grown = source.copy()
         for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)):
             shifted = np.full_like(source, -1)
@@ -1093,8 +1102,8 @@ def _rock_surface(np, rng, color, size, form, extent, moss, bake):
     tone, iron staining, mineral grain, joints and hairline cracks, irregular strata on outcrops,
     rain streaks, lichen, crevice and ground-contact darkening, a tunnel that darkens inward, and
     moss settling on sky-facing rock and in crevices with a soft, irregular edge."""
-    if size != 512:
-        raise ValueError("Rock textures are laid out for 512 px")
+    if size not in (512, 1024):
+        raise ValueError("Rock textures require 512 or 1024 px")
     if not (isinstance(extent, (int, float)) and math.isfinite(extent) and .05 <= extent <= 20):
         raise ValueError("Rock texture extent must be .05..20 m")
     if not isinstance(bake, dict):

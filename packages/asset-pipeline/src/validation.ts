@@ -146,7 +146,7 @@ export function validateAudit(value: unknown, request: AssetRequest, manifestVer
           typeof actual.metallic !== 'number' || Math.abs(actual.metallic - wanted.metallic!) > .00001 || typeof actual.roughness !== 'number' || Math.abs(actual.roughness - wanted.roughness!) > .00001 ||
           emission.strength !== 0 || !isDeepStrictEqual(vector(emission.color, 0, 1, 'procedural emission color'), [1, 1, 1]))
         throw new AssetError('MESH', 'Measured procedural PBR values differ from the selected finish.');
-      validateGeneratedSurface(actual.surface, wanted, proceduralSurfacePattern(request.procedural, wanted.id));
+      validateGeneratedSurface(actual.surface, wanted, proceduralSurfacePattern(request.procedural, wanted.id), request.procedural.kind !== 'rock' || request.procedural.textureResolution === undefined);
     }
   }
   if (request.template === 'hero-prop' && (!totals.lod1Triangles || totals.lod1Triangles >= totals.renderTriangles)) throw new AssetError('MESH', 'Hero LOD must reduce geometry.');
@@ -426,10 +426,10 @@ export function workerScripts(request: AssetRequest): string[] {
     ...(request.procedural?.finish === 'natural' || request.procedural?.kind === 'spec' ? UV_WORKER_SCRIPTS : []), ...(isNaturalTreeRequest(request) ? TREE_STRUCTURE_WORKER_SCRIPTS : []), ...(request.procedural?.kind === 'spec' ? MODEL_WORKER_SCRIPTS : []),
     ...(usesMaterialLibrary(request) ? MATERIAL_WORKER_SCRIPTS : [])];
 }
-function validateGeneratedSurface(value: unknown, wanted: AssemblyMaterial, pattern?: string): void {
+function validateGeneratedSurface(value: unknown, wanted: AssemblyMaterial, pattern?: string, allowLegacySurface = true): void {
   const surface = record(value, 'generated procedural surface'), expected = { ...wanted.surface! };
   // Natural oak/birch/pine assets made before the species patterns keep their plain 256 px tiles.
-  if (pattern !== undefined && surface.pattern === undefined && surface.resolution === PROCEDURAL_SURFACE_RESOLUTION) { expected.resolution = PROCEDURAL_SURFACE_RESOLUTION; pattern = undefined; }
+  if (allowLegacySurface && pattern !== undefined && surface.pattern === undefined && surface.resolution === PROCEDURAL_SURFACE_RESOLUTION) { expected.resolution = PROCEDURAL_SURFACE_RESOLUTION; pattern = undefined; }
   const alphaMode = pattern?.endsWith('-leaves') ? 'MASK' : 'OPAQUE';
   if (surface.profile !== expected.profile || surface.resolution !== expected.resolution || surface.generator !== 'arcane-tile-v1' || surface.texCoord !== 0 ||
       surface.pattern !== pattern || (pattern === undefined ? surface.alphaMode !== undefined : surface.alphaMode !== alphaMode) ||

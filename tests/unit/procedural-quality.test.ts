@@ -167,3 +167,23 @@ test('procedural natural finish cannot silently export a flat GLB without embedd
   assert.throws(() => validateSurfaceGlb(glb(), normalizeRequest(input('natural')), measured()));
   assert.doesNotThrow(() => validateSurfaceGlb(glb(), normalizeRequest(input()), measured()));
 });
+
+
+test('explicit rock texture quality requires exact resolution and cannot use the legacy tile fallback', () => {
+  const request = normalizeRequest({ template: 'procedural', name: 'quality', renderResolution: 128, procedural: { kind: 'rock', form: 'boulder', finish: 'natural', textureResolution: 1024 } });
+  const material = proceduralSurfaceMaterials(request.procedural!, request.color)[0]!;
+  const result = measured(0, 2, true), mesh = result.meshes[0]!;
+  mesh.name = 'SM_quality_rock'; mesh.materials = ['MAT_Rock'];
+  const evidence = mesh.materialProperties![0]!;
+  evidence.name = 'MAT_Rock'; evidence.color = material.color; evidence.metallic = material.metallic!; evidence.roughness = material.roughness!;
+  const surface = evidence.surface!;
+  surface.profile = 'stone'; surface.pattern = 'rock-boulder'; surface.alphaMode = 'OPAQUE'; surface.resolution = 1024;
+  for (const image of surface.images) { image.name = image.name.replace('Bark', 'Rock'); image.width = image.height = 1024; }
+  assert.doesNotThrow(() => validateAudit(result, request));
+  const wrong = structuredClone(result); wrong.meshes[0]!.materialProperties![0]!.surface!.resolution = 512;
+  assert.throws(() => validateAudit(wrong, request), /surface differs/);
+  const legacy = structuredClone(result), old = legacy.meshes[0]!.materialProperties![0]!.surface!;
+  delete old.pattern; delete old.alphaMode; old.resolution = 256;
+  for (const image of old.images) image.width = image.height = 256;
+  assert.throws(() => validateAudit(legacy, request), /surface differs/);
+});

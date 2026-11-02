@@ -15,8 +15,8 @@ import procedural  # noqa: E402
 import textures  # noqa: E402
 
 
-SOURCE = Path(__file__).resolve().parents[2] / "workers/blender/textures.py"
-# Complete reviewed e461 module, normalized only from CRLF to LF. Reversing just
+SOURCE = Path(__file__).resolve().parents[2] / "tests/fixtures/materials/textures-512-baseline.py"
+# Frozen pre-detail module; the reviewed e461 control is normalized only from CRLF to LF. Reversing just
 # the two reviewed insertions must reproduce it; unrelated source drift is refused.
 CONTROL_SHA256 = "c61fd656429570df623b551970ee4103703dc955f393ea323d3ebb29d5262261"
 INSERTED_HELPER = '''def _weathered_boulder_joints(np, crack, medium):

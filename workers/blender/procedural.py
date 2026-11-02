@@ -3617,8 +3617,11 @@ def surface_materials(request):
     deadwood = kind in ("log", "stump")
     if deadwood:
         keys = ["bark"]
-    # Natural rock forms: one 512 px texture baked in world space over the rock's unique UV charts.
+    # Natural rock forms: one bounded 512/1024 px world-space bake over the same UV charts.
     stone = kind == "rock" and request["procedural"].get("form") in ROCK_FORMS
+    rock_resolution = request["procedural"].get("textureResolution", BARK_RESOLUTION)
+    if "textureResolution" in request["procedural"] and (not stone or rock_resolution not in (512, 1024)):
+        raise ValueError("Rock texture resolution requires a natural rock form and 512 or 1024 px")
     leaf_scale = 1.0
     if tree and species == "oak" and request["procedural"]["leafDensity"] > 0:
         effective = request["procedural"]
@@ -3630,7 +3633,7 @@ def surface_materials(request):
         leaf_scale = min(1.0, 9.0 / effective["height"])
     return [{"id": key.capitalize(), "color": request["procedural"]["secondaryColor"] if key == "leaves" else request["color"],
              "metallic": MATERIALS[key][0], "roughness": .8 if key in ("leaves", "foliage", "stone") else MATERIALS[key][1],
-             "surface": {"profile": profiles[key], "resolution": BARK_RESOLUTION if tree or deadwood or stone else 256},
+             "surface": {"profile": profiles[key], "resolution": rock_resolution if stone else BARK_RESOLUTION if tree or deadwood else 256},
              **({"pattern": species + "-" + key} if tree else {}),
              **({"leaf_scale": leaf_scale} if key == "leaves" and leaf_scale < 1.0 else {}),
              **({"pattern": species + "-log", "repeats": log_repeats(request["procedural"]), "moss": bool(request["procedural"].get("moss"))} if deadwood else {}),

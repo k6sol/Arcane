@@ -21,7 +21,9 @@ on:
       - 'tests/unit/asset_preview_camera_test.py'
       - 'tests/unit/uv_engine_test.py'
       - 'tests/fixtures/uv/**'
+      - 'tests/fixtures/materials/**'
       - 'tests/unit/rock_joints_test.py'
+      - 'tests/unit/rock_texture_resolution_test.py'
       - 'tests/unit/tree_station_fidelity_test.py'
       - 'tests/unit/tree_budget_allocation_test.py'
       - 'tests/unit/procedural_generator_test.py'
@@ -49,7 +51,9 @@ on:
       - 'tests/unit/asset_preview_camera_test.py'
       - 'tests/unit/uv_engine_test.py'
       - 'tests/fixtures/uv/**'
+      - 'tests/fixtures/materials/**'
       - 'tests/unit/rock_joints_test.py'
+      - 'tests/unit/rock_texture_resolution_test.py'
       - 'tests/unit/tree_station_fidelity_test.py'
       - 'tests/unit/tree_budget_allocation_test.py'
       - 'tests/unit/procedural_generator_test.py'
@@ -144,6 +148,11 @@ jobs:
           PYTHONDONTWRITEBYTECODE: '1'
           PYTHONUTF8: '1'
         run: python tests/unit/asset_worker_failure_test.py
+      - name: Verify bounded rock texture detail and unchanged512 defaults
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+          PYTHONUTF8: '1'
+        run: python tests/unit/rock_texture_resolution_test.py
       - name: Verify costed branch station fidelity
         env:
           PYTHONDONTWRITEBYTECODE: '1'

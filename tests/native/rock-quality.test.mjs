@@ -13,6 +13,10 @@ import { noLinks, readRegularFile, regularFile } from '../../dist/packages/asset
 import { decodeMaterialPng, materialPngPixels } from '../../dist/packages/asset-pipeline/src/material-png.js';
 import { validateGlb } from '../../dist/apps/desktop/src/glb-preflight.js';
 import { matrixFromTrs, multiplyMatrix4 } from '../../dist/packages/core/src/spatial-math.js';
+import {adaptCompletedStudioImport} from '../../dist/apps/daemon/src/asset-import-adapter.js';
+import {createStudioImportManifestAuthority} from '../../dist/packages/asset-pipeline/src/studio-import-manifest.js';
+import {decodeStudioImportPayload} from '../../dist/packages/asset-pipeline/src/studio-import-payload.js';
+import {createStudioImportTransfer} from '../../dist/packages/asset-pipeline/src/studio-import-transfer.js';
 
 // Mandatory hosted acceptance of ONE current original boulder, not an artistic
 // pass or native Studio acceptance. No injected runners, algorithms or audits.
@@ -22,10 +26,30 @@ const evidenceNames = ['rock-hero.png', 'rock-quality.json', 'rock-side.png'];
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 const input = Object.freeze({ template: 'procedural', name: 'rock-current-quality', seed: 31, triangleBudget: 6000,
   renderResolution: 512, renderSamples: 16,
-  procedural: Object.freeze({ kind: 'rock', form: 'boulder', moss: false, finish: 'natural', size: Object.freeze([1.6, 1.2, .9]), roughness: .7 }) });
+  procedural: Object.freeze({ kind: 'rock', form: 'boulder', moss: false, finish: 'natural', textureResolution: 1024, size: Object.freeze([1.6, 1.2, .9]), roughness: .7 }) });
 const expectedRequest = normalizeRequest(input);
 const stages = new Set(['prepare-output', 'probe', 'generate', 'request-validation', 'blockout', 'identity', 'checkpoint-save',
   'mesh-validation', 'texture-authoring', 'review-render', 'scene-save', 'export', 'export-identity', 'export-roundtrip', 'scene-reopen', 'audit-write', 'host-validation', 'complete']);
+
+async function inspectOfflineTextureImport(manifest, exports) {
+  // Real source bytes and production adaptation; the synthetic target has no Studio authority.
+  const generated = adaptCompletedStudioImport(manifest, exports, sha(Buffer.from('native-rock-detail-offline-review')),
+    {target:{sessionId:'offline-rock-detail',placeId:0,universeId:0,root:'Workspace',parentRef:'offline-parent',creator:{kind:'user',id:'1'}},
+      placement:{mode:'bottom-centre'},studsPerMeter:1/.28}, null);
+  const authority = createStudioImportManifestAuthority({loadGeneratedFiles:async()=>generated});
+  try {
+    const prepared = await authority.prepare(await authority.admit(generated.revisionId));
+    const payload = decodeStudioImportPayload(prepared, new Map(generated.files.map(file=>[file.fileId,file.bytes])));
+    const transfer = createStudioImportTransfer(prepared,payload);
+    assert.equal(payload.textures.length,4);
+    assert.deepEqual(payload.textures.map(map=>map.semantic).sort(),['ColorMap','MetalnessMap','NormalMap','RoughnessMap']);
+    assert.ok(payload.textures.every(map=>map.width===1024&&map.height===1024));
+    const rgbaBytes=payload.textures.reduce((sum,map)=>sum+map.bytes.length,0);
+    assert.equal(rgbaBytes,16*1024*1024);
+    return {syntheticOfflineTarget:true,textureMaps:4,rgbaBytes,packetCount:transfer.packets.length,transferBytes:transfer.byteLength,
+      payloadDigest:payload.digest,stageCommandsSent:0,studioOperations:0,humanApprovalGranted:false};
+  } finally {authority.close();}
+}
 
 function requireCurrentBoulder(request) {
   assert.deepEqual(request, expectedRequest, 'Evidence must be the exact current explicit boulder request, never legacy omitted-form output.');
@@ -274,10 +298,11 @@ test('real current boulder: original native geometry, 512px world bake, saved sc
   // do not invent a different native audit intent from the source's unique packing.
   assert.equal(render[0].materials.length, 1); assert.ok(render[0].uvQuality && render[0].uvQuality.intent === 'tiled');
   const material = render[0].materialProperties[0], surface = material.surface;
-  assert.equal(surface.profile, 'stone'); assert.equal(surface.pattern, 'rock-boulder'); assert.equal(surface.resolution, 512); assert.equal(surface.alphaMode, 'OPAQUE');
+  assert.equal(surface.profile, 'stone'); assert.equal(surface.pattern, 'rock-boulder'); assert.equal(surface.resolution, 1024); assert.equal(surface.alphaMode, 'OPAQUE');
   assert.deepEqual(surface.images.map(image => image.role).sort(), ['baseColor', 'metallicRoughness', 'normal']);
-  for (const image of surface.images) { assert.equal(image.width, 512); assert.equal(image.height, 512); assert.match(image.sha256, /^[a-f0-9]{64}$/); }
+  for (const image of surface.images) { assert.equal(image.width, 1024); assert.equal(image.height, 1024); assert.match(image.sha256, /^[a-f0-9]{64}$/); }
   const glb = await readRegularFile(join(job.directory, 'asset.glb'), 128 * 1024 * 1024), bounds = exportedBounds(glb);
+  evidence.offlineTextureImport = await inspectOfflineTextureImport(manifest,new Map([['asset.glb',glb],['collision.glb',await readRegularFile(join(job.directory,'collision.glb'),128*1024*1024)]]));
   for (const view of ['hero', 'side']) {
     const original = 'preview-' + view + '.png', artifact = artifacts.get(original); assert.ok(artifact && artifact.role === 'preview');
     const bytes = await readRegularFile(join(job.directory, original), PNG_LIMIT), measured = requirePreview(bytes);

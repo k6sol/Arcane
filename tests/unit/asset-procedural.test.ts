@@ -6,7 +6,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { audit, glb, png } from '../../packages/asset-pipeline/testing/fixture.js';
 import { AssetError, normalizeRequest } from '../../packages/asset-pipeline/src/index.js';
-import { normalizeProcedural, proceduralSize, PROCEDURAL_LIMITS } from '../../packages/asset-pipeline/src/procedural.js';
+import { normalizeProcedural, proceduralSize, proceduralSurfaceMaterials, PROCEDURAL_LIMITS } from '../../packages/asset-pipeline/src/procedural.js';
 import { sha256, validateAudit, validateManifestFiles, workerScripts } from '../../packages/asset-pipeline/src/validation.js';
 import type { AssetAudit, AssetManifest, Artifact } from '../../packages/asset-pipeline/src/types.js';
 import { assetInput, assetRequest, assetManifest } from '../../apps/mcp/src/asset-schemas.js';
@@ -320,4 +320,24 @@ test('structure preview reads only the exact retained job image and never genera
   const malformed = await client.callTool({ name: 'assets_preview', arguments: { jobId, view: '../structure' } });
   assert.equal(malformed.isError, true); assert.equal(reads.length, 2);
   assert.equal(starts, 0);
+});
+
+
+test('natural rock texture resolution is bounded, canonical and advertised without changing defaults', () => {
+  const base = { template: 'procedural', name: 'detailed-rock', procedural: { kind: 'rock', form: 'boulder', finish: 'natural' } };
+  const original = normalizeRequest(base);
+  assert.equal(Object.hasOwn(original.procedural!, 'textureResolution'), false);
+  assert.deepEqual(proceduralSurfaceMaterials(original.procedural!, original.color)[0]!.surface, { profile: 'stone', resolution: 512 });
+  for (const textureResolution of [512, 1024]) {
+    const request = normalizeRequest({ ...base, procedural: { ...base.procedural, textureResolution } });
+    assert.deepEqual(normalizeRequest(JSON.parse(JSON.stringify(request))), request);
+    assert.deepEqual(proceduralSurfaceMaterials(request.procedural!, request.color)[0]!.surface, { profile: 'stone', resolution: textureResolution });
+    assert.equal(assetRequest.safeParse(request).success, true);
+    assert.equal(proceduralInput.safeParse({ name: 'detail', generator: { kind: 'rock', textureResolution } }).success, true);
+  }
+  for (const textureResolution of [0, 129, 256, 513, 2048, NaN, '1024', true])
+    assert.throws(() => normalizeRequest({ ...base, procedural: { ...base.procedural, textureResolution } }), code('INPUT'));
+  for (const finish of [undefined, 'flat'])
+    assert.throws(() => normalizeRequest({ ...base, procedural: { ...base.procedural, finish, textureResolution: 1024 } }), code('INPUT'));
+  assert.equal(proceduralInput.safeParse({ name: 'detail', generator: { kind: 'tree', textureResolution: 1024 } }).success, false);
 });

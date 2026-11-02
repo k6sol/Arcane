@@ -20,7 +20,7 @@ export type AssetTemplate = 'hero-prop' | 'environment-kit' | 'custom-assembly' 
 export type ProceduralFinish = 'natural' | 'flat';
 export type ProceduralSpec = (
   | { kind: 'tree'; species: 'pine' | 'oak' | 'birch' | 'palm'; height: number; trunkTaper: number; branchLevels: number; leafDensity: number; trunkRadius: number | null; secondaryColor: Vec3 }
-  | { kind: 'rock'; size: Vec3; roughness: number; form?: 'boulder' | 'outcrop' | 'cave'; moss?: boolean }
+  | { kind: 'rock'; size: Vec3; roughness: number; form?: 'boulder' | 'outcrop' | 'cave'; moss?: boolean; textureResolution?: 512 | 1024 }
   | { kind: 'column'; radius: number; height: number; flutes: number; base: 'none' | 'plinth' | 'attic'; capital: 'none' | 'doric' | 'ionic' | 'corinthian' }
   | { kind: 'foliage'; style: 'bush' | 'grass' | 'fern'; radius: number; height: number; density: number }
   | { kind: 'log'; species: 'oak' | 'birch'; length: number; radius: number; ends: 'cut' | 'broken' | 'mixed'; moss: boolean }
@@ -143,7 +143,7 @@ export interface PipelineOptions {
 
 export type Vec3 = [number, number, number];
 export type AssemblyRole = 'render' | 'collision' | 'lod1';
-export interface MaterialSurface { profile: 'bark' | 'stone' | 'leaf' | 'weathered'; resolution?: 128 | 256 | 512 }
+export interface MaterialSurface { profile: 'bark' | 'stone' | 'leaf' | 'weathered'; resolution?: 128 | 256 | 512 | 1024 }
 export interface AssemblyMaterial { id: string; color: Vec3; metallic?: number; roughness?: number; emission?: { color: Vec3; strength: number }; surface?: MaterialSurface }
 export type AssemblyGeometry =
   | { kind: 'box' }

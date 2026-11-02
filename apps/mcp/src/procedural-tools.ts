@@ -7,7 +7,7 @@ import { BridgeError, type CommandOutcome, type DaemonClient } from './daemon-cl
 import { assetSlug, boundedVector } from './assembly-schemas.js';
 import { assetJobId, nativeAssetJobId } from './asset-schemas.js';
 import { id, ref } from './schemas.js';
-import { COLUMN_BASES, COLUMN_CAPITALS, DEADWOOD_SPECIES, FOLIAGE_STYLES, LOG_ENDS, PROCEDURAL_FINISHES, PROCEDURAL_LIMITS as L, PROCEDURAL_VARIANTS, ROCK_FORMS, STUMP_TOPS, TREE_SPECIES } from '../../../packages/asset-pipeline/src/procedural.js';
+import { COLUMN_BASES, COLUMN_CAPITALS, DEADWOOD_SPECIES, FOLIAGE_STYLES, LOG_ENDS, PROCEDURAL_FINISHES, PROCEDURAL_LIMITS as L, PROCEDURAL_VARIANTS, ROCK_FORMS, ROCK_TEXTURE_RESOLUTIONS, STUMP_TOPS, TREE_SPECIES } from '../../../packages/asset-pipeline/src/procedural.js';
 import { MODEL_FINISHES, MODEL_LIMITS } from '../../../packages/asset-pipeline/src/model-spec.js';
 import type { LearnedDefaults } from './learned-defaults.js';
 
@@ -24,7 +24,7 @@ const n = z.number().finite();
 const between = (low: number, high: number) => n.min(low).max(high);
 const wait = (fallback: number) => z.number().int().min(1000).max(60_000).default(fallback).describe('Total wait for this tool call (ms).');
 const color = boundedVector(0, 1);
-const finish = z.enum(PROCEDURAL_FINISHES).default('natural').describe('Original 256px opaque UV/PBR finish; flat uses solid material factors.');
+const finish = z.enum(PROCEDURAL_FINISHES).default('natural').describe('Original UV/PBR finish; resolution depends on the generator. Flat uses solid material factors.');
 
 const tree = z.strictObject({ kind: z.literal('tree'), finish, species: z.enum(TREE_SPECIES).default('oak'),
   height: between(...L.treeHeight).default(9).describe('Metres (1 m ≈ 3.57 studs).'),
@@ -35,6 +35,7 @@ const tree = z.strictObject({ kind: z.literal('tree'), finish, species: z.enum(T
 const rock = z.strictObject({ kind: z.literal('rock'), finish, size: z.tuple([between(...L.rockSize), between(...L.rockSize), between(...L.rockSize)]).default([1.6, 1.2, 0.9]).describe('[x,y,z] metres; z is height.'),
   roughness: between(0, 1).optional().describe('0 smooth boulder .. 1 jagged, faceted crag.'),
   form: z.enum(ROCK_FORMS).default('boulder').describe('boulder; outcrop: steep stratified cliff face (front -Y); cave: outcrop with a recessed cave mouth.'),
+  textureResolution: z.union([z.literal(ROCK_TEXTURE_RESOLUTIONS[0]), z.literal(ROCK_TEXTURE_RESOLUTIONS[1])]).optional().describe('Natural rocks only: 1024 for detailed close-up assets, 512 for background assets (omitted preserves 512). Both fit connected image import.'),
   moss: z.boolean().optional().describe('Moss cap on the upper sky-facing rock (default false).') });
 const column = z.strictObject({ kind: z.literal('column'), finish, radius: between(...L.columnRadius).default(0.35), height: between(...L.columnHeight).default(4),
   flutes: z.number().int().min(0).max(L.flutes[1]).optional().describe('0 smooth or 8..32 flutes (default 20).'),

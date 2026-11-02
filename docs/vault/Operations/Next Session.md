@@ -17,9 +17,13 @@ Every fulfilled409 delivery operation is completed and must not be replayed: sel
 
 The user stopped Computer Use with physical Escape before the new window was observed. Do not resume UI automation without user resumption. Non-UI process observation proves the selected409 runtime is running. The selected-project native journal showed no fresh connect after launch; older acknowledged/rejected records are not current-startup acceptance. Preserve original custody and never replay an uncertain operation.
 
-Before closing the old window, its327-byte draft matched the retained private NodeREPL backup. The backup is a lexical object named arcaneDraftForFinalUpdate (and earlier arcaneDraftBeforeUpdate), not a globalThis string. Do not reset that session. UI restoration remains unverified. When the user resumes verification, reselect the current returned window, inspect its actual draft first, and never overwrite a changed value with this historical backup. No prompt or Studio action was submitted by this delivery.
+Before closing the old window, its327-byte draft matched the retained private NodeREPL backup. The earlier arcaneDraftBeforeUpdate is a lexical object; globalThis.arcaneDraftForFinalUpdate is the fresh-copy object. Both contain text/bytes/digest/window; neither is a string. Do not reset that session. UI restoration remains unverified. When the user resumes verification, reselect the current returned window, inspect its actual draft first, and never overwrite a changed value with this historical backup. No prompt or Studio action was submitted by this delivery.
 
 Verify saved sign-in, actual model/effort selection and the visible available-actions / plan-cap display. Only after exact current draft ownership and readiness are established may an authorized isolated no-tools chat test proceed. Actual Studio/customer import remains unverified and Studio operation is prohibited.
+
+## Newer rock-detail source
+
+[[Bugs/Rock Texture Detail]] adds explicit512/1024 natural-rock textures while preserving omitted/default512 requests and exact default map arrays. Strict660,45 enabled compiled cases/two unconfigured old native-report cases, five new NumPy cases, seven existing joint cases and45 skill checks pass. An actual local Blender4.5 generation completes38.3seconds with all original workers closed, followed by an actual GLB offline import/107-packet data check. Renders were inspected; material/form realism remains open. Hosted5.2 acceptance and delivery are pending for this source. Do not replay that completed local generation or import inspection. Native workflow input selection now has28 paths, including the frozen material fixture and resolution test; derive the exact list for future delivery rather than reusing409's26-path selection. Observe the new original runs after publishing. Installed409 remains the customer baseline, and Computer Use stays stopped.
 
 ## Next functional work
 
