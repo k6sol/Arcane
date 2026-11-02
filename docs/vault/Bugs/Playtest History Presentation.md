@@ -11,6 +11,6 @@ History now starts as a collapsed Previous playtests disclosure. View reports is
 
 The final176-case focused UI run passes, including history parser/pagination/scope tests, real Edge report/capture behavior and a new empty-archive case. The first run exposed a fixture selecting the newly introduced outer details instead of the actual report details, and pagination waiting for old omission wording. The selector was narrowed to the report details; the omission count was retained with clearer copy. No deadline, archive scope check or live-authority assertion was weakened.
 
-This is source/controlled-browser acceptance. It has not been installed in the customer's desktop.
+The source/controlled-browser checks pass. Thef8 package is now installed and reopened; its new startup connection failure prevents full customer workflow acceptance. See [[Sessions/2026-11-02 Local Chat Desktop Delivery]].
 
 [[Bugs/Zero Action Chat]] ? [[Operations/Next Session]]

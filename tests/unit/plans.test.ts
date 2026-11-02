@@ -265,7 +265,8 @@ test('actions read as used / plan limit: the free plan 500 unless the feed names
   assert.deepEqual([usedOfLimit(fed), fed.source, allowanceDetail(fed)], ['900 / 1,200', 'feed', '300 left · resets 15 Nov']);
   for (const limit of [0, -5, 1.5, '500']) assert.equal(actionsAllowance(reply({ key: '2026-10', used: 1, limit })).limit, 500, 'A malformed feed limit is ignored, never guessed: ' + String(limit));
   const chip = chipLabel(reply({ key: '2026-10', used: 750 }));
-  assert.deepEqual([chip.value, chip.unit, chip.level], ['750', '/ 500', 'over']);
+  assert.deepEqual([chip.value, chip.unit, chip.level], ['0', 'left', 'over']);
+  assert.deepEqual([chipLabel(reply({ key: '2026-10', used: 0 })).value, chipLabel(reply({ key: '2026-10', used: 0 })).unit], ['500', 'left']);
   assert.match(chip.aria, /^750 of 500 Arcane actions used this month, 250 over the limit, resets 1 Nov\. Open Plans and credits\.$/);
   assert.match(allowanceSentence(normal), /^312 of 500 Arcane actions used this month, 188 left, resets 1 Nov$/);
 });
@@ -295,7 +296,10 @@ test('real Edge: Plans & credits page and balance chip render, and buying says c
   await page.goto(origin + '/fixture');
   await page.evaluate(async (token: string) => { const path: string = '/plans.js'; const m = await import(path); (window as any).planOptions={token:()=>token,desktop:null};(window as any).plans = m.startPlans(document, (window as any).planOptions); }, token);
   await page.waitForFunction(() => !(document.getElementById('arcane-balance-chip') as HTMLElement).hidden);
-  assert.equal(await page.locator('#arcane-balance-chip-value').textContent(), String(ledger.summary().month.used));
+  assert.equal(await page.locator('#arcane-balance-chip-value').textContent(), String(500 - ledger.summary().month.used));
+  assert.equal(await page.locator('#arcane-balance-chip-unit').textContent(), 'left');
+  assert.equal(await page.locator('#sidebar-actions-value').textContent(), String(500 - ledger.summary().month.used));
+  assert.equal(await page.locator('#sidebar-actions-limit').textContent(), 'left');
   assert.match(await page.locator('#arcane-balance-chip').getAttribute('aria-label') ?? '', /used this month/);
   await page.evaluate(() => {
     document.getElementById('provider-login-gate')?.setAttribute('hidden', ''); document.getElementById('workspace-stage')?.classList.remove('provider-required');

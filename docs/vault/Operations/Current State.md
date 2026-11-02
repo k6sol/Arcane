@@ -65,3 +65,7 @@ Work in Arcane only; do not operate Roblox Studio or work on ArchLiquid. Preserv
 [[Operations/Next Session]] · [[Operations/Requirements Ledger]] · [[Delivery/Goal Board]] · [[Operations/Evidence Ledger]] · [[Sessions/2026-11-01 Checkpoint Archive]]
 
 [[Bugs/Browser Key Action Evidence]] retains one original Windows input timeout and adds failure-only observations without changing action deadlines or replaying input. Strict660 compile and the complete103-case local Claude file pass with frozen inputs; hosted cause and acceptance remain open.
+
+## Latest installed checkpoint
+
+[[Sessions/2026-11-02 Local Chat Desktop Delivery]] records verifiedf8 installation/reopen and exact unsent draft restoration. A new native startup connection failed with Error440; native chat acceptance remains open. [[Bugs/Action Meter Labels]] clarifies remaining actions in newer source, with21 frozen Plans cases passing. Newer5ab local-context original component run41510761647 is fully successful, separate from installedf8.

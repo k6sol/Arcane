@@ -138,10 +138,10 @@ export function allowanceSentence(allowance: ActionsAllowance, singular = 'actio
   return formatCount(allowance.used) + ' of ' + formatCount(allowance.limit) + ' Arcane ' + (allowance.limit === 1 ? singular : plural) + ' used this month'
     + (allowance.over > 0 ? ', ' + formatCount(allowance.over) + ' over the limit' : ', ' + formatCount(allowance.left) + ' left') + (reset ? ', resets ' + reset : '');
 }
-/** Top-bar pill: value "312", unit "/ 500" (used / plan limit), level for colour. */
+/** Top-bar pill shows remaining actions; the tooltip and accessible sentence retain full usage and reset details. */
 export function chipLabel(state: PlansState): { value: string; unit: string; aria: string; level: ActionsLevel; title: string } {
   const allowance = actionsAllowance(state);
-  return { value: formatCount(allowance.used), unit: '/ ' + formatCount(allowance.limit), level: allowance.level,
+  return { value: formatCount(allowance.left), unit: 'left', level: allowance.level,
     aria: allowanceSentence(allowance, state.catalog.action.singular, state.catalog.action.plural) + '. Open Plans and credits.',
     title: 'Arcane actions this month: ' + usedOfLimit(allowance) + ' · ' + allowanceDetail(allowance) };
 }
@@ -269,13 +269,13 @@ export function startPlans(doc: Document, options: PlansOptions) {
       if (value) value.textContent = label.value; if (unit) unit.textContent = label.unit;
       chip.setAttribute('aria-label', label.aria); chip.title = label.title; chip.dataset.level = label.level; chip.hidden = false;
     }
-    // Sidebar footer: used / plan limit, the bar and (in the footer menu) what is left and when it resets.
+    // Show remaining actions beside the usage bar; keep the used/limit and reset breakdown in the tooltip/menu.
     const sidebar = el('sidebar-actions');
     if (sidebar) {
       const allowance = actionsAllowance(state), sentence = allowanceSentence(allowance, state.catalog.action.singular, state.catalog.action.plural);
       const value = el('sidebar-actions-value'), limit = el('sidebar-actions-limit'), meter = el('sidebar-actions-meter'), fill = el('sidebar-actions-fill');
-      if (value) value.textContent = formatCount(allowance.used);
-      if (limit) limit.textContent = '/ ' + formatCount(allowance.limit);
+      if (value) value.textContent = formatCount(allowance.left);
+      if (limit) limit.textContent = 'left';
       if (meter) {
         meter.setAttribute('aria-valuemax', String(allowance.limit)); meter.setAttribute('aria-valuenow', String(Math.min(allowance.used, allowance.limit)));
         meter.setAttribute('aria-valuetext', sentence); meter.hidden = false;
