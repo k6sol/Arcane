@@ -24,7 +24,7 @@ export type ClaudeToolStatus = 'started' | 'finished' | 'failed';
 /** `image`: a live tool event's capture (PNG/JPEG data: URL from the host's Arcane tools); saved history never has one. */
 export interface ClaudeChatTool { name: string; status: ClaudeToolStatus; input?: string; result?: string; image?: string }
 /** `steered`: a user message sent into a running reply (it joined that reply instead of starting a new one). */
-export interface ClaudeMessageDelivery { model:string; effort:string; turnId:string|null; startedAt:string; finishedAt:string|null; state:'sending'|'accepted'|'completed'|'failed'|'stopped'; error:string|null;contextIncluded:boolean;transmittedBytes:number }
+export interface ClaudeMessageDelivery { localOnly?:true;model:string; effort:string; turnId:string|null; startedAt:string; finishedAt:string|null; state:'sending'|'accepted'|'completed'|'failed'|'stopped'; error:string|null;contextIncluded:boolean;transmittedBytes:number }
 export interface ClaudeChatMessage { id: string; role: ClaudeChatRole; text: string; at: string; tool?: ClaudeChatTool; steered?: true; delivery?:ClaudeMessageDelivery }
 /** One Claude Code sub-agent call as the composer lists it: its agent type, its short task description and its tool status. */
 export interface ClaudeSubagentView { name: string; task: string; state: ClaudeToolStatus }
@@ -51,8 +51,8 @@ export function mergeClaudeChatMessages(saved:readonly ClaudeChatMessage[],live:
 }
 export function claudeMessageDetails(message:ClaudeChatMessage,provider:string,conversationId:string|null):string {
   const delivery=message.delivery;
-  const fields:[string,string|number|null|undefined][]=[['Provider',provider],['Message',message.role==='user'?'Your prompt':message.role==='assistant'?'Assistant response':message.role==='error'?'Error':'Tool result'],
-    ['Status',delivery?.state??(message.role==='error'?'Failed':'Saved message')],['Model',delivery?.model??'Not reported for this message'],['Reasoning',delivery?.effort??'Not reported for this message'],
+  const fields:[string,string|number|null|undefined][]=[['Provider',delivery?.localOnly?'Arcane':provider],['Message',message.role==='user'?'Your prompt':message.role==='assistant'?'Assistant response':message.role==='error'?'Error':'Tool result'],
+    ['Status',delivery?.localOnly?'Saved locally':delivery?.state??(message.role==='error'?'Failed':'Saved message')],['Model',delivery?.localOnly?'No model request':delivery?.model??'Not reported for this message'],['Reasoning',delivery?.effort??'Not reported for this message'],
     ['Submitted',delivery?.startedAt],['Finished',delivery?.finishedAt],['Recorded',message.at||null],['Error details',delivery?.error??(message.role==='error'?message.text:null)],
     ['Text size',new TextEncoder().encode(message.text).length+' UTF-8 bytes'],['Transmitted text',delivery?delivery.transmittedBytes+' UTF-8 bytes':null],['Shared conversation context',delivery?.contextIncluded?'Included with this explicit Send':null],['Lines',message.text.split('\n').length],['Conversation',conversationId??'Not started'],['Turn',delivery?.turnId],['Message ID',message.id||null]];
   return fields.filter(([,value])=>value!==null&&value!==undefined).map(([label,value])=>label+': '+value).join('\n');
@@ -210,7 +210,7 @@ export function readClaudeChatMessage(value: unknown): ClaudeChatMessage | null 
     ['sending','accepted','completed','failed','stopped'].includes(String(delivery.state))&&(delivery.error===null||typeof delivery.error==='string'&&delivery.error.length<=2048)&&
     typeof delivery.contextIncluded==='boolean'&&typeof delivery.transmittedBytes==='number'&&Number.isSafeInteger(delivery.transmittedBytes)&&delivery.transmittedBytes>=0&&delivery.transmittedBytes<=2000000)
     output.delivery={model:delivery.model,effort:delivery.effort,turnId:delivery.turnId,startedAt:delivery.startedAt,finishedAt:delivery.finishedAt as string|null,
-      state:delivery.state as ClaudeMessageDelivery['state'],error:delivery.error as string|null,contextIncluded:delivery.contextIncluded,transmittedBytes:delivery.transmittedBytes};
+      state:delivery.state as ClaudeMessageDelivery['state'],error:delivery.error as string|null,contextIncluded:delivery.contextIncluded,transmittedBytes:delivery.transmittedBytes,...(delivery.localOnly===true&&delivery.state==='completed'&&delivery.transmittedBytes===0&&delivery.contextIncluded===false?{localOnly:true as const}:{})};
   const tool = record(message.tool);
   if (tool && typeof tool.status === 'string' && TOOL_STATES.includes(tool.status as ClaudeToolStatus)) {
     output.tool = { name: text(tool.name, 256) || 'Tool', status: tool.status as ClaudeToolStatus };
@@ -1008,7 +1008,9 @@ export class ClaudeChat {
     const id = text(record(reply)?.messageId, 256), shown = this.active && epoch === this.viewEpoch;
     if (id) {
       echo.id = id;
-      if (shown) article.dataset.steerState = 'sent';
+      const local=record(reply)?.localOnly===true?readClaudeChatMessage({...echo,delivery:record(reply)?.delivery}):null;
+      if(local?.delivery?.localOnly){delete echo.steered;echo.delivery=local.delivery;if(shown){article.removeAttribute('data-steered');article.querySelector('.message-steer-label')?.remove();article.dataset.steerState='local';this.refreshMessageDetails();}}
+      else if (shown) article.dataset.steerState = 'sent';
       if(item)this.replaceQueue(this.queue.filter(row=>row!==item));
       this.render();if(turn.delivery.state==='completed')this.drainQueue(turn);return true;
     }
@@ -1359,6 +1361,7 @@ export class ClaudeChat {
       case 'message': case 'tool': {
         const message = readClaudeChatMessage(event.message);
         if (!message) return;
+        if(message.delivery?.localOnly){if(visible){const near=this.nearBottom();this.appendMessage(message,false);this.refreshMessageDetails();if(near)this.scrollToBottom();}return;}
         message.delivery=turn.delivery;
         if (message.role === 'user' && turn.echo !== null && message.text.trim() === turn.echo) { turn.echo = null; return; }
         // A finished reply replaces the pending paint; anything else first draws the text that streamed before it.
@@ -1381,6 +1384,7 @@ export class ClaudeChat {
         this.flushStream();
         turn.bubble?.setAttribute('aria-busy', 'false'); turn.bubble?.removeAttribute('aria-live');
         const ok = event.ok === true, error = nullableText(event.error, 2048), limited = ok ? null : readUsageLimit(event.usageLimit, error, this.profile.usageLimitText);
+        if(event.localOnly===true){turn.delivery.localOnly=true;turn.delivery.transmittedBytes=0;turn.delivery.contextIncluded=false;}
         turn.delivery.state=ok?'completed':turn.stopping?'stopped':'failed';turn.delivery.finishedAt=new Date().toISOString();turn.delivery.error=error;this.refreshMessageDetails();
         this.turn = null; this.markTurnLive();
         // At the usage limit the unanswered message returns to an empty composer so it can move to the other provider.
@@ -1401,12 +1405,12 @@ export class ClaudeChat {
         const model = this.turnModel(turn.tabKey), display = this.costDisplay(), reply = claudeReplyCost(event.usage, model);
         this.notice = turn.stopping && !ok ? 'Stopped.' : this.replyNotice(event.usage, model, display) ?? (ok ? 'Done.' : '');
         if (visible && reply) this.appendReplyUsage(reply, display, this.turnModelLabel(turn.tabKey));
-        if (visible && ok) try { feedbackSink?.turnFinished({ key: this.profile.provider + ':' + turn.tabKey, ok, tools: this.turnTools(), box: this.el('codex-messages') }); } catch { /* Learning is optional. */ }
+        if (visible && ok && !turn.delivery.localOnly) try { feedbackSink?.turnFinished({ key: this.profile.provider + ':' + turn.tabKey, ok, tools: this.turnTools(), box: this.el('codex-messages') }); } catch { /* Learning is optional. */ }
         this.addUsage(turn.conversationId, reply);
-        if (limited) this.setUsageLimit(limited); else if (ok) this.setUsageLimit(null);
+        if(!turn.delivery.localOnly){if (limited) this.setUsageLimit(limited); else if (ok) this.setUsageLimit(null);}
         // The queue continues only after a reply that finished; a failure, Stop or usage limit returns it to the draft.
         if (ok) this.drainQueue(turn); else this.returnQueue();
-        try { this.replyFinished(); } catch { /* Presentation only. */ }
+        try { if(!turn.delivery.localOnly)this.replyFinished(); } catch { /* Presentation only. */ }
         this.render();
         void this.reloadList().then(() => this.render());
         return;

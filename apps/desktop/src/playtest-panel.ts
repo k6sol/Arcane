@@ -464,12 +464,12 @@ export function startPlaytestPanel(options: PlaytestPanelOptions): PlaytestPanel
   repairButton.setAttribute('data-playtest-action', 'repair');
   let repairArmed = false, fenced = false;
   const feedback = node('div', undefined, 'playtest-feedback'); feedback.append(notice, repairButton, refreshButton); feedback.hidden = true;
-  const historySection=node('section',undefined,'playtest-history'),historyNotice=node('p','Saved reports are read-only. Current source is unobserved.','playtest-notice');
+  const historySection=node('details',undefined,'playtest-history'),historyNotice=node('p','Results from previous tests. Run a new test to check your latest changes.','playtest-notice');
   historySection.setAttribute('aria-label','Saved playtest reports');historyNotice.setAttribute('role','status');
-  const historyLoad=node('button','Load saved reports','playtest-refresh'),historyNext=node('button','Next reports','playtest-refresh');
+  const historyLoad=node('button','View reports','playtest-refresh'),historyNext=node('button','Older reports','playtest-refresh');
   historyLoad.type=historyNext.type='button';historyNext.hidden=true;
-  const historyList=node('div'),historyResult=node('div');historySection.append(node('h3','Saved playtest reports','playtest-title'),historyNotice,historyLoad,historyNext,historyList,historyResult);
-  let historyCursor:string|null=null,historyRow:JobView|null=null;
+  const historyList=node('div'),historyResult=node('div');historySection.append(node('summary','Previous playtests','playtest-title'),historyNotice,historyLoad,historyNext,historyList,historyResult);
+  let historyCursor:string|null=null,historyRow:JobView|null=null,historyEmpty=false;
   let removeHistoryListeners:(()=>void)[]=[];
   const historyButtons:HTMLButtonElement[]=[];
   root.hidden = true; root.replaceChildren();
@@ -480,8 +480,8 @@ export function startPlaytestPanel(options: PlaytestPanelOptions): PlaytestPanel
     rendered.clear(); jobs = []; root.replaceChildren(); root.hidden = true; showFence(false);
     root.setAttribute('aria-busy', 'false'); notice.textContent = ''; feedback.hidden = true; stale = false;
     historyRow?.remove();historyRow=null;removeHistoryListeners.forEach(remove=>remove());removeHistoryListeners=[];historyButtons.length=0;
-    historyList.replaceChildren();historyResult.replaceChildren();historyCursor=null;historyNext.hidden=true;historyLoad.textContent='Load saved reports';
-    historyNotice.textContent='Saved reports are read-only. Current source is unobserved.';
+    historyList.replaceChildren();historyResult.replaceChildren();historyCursor=null;historyNext.hidden=true;historyLoad.textContent='View reports';historyEmpty=false;historySection.open=false;
+    historyNotice.textContent='Results from previous tests. Run a new test to check your latest changes.';
   }
   function invalidate(): void {
     epoch++; request?.controller.abort(); request = null; sessionToken = null;sessionReportContext=null;reportProject=null; clearRows();
@@ -629,7 +629,7 @@ export function startPlaytestPanel(options: PlaytestPanelOptions): PlaytestPanel
     const focused = doc.activeElement as HTMLElement | null;
     const focusedRow = [...rendered.values()].find(row => focused && row.element.contains(focused));
     const focusedAction = focused?.getAttribute('data-playtest-action');
-    const historyVisible=options.reports===true&&reportProject!==null;
+    const historyVisible=options.reports===true&&reportProject!==null&&!historyEmpty;
     let changed = root.children.length !== selected.length + 1+(historyVisible?1:0);
     const next = new Map<string, JobView>();
     for (const job of selected) {
@@ -712,17 +712,17 @@ export function startPlaytestPanel(options: PlaytestPanelOptions): PlaytestPanel
     const token=syncContext(),project=reportProject;
     if(!token||!project||request||options.reports!==true)return Promise.resolve();
     return run(token,'GET','/v1/playtests/history'+(cursor?'?cursor='+encodeURIComponent(cursor):''),undefined,value=>{
-      const page=reportPage(value,project);historyCursor=page.nextCursor;historyNext.hidden=historyCursor===null;historyLoad.textContent='Latest reports';
+      const page=reportPage(value,project);historyCursor=page.nextCursor;historyNext.hidden=historyCursor===null;historyLoad.textContent='Refresh reports';
       historyRow?.remove();historyRow=null;historyResult.replaceChildren();removeHistoryListeners.forEach(remove=>remove());removeHistoryListeners=[];historyButtons.length=0;historyList.replaceChildren();
-      historyNotice.textContent='Saved reports are read-only. Current source is unobserved. Archive '+page.archive.state+(page.archive.code?' · '+page.archive.code:'')+'.'+
-        (page.omittedReports?' '+page.omittedReports+' earlier reports omitted by retention.':'')+(!page.reports.length?' No saved reports on this page.':'');
+      historyEmpty=page.archive.state==='ready'&&page.reports.length===0&&page.nextCursor===null;
+      historyNotice.textContent=(page.archive.state==='ready'?'These are previous results. Run a new test to check your latest changes.':'Some previous results are unavailable. Refresh to check again.')+(page.omittedReports?' '+page.omittedReports+' older reports are no longer available.':'');
       for(const summary of page.reports){
         const row=node('article',undefined,'playtest-row'),open=node('button','Open report · '+summary.targetName,'playtest-refresh');open.type='button';
         row.append(open,node('p',summary.observedAt+' · '+(summary.snapshot==='admission'?'Last observed · Outcome unavailable':(summary.outcome??'Outcome unavailable')+' · '+summary.code+' · Cleanup '+summary.cleanup)));
         const click=(event:Event)=>{if(event.isTrusted===true&&!open.disabled&&root.contains(open))void showHistorical(summary);};
         open.addEventListener('click',click);removeHistoryListeners.push(()=>open.removeEventListener('click',click));historyButtons.push(open);historyList.append(row);
       }
-    },()=>{historyNotice.textContent='Saved reports unavailable. Try loading the latest reports again.';},undefined,HISTORY_PAGE_BYTES);
+    },()=>{historyNotice.textContent='Saved reports unavailable. Try loading the latest reports again.';},()=>render(),HISTORY_PAGE_BYTES);
   }
   const historyLoadClick=(event:Event)=>{if(event.isTrusted===true&&!historyLoad.disabled&&root.contains(historyLoad))void loadHistory(null);};
   const historyNextClick=(event:Event)=>{if(event.isTrusted===true&&!historyNext.disabled&&root.contains(historyNext)&&historyCursor)void loadHistory(historyCursor);};

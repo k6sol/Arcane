@@ -358,7 +358,7 @@ async function admitClaudeSubscription(turnId,epoch,owned) {
   if(response.body)for await(const chunk of response.body){bytes+=chunk.length;if(bytes>4096)throw Error('Subscription allowance is unavailable.');chunks.push(Buffer.from(chunk));}
   if(!current())throw Error('Subscription allowance is unavailable.');
   const value=JSON.parse(Buffer.concat(chunks).toString('utf8'));
-  if(response.status===429&&value?.admitted===false&&value.code==='ACTION_LIMIT')return false;
+  if(response.status===429&&value?.admitted===false&&value.code==='ACTION_LIMIT')return Object.freeze({admitted:false,message:typeof value.message==='string'&&value.message.length<=2048?value.message:null});
   if(!response.ok||value?.admitted!==true)throw Error('Subscription allowance is unavailable.');
   return true;
 }

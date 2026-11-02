@@ -385,3 +385,10 @@ test('local action redemption requires the human token and same origin, accepts 
  assert.equal((await(await f.call('/v1/actions/redeem',{method:'POST',body:input})).json() as any).replayed,true);
  assert.equal(f.ledger.summary().month.used,0);assert.equal(f.ledger.summary().month.limit,1500);
 });
+
+test('action exhaustion reply states the actual UTC reset and separates credits from subscription use',async t=>{
+ const directory=await temp(),ledger=new ActionsLedger(directory);t.after(()=>rm(directory,{recursive:true,force:true}));
+ assert.match(ledger.exhaustedMessage(new Date('2026-11-30T23:59:59Z')),/1 December 2026 at 00:00 UTC/);
+ assert.match(ledger.exhaustedMessage(new Date('2026-12-31T23:59:59Z')),/1 January 2027 at 00:00 UTC/);
+ assert.match(ledger.exhaustedMessage(),/API-credit models use credits instead of actions/);
+});

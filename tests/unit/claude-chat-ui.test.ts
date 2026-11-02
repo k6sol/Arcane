@@ -2874,3 +2874,19 @@ test('C31: New chat is never refused while a message is handed off; it opens rig
   assert.equal(sends(b).length, 1, 'nothing was sent again');
   click(f.tabs()[0]!); await tick(); assert.equal(f.chat.activeConversation(), 'conv-new', 'the sent message kept its tab');
 });
+
+test('local action exhaustion reply completes a sent message and leaves the composer available for another message',async t=>{
+ const b=fakeBridge(),f=mount(b.bridge);t.after(()=>f.chat.stop());await f.chat.refresh();f.type('Save this message');await f.chat.send();
+ const at='2026-11-02T00:00:00.000Z',delivery={model:'sonnet',effort:'high',turnId:'turn-1',startedAt:at,finishedAt:at,state:'completed',error:null,localOnly:true,contextIncluded:false,transmittedBytes:0};
+ b.emit({type:'message',message:{id:'local-1',role:'assistant',text:'You have run out of Arcane actions. Reset: 1 December 2026. Open Plans and credits.',at,delivery}});
+ b.emit({type:'done',ok:true,error:null,usage:null,localOnly:true});await tick();
+ assert.equal(f.input.value,'');assert.equal(f.bubbles().length,2);assert.match(f.bubbles()[1]!.text,/1 December 2026/);
+ f.type('Another saved message');assert.equal(f.submit.disabled,false);await f.chat.send();assert.equal(sends(b).length,2);
+});
+test('a local action-limit reply during a running stream does not replace or finish that original reply',async t=>{
+ const b=fakeBridge(),f=mount(b.bridge);t.after(()=>f.chat.stop());await f.chat.refresh();f.type('Original model task');await f.chat.send();b.emit({type:'delta',text:'Working'});
+ const at='2026-11-02T00:00:00.000Z',delivery={model:'sonnet',effort:'high',turnId:'turn-1',startedAt:at,finishedAt:at,state:'completed',error:null,localOnly:true,contextIncluded:false,transmittedBytes:0};
+ b.emit({type:'message',message:{id:'local-2',role:'assistant',text:'Arcane actions are exhausted.',at,delivery}});b.emit({type:'delta',text:' on the original task'});
+ assert.ok(f.bubbles().some(row=>row.text==='Working on the original task'));assert.ok(f.bubbles().some(row=>row.text==='Arcane actions are exhausted.'));
+ assert.equal(f.submit.getAttribute('aria-label'),'Stop task');assert.equal(sends(b).length,1);
+});

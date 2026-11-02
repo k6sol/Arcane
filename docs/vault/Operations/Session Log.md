@@ -5,6 +5,10 @@ tags: [arcane]
 ---
 # Session log
 
+## 2026-11-02 ? Action redemption and local chat replies
+
+[[Bugs/Action Code Redemption]] gives1,000 reusable action units with no credit mutation. [[Bugs/Zero Action Chat]] saves exhausted prompts and an Arcane-local reply with reset/options, prevents provider dispatch/resend and preserves an existing reply. [[Bugs/Playtest History Presentation]] collapses previous results and hides an explicitly checked empty archive. Strict660, final176 controlled UI cases and bridge/preload checks pass. Earlier history assertion failures and original hosted timeouts remain recorded; no customer or Studio acceptance is inferred.
+
 ## 2026-11-02 ? Full metadata factory and recovery host checks
 
 [[Bugs/Native Discovery Shutdown]] now includes actual complete factory metadata evidence: both original processes and output streams closed normally without kill, with saved subscription/eight models and no thread/prompt/Studio. All35 remaining Windows focused cases passed locally unchanged; original hosted stalls remain unexplained. [[Bugs/Windows Taskbar Branding]] records the platform/API recovery-host fixture correction and five passing cases. Customer app connection and actual taskbar acceptance remain open.

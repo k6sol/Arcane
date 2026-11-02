@@ -810,8 +810,8 @@ const billing = Object.freeze({ version: 1,
     const value=await ipcRenderer.invoke('arcane:billing-redeem',args[0],args[1]);
     if(!value||value.version!==1||!['redeemed','invalid-code','signed-out','not-connected','unknown','balance-limit'].includes(value.state))throw new Error(BILLING_UNAVAILABLE);
     if(value.state==='redeemed'){
-      if(Object.keys(value).sort().join(',')!=='balance,granted,replayed,state,version'||value.granted!==1000||!Number.isSafeInteger(value.balance)||value.balance<0||typeof value.replayed!=='boolean')throw new Error(BILLING_UNAVAILABLE);
-      return{version:1,state:'redeemed',granted:1000,balance:value.balance,replayed:value.replayed};
+      if(Object.keys(value).sort().join(',')!=='balance,granted,replayed,state,unit,version'||value.unit!=='action'||value.granted!==1000||!Number.isSafeInteger(value.balance)||value.balance<0||typeof value.replayed!=='boolean')throw new Error(BILLING_UNAVAILABLE);
+      return{version:1,state:'redeemed',unit:'action',granted:1000,balance:value.balance,replayed:value.replayed};
     }
     if(Object.keys(value).sort().join(',')!=='state,version')throw new Error(BILLING_UNAVAILABLE);
     return{version:1,state:value.state};

@@ -132,7 +132,7 @@ export function plansRoutes(options: PlansRouteOptions) {
       if(!options.admissionEnforced||Object.keys(input).length!==2||input.source!=='claude'||typeof input.turnId!=='string'||!ID.test(input.turnId)){
         send(response,400,{error:'INPUT',message:'Expected one original Claude subscription request.'});return true;
       }
-      try{const result=options.ledger.admit('claude',input.turnId,now());send(response,result.admitted?200:429,{...result,code:result.admitted?null:'ACTION_LIMIT'});}
+      try{const result=options.ledger.admit('claude',input.turnId,now());send(response,result.admitted?200:429,{...result,code:result.admitted?null:'ACTION_LIMIT',...(!result.admitted?{message:options.ledger.exhaustedMessage(now())}:{})});}
       catch{send(response,503,{admitted:false,code:'ACTIONS_UNAVAILABLE'});}return true;
     }
     if (path === '/v1/plans/checkout') {

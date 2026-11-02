@@ -496,10 +496,11 @@ function createStore({ fs, p, directory, now, limits, modelPattern = CHOICE }) {
       if (steered && (v.steered !== true || v.role !== 'user')) return null;
       const out = { id: v.id, role: v.role, text: v.text, at: v.at, ...(steered ? { steered: true } : {}) };
       if(delivery){
-        const d=plain(v.delivery,['model','effort','turnId','startedAt','finishedAt','state','error','contextIncluded','transmittedBytes']);
+        const d=plain(v.delivery,['model','effort','turnId','startedAt','finishedAt','state','error','contextIncluded','transmittedBytes',...(m.delivery&&Object.hasOwn(m.delivery,'localOnly')?['localOnly']:[])]);
         if(typeof d.model!=='string'||!modelPattern.test(d.model)||typeof d.effort!=='string'||!CHOICE.test(d.effort)||!isId(d.turnId)||!ISO.test(d.startedAt)||
           !(d.finishedAt===null||typeof d.finishedAt==='string'&&ISO.test(d.finishedAt))||!['sending','accepted','completed','failed','stopped'].includes(d.state)||
           !(d.error===null||typeof d.error==='string'&&d.error.length<=2048)||typeof d.contextIncluded!=='boolean'||!Number.isSafeInteger(d.transmittedBytes)||d.transmittedBytes<0||d.transmittedBytes>2000000)return null;
+        if(Object.hasOwn(d,'localOnly')&&(d.localOnly!==true||d.state!=='completed'||d.transmittedBytes!==0||d.contextIncluded!==false))return null;
         out.delivery={...d};
       }
       if (keys.includes('tool')) {
@@ -958,9 +959,9 @@ function createClaudeChat(options) {
     const turn = { turnId: randomUUID(), conversationId, model: v.model, effort: v.effort, child: null, stopped: false, finished: false, timer: null,
       sessionId: entry?.sessionId ?? null, credential: null, redactions: [], deltaCarry: '', assets: null, result: null, tools: new Map(), arcaneCalls: new Set(), toolImages: 0, overflow: false, limit: null, seed: '', images: v.images ?? [], playtest: v.playtest,modelSource:v.modelSource };
     turns.set(turn.turnId, turn); byConversation.set(conversationId, turn);
-    let user = null;
+    let user = null,localReply=null;
     try {
-      if(options.admitSubscriptionAction&&await options.admitSubscriptionAction(turn.turnId)!==true)fail('actions');
+      if(options.admitSubscriptionAction){const admission=await options.admitSubscriptionAction(turn.turnId);if(admission!==true)localReply=admission&&admission.admitted===false&&typeof admission.message==='string'?bounded(admission.message,2048):"You've run out of Arcane actions. Open Plans and credits to see your reset date, upgrade your plan, redeem an action code, or buy API credits.";}
       if(disposed||turn.stopped)fail('unavailable');
       const at = isoNow(now);
       if (!entry) {
@@ -973,13 +974,21 @@ function createClaudeChat(options) {
       const display=v.displayText??v.text;
       user = message('user', v.images ? display + '\n\n' + imageMarkers(v.images) : display);
       turn.delivery={model:v.model,effort:v.effort,turnId:turn.turnId,startedAt:at,finishedAt:null,state:'accepted',error:null,contextIncluded:display!==v.text,transmittedBytes:Buffer.byteLength(turn.seed+v.text)};
+      if(localReply)turn.delivery={...turn.delivery,state:'completed',finishedAt:at,transmittedBytes:0,contextIncluded:false,localOnly:true};
       user.delivery={...turn.delivery};turn.userMessage=user;
       if (!await store.put(conversationId, user)) fail('missing');
     } catch (error) {
       turns.delete(turn.turnId); byConversation.delete(conversationId);
       throw error instanceof ClaudeChatError ? error : new ClaudeChatError('unavailable');
     }
-    void runTurn(turn, turn.seed + v.text);
+    if(localReply){
+      const response=message('assistant',localReply);response.delivery={...turn.delivery};
+      try{if(!await store.put(conversationId,response))fail('missing');await store.update(conversationId,{updatedAt:isoNow(now)});}
+      catch(error){turns.delete(turn.turnId);byConversation.delete(conversationId);throw error instanceof ClaudeChatError?error:new ClaudeChatError('unavailable');}
+      turn.finished=true;turns.delete(turn.turnId);byConversation.delete(conversationId);
+      emit({turnId:turn.turnId,conversationId,type:'message',message:publicMessage(response)});
+      emit({turnId:turn.turnId,conversationId,type:'done',ok:true,error:null,usage:null,usageLimit:null,localOnly:true});
+    }else void runTurn(turn, turn.seed + v.text);
     return Object.freeze({ turnId: turn.turnId, conversationId, messageId: user.id });
   }
   /**
@@ -1229,7 +1238,17 @@ function createClaudeChat(options) {
     if (!turn || turn.finished || turn.stopped || !turn.inputOpen || !turn.child || turn.result || turn.limit) return false;
     if (appAssets) assertAssetLive(turn);
     const m = { ...message('user', v.text), steered: true };
-    if(options.admitSubscriptionAction&&await options.admitSubscriptionAction(m.id)!==true)fail('actions');
+    if(options.admitSubscriptionAction){
+      const admission=await options.admitSubscriptionAction(m.id);
+      if(admission!==true){
+        const text=admission&&admission.admitted===false&&typeof admission.message==='string'?bounded(admission.message,2048):"You've run out of Arcane actions. Open Plans and credits for your reset date, plan upgrades and API-credit options.";
+        const at=isoNow(now),delivery={model:turn.model,effort:turn.effort,turnId:turn.turnId,startedAt:at,finishedAt:at,state:'completed',error:null,contextIncluded:false,transmittedBytes:0,localOnly:true};
+        delete m.steered;m.delivery={...delivery};const response=message('assistant',text);response.delivery={...delivery};
+        if(!await store.put(turn.conversationId,m)||!await store.put(turn.conversationId,response))fail('unavailable');
+        await store.update(turn.conversationId,{updatedAt:at});
+        emit({turnId:turn.turnId,conversationId:turn.conversationId,type:'message',message:publicMessage(response)});return Object.freeze({messageId:m.id,localOnly:true,delivery:Object.freeze({...delivery})});
+      }
+    }
     if(disposed||turn.finished||turn.stopped||!turn.inputOpen||turn.result||turn.limit)fail('unavailable');
     if(appAssets)assertAssetLive(turn);
     // Start the write before awaiting. A successful callback confirms the pipe accepted it, not that the CLI acted on it.

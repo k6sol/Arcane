@@ -1436,3 +1436,11 @@ test('Keep this mesh preserves uncertainty when a delivered start has no readabl
     assert.doesNotMatch(result.message, /Nothing was uploaded/);
   }
 });
+
+test('the billing preload accepts action grants and refuses old credit or malformed grant replies',async()=>{
+ let exposed,value={version:1,state:'redeemed',unit:'action',granted:1000,balance:1000,replayed:false};
+ vm.runInNewContext(preloadSource,{require(name){assert.equal(name,'electron');return{contextBridge:{exposeInMainWorld(_name,v){exposed=v;}},ipcRenderer:{invoke:async()=>value}};}});
+ const id='00000000-0000-4000-8000-000000000001';
+ assert.deepEqual({...await exposed.billing.redeemCode('test',id)},value);
+ for(const unit of ['credit',null]){value={...value,unit};await assert.rejects(exposed.billing.redeemCode('test',id));}
+});

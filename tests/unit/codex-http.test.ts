@@ -47,7 +47,8 @@ test('subscription exhaustion refuses before native model dispatch and replay ne
  const started=await f.action({action:'thread-start',connectionId}),threadId=started.state.snapshot!.thread!.threadId;
  const input={action:'turn-start',connectionId,threadId,requestId:randomUUID(),text:'fixture request'};
  const refused=await f.action(input);assert.equal(refused.record.state,'rejected');assert.equal(refused.record.errorCode,'ACTION_LIMIT');
- assert.equal((await f.action(input)).replayed,true);assert.equal(calls,1);
+ const local=refused.state.submittedMessages!.messages.at(-1)!;assert.equal(local.text,input.text);assert.match(local.localReply??'',/run out of Arcane actions/);assert.equal(local.transmittedBytes,0);
+ assert.equal((await f.action(input)).replayed,true);assert.equal(calls,1);assert.equal(f.service.state().submittedMessages!.messages.length,1);
  let log=await readFile(join(f.directory,'receipt-1.jsonl'),'utf8');assert.ok(!log.includes('"method":"turn/start"'));
  allow=true;const next={...input,requestId:randomUUID()};assert.equal((await f.action(next)).record.state,'acknowledged');
  assert.equal((await f.action(next)).replayed,true);assert.equal(calls,2);

@@ -102,6 +102,12 @@ export class ActionsLedger {
     const after=this.summary(now);return{granted:1000,balance:Math.max(0,after.month.limit-after.month.used),replayed};
   }
 
+  exhaustedMessage(now=new Date()):string {
+    const reset=this.summary(now).month.resetsAt;
+    const date=new Intl.DateTimeFormat('en-GB',{day:'numeric',month:'long',year:'numeric',timeZone:'UTC'}).format(new Date(reset));
+    return "You've run out of Arcane actions. Your monthly plan actions reset on "+date+" at 00:00 UTC. Open Plans and credits to upgrade, redeem an action code, or buy API credits. API-credit models use credits instead of actions and don't spend your ChatGPT or Claude subscription usage.";
+  }
+
   #ensureDirectory(): void {
     mkdirSync(this.directory, { recursive: true, mode: 0o700 });
     const stat = lstatSync(this.directory);

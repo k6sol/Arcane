@@ -262,10 +262,11 @@ export function readCodexState(value: unknown): ChatState {
       !text(submitted.threadId)||!(submitted.sessionId===null||text(submitted.sessionId))||!integer(submitted.earlierCount)||!Array.isArray(submitted.messages)||submitted.messages.length>64||utf8(JSON.stringify(submitted.messages))>512*1024)
       throw new Error('Invalid submitted message transcript.');
     for(const row of submitted.messages) {
-      if(!dataObject(row,['requestId','turnId','text','model','effort','state','createdAt','finishedAt','errorCode','contextIncluded','transmittedBytes',...(dataObject(row)&&Object.hasOwn(row,'kind')?['kind']:[])])||Object.hasOwn(row,'kind')&&row.kind!=='steer'||!uuid(row.requestId)||ids.has(row.requestId)||typeof row.contextIncluded!=='boolean'||!integer(row.transmittedBytes)||(row.transmittedBytes as number)>CODEX_INPUT_BYTES||
+      if(!dataObject(row,['requestId','turnId','text','model','effort','state','createdAt','finishedAt','errorCode','contextIncluded','transmittedBytes',...(dataObject(row)&&Object.hasOwn(row,'kind')?['kind']:[]),...(dataObject(row)&&Object.hasOwn(row,'localReply')?['localReply']:[])])||Object.hasOwn(row,'kind')&&row.kind!=='steer'||!uuid(row.requestId)||ids.has(row.requestId)||typeof row.contextIncluded!=='boolean'||!integer(row.transmittedBytes)||(row.transmittedBytes as number)>CODEX_INPUT_BYTES||
         !(row.turnId===null||text(row.turnId))||typeof row.text!=='string'||utf8(row.text)>CODEX_INPUT_BYTES||!(row.model===null||text(row.model))||!(row.effort===null||text(row.effort,64))||
         !['pending','acknowledged','rejected','unknown'].includes(String(row.state))||!text(row.createdAt,64)||!Number.isFinite(Date.parse(row.createdAt))||
         !(row.finishedAt===null||text(row.finishedAt,64)&&Number.isFinite(Date.parse(row.finishedAt)))||!(row.errorCode===null||text(row.errorCode)))throw new Error('Invalid submitted message receipt.');
+      if(Object.hasOwn(row,'localReply')&&(typeof row.localReply!=='string'||!row.localReply.trim()||utf8(row.localReply)>2048||row.errorCode!=='ACTION_LIMIT'||row.state!=='rejected'||row.transmittedBytes!==0||row.finishedAt===null))throw new Error('Invalid local action-limit response.');
       ids.add(row.requestId);
     }
     const snapshot=value.snapshot as ChatSnapshot|null, binding=snapshot?.thread?.configured?snapshot.thread:value.nativeHistory;
@@ -668,7 +669,7 @@ export class CodexChatApi {
     } catch(error) { if(error instanceof CodexHttpError)throw error;throw new CodexHttpError(this.safe(error instanceof Error?error.message:'Unreadable native acknowledgement.'),true); }
   }
 }
-export interface ChatMessage { key: string; role: 'human'|'codex'|'tool'; scope: string; text: string; acknowledgement?: string; threadId?: string; toolState?: ToolActivityState; toolCall?: LiveToolCall; receipt?:SubmittedChatMessage; source?:'history'|'live'|'submission';steered?:true }
+export interface ChatMessage { key: string; role: 'human'|'codex'|'tool'; scope: string; text: string; acknowledgement?: string; threadId?: string; toolState?: ToolActivityState; toolCall?: LiveToolCall; receipt?:SubmittedChatMessage; source?:'history'|'live'|'submission';local?:true;steered?:true }
 /** Join local Send receipts to native turns, never by prompt text (identical consecutive prompts remain separate). */
 export function mergeSubmittedMessages(messages:readonly ChatMessage[],submitted:SubmittedChatTranscript|undefined):ChatMessage[] {
   const merged=messages.map(message=>({...message}));
@@ -680,7 +681,7 @@ export function mergeSubmittedMessages(messages:readonly ChatMessage[],submitted
         (receipt.kind==='steer'?ids[2]===receipt.requestId:row.receipt?.kind!=='steer'&&!steeringIds.has(ids[2]!));
     }):-1;
     const row:ChatMessage={key:receipt.requestId,role:'human',threadId:submitted!.threadId,scope:submitted!.threadId,text:receipt.text,
-      acknowledgement:'Native acknowledgement: '+receipt.state,receipt,source:'submission',...(receipt.kind==='steer'?{steered:true as const}:{})};
+      acknowledgement:receipt.localReply?'Saved locally; no model request':'Native acknowledgement: '+receipt.state,receipt,source:'submission',...(receipt.kind==='steer'?{steered:true as const}:{})};
     if(byTurn>=0) {
       const native=merged[byTurn]!;merged[byTurn]={...native,...row,key:native.key,scope:native.scope};
       if(byRequest>=0&&byRequest!==byTurn)merged.splice(byRequest,1);
@@ -689,6 +690,11 @@ export function mergeSubmittedMessages(messages:readonly ChatMessage[],submitted
       const matching=merged.flatMap((message,index)=>message.threadId===submitted!.threadId&&(message.receipt?.turnId??message.key.split('\0')[1])===receipt.turnId?[index]:[]);
       const position=receipt.turnId===null||!matching.length?-1:receipt.kind==='steer'?matching.at(-1)!+1:matching[0]!;
       if(position<0)merged.push(row);else merged.splice(position,0,row);
+    }
+    if(receipt.localReply){
+      const key='arcane-local:'+receipt.requestId,response:ChatMessage={key,role:'codex',threadId:submitted!.threadId,scope:submitted!.threadId,text:receipt.localReply,source:'submission',local:true,acknowledgement:'Arcane local reply'};
+      const existing=merged.findIndex(row=>row.key===key),human=merged.findIndex(row=>row.role==='human'&&row.receipt?.requestId===receipt.requestId);
+      if(existing>=0)merged[existing]=response;else merged.splice(human+1,0,response);
     }
   }
   return merged;
@@ -703,9 +709,9 @@ export function codexMessageDetails(message:ChatMessage,state:ChatState|null):st
   const failure=state?.snapshot?.events.findLast(event=>event.type==='error'&&event.threadId===threadId&&event.turnId===turnId);
   const status=message.role==='human'?receipt?.state??message.acknowledgement??'Recorded':terminal?.type==='turn'?terminal.status:'Recorded response';
   const reason=receipt?.errorCode??(failure?.type==='error'?failure.code:null);
-  const fields:[string,string|number|null|undefined][]=[['Provider','Codex'],['Message',message.role==='human'?'Your prompt':message.role==='codex'?'Assistant response':'Tool result'],
-    ['Status',status],['Source',message.source==='submission'?message.receipt?.kind==='steer'?'Saved steering receipt':'Saved Send receipt':message.source==='history'?'Saved public history':'Live conversation'],
-    ['Model',receipt?.model??'Not reported for this message'],['Reasoning',receipt?.effort??'Not reported for this message'],
+  const fields:[string,string|number|null|undefined][]=[['Provider',message.local||message.receipt?.localReply?'Arcane':'Codex'],['Message',message.role==='human'?'Your prompt':message.role==='codex'?'Assistant response':'Tool result'],
+    ['Status',status],['Source',message.local?'Arcane local reply':message.source==='submission'?message.receipt?.kind==='steer'?'Saved steering receipt':'Saved Send receipt':message.source==='history'?'Saved public history':'Live conversation'],
+    ['Model',message.local||message.receipt?.localReply?'No model request':receipt?.model??'Not reported for this message'],['Reasoning',receipt?.effort??'Not reported for this message'],
     ['Submitted',receipt?.createdAt],['Acknowledged',receipt?.finishedAt],['Error code',reason],['Error details',reason?codexFailureHint(reason)||'The provider did not report a more detailed reason.':null],
     ['Text size',utf8(message.text)+' UTF-8 bytes'],['Transmitted text',message.receipt?.transmittedBytes===undefined?null:message.receipt.transmittedBytes+' UTF-8 bytes'],
     ['Shared conversation context',message.receipt?.contextIncluded?'Included with this explicit Send':null],['Lines',message.text.split('\n').length],['Request',message.receipt?.requestId??action?.requestId],['Conversation',threadId],['Turn',turnId],['Item',ids.length===3?ids[2]:null]];
@@ -3839,7 +3845,7 @@ export class CodexChat {
     if(!this.canSteerQueue()||item.scope!==this.queueScope())return;const turn=this.snapshot()!.thread!;
     this.queueSteering=true;item.state='sending';item.notice='Steering this reply…';this.renderControls();
     const receipt=await this.dispatch('turn-steer',{threadId:turn.threadId,expectedTurnId:turn.turnId,text:item.text},false,item);
-    if(receipt?.state==='acknowledged')this.queue=this.queue.filter(row=>row!==item);
+    if(receipt?.state==='acknowledged'||!!receipt&&this.state?.submittedMessages?.messages.some(row=>row.requestId===receipt.requestId&&row.localReply))this.queue=this.queue.filter(row=>row!==item);
     else {item.state=receipt?.state==='rejected'?'rejected':item.dispatched?'unknown':'paused';item.notice=receipt?.state==='rejected'?'Steering was not accepted. This message is retained.':item.dispatched?'Steering delivery is unknown. Review recorded state before sending again.':'Not sent. The conversation changed.';this.pauseQueue('Paused after an unconfirmed steering result.');}
     this.queueSteering=false;this.renderControls();
   }
@@ -3848,7 +3854,7 @@ export class CodexChat {
     if(!head||head.scope!==scope||head.state!=='queued')return;
     this.queueRun=null;this.queueSending=true;head.state='sending';head.notice='Sending queued message…';this.renderControls();
     const receipt=await this.submitMessage(head);
-    if(receipt?.state==='acknowledged'){
+    if(receipt?.state==='acknowledged'||!!receipt&&this.state?.submittedMessages?.messages.some(row=>row.requestId===receipt.requestId&&row.localReply)){
       this.queue=this.queue.filter(row=>row!==head);if(this.queueScope()===scope&&this.queue.some(row=>row.scope===scope&&row.state==='queued'))this.armQueue();
     }else{head.state=receipt?.state==='rejected'?'rejected':head.dispatched?'unknown':'paused';head.notice=receipt?.state==='rejected'?'This message was not accepted. Choose Send next when ready.':head.dispatched?'Message delivery is unknown. Review recorded state before sending again.':'Not sent. Review this conversation and choose Send next.';this.pauseQueue('Paused after an unconfirmed send.');}
     this.queueSending=false;this.renderControls();
@@ -3881,7 +3887,7 @@ export class CodexChat {
     if(this.queueEnqueue&&this.queueEnqueueContext!==this.queueGesture())this.queueEnqueueContext=null;
     if(run&&(run.scope!==scope||run.connectionId!==s?.connectionId||run.selection!==JSON.stringify(this.displaySelection())||this.surfaceYielded||this.stopped))this.pauseQueue('Conversation or model changed. Choose Send next to resume.');
     for(const item of this.queue)if(item.scope===scope&&item.requestId&&item.state==='unknown'){
-      const receipt=this.state?.actions.find(record=>record.requestId===item.requestId&&record.threadId===item.target?.conversationId);if(receipt?.state==='acknowledged')this.queue=this.queue.filter(row=>row!==item);
+      const receipt=this.state?.actions.find(record=>record.requestId===item.requestId&&record.threadId===item.target?.conversationId);if(receipt?.state==='acknowledged'||!!receipt&&this.state?.submittedMessages?.messages.some(row=>row.requestId===receipt.requestId&&row.localReply))this.queue=this.queue.filter(row=>row!==item);
       else if(receipt?.state==='rejected'){item.state='rejected';item.notice='The recorded request was not accepted. Your text is retained.';}
     }
     if(this.renderEmptyQueue())return;
@@ -4537,11 +4543,12 @@ export class CodexChat {
       if(!fenced){this.readVersion++;this.applyState(outcome.state);this.fresh=true;
         acknowledgedStateApplied=outcome.record.state==='acknowledged';
         const acknowledged:Record<string,string>={connect:'Connected. Choose a model to continue.',disconnect:'Disconnected.',select:'Model updated.','thread-start':'Conversation ready.','thread-resume':'Conversation opened.','turn-start':'Message accepted. Waiting for a response.','turn-steer':'Steering message accepted by the active reply.','turn-interrupt':'Stop requested.','task-stop':'Task stopped.','grant-writes':'Workspace editing enabled for this conversation.','revoke-writes':'Workspace editing disabled.','grant-assets':'Asset jobs enabled for this conversation.','revoke-assets':'Asset jobs disabled.',approval:'Your review was recorded.','history-load':'History loaded.'};
-        if(outcome.record.state==='acknowledged')this.text('codex-notice',acknowledged[input.action]??'Request confirmed.');
+        if(outcome.state.submittedMessages?.messages.some(row=>row.requestId===input.requestId&&row.localReply))this.text('codex-notice','');
+        else if(outcome.record.state==='acknowledged')this.text('codex-notice',acknowledged[input.action]??'Request confirmed.');
         else if(outcome.record.state==='rejected')this.requestNotice(codexRequestNotice(input.action,outcome.record.state,input.requestId,outcome.record.errorCode??null));
         else this.text('codex-notice','');} // Unconfirmed: the recovery card says it once.
       if(['pending','unknown'].includes(outcome.record.state))this.uncertain.set(input.requestId,{input,read:false});
-      else if(outcome.record.state==='rejected'){attachmentOutcome='retain';restoreRejectedDraft();}
+      else if(outcome.record.state==='rejected'){attachmentOutcome='retain';if(!outcome.state.submittedMessages?.messages.some(row=>row.requestId===input.requestId&&row.localReply))restoreRejectedDraft();}
       const message=this.transcript.messages.find(m=>m.key===input.requestId);if(message)message.acknowledgement='Native acknowledgement: '+outcome.record.state;
       return fenced?undefined:outcome.record;
     } catch(error) {

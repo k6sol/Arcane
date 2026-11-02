@@ -82,14 +82,14 @@ function fixture(t:TestContext,records=[report()],reports=true){
 type Fixture=ReturnType<typeof fixture>;
 function button(f:Fixture,label:string):ElementFixture{const value=f.root.all().find(e=>e.tagName==='BUTTON'&&e.textContent===label);assert.ok(value,'Expected button '+label);return value;}
 function saved(f:Fixture):boolean{return f.root.all().some(e=>e.tagName==='H3'&&e.textContent.startsWith('Saved playtest · '));}
-async function load(f:Fixture,r:StudioTestHistoricalReport):Promise<void>{await f.panel.refresh();button(f,'Load saved reports').emit('click',true);await until(()=>f.root.textContent.includes('Open report · '+r.targetName));button(f,'Open report · '+r.targetName).emit('click',true);await until(()=>saved(f));}
+async function load(f:Fixture,r:StudioTestHistoricalReport):Promise<void>{await f.panel.refresh();button(f,'View reports').emit('click',true);await until(()=>f.root.textContent.includes('Open report · '+r.targetName));button(f,'Open report · '+r.targetName).emit('click',true);await until(()=>saved(f));}
 function noAuthority(f:Fixture):void{assert.equal(f.posts().length,0);for(const label of ['Run test','Stop','Cancel','Repair playtest records'])assert.ok(!f.root.all().some(e=>e.tagName==='BUTTON'&&!e.hidden&&e.textContent===label));}
 
 test('saved terminal report renders after remount without live jobs, preserving first failure and complete details',async t=>{
   const r=report(),f=fixture(t,[r]);await f.panel.refresh();assert.equal(f.root.hidden,false);assert.equal(f.calls.filter(c=>c.path.startsWith('/v1/playtests/history')).length,0,'History reads require an explicit trusted action.');
-  button(f,'Load saved reports').click();await flush();assert.equal(f.calls.filter(c=>c.path.startsWith('/v1/playtests/history')).length,0);
+  button(f,'View reports').click();await flush();assert.equal(f.calls.filter(c=>c.path.startsWith('/v1/playtests/history')).length,0);
   await load(f,r);assert.match(f.root.textContent,/First failed step: distance/);assert.match(f.root.textContent,/distance · failed · Expected 2 · Observed 0.25/);assert.match(f.root.textContent,/Input release: observed released/);assert.match(f.root.textContent,/Cleanup: complete/);
-  const details=f.root.all().find(e=>e.tagName==='DETAILS');assert.ok(details);assert.equal(details.children[0]!.textContent,'Report details');details.open=true;
+  const details=f.root.all().find(e=>e.tagName==='DETAILS'&&e.className==='playtest-details');assert.ok(details);assert.equal(details.children[0]!.textContent,'Report details');details.open=true;
   assert.ok(f.root.all().some(e=>e.tagName==='PRE'&&e.textContent===JSON.stringify(r,null,2)),'Full actual review, watchdog and log digests stay inspectable.');
   noAuthority(f);f.remount();await load(f,r);assert.match(f.root.textContent,/Current source unobserved/);noAuthority(f);
   t.mock.timers.tick(5000);await flush();noAuthority(f);
@@ -111,7 +111,7 @@ for(const interval of [250,25])test('historical metadata cannot claim an unadmit
   const seed=report(),{historicalDigest:_,...original}=seed,display={...seed.display,proposal:{...seed.display.proposal,durationMs:60_000,observationIntervalMs:interval}};
   const content={...original,display,displayDigest:digest(display),review:{...seed.review,observations:Math.ceil(60_000/interval),scopeDigest:digest(display),deadline:60_000,cleanupDeadline:75_000}};
   assert.throws(()=>createStudioTestHistoricalReport(content),{code:'ARCHIVE_INPUT'},'The real controller admission domain is retained by the backend parser.');
-  const r:StudioTestHistoricalReport={...content,historicalDigest:digest(content)},f=fixture(t,[r]);await f.panel.refresh();button(f,'Load saved reports').emit('click',true);await until(()=>f.root.textContent.includes('Open report ·'));
+  const r:StudioTestHistoricalReport={...content,historicalDigest:digest(content)},f=fixture(t,[r]);await f.panel.refresh();button(f,'View reports').emit('click',true);await until(()=>f.root.textContent.includes('Open report ·'));
   button(f,'Open report · '+r.targetName).emit('click',true);await until(()=>f.root.textContent.includes('Saved report unavailable'));assert.equal(saved(f),false);noAuthority(f);
 });
 
@@ -137,32 +137,32 @@ test('fixed eight-report pagination uses only the exact returned project cursor 
   f.handler(async call=>{if(call.path==='/v1/playtests')return Response.json({jobs:[]});assert.equal(call.init.method,'GET');assert.equal(new Headers(call.init.headers).get('Authorization'),'Bearer '+TOKEN);
     if(page++===0){assert.equal(call.path,'/v1/playtests/history');return Response.json({schemaVersion:1,projectId:PROJECT,archive:{state:'degraded',code:'ARCHIVE_LIMIT'},reports:records.slice(0,8).map(summary),nextCursor:cursor,omittedReports:4});}
     assert.equal(call.path,'/v1/playtests/history?cursor='+encodeURIComponent(cursor));return Response.json({schemaVersion:1,projectId:PROJECT,archive:{state:'ready',code:null},reports:[summary(records[8]!)],nextCursor:null,omittedReports:4});});
-  await f.panel.refresh();button(f,'Load saved reports').emit('click',true);await until(()=>f.root.textContent.includes('4 earlier reports omitted'));assert.equal(f.root.all().filter(e=>e.tagName==='BUTTON'&&e.textContent.startsWith('Open report ·')).length,8);
-  button(f,'Next reports').emit('click',true);await until(()=>f.root.textContent.includes(records[8]!.targetName));assert.equal(f.root.all().filter(e=>e.tagName==='BUTTON'&&e.textContent.startsWith('Open report ·')).length,1);assert.equal(button(f,'Next reports').hidden,true);noAuthority(f);
+  await f.panel.refresh();button(f,'View reports').emit('click',true);await until(()=>f.root.textContent.includes('4 older reports are no longer available'));assert.equal(f.root.all().filter(e=>e.tagName==='BUTTON'&&e.textContent.startsWith('Open report ·')).length,8);
+  button(f,'Older reports').emit('click',true);await until(()=>f.root.textContent.includes(records[8]!.targetName));assert.equal(f.root.all().filter(e=>e.tagName==='BUTTON'&&e.textContent.startsWith('Open report ·')).length,1);assert.equal(button(f,'Older reports').hidden,true);noAuthority(f);
 });
 
 for(const malformed of ['project','unknown-field','nine-reports','foreign-cursor'])test('history page refuses '+malformed+' instead of adopting response identity',async t=>{
   const r=report(),f=fixture(t,[r]);await f.panel.refresh();f.handler(async()=>{const page={schemaVersion:1,projectId:PROJECT,archive:{state:'ready',code:null},reports:[summary(r)],nextCursor:null as string|null,omittedReports:0};
     if(malformed==='project')page.projectId=OTHER;else if(malformed==='unknown-field')Object.assign(page,{actor:'invented'});else if(malformed==='nine-reports')page.reports=Array.from({length:9},()=>summary(r));else page.nextCursor='1.'+OTHER+'.1';return Response.json(page);});
-  button(f,'Load saved reports').emit('click',true);await until(()=>f.root.textContent.includes('Saved reports unavailable'));assert.equal(saved(f),false);assert.ok(!f.root.textContent.includes('Open report ·'));noAuthority(f);
+  button(f,'View reports').emit('click',true);await until(()=>f.root.textContent.includes('Saved reports unavailable'));assert.equal(saved(f),false);assert.ok(!f.root.textContent.includes('Open report ·'));noAuthority(f);
 });
 
 for(const malformed of ['digest','content','display-digest','run-metadata','envelope','job'])test('saved report refuses exact '+malformed+' tamper before rendering',async t=>{
-  const r=report(),f=fixture(t,[r]);await f.panel.refresh();button(f,'Load saved reports').emit('click',true);await until(()=>f.root.textContent.includes('Open report ·'));
+  const r=report(),f=fixture(t,[r]);await f.panel.refresh();button(f,'View reports').emit('click',true);await until(()=>f.root.textContent.includes('Open report ·'));
   f.handler(async()=>{const value=structuredClone(envelope(r));if(malformed==='digest')Object.assign(value.report,{historicalDigest:HASH});else if(malformed==='content')Object.assign(value.report.review.logs[0]!,{bytes:25});else if(malformed==='display-digest')Object.assign(value.report,{displayDigest:HASH});else if(malformed==='run-metadata')Object.assign(value.report.review,{binding:null});else if(malformed==='envelope')Object.assign(value,{readOnly:false});else Object.assign(value.report,{jobId:id(99)});return Response.json(value);});
   button(f,'Open report · '+r.targetName).emit('click',true);await until(()=>f.root.textContent.includes('Saved report unavailable'));assert.equal(saved(f),false);noAuthority(f);
 });
 
 for(const change of ['auth-ABA','project-ABA'])test('an original pending history response loses authority after '+change,async t=>{
   const r=report(),f=fixture(t,[r]);await f.panel.refresh();let resolve!:(response:Response)=>void;const pending=new Promise<Response>(done=>{resolve=done;});f.handler(async()=>pending);
-  button(f,'Load saved reports').emit('click',true);const original=f.calls.at(-1)!;
+  button(f,'View reports').emit('click',true);const original=f.calls.at(-1)!;
   if(change==='auth-ABA'){f.auth(false,'other-control');f.auth(true,TOKEN);}else{f.project(OTHER);f.project(PROJECT);}
   const refresh=f.panel.refresh();assert.equal(original.init.signal?.aborted,true);resolve(Response.json({schemaVersion:1,projectId:PROJECT,archive:{state:'ready',code:null},reports:[summary(r)],nextCursor:null,omittedReports:0}));await refresh;await flush();
   assert.equal(saved(f),false);assert.ok(!f.root.textContent.includes('Open report · '+r.targetName));noAuthority(f);
 });
 
 for(const cancel of ['deadline','context','stop'])test('delayed report digest cannot render after '+cancel,async t=>{
-  const r=report(),f=fixture(t,[r]);await f.panel.refresh();button(f,'Load saved reports').emit('click',true);await until(()=>f.root.textContent.includes('Open report ·'));
+  const r=report(),f=fixture(t,[r]);await f.panel.refresh();button(f,'View reports').emit('click',true);await until(()=>f.root.textContent.includes('Open report ·'));
   let release!:()=>void,started=false,finished=false;const gate=new Promise<void>(done=>{release=done;}),original=crypto.subtle.digest.bind(crypto.subtle);
   t.mock.method(crypto.subtle,'digest',async(algorithm:AlgorithmIdentifier,data:BufferSource)=>{started=true;await gate;const result=await original(algorithm,data);finished=true;return result;});
   button(f,'Open report · '+r.targetName).emit('click',true);await until(()=>started);
@@ -198,20 +198,26 @@ for(const cancel of ['deadline','auth-ABA'])test('original capture digest finish
 });
 
 for(const kind of ['page','report'])test('history '+kind+' response respects its independent advertised byte cap',async t=>{
-  const r=report(),f=fixture(t,[r]);await f.panel.refresh();if(kind==='report'){button(f,'Load saved reports').emit('click',true);await until(()=>f.root.textContent.includes('Open report ·'));}
+  const r=report(),f=fixture(t,[r]);await f.panel.refresh();if(kind==='report'){button(f,'View reports').emit('click',true);await until(()=>f.root.textContent.includes('Open report ·'));}
   let cancelled=0;f.handler(async()=>new Response(new ReadableStream<Uint8Array>({cancel(){cancelled++;}}),{headers:{'content-type':'application/json','content-length':String((kind==='page'?32:272)*1024+1)}}));
-  button(f,kind==='page'?'Load saved reports':'Open report · '+r.targetName).emit('click',true);await until(()=>cancelled===1);assert.equal(saved(f),false);noAuthority(f);
+  button(f,kind==='page'?'View reports':'Open report · '+r.targetName).emit('click',true);await until(()=>cancelled===1);assert.equal(saved(f),false);noAuthority(f);
 });
 
 for(const kind of ['page','report'])test('duplicate keys in the original history '+kind+' envelope are refused',async t=>{
-  const r=report(),f=fixture(t,[r]);await f.panel.refresh();if(kind==='report'){button(f,'Load saved reports').emit('click',true);await until(()=>f.root.textContent.includes('Open report ·'));}
+  const r=report(),f=fixture(t,[r]);await f.panel.refresh();if(kind==='report'){button(f,'View reports').emit('click',true);await until(()=>f.root.textContent.includes('Open report ·'));}
   const original=kind==='report'?envelope(r):{schemaVersion:1,projectId:PROJECT,archive:{state:'ready',code:null},reports:[summary(r)],nextCursor:null,omittedReports:0};
   f.handler(async()=>new Response(JSON.stringify(original).replace('{','{"schemaVersion":1,'),{headers:{'content-type':'application/json'}}));
-  button(f,kind==='page'?'Load saved reports':'Open report · '+r.targetName).emit('click',true);await until(()=>f.root.textContent.includes(kind==='page'?'Saved reports unavailable':'Saved report unavailable'));assert.equal(saved(f),false);noAuthority(f);
+  button(f,kind==='page'?'View reports':'Open report · '+r.targetName).emit('click',true);await until(()=>f.root.textContent.includes(kind==='page'?'Saved reports unavailable':'Saved report unavailable'));assert.equal(saved(f),false);noAuthority(f);
 });
 
 test('actual production caller explicitly enables fixed-project history and releases its auth subscription',async()=>{
   const source=await readFile(resolve('apps/desktop/src/studio.ts'),'utf8');
   assert.match(source,/reports:true/);assert.match(source,/projectEpoch:this\.productMetadataEpoch/);assert.match(source,/playtestAuthEpoch\+\+;void playtests\?\.refresh\(\)/);
   assert.match(source,/reportContext:\(\)=>\{const current=workbench\.getPlaytestReportContext\(\)/);assert.match(source,/const stopTests=\(\)=>\{removePlaytestAuth\?\.\(\);removePlaytestAuth=null;playtests\?\.stop\(\)/);
+});
+
+test('an explicitly checked empty archive leaves no reports panel in the chat',async t=>{
+ const f=fixture(t,[]);await f.panel.refresh();assert.equal(f.calls.some(c=>c.path.startsWith('/v1/playtests/history')),false);
+ button(f,'View reports').emit('click',true);await until(()=>f.root.hidden);
+ assert.equal(f.root.textContent.includes('Archive ready'),false);assert.equal(f.root.textContent.includes('No saved reports'),false);noAuthority(f);
 });

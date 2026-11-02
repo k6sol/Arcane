@@ -139,6 +139,7 @@ export type CodexHostClient = Pick<CodexClient, 'snapshot'|'selectModel'|'startT
 export interface CodexServiceOptions {
   /** Trusted subscription quota admission, immediately before new native work. */
   admitSubscriptionAction?:(requestId:string)=>boolean;
+  subscriptionActionLimitReply?:()=>string;
   directory: string; projectPath: string;
   /** Parent-controlled client factory. Tests use a labelled fixture; never accept it from HTTP input. */
   connect?: (nativeAssetHooks?: NativeAssetHooks) => Promise<CodexHostClient>;
@@ -489,10 +490,11 @@ export function createCodexService(options: CodexServiceOptions) {
       return {projectPath,requestId:value.requestId,receiptFingerprint:value.receiptFingerprint,reviewedAt};
     }catch(error){try{db.exec('ROLLBACK');}catch{connectReviewFault=true;}throw error;}
   }
+  const localLimitReplies=new Map<string,string>();
   const save = (record: CodexActionRecord) => {
     db.prepare('UPDATE actions SET payload=? WHERE id=?').run(JSON.stringify(record),record.requestId);
     if(record.action==='turn-start'||record.action==='turn-steer')submitted.finish(record.requestId,{turnId:record.turnId,model:record.model,effort:record.effort,
-      state:record.state,finishedAt:record.finishedAt,errorCode:record.errorCode});
+      state:record.state,finishedAt:record.finishedAt,errorCode:record.errorCode,...(localLimitReplies.has(record.requestId)?{localReply:localLimitReplies.get(record.requestId)!,transmittedBytes:0,contextIncluded:false}:{})});
   };
   const exactClient = (connectionId: string): CodexHostClient => {
     if (!client || client.snapshot().connectionId !== connectionId) throw new CodexClientError('STALE_CONNECTION','Choose the exact current native connection.');
@@ -700,7 +702,7 @@ export function createCodexService(options: CodexServiceOptions) {
               break;
             }
             case 'turn-start': {
-              if(options.admitSubscriptionAction?.(value.requestId)===false)throw new CodexClientError('ACTION_LIMIT','No subscription actions remain. Open Plans and credits or use an API-credit model.');
+              if(options.admitSubscriptionAction?.(value.requestId)===false){localLimitReplies.set(value.requestId,options.subscriptionActionLimitReply?.()??"You've run out of Arcane actions. Open Plans and credits for your reset date, plan upgrades and API-credit options.");throw new CodexClientError('ACTION_LIMIT','Arcane saved your message and replied locally.');}
               // Explicit trusted test/host injections may implement the legacy
               // client only. They gain no managed task origin or repair claim.
               const injectedLegacy=options.connect!==undefined&&(!selected.startManagedTask||!selected.continueTask||!selected.revokeTaskContinuation||!selected.taskAccountIdentity);
@@ -823,7 +825,7 @@ export function createCodexService(options: CodexServiceOptions) {
                 snapshot.operations.some(operation=>operation.state==='pending'||operation.state==='unknown'))
                 throw new CodexClientError('STATE','Steer only the exact active acknowledged native turn.');
               if(!selected.steerTurn)throw new CodexClientError('STEER_UNSUPPORTED','This native client does not expose turn steering. No new turn was started.');
-              if(options.admitSubscriptionAction?.(value.requestId)===false)throw new CodexClientError('ACTION_LIMIT','No subscription actions remain. The existing turn was left unchanged.');
+              if(options.admitSubscriptionAction?.(value.requestId)===false){localLimitReplies.set(value.requestId,options.subscriptionActionLimitReply?.()??"You've run out of Arcane actions. Open Plans and credits for your reset date, plan upgrades and API-credit options.");throw new CodexClientError('ACTION_LIMIT','Arcane saved your message and replied locally.');}
               const sessionId=thread.sessionId,selection={...thread.selection};
               const acknowledgement=await selected.steerTurn({initiatedBy:'human',threadId:value.threadId,expectedTurnId:value.expectedTurnId,text:value.text,clientUserMessageId:value.requestId});
               const current=selected.snapshot(),active=current.thread;

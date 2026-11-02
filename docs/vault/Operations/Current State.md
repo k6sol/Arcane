@@ -15,6 +15,9 @@ The previous7d workspace restored saved sign-in/history and hides existing empty
 
 ## Implemented and verified
 
+- [[Bugs/Action Code Redemption]] changes reusable test code to1,000 actions, not API credits, with durable local admission, carryover and permanent request dedup. [[Bugs/Zero Action Chat]] keeps zero-action messages saved and replies locally; [[Bugs/Playtest History Presentation]] removes the checked-empty archive panel. Strict660 and the final176-case controlled UI run pass. These newer source changes are not installed.
+
+
 - [[Bugs/Windows Taskbar Branding]] corrects the Arcane A image and explicitly binds Windows taskbar identity to a packaged ICO. Three focused offline packaging cases pass, including source-binding rejection. The running2d app and legacy launcher icon are unchanged; actual updated taskbar acceptance remains open.
 
 - [[Bugs/Native Discovery Shutdown]] is signed and pushed as e5aea4c with245 controlled passes. A separately owned actual installed-CLI discovery check also passes with subscription/eight models and original no-kill process/stream closure; no thread or prompt was dispatched. The actual installed app is still2d and its startup has not been repaired or retried.

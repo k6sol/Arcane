@@ -7,6 +7,8 @@ export type SubmittedChatState = 'pending' | 'acknowledged' | 'rejected' | 'unkn
 export interface SubmittedChatMessage {
   /** Absent means a legacy new-turn Send. Steering receipts are keyed by requestId, never turnId. */
   kind?: 'steer';
+  /** Arcane-local response; no provider turn was dispatched. */
+  localReply?:string;
   requestId: string; turnId: string | null; text: string;
   model: string | null; effort: string | null; state: SubmittedChatState;
   createdAt: string; finishedAt: string | null; errorCode: string | null;
@@ -38,7 +40,7 @@ export class SubmittedChatStore {
     this.db.prepare('INSERT INTO submitted_chat_messages(request_id,provider,project_path,thread_id,session_id,payload) VALUES(?,?,?,?,?,?)')
       .run(message.requestId, this.provider, this.projectPath, binding.threadId, binding.sessionId, JSON.stringify(safe));
   }
-  finish(requestId: string, outcome: Pick<SubmittedChatMessage, 'turnId' | 'model' | 'effort' | 'state' | 'finishedAt' | 'errorCode'>): void {
+  finish(requestId: string, outcome: Pick<SubmittedChatMessage, 'turnId' | 'model' | 'effort' | 'state' | 'finishedAt' | 'errorCode'> & {localReply?:string;transmittedBytes?:number;contextIncluded?:boolean}): void {
     const row = this.db.prepare('SELECT payload FROM submitted_chat_messages WHERE request_id=? AND provider=? AND project_path=?')
       .get(requestId, this.provider, this.projectPath) as { payload: string } | undefined;
     if (!row) return;

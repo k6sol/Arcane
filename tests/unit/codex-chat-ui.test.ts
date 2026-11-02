@@ -167,10 +167,10 @@ function mockClient(projectPath:string,threadSuffix='') {
   };
   return {host,s,calls,push,loseAck(){loseAck=true;},hold(){hold=new Promise<void>(done=>{release=done;});},release(){release();hold=null;}};
 }
-async function harness(t:test.TestContext,spawned=false,distinctThreads=false,firstConnectFrameLimit=false) {
+async function harness(t:test.TestContext,spawned=false,distinctThreads=false,firstConnectFrameLimit=false,exhausted=false) {
   const directory=await mkdtemp(join(tmpdir(),'arcane-codex-chat-')),projectPath=join(directory,'project');await mkdir(projectPath);
   const clients:ReturnType<typeof mockClient>[]=[];const children:CodexSession[]=[];let connected=0;
-  const service=createCodexService({directory:join(directory,'journal'),projectPath,nativeToolsConfigured:true,connect:async()=>{
+  const service=createCodexService({directory:join(directory,'journal'),projectPath,nativeToolsConfigured:true,...(exhausted?{admitSubscriptionAction:()=>false,subscriptionActionLimitReply:()=>"You've run out of Arcane actions. Your plan resets on 1 December 2026 at 00:00 UTC. Open Plans and credits."}:{}),connect:async()=>{
     connected++;
     if(firstConnectFrameLimit&&connected===1)throw new CodexClientError('FRAME_LIMIT','Controlled original discovery frame refusal.',true);
     if(spawned){const client=new CodexSession({command:process.execPath,args:[resolve('packages/codex-client/fixtures/protocol.mjs'),'approvals',join(directory,'audit-'+connected+'.jsonl')],cwd:projectPath,env:nativeEnvironment()},limits({requestTimeoutMs:1500,approvalTimeoutMs:15000}),'spawned-node-fixture');children.push(client);await client.initialize();return client;}
@@ -882,4 +882,17 @@ test('real Edge draft chats close from the chat chip menu and Ctrl+W; a draft wi
   await page.waitForFunction((old:string)=>{const nodes=document.querySelectorAll<HTMLElement>('#workspace-chat-tabs [role="tab"]');return nodes.length===1&&nodes[0]!.dataset.chatKey!==old;},keys[1]);
   assert.equal(await tabs.first().getAttribute('aria-selected'),'true','closing the last chat leaves a fresh empty chat');
   assert.equal(b.posts.length,posts,'closing drafts sends no native action');assert.deepEqual(b.errors,[]);void focused;
+});
+
+test('real Edge exhausted actions saves each Send and local reset reply while the composer stays usable and native work stays absent',{skip:!browserModule,timeout:60000},async t=>{
+ const h=await harness(t,false,false,false,true),b=await browser(t,h.origin),{page}=b;
+ await b.open();await b.connect();await b.select();
+ for(const text of ['First message without actions','Second message without actions']){
+  await page.locator('#codex-composer').fill(text);await b.ready('codex-submit');await page.locator('#codex-composer').press('Enter');
+  await page.waitForFunction((text:string)=>document.getElementById('codex-messages')?.textContent?.includes(text),text);
+  await b.text('codex-messages','1 December 2026');await page.waitForFunction(()=>!(document.getElementById('codex-composer') as HTMLTextAreaElement)?.value);
+ }
+ const saved=h.service.state().submittedMessages!.messages;assert.equal(saved.length,2);assert.ok(saved.every(row=>row.localReply&&row.transmittedBytes===0));
+ assert.equal(h.clients.flatMap(client=>client.calls).filter(row=>row.method==='turn-start').length,0);
+ assert.equal(b.posts.filter(row=>row.action==='turn-start').length,2);assert.deepEqual(b.errors,[]);
 });

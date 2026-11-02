@@ -5,6 +5,13 @@ tags: [arcane, context, delivery]
 ---
 # Requirements ledger
 
+## Current customer corrections ? 2026-11-02
+
+- [ ] Reusable `test` code adds1,000 Arcane actions, not API credits. Keep the two balances and model billing paths separate; preserve exact request dedup and saved balances. See [[Bugs/Action Code Redemption]].
+- [ ] At zero actions, chat Send remains usable: save the user message and provide an Arcane-local reply with the actual plan reset and Plans/API-credit options, without provider dispatch or automatic resend. Cover Codex and Claude, including messages during an active reply.
+- [ ] Hide checked-empty playtest history and remove internal archive/source-state wording from ordinary chat. Previous results remain available when useful, with an explicit user request and no live test authority.
+
+
 - [ ] [[Architecture/Figma GUI Workflow|Figma-first game GUI]]: users connect their account inside Arcane; Arcane creates an editable file, iterates from human feedback, imports only the approved design, and wires/test its real functionality. Match the requested style and complete screen/state inventory, with relevant animation/SFX. No pre-created file requirement. External plan/client-access dependencies and actual acceptance remain explicit.
 
 This is the durable customer brief. New priorities add to it; they do not erase earlier requirements. Use [[Delivery/Goal Board]] for the ten release goals and their acceptance records. Mark a requirement complete only with attributable evidence; preserve implementation, controlled tests, packaged checks and actual customer/native acceptance as distinct states.
@@ -46,7 +53,7 @@ This is the durable customer brief. New priorities add to it; they do not erase 
 - [ ] Failed generation/import/tool work reports its stage, reason and useful details rather than only an ID. Do not display a complete-success heading over an incomplete build.
 - [ ] Use the prepared central diagnostic service and redacted bounded local outbox; configure and verify the real endpoint before claiming remote collection.
 - [ ] Message details show real operation inputs/results where safely available, provider/model/effort, timing and errors; do not invent facts from identity-only events.
-- [ ] Test real prompts in the user's designated baseplate through the open Arcane app, inspect the result and keep existing user content intact. The latest permission permits this scoped app/Studio testing; it does not authorize work in unrelated places.
+- [ ] Test real prompts in the user's designated baseplate through the open Arcane app, inspect the result and keep existing user content intact. Earlier permission covered scoped baseplate testing. The current active objective explicitly says not to touch Roblox Studio; that restriction remains until a subsequent explicit instruction changes it. Source, synthetic Studio fixtures and packaged desktop checks do not count as native Studio acceptance.
 
 ## Accounts, distribution and development
 

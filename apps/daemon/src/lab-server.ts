@@ -193,6 +193,7 @@ export async function createConnectionLab(options: Options) {
   const actionLedger=options.studioStore?new ActionsLedger(join(options.stateDirectory,'arcane-actions')):null;
   const codex = options.codexService ?? (options.studioStore ? createCodexService({
     admitSubscriptionAction:requestId=>actionLedger!.admit('codex',requestId).admitted,
+    subscriptionActionLimitReply:()=>actionLedger!.exhaustedMessage(),
     directory: join(options.stateDirectory, 'native-codex'), projectPath: options.projectPath ?? options.cwd,
     ...(options.codexConnect ? {connect:options.codexConnect} : {}),
     ...(options.codexProposalWorker ? {proposalWorker:options.codexProposalWorker} : {}),

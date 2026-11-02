@@ -78,7 +78,8 @@ async function fixture(t:TestContext){
     check(){assert.deepEqual(writes,[],'History never invokes live POST/action routes.');assert.deepEqual(errors,[]);assert.deepEqual(unexpected,[]);}};
 }
 async function openReport(page:Page,name=LONG_NAME){
-  const load=page.getByRole('button',{name:/^(Load saved reports|Latest reports)$/});await page.waitForFunction(()=>document.getElementById('playtest-panel')?.getAttribute('aria-busy')==='false');await load.focus();await load.press('Enter');
+  if(!await page.locator('details.playtest-history').evaluate((element:HTMLDetailsElement)=>element.open))await page.getByText('Previous playtests',{exact:true}).click();
+  const load=page.getByRole('button',{name:/^(View reports|Refresh reports)$/});await page.waitForFunction(()=>document.getElementById('playtest-panel')?.getAttribute('aria-busy')==='false');await load.focus();await load.press('Enter');
   const open=page.getByRole('button',{name:'Open report · '+name,exact:true});await open.waitFor({state:'visible'});await page.waitForFunction(()=>document.getElementById('playtest-panel')?.getAttribute('aria-busy')==='false');await open.focus();await open.press('Enter');
   await page.getByRole('heading',{name:'Saved playtest · '+name,exact:true}).waitFor({state:'visible'});
 }
@@ -120,7 +121,8 @@ test('Edge saved reports: original capture URLs and stale reports retire across 
     await openReport(page);await page.getByRole('button',{name:'View capture · Context unverified',exact:true}).click();await page.waitForFunction(()=>document.querySelector<HTMLImageElement>('#playtest-panel img')?.naturalWidth===128);
   }
   await page.evaluate(()=>window.savedHistoryFixture.transition('auth'));const entered=f.holdReport();
-  const load=page.getByRole('button',{name:'Load saved reports',exact:true});await load.click();const open=page.getByRole('button',{name:'Open report · '+LONG_NAME,exact:true});await open.waitFor({state:'visible'});await open.click();await entered;
+  if(!await page.locator('details.playtest-history').evaluate((element:HTMLDetailsElement)=>element.open))await page.getByText('Previous playtests',{exact:true}).click();
+  const load=page.getByRole('button',{name:'View reports',exact:true});await load.click();const open=page.getByRole('button',{name:'Open report · '+LONG_NAME,exact:true});await open.waitFor({state:'visible'});await open.click();await entered;
   await page.evaluate(()=>window.savedHistoryFixture.transition('auth'));f.releaseReport();await page.evaluate(()=>new Promise<void>(done=>requestAnimationFrame(()=>requestAnimationFrame(()=>done()))));
   assert.equal(await page.getByRole('heading',{name:'Saved playtest · '+LONG_NAME,exact:true}).count(),0,'Releasing the old held response cannot repopulate the new auth epoch.');
   await openReport(page);await page.getByRole('button',{name:'View capture · Context unverified',exact:true}).click();await page.waitForFunction(()=>document.querySelector<HTMLImageElement>('#playtest-panel img')?.naturalWidth===128);

@@ -147,3 +147,14 @@ test('explicit draft metadata distinguishes a hydrated local draft from a null o
   claude.loading=true;assert.equal(draft(),false);claude.loading=false;
   claudeTab.conversationId='native-conversation';assert.equal(draft(),false);
 });
+
+test('an exhausted prompt and Arcane reply survive storage and merge once without claiming native transmission',()=>{
+ const db=new DatabaseSync(':memory:');try{
+  const store=new SubmittedChatStore(db,'project','codex'),r=receipt({turnId:null});store.put(binding,r);
+  const reply="You've run out of Arcane actions. Your actions reset on 1 December 2026. Open Plans and credits.";
+  store.finish(r.requestId,{turnId:null,model:r.model,effort:r.effort,state:'rejected',finishedAt:stamp,errorCode:'ACTION_LIMIT',localReply:reply,transmittedBytes:0,contextIncluded:false});
+  const saved=new SubmittedChatStore(db,'project','codex').read(binding),merged=mergeSubmittedMessages([],saved),again=mergeSubmittedMessages(merged,saved);
+  assert.equal(again.length,2);assert.equal(again[0]!.text,r.text);assert.equal(again[1]!.text,reply);assert.equal(again[1]!.local,true);assert.match(again[0]!.acknowledgement??'',/Saved locally/);
+  assert.match(codexMessageDetails(again[0]!,null),/No model request/);assert.match(codexMessageDetails(again[0]!,null),/Transmitted text: 0 UTF-8 bytes/);
+ }finally{db.close();}
+});

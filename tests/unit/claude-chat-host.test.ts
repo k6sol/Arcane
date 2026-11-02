@@ -60,7 +60,7 @@ class FakeChild extends EventEmitter {
 type Script = (child: FakeChild, args: string[]) => void;
 const replay = (...lines: string[]): Script => child => { for (const l of lines) child.write(l); child.close(0); };
 
-async function fixture(t: TestContext, options: { auth?: unknown; help?: string; locate?: string | null; response?: number; limits?: Record<string, number>; directory?: string; permissions?: unknown; expiresInMs?: number; reportFailure?: (event: any) => unknown;admitSubscriptionAction?:(turnId:string)=>Promise<boolean> } = {}) {
+async function fixture(t: TestContext, options: { auth?: unknown; help?: string; locate?: string | null; response?: number; limits?: Record<string, number>; directory?: string; permissions?: unknown; expiresInMs?: number; reportFailure?: (event: any) => unknown;admitSubscriptionAction?:(turnId:string)=>Promise<boolean|{admitted:false;message:string}> } = {}) {
   const root = await realpath(await mkdtemp(join(await realpath(tmpdir()), 'arcane-claude-chat-')));
   t.after(() => rm(root, { recursive: true, force: true }));
   const project = join(root, 'project'), state = options.directory ?? join(root, 'state');
@@ -114,11 +114,13 @@ async function waitFor<T>(read: () => T | undefined, ms = 3000): Promise<T> {
 }
 const turnInput = (text: string, conversationId: string | null = null) => ({ conversationId, text, model: 'sonnet', effort: 'high' });
 
-test('exhausted subscription allowance refuses before transcript, credential or native model work',async t=>{
+test('exhausted subscription allowance saves the message and local reply without credential or native model work',async t=>{
  let admission=0;const f=await fixture(t,{admitSubscriptionAction:async()=>{admission++;return false;}});t.after(()=>f.host.dispose());
- await assert.rejects(f.host.send(turnInput('do not dispatch')),/No subscription actions remain/);
+ const sent=await f.host.send(turnInput('do not dispatch'));
+ const history=await f.host.history(sent.conversationId);assert.equal(history.messages[0].text,'do not dispatch');assert.match(history.messages[1].text,/run out of Arcane actions/);assert.equal(history.messages[0].delivery.localOnly,true);assert.equal(history.messages[0].delivery.transmittedBytes,0);
+ assert.equal(f.events.find(e=>e.turnId===sent.turnId&&e.type==='done')?.ok,true);
  assert.equal(admission,1);assert.equal(f.turns().length,0);assert.equal(f.prepared.length,0);
- assert.equal((await f.host.list()).conversations.length,0,'refusal does not create a conversation');
+ assert.equal((await f.host.list()).conversations.length,1,'a sent local message is a saved chat');
 });
 
 test('terminal Claude failure reports one finite original turn after saving its transcript without awaiting reporting', async t => {
@@ -963,9 +965,10 @@ test('exhausted subscription steering retains the running reply without writing 
   const sent=await f.host.send(turnInput('Original request'));
   await waitFor(()=>f.events.find(e=>e.turnId===sent.turnId&&e.type==='message'));
   const child=proc as unknown as FakeChild,before=child.lines.length;
-  await assert.rejects(f.host.steer({turnId:sent.turnId,text:'Refused guidance'}),/No subscription actions remain/);
+  const local=await f.host.steer({turnId:sent.turnId,text:'Refused guidance'});assert.equal(local.localOnly,true);assert.equal(typeof local.messageId,'string');
   assert.equal(admissions,2);assert.equal(child.lines.length,before);assert.equal(child.killed,0);
-  assert.equal((await f.host.history(sent.conversationId)).messages.some((m:any)=>m.text==='Refused guidance'),false);
+  assert.equal((await f.host.history(sent.conversationId)).messages.some((m:any)=>m.text==='Refused guidance'&&m.delivery?.localOnly===true),true);
+  assert.equal(f.events.some(e=>e.turnId===sent.turnId&&e.type==='done'),false,'local steering reply does not finish the existing native turn');
   child.write(result());child.close(0);assert.equal((await f.done(sent.turnId)).ok,true);
 });
 // Recorded with the installed Claude Code 2.1.302: a user message written mid-turn was read after the running tool call
