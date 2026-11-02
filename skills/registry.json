@@ -473,11 +473,14 @@
         "shop",
         "notification",
         "settings",
-        "button"
+        "button",
+        "figma",
+        "prototype",
+        "design review"
       ],
-      "version": "0.2.1",
+      "version": "0.3.0",
       "path": "skills/arcane/arcane-interface/SKILL.md",
-      "sha256": "90325dc8c05fffa36744360d37d18700c8d1a6b7d11bc9b7f72cac0ac7becb24",
+      "sha256": "2cc1b3c77c5f1c6a389ea5198278571e82f7a1c46b16ffa2c746b72eec3bde46",
       "status": "experimental",
       "approved": false,
       "evaluationRuns": [],
@@ -495,6 +498,11 @@
           "name": "controller",
           "path": "skills/arcane/arcane-interface/references/controller.md",
           "sha256": "915b5bf3b54081dde45e6ad82f6611a28032a3f57d1353a236eff0ac0c265c1c"
+        },
+        {
+          "name": "figma-review",
+          "path": "skills/arcane/arcane-interface/references/figma-review.md",
+          "sha256": "1bc0e3435697f3fd4a4bbf2bec7c450e4b0a9964d6461c1d82d251588c52308e"
         }
       ]
     },

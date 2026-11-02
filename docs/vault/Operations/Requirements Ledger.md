@@ -5,6 +5,8 @@ tags: [arcane, context, delivery]
 ---
 # Requirements ledger
 
+- [ ] [[Architecture/Figma GUI Workflow|Figma-first game GUI]]: users connect their account inside Arcane; Arcane creates an editable file, iterates from human feedback, imports only the approved design, and wires/test its real functionality. Match the requested style and complete screen/state inventory, with relevant animation/SFX. No pre-created file requirement. External plan/client-access dependencies and actual acceptance remain explicit.
+
 This is the durable customer brief. New priorities add to it; they do not erase earlier requirements. Use [[Delivery/Goal Board]] for the ten release goals and their acceptance records. Mark a requirement complete only with attributable evidence; preserve implementation, controlled tests, packaged checks and actual customer/native acceptance as distinct states.
 
 ## Output and complete games
