@@ -154,6 +154,7 @@ const STREAM_FRAME_MS = 32;
 const SEND_PATH = 'M12 19V5m-6 6 6-6 6 6', STOP_PATH = 'M7 7h10v10H7Z';
 // Fixed, already-safe messages the preload bridge may reject with; anything else is replaced by a generic message.
 const KNOWN_BRIDGE_ERRORS = new Set(['Claude chat is unavailable.', 'Another Claude chat reply is still running in this conversation.',
+  'No subscription actions remain. Open Plans and credits or use an API-credit model.',
   'Too many Claude chat replies are running. Wait for one to finish.', 'This conversation no longer exists.', 'Message is empty or too long.',
   'This message can no longer be edited.', CLAUDE_CHAT_IMAGES_TEXT]);
 /** Shown after an edit with "Also undo Studio changes": the restore request waits in the composer, the edit in the queue. */

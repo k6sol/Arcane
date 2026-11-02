@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile,rm } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -17,6 +17,19 @@ const configured = (patch: Partial<PlansConfig> = {}): PlansConfig => ({ ...stru
   billing: { serviceUrl: 'https://billing.arcane.test', allowedOrigins: ['https://billing.arcane.test'] },
   gateway: { url: 'https://gateway.arcane.test/api', allowedOrigins: ['https://gateway.arcane.test'] }, ...patch });
 const memoryVault = (token: string | null): ArcaneCredentialVault => { let value = token; return { read: async () => value, write: async next => { value = next; }, clear: async () => { value = null; } }; };
+
+test('subscription admission uses the final slot once, persists across reopen and refuses unreadable usage',async t=>{
+ const directory=await temp(),ledger=new ActionsLedger(directory),at=new Date('2026-11-02T00:00:00Z');
+ t.after(()=>rm(directory,{recursive:true,force:true}));
+ assert.deepEqual(ledger.admit('codex','request-1',at,1),{admitted:true,recorded:true});
+ assert.deepEqual(ledger.admit('claude','request-2',at,1),{admitted:false,recorded:false});
+ const reopened=new ActionsLedger(directory);
+ assert.deepEqual(reopened.admit('codex','request-1',at,1),{admitted:true,recorded:false});
+ assert.deepEqual(reopened.admit('codex','request-3',at,1),{admitted:false,recorded:false});
+ assert.equal(reopened.summary(at).month.used,1);
+ const file=join(directory,LEDGER_FILE),bytes=await readFile(file,'utf8');await writeFile(file,bytes.replace('request','changed')+'not-json\n');
+ assert.throws(()=>new ActionsLedger(directory).admit('codex','request-4',at,1),/review/);
+});
 
 test('the shipped plans config is valid, marked placeholder, and has no billing or gateway service', () => {
   assert.equal(validatePlansConfig(ARCANE_PLANS), ARCANE_PLANS);
@@ -158,6 +171,22 @@ async function routeServer(t: test.TestContext, extra: Partial<Parameters<typeof
     ...(init.body ? { body: JSON.stringify(init.body) } : {}) });
   return { call, ledger, token, origin, directory };
 }
+
+test('enforced subscription admission refuses exhaustion before work and never meters API-mode tool completions',async t=>{
+ const at=new Date('2026-11-02T00:00:00Z');
+ const f=await routeServer(t,{admissionEnforced:true,now:()=>at,codexState:()=>{throw Error('Completion metering must not run in enforced mode');},studioEvents:()=>{throw Error('API tools must not debit subscription actions');}});
+ for(let i=0;i<499;i++)f.ledger.record({kind:'build-turn',source:'codex',id:'previous-'+i,at});
+ const input={source:'claude',turnId:'turn-final'};
+ assert.equal((await f.call('/v1/actions/admit',{method:'POST',body:input,bearer:'b'.repeat(64)})).status,401);
+ assert.equal((await f.call('/v1/actions/admit',{method:'POST',body:input,origin:null})).status,403);
+ assert.equal((await f.call('/v1/actions/admit',{method:'POST',body:input})).status,200);
+ assert.equal((await f.call('/v1/actions/admit',{method:'POST',body:{source:'claude',turnId:'turn-over-limit'}})).status,429);
+ assert.equal((await f.call('/v1/actions/admit',{method:'POST',body:input})).status,200,'same original admission is idempotent');
+ assert.equal((await f.call('/v1/actions/admit',{method:'POST',body:{source:'arcane',turnId:'api-credit-turn'}})).status,400);
+ const done=await(await f.call('/v1/actions/record',{method:'POST',body:{...input,conversationId:null}})).json() as any;
+ assert.equal(done.recorded,false);assert.equal(done.usage.month.used,500);
+ const state=await(await f.call('/v1/plans/state')).json() as any;assert.equal(state.usage.enforced,true);assert.equal(state.usage.month.used,500);assert.ok(readPlansState(state));
+});
 
 test('plans routes: human bearer only, checkout is not connected, and Claude turns record once', async t => {
   const { call } = await routeServer(t);

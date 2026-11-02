@@ -137,6 +137,8 @@ export interface CodexProductState {
 export interface CodexActionOutcome { record: CodexActionRecord; replayed: boolean; state: CodexProductState }
 export type CodexHostClient = Pick<CodexClient, 'snapshot'|'selectModel'|'startThread'|'resumeThread'|'grantThreadWrites'|'revokeThreadWrites'|'startTurn'|'interruptTurn'|'respondApproval'|'close'> & Partial<Pick<CodexClient,'steerTurn'|'readRateLimits'|'readThreadHistory'|'startManagedTask'|'continueTask'|'revokeTaskContinuation'|'taskAccountIdentity'|'openIncorporationChain'|'issueIncorporationPermit'|'continueIncorporation'|'isOwnedCloseRequestError'|'retireManagedTask'>>;
 export interface CodexServiceOptions {
+  /** Trusted subscription quota admission, immediately before new native work. */
+  admitSubscriptionAction?:(requestId:string)=>boolean;
   directory: string; projectPath: string;
   /** Parent-controlled client factory. Tests use a labelled fixture; never accept it from HTTP input. */
   connect?: (nativeAssetHooks?: NativeAssetHooks) => Promise<CodexHostClient>;
@@ -698,6 +700,7 @@ export function createCodexService(options: CodexServiceOptions) {
               break;
             }
             case 'turn-start': {
+              if(options.admitSubscriptionAction?.(value.requestId)===false)throw new CodexClientError('ACTION_LIMIT','No subscription actions remain. Open Plans and credits or use an API-credit model.');
               // Explicit trusted test/host injections may implement the legacy
               // client only. They gain no managed task origin or repair claim.
               const injectedLegacy=options.connect!==undefined&&(!selected.startManagedTask||!selected.continueTask||!selected.revokeTaskContinuation||!selected.taskAccountIdentity);
@@ -820,6 +823,7 @@ export function createCodexService(options: CodexServiceOptions) {
                 snapshot.operations.some(operation=>operation.state==='pending'||operation.state==='unknown'))
                 throw new CodexClientError('STATE','Steer only the exact active acknowledged native turn.');
               if(!selected.steerTurn)throw new CodexClientError('STEER_UNSUPPORTED','This native client does not expose turn steering. No new turn was started.');
+              if(options.admitSubscriptionAction?.(value.requestId)===false)throw new CodexClientError('ACTION_LIMIT','No subscription actions remain. The existing turn was left unchanged.');
               const sessionId=thread.sessionId,selection={...thread.selection};
               const acknowledgement=await selected.steerTurn({initiatedBy:'human',threadId:value.threadId,expectedTurnId:value.expectedTurnId,text:value.text,clientUserMessageId:value.requestId});
               const current=selected.snapshot(),active=current.thread;

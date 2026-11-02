@@ -11,6 +11,7 @@ export const USER_ERRORS=Object.freeze({
   421:entry(421,'Request outcome unconfirmed','Arcane could not confirm whether the request completed.','Check its recorded status. Do not resend it until the original outcome is understood.'),
   422:entry(422,'Operation timed out','The operation exceeded its time limit.','Check its recorded outcome and cleanup status before retrying.'),
   423:entry(423,'Saved state unavailable','Arcane could not save or verify the required local records.','Keep unsent work in this window and check storage availability.'),
+  429:entry(429,'Subscription actions used up','No Arcane actions remain for requests using your Codex or Claude subscription.','Open Plans and credits, wait for the allowance reset, or choose an API-credit model. API credits are separate.'),
   431:entry(431,'Model generation failed','The model could not complete its generation stage.','Read the failing stage and reason below before starting another generation.'),
   432:entry(432,'Mesh validation failed','The generated geometry did not pass its structural checks.','Inspect the mesh validation report and correct the failed checks.'),
   433:entry(433,'Material validation failed','A model material or shader did not pass its required checks.','Inspect the material report for the missing shader, connection or PBR value.'),
@@ -25,6 +26,7 @@ export type UserErrorNumber=keyof typeof USER_ERRORS;
 const CODES:Readonly<Record<string,UserErrorNumber>>=Object.freeze({
   FRAME_LIMIT:411,NATIVE_FRAME_LIMIT:411,TASK_RECOVERY_REQUIRED:412,AUTH_REQUIRED:413,AUTH:413,
   LOGIN_UNCONFIRMED:414,DISCONNECTED:415,CONNECTION_UNAVAILABLE:415,STALE_CONNECTION:416,STALE_CONTEXT:416,
+  ACTION_LIMIT:429,
   OUTCOME_UNKNOWN:421,TIMEOUT:422,DEADLINE:422,REQUEST_TIMEOUT:422,JOURNAL_FAILURE:423,STORAGE_UNAVAILABLE:423,
   MESH_AUDIT:432,MESH_REPAIR:432,MESH_MATERIAL_NODE:433,MESH_MATERIAL_LINK:433,MESH_MATERIAL_SURFACE:433,MESH_MATERIAL_PBR:433,
   FOLIAGE_ATTACHMENT:432,CONVERSION_COLLISION:432,RENDER_CONTENT:437,CONVERSION_RENDER:437,

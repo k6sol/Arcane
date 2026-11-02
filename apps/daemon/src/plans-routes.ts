@@ -15,6 +15,8 @@ import { ActionsLedger } from './actions-ledger.js';
 import { gatewayStatus } from './arcane-gateway.js';
 
 export interface PlansRouteOptions {
+  /** Production charges subscription requests at admission, not again at finish. */
+  admissionEnforced?:boolean;
   ledger: ActionsLedger;
   config?: PlansConfig;
   fetch?: typeof fetch;
@@ -38,6 +40,7 @@ export function plansRoutes(options: PlansRouteOptions) {
 
   /** Reads trusted daemon state for newly finished Codex turns and applied Studio changes. */
   function observe(force = false): void {
+    if(options.admissionEnforced)return;
     const at = Date.now();
     if (!force && at - lastObserved < 1000) return;
     lastObserved = at;
@@ -82,7 +85,7 @@ export function plansRoutes(options: PlansRouteOptions) {
         /** The only origin the desktop may open for checkout, and only once verified. */
         origins: verified ? [new URL(serviceBase(config.billing)!).origin] : [] },
       gateway: gatewayStatus(config, options.gatewaySignedIn?.() ?? false),
-      usage: options.ledger.summary(now()),
+      usage: {...options.ledger.summary(now()),enforced:options.admissionEnforced===true},
     };
   }
 
@@ -106,7 +109,7 @@ export function plansRoutes(options: PlansRouteOptions) {
 
   async function handle(request: IncomingMessage, response: ServerResponse, url: URL, token: string, origin: string): Promise<boolean> {
     const path = url.pathname;
-    if (path !== '/v1/plans/state' && path !== '/v1/plans/checkout' && path !== '/v1/actions/record') {
+    if (path !== '/v1/plans/state' && path !== '/v1/plans/checkout' && path !== '/v1/actions/record' && path !== '/v1/actions/admit') {
       if (path.startsWith('/v1/codex/') || path.startsWith('/v1/studio/')) observe();
       return false;
     }
@@ -120,6 +123,13 @@ export function plansRoutes(options: PlansRouteOptions) {
     if (request.headers.origin !== origin) { send(response, 403, { error: 'ORIGIN', message: 'Writes require the local panel origin.' }); return true; }
     const input = await body(request);
     if (!input) { send(response, 400, { error: 'INPUT', message: 'Expected a small JSON object.' }); return true; }
+    if(path==='/v1/actions/admit'){
+      if(!options.admissionEnforced||Object.keys(input).length!==2||input.source!=='claude'||typeof input.turnId!=='string'||!ID.test(input.turnId)){
+        send(response,400,{error:'INPUT',message:'Expected one original Claude subscription request.'});return true;
+      }
+      try{const result=options.ledger.admit('claude',input.turnId,now());send(response,result.admitted?200:429,{...result,code:result.admitted?null:'ACTION_LIMIT'});}
+      catch{send(response,503,{admitted:false,code:'ACTIONS_UNAVAILABLE'});}return true;
+    }
     if (path === '/v1/plans/checkout') {
       const kind = input.kind, id = input.id;
       if (!['plan', 'pack', 'credits'].includes(String(kind)) || typeof id !== 'string' || Object.keys(input).length !== 2) { send(response, 400, { error: 'INPUT', message: 'Choose one offer.' }); return true; }
@@ -130,8 +140,8 @@ export function plansRoutes(options: PlansRouteOptions) {
     if (input.source !== 'claude' || typeof input.turnId !== 'string' || !ID.test(input.turnId) || !(input.conversationId === null || typeof input.conversationId === 'string' && ID.test(input.conversationId)) || Object.keys(input).length !== 3) {
       send(response, 400, { error: 'INPUT', message: 'Expected one finished Claude turn.' }); return true;
     }
-    const recorded = options.ledger.record({ kind: 'build-turn', source: 'claude', id: input.turnId, conversation: input.conversationId as string | null });
-    send(response, 200, { recorded, usage: options.ledger.summary(now()) }); return true;
+    const recorded = !options.admissionEnforced&&options.ledger.record({ kind: 'build-turn', source: 'claude', id: input.turnId, conversation: input.conversationId as string | null });
+    send(response, 200, { recorded, usage: {...options.ledger.summary(now()),enforced:options.admissionEnforced===true} }); return true;
   }
 
   return { handle, observe, state };

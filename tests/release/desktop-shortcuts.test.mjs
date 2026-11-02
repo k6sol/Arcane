@@ -40,11 +40,11 @@ foreach($path in @($desktopLink,$programLink)){
 }
 if(@(Get-ChildItem -LiteralPath $desktop,$programs -Filter '*.lnk').Count -ne 2){throw 'Duplicate shortcuts.'}
 $link=$shell.CreateShortcut($programLink);$link.TargetPath=Join-Path $root 'unrelated.exe';$link.Save()
-$beforeDesktop=(Get-FileHash -LiteralPath $desktopLink).Hash
-$beforePrograms=(Get-FileHash -LiteralPath $programLink).Hash
+$beforeDesktop=Get-ArcaneLinkHash $desktopLink
+$beforePrograms=Get-ArcaneLinkHash $programLink
 $refused=$false
 try{Set-ArcaneShortcuts $target @($target,$old) @($desktop,$programs)}catch{$refused=$true}
-if(-not $refused -or (Get-FileHash -LiteralPath $desktopLink).Hash -ne $beforeDesktop -or (Get-FileHash -LiteralPath $programLink).Hash -ne $beforePrograms){throw 'Foreign link was not retained before all writes.'}
+if(-not $refused -or (Get-ArcaneLinkHash $desktopLink) -ne $beforeDesktop -or (Get-ArcaneLinkHash $programLink) -ne $beforePrograms){throw 'Foreign link was not retained before all writes.'}
 Write-Output 'stable-shortcuts-pass'
 `;
  const result=await runBoundedChild(join(process.env.SystemRoot??'C:/Windows','System32/WindowsPowerShell/v1.0/powershell.exe'),['-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')],{cwd:root,env:{...process.env,ARCANE_SHORTCUT_FIXTURE:root},deadlineMs:30000});

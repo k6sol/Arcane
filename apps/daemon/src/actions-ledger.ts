@@ -1,8 +1,10 @@
 /**
  * Local Arcane actions ledger: an append-only, hash-chained JSONL file in the daemon state directory.
  *
- * One Arcane action = one finished build turn (Codex or Claude chat) or one applied Studio change (a succeeded
- * Studio write command). The ledger is informational: it never blocks work and it never represents purchased balance.
+ * Production admission records a subscription request before Codex/Claude dispatch.
+ * Older entries may describe finished turns or applied Studio changes. API-credit
+ * work does not enter production admission. This is local workspace usage, not
+ * an account-wide entitlement or purchased balance.
  * Each line carries the hash of the previous line, so edits, deletions and reordering are detectable on load
  * ("tamper-evident enough" for a local usage meter, not a security boundary against the machine owner).
  * The file is bounded: past MAX_ENTRIES the oldest entries fold into one checkpoint line with per-month totals.
@@ -38,7 +40,7 @@ export interface ActionsSummary {
   conversations: { conversation: string; used: number }[];
   integrity: 'verified' | 'mismatch' | 'empty';
   entries: number;
-  /** Local usage never blocks; only a configured plan service could change this. */
+  /** Raw summaries do not establish enforcement; the admission owner projects it. */
   enforced: false;
 }
 
@@ -63,6 +65,20 @@ export class ActionsLedger {
   constructor(readonly directory: string, options: { maxEntries?: number } = {}) {
     this.file = join(directory, LEDGER_FILE);
     this.#maxEntries = Math.max(10, Math.min(options.maxEntries ?? 20000, 50000));
+  }
+
+  /** Trusted subscription admission: debit before dispatch, once per original
+   * request. Synchronous append keeps concurrent admissions from sharing a slot.
+   * API-credit calls never use this ledger. */
+  admit(source:'codex'|'claude',id:string,now=new Date(),limit=500):{admitted:boolean;recorded:boolean} {
+    if(!['codex','claude'].includes(source)||!SAFE_ID.test(id)||!Number.isSafeInteger(limit)||limit<1)throw Error('Invalid subscription admission.');
+    const summary=this.summary(now);
+    if(summary.integrity==='mismatch')throw Error('Subscription usage needs review before more work can start.');
+    if(this.#refs.has(sha(source+'\u0000'+id)))return{admitted:true,recorded:false};
+    if(summary.month.used>=limit)return{admitted:false,recorded:false};
+    try{if(!this.record({kind:'build-turn',source,id,at:now},true))throw Error('Subscription action could not be recorded.');}
+    catch(error){this.#integrity='mismatch';throw error;}
+    return{admitted:true,recorded:true};
   }
 
   #ensureDirectory(): void {
@@ -100,8 +116,8 @@ export class ActionsLedger {
     this.#head = prev;
   }
 
-  /** Records one action once. Returns false for a duplicate or an invalid id; never throws for usage metering. */
-  record(input: RecordInput): boolean {
+  /** Records once; returns false for duplicate/invalid IDs. Storage failures throw. */
+  record(input: RecordInput, flush=false): boolean {
     if (!['build-turn', 'studio-change'].includes(input.kind) || !['codex', 'claude', 'studio'].includes(input.source)) return false;
     if (typeof input.id !== 'string' || !SAFE_ID.test(input.id)) return false;
     const conversation = typeof input.conversation === 'string' && SAFE_ID.test(input.conversation) ? input.conversation : null;
@@ -113,7 +129,7 @@ export class ActionsLedger {
     const entry = this.#seal<ActionEntry>({ type: 'action', v: 1, seq: this.#seq + 1, at: at.toISOString(), kind: input.kind, source: input.source, ref, conversation, prev: this.#head });
     const text = JSON.stringify(entry) + '\n';
     if (Buffer.byteLength(text) > MAX_LINE_BYTES) return false;
-    appendFileSync(this.file, text, { mode: 0o600 });
+    appendFileSync(this.file, text, { mode: 0o600,flush });
     this.#seq = entry.seq; this.#head = entry.hash; this.#entries.push(entry); this.#refs.add(ref);
     if (this.#entries.length > this.#maxEntries) this.#compact();
     return true;

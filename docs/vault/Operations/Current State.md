@@ -13,6 +13,8 @@ The loaded7d workspace restores saved sign-in/history and hides existing empty s
 
 ## Implemented and verified
 
+- [[Bugs/Subscription Action Admission]] now charges personal Codex/Claude requests before dispatch and refuses exhaustion without starting model work. API-credit requests and completed Studio changes do not incur that debit. The existing local workspace allowance is not account-wide hosted billing. Strict660,94 frozen focused cases and63 desktop host/installer/shortcut cases pass. Original hosted authorization-fixture timeout remains unresolved; these changes are not installed yet.
+
 - [[Bugs/API Credit Codes]] adds the bottom-of-page code form and authenticated reusable `test` grants of1,000 API credits, with permanent request deduplication. New API inference reservations spend credits without subscription actions. Strict660,11 focused HTTP,54 host/preload,16 Plans and56 observed full gateway cases pass. Hosted customer setup/redemption and subscription quota admission remain open.
 
 - [[Bugs/Stable Windows Shortcuts]] fixes a stale Start Menu entry that targeted an older recorded release. Actual Desktop/Start Menu links now both target the stable launcher, repaired in place without restarting the app. Nine focused release/native COM cases pass; future installer behavior maintains these fixed entries.

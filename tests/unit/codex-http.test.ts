@@ -16,10 +16,10 @@ import { createNativeAssetRegistry } from '../../apps/daemon/src/native-asset-au
 import { limits } from '../../packages/codex-client/src/validation.js';
 import { nativeEnvironment } from '../../packages/codex-client/src/transport.js';
 const ROOT=resolve(process.cwd()),TEMP=join(ROOT,'tests','.tmp','codex-http');
-async function fixture(t:test.TestContext,mode='normal',firstConnectFailure?:CodexClientError) {
+async function fixture(t:test.TestContext,mode='normal',firstConnectFailure?:CodexClientError,admitSubscriptionAction?:(requestId:string)=>boolean) {
   await mkdir(TEMP,{recursive:true});const directory=await mkdtemp(join(TEMP,'native-'));let starts=0;
   const connect=async()=>{starts++;if(starts===1&&firstConnectFailure)throw firstConnectFailure;const client=new CodexSession({command:process.execPath,args:[join(ROOT,'packages/codex-client/fixtures/protocol.mjs'),mode,join(directory,'receipt-'+starts+'.jsonl')],cwd:ROOT,env:nativeEnvironment()},limits({requestTimeoutMs:3000,approvalTimeoutMs:15000}),'spawned-node-fixture');await client.initialize();return client;};
-  const service=createCodexService({directory,projectPath:ROOT,connect});
+  const service=createCodexService({directory,projectPath:ROOT,connect,...(admitSubscriptionAction?{admitSubscriptionAction}:{})});
   const lab=await createConnectionLab({cwd:ROOT,stateDirectory:join(directory,'lab'),codexService:service});
   t.after(async()=>{await lab.close();const path=relative(TEMP,directory);assert.ok(path.startsWith('native-')&&!path.includes(sep));await rm(directory,{recursive:true,force:true});});
   const call=async(route:string,body?:unknown,bearer=lab.token,origin=lab.origin)=>{
@@ -39,6 +39,20 @@ async function thread(t:test.TestContext,mode='normal'){
   const f=await connected(t,mode);assert.equal((await f.action({action:'select',connectionId:f.id,model:'fixture-sol',effort:'ultra'})).record.state,'acknowledged');
   const opened=await f.action({action:'thread-start',connectionId:f.id});assert.equal(opened.record.state,'acknowledged');return {...f,threadId:opened.state.snapshot!.thread!.threadId};
 }
+
+test('subscription exhaustion refuses before native model dispatch and replay never debits again',async t=>{
+ let allow=false,calls=0;const f=await fixture(t,'normal',undefined,()=>{calls++;return allow;});
+ const connect=await f.action({action:'connect',connectionId:null}),connectionId=connect.state.snapshot!.connectionId;
+ await f.action({action:'select',connectionId,model:'fixture-sol',effort:'ultra'});
+ const started=await f.action({action:'thread-start',connectionId}),threadId=started.state.snapshot!.thread!.threadId;
+ const input={action:'turn-start',connectionId,threadId,requestId:randomUUID(),text:'fixture request'};
+ const refused=await f.action(input);assert.equal(refused.record.state,'rejected');assert.equal(refused.record.errorCode,'ACTION_LIMIT');
+ assert.equal((await f.action(input)).replayed,true);assert.equal(calls,1);
+ let log=await readFile(join(f.directory,'receipt-1.jsonl'),'utf8');assert.ok(!log.includes('"method":"turn/start"'));
+ allow=true;const next={...input,requestId:randomUUID()};assert.equal((await f.action(next)).record.state,'acknowledged');
+ assert.equal((await f.action(next)).replayed,true);assert.equal(calls,2);
+ log=await readFile(join(f.directory,'receipt-1.jsonl'),'utf8');assert.equal(log.trim().split('\n').map(line=>JSON.parse(line)).filter(row=>row.message?.method==='turn/start').length,1);
+});
 
 test('saved history reads SQLite for one exact thread without connecting, resuming or journaling',async t=>{
   const f=await thread(t,'image-history-resume');

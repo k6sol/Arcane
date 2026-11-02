@@ -385,7 +385,8 @@ const setupChecklist = Object.freeze({ version: 1,
 // In-app Claude chat: exact argument envelopes out, plain bounded copies back. Only fixed host messages pass through.
 const CLAUDE_CHAT_ERRORS = ['Claude chat is unavailable.', 'Another Claude chat reply is still running in this conversation.',
   'Too many Claude chat replies are running. Wait for one to finish.', 'This conversation no longer exists.', 'Message is empty or too long.',
-  'This message can no longer be edited.', 'Attached images must be at most 4 PNG references within 512 KiB in total.'];
+  'This message can no longer be edited.', 'Attached images must be at most 4 PNG references within 512 KiB in total.',
+  'No subscription actions remain. Open Plans and credits or use an API-credit model.'];
 // Optional PNG references on send: 1..4 exact {name, dataUrl} records with a bounded base64 PNG data URL (the main process
 // decodes and checks the PNG signature and the 512 KiB total again).
 const CLAUDE_CHAT_IMAGE_PREFIX = 'data:image/png;base64,';

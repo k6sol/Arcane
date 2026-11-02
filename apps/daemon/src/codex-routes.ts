@@ -131,8 +131,8 @@ async function discard(request: IncomingMessage,response: ServerResponse): Promi
       await discard(request,response);
       const known=error instanceof RouteError||error instanceof CodexClientError;
       const code=known?error.code:'NATIVE_ERROR';
-      const status=error instanceof RouteError?error.status:code==='IDEMPOTENCY'?409:code==='JOURNAL_LIMIT'?429:known?400:500;
-      send(status,{error:code,message:'Native request was refused or failed. Inspect its recorded request ID before retrying; native account/process output is not exposed.'});
+      const status=error instanceof RouteError?error.status:code==='IDEMPOTENCY'?409:code==='JOURNAL_LIMIT'||code==='ACTION_LIMIT'?429:known?400:500;
+      send(status,{error:code,message:code==='ACTION_LIMIT'?'No subscription actions remain. Open Plans and credits or use an API-credit model.':'Native request was refused or failed. Inspect its recorded request ID before retrying; native account/process output is not exposed.'});
     }
     return true;
   };

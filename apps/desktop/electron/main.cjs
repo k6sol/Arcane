@@ -349,6 +349,19 @@ async function startAppAssets(owned, epoch) {
     throw new Error('App asset runtime is unavailable.');
   }
 }
+async function admitClaudeSubscription(turnId,epoch,owned) {
+  const current=()=>!closing&&!switching&&projectSession===epoch&&child===owned&&!!origin&&!!token;
+  if(!current())throw Error('Subscription allowance is unavailable.');
+  const response=await fetch(origin+'/v1/actions/admit',{method:'POST',headers:{Authorization:'Bearer '+token,Origin:origin,'Content-Type':'application/json'},
+    body:JSON.stringify({source:'claude',turnId}),redirect:'error',credentials:'omit',signal:AbortSignal.timeout(8000)});
+  const chunks=[];let bytes=0;
+  if(response.body)for await(const chunk of response.body){bytes+=chunk.length;if(bytes>4096)throw Error('Subscription allowance is unavailable.');chunks.push(Buffer.from(chunk));}
+  if(!current())throw Error('Subscription allowance is unavailable.');
+  const value=JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  if(response.status===429&&value?.admitted===false&&value.code==='ACTION_LIMIT')return false;
+  if(!response.ok||value?.admitted!==true)throw Error('Subscription allowance is unavailable.');
+  return true;
+}
 function appAssetPort(provider, broker, epoch, owned) {
   const isCurrent = () => !switching && ownedAppAssetRuntime(broker, epoch, owned);
   return Object.freeze({ isCurrent, async issue(value) {
@@ -403,6 +416,7 @@ async function startClaudeChat() {
     allowClaudeTools: async () => { if (projectSession === chatEpoch) await projectPermissions.save({ claudeTools: true }); } } : undefined;
   let ownedHost;
   ownedHost = require('./claude-chat.cjs').createClaudeChat({ projectPath: chatEpoch.projectPath, stateDirectory: chatDirectory, dialog, permissions,
+    admitSubscriptionAction:turnId=>admitClaudeSubscription(turnId,chatEpoch,chatChild),
     reportFailure:providerFailureReporter(()=>!switching && claudeChat===ownedHost && projectSession===chatEpoch && nativeHandoff===chatBroker && child===chatChild),
     appAssets: appAssetPort('claude-code', assetBroker, chatEpoch, chatChild),
     getWindow: () => closing || switching || !window || window.isDestroyed() || projectSession !== chatEpoch ? null : window,

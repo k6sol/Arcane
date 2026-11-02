@@ -45,7 +45,7 @@ export const ARCANE_PLANS: PlansConfig = {
   currency: 'USD',
   action: {
     singular: 'action', plural: 'actions',
-    definition: 'One Arcane action is one finished build turn in chat, or one applied Studio change.',
+    definition: 'One action admits a chat request using your Codex or Claude subscription. API-credit models do not use actions.',
   },
   plans: [
     { id: 'starter', name: 'Starter', priceCents: 900 /* PLACEHOLDER */, actionsPerMonth: 300 /* PLACEHOLDER */,

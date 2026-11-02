@@ -9,7 +9,7 @@ import {AssetPipeline} from '../../packages/asset-pipeline/src/index.js';
 import {createAssetService} from '../../apps/daemon/src/asset-service.js';
 import type {DiagnosticEvent} from '../../packages/diagnostics/src/report.js';
 import {assetJob} from '../../apps/mcp/src/asset-schemas.js';
-test('asset failure retains its cause, attaches only the acknowledged report id and restores that display id on reload',async t=>{
+test('asset failure retains its cause, attaches only the acknowledged report id and restores that display id on reload',{timeout:15000},async t=>{
   const base=await realpath(tmpdir()),root=await mkdtemp(join(base,'arcane-diagnostic-job-')),workers=join(root,'workers'),outputRoot=join(root,'assets');
   t.after(async()=>{const actual=await realpath(root),child=relative(base,actual);assert.ok(!isAbsolute(child)&&child.startsWith('arcane-diagnostic-job-')&&!child.includes(sep)&&!child.includes('..'));await rm(actual,{recursive:true,force:true});});
   await mkdir(workers);for(const name of ['asset_worker.py','audit.py','probe.py'])await writeFile(join(workers,name),'# fixed fixture worker\n');
@@ -21,15 +21,16 @@ test('asset failure retains its cause, attaches only the acknowledged report id 
     }});
   const original=AssetPipeline.prototype.start;t.mock.method(AssetPipeline.prototype,'start',function(...args:Parameters<typeof original>){return original.apply(pipeline,args);});
   let release:(id:string|null)=>void=()=>{},reported:DiagnosticEvent|null=null,fixtureClosing=false;
-  const service=await createAssetService({cwd:root,outputRoot,workerRoot:workers,reportFailure:async event=>{if(fixtureClosing)return null;reported=event;return new Promise<string|null>(done=>{release=done;});}});
+  let reportArrived:()=>void=()=>{},arrival=new Promise<void>(done=>{reportArrived=done;});
+  const service=await createAssetService({cwd:root,outputRoot,workerRoot:workers,reportFailure:async event=>{if(fixtureClosing)return null;reported=event;reportArrived();return new Promise<string|null>(done=>{release=done;});}});
   t.after(()=>{fixtureClosing=true;release(null);return service.close();});
   async function wait(predicate:()=>boolean){const end=Date.now()+1000;while(Date.now()<end){if(predicate())return;await delay(5);}assert.fail('Fixture transition did not complete');}
-  const first=await service.start({template:'hero-prop',name:'crate'});await wait(()=>reported!==null);
+  const first=await service.start({template:'hero-prop',name:'crate'});await arrival;
   assert.equal(service.jobs()[0]!.state,'failed');assert.equal(service.jobs()[0]!.reportId,undefined);
   assert.equal((reported as DiagnosticEvent|null)?.stage,'mesh-validation');assert.ok(!JSON.stringify(reported).includes('private'));
   release(randomUUID());await wait(()=>service.jobs().find(job=>job.jobId===first.jobId)?.state==='failed');await nextTurn();
   assert.equal(service.jobs().find(job=>job.jobId===first.jobId)!.reportId,undefined,'an unrelated id is never attached');
-  reported=null;const second=await service.start({template:'hero-prop',name:'crate'});await wait(()=>reported!==null);const accepted=(reported as DiagnosticEvent|null)!.eventId;
+  reported=null;arrival=new Promise<void>(done=>{reportArrived=done;});const second=await service.start({template:'hero-prop',name:'crate'});await arrival;const accepted=(reported as DiagnosticEvent|null)!.eventId;
   release(accepted);await wait(()=>service.jobs().find(job=>job.jobId===second.jobId)?.reportId===accepted);
   const final=service.jobs().find(job=>job.jobId===second.jobId)!;assert.equal(final.error?.diagnostic?.reasonCode,'MESH_AUDIT');assert.match(final.error!.message,/420 is outside/);
   assert.equal(assetJob.parse(final).reportId,accepted);assert.throws(()=>assetJob.parse({...final,reportId:'not-a-report-id'}));

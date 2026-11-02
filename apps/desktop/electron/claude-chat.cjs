@@ -57,6 +57,7 @@ const MCP_SERVER = 'arcane';
 // Fixed renderer-safe messages. Nothing from stderr or raw native output is ever forwarded.
 const MESSAGES = Object.freeze({
   unavailable: 'Claude chat is unavailable.',
+  actions: 'No subscription actions remain. Open Plans and credits or use an API-credit model.',
   busy: 'Another Claude chat reply is still running in this conversation.',
   full: 'Too many Claude chat replies are running. Wait for one to finish.',
   missing: 'This conversation no longer exists.',
@@ -959,6 +960,8 @@ function createClaudeChat(options) {
     turns.set(turn.turnId, turn); byConversation.set(conversationId, turn);
     let user = null;
     try {
+      if(options.admitSubscriptionAction&&await options.admitSubscriptionAction(turn.turnId)!==true)fail('actions');
+      if(disposed||turn.stopped)fail('unavailable');
       const at = isoNow(now);
       if (!entry) {
         const title = (v.displayText??v.text).replace(/[\u0000-\u001f\u007f-\u009f‪-‮⁦-⁩]/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, limits.titleChars) || 'New chat';
@@ -1226,6 +1229,9 @@ function createClaudeChat(options) {
     if (!turn || turn.finished || turn.stopped || !turn.inputOpen || !turn.child || turn.result || turn.limit) return false;
     if (appAssets) assertAssetLive(turn);
     const m = { ...message('user', v.text), steered: true };
+    if(options.admitSubscriptionAction&&await options.admitSubscriptionAction(m.id)!==true)fail('actions');
+    if(disposed||turn.finished||turn.stopped||!turn.inputOpen||turn.result||turn.limit)fail('unavailable');
+    if(appAssets)assertAssetLive(turn);
     // Start the write before awaiting. A successful callback confirms the pipe accepted it, not that the CLI acted on it.
     // An attempted write that fails has an uncertain outcome: reject instead of returning false (which queues a resend).
     await new Promise((resolve, reject) => {

@@ -5,6 +5,11 @@ import {runBoundedChild} from './check-windows-executable.mjs';
 // Kept separate so native tests can exercise the same implementation in owned
 // fixture directories without touching the person's Desktop or Start Menu.
 export const shortcutFunctions=String.raw`
+function Get-ArcaneLinkHash($path) {
+  $stream=[IO.File]::OpenRead($path);$sha=[Security.Cryptography.SHA256]::Create()
+  try{return [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-','')}
+  finally{$sha.Dispose();$stream.Dispose()}
+}
 function Set-ArcaneShortcuts($target,$allowed,$directories) {
   $shell=New-Object -ComObject WScript.Shell
   $plans=@()
@@ -17,7 +22,7 @@ function Set-ArcaneShortcuts($target,$allowed,$directories) {
       if($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $item.Length -gt 16384){throw 'Arcane shortcut needs review.'}
       $existing=$shell.CreateShortcut($path)
       if($existing.Arguments -or -not ($allowed -contains $existing.TargetPath)){throw 'An unrelated Arcane shortcut already exists.'}
-      $hash=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+      $hash=Get-ArcaneLinkHash $path
     }
     $plans+=@{path=$path;directory=$directory;hash=$hash}
   }
@@ -32,7 +37,7 @@ function Set-ArcaneShortcuts($target,$allowed,$directories) {
     $check=$shell.CreateShortcut($temporary)
     if($check.TargetPath -ne $target -or $check.Arguments -or $check.WorkingDirectory -ne [IO.Path]::GetDirectoryName($target)){throw 'Shortcut verification failed.'}
     if($null -ne $plan.hash){
-      if((Get-FileHash -LiteralPath $plan.path -Algorithm SHA256).Hash -ne $plan.hash){throw 'Arcane shortcut changed during update.'}
+      if((Get-ArcaneLinkHash $plan.path) -ne $plan.hash){throw 'Arcane shortcut changed during update.'}
       [IO.File]::Replace($temporary,$plan.path,[NullString]::Value)
     }else{[IO.File]::Move($temporary,$plan.path)}
     $saved=$shell.CreateShortcut($plan.path)

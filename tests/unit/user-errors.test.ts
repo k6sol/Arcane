@@ -6,6 +6,8 @@ test('the same failure has a stable readable reference instead of a job-specific
   assert.equal(userError('FRAME_LIMIT'),USER_ERRORS[411]);
   assert.equal(userError('NATIVE_FRAME_LIMIT'),USER_ERRORS[411]);
   assert.equal(userError('TASK_RECOVERY_REQUIRED'),USER_ERRORS[412]);
+  assert.equal(userError('ACTION_LIMIT'),USER_ERRORS[429]);
+  assert.match(userErrorText(USER_ERRORS[429]),/API credits are separate/);
   assert.match(userErrorText(userError('FRAME_LIMIT')),/^Error 411 · .+size.+unconfirmed/i);
   assert.match(userErrorText(USER_ERRORS[412]),/Reconnecting does not settle/);
   assert.ok(Object.isFrozen(USER_ERRORS)&&Object.isFrozen(userError('FRAME_LIMIT')));

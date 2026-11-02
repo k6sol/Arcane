@@ -190,7 +190,9 @@ export async function createConnectionLab(options: Options) {
   try { selection = await store.read(); } catch { savedStateFailed = true; stateWarnings.push('Saved preference unreadable; original file has not been overwritten. Repair or back it up before saving a new preference.'); }
   let busy = false;
   let shuttingDown = false;
+  const actionLedger=options.studioStore?new ActionsLedger(join(options.stateDirectory,'arcane-actions')):null;
   const codex = options.codexService ?? (options.studioStore ? createCodexService({
+    admitSubscriptionAction:requestId=>actionLedger!.admit('codex',requestId).admitted,
     directory: join(options.stateDirectory, 'native-codex'), projectPath: options.projectPath ?? options.cwd,
     ...(options.codexConnect ? {connect:options.codexConnect} : {}),
     ...(options.codexProposalWorker ? {proposalWorker:options.codexProposalWorker} : {}),
@@ -219,8 +221,7 @@ export async function createConnectionLab(options: Options) {
   const meshKeep = options.studioStore ? createMeshKeep({ store: options.studioStore, stateDirectory: options.stateDirectory }) : null;
   // Imported models and effects ("Imported by you"): a separate store; uploads need the desktop host's IPC consent.
   const imports = options.studioStore ? createImportedAssets({ stateDirectory: options.stateDirectory }) : null;
-  const plans = options.studioStore ? plansRoutes({ ledger: new ActionsLedger(join(options.stateDirectory, 'arcane-actions')),
-    codexState: () => codex?.state(), studioEvents: () => options.studioStore?.events(100) ?? [] }) : null;
+  const plans = actionLedger ? plansRoutes({ledger:actionLedger,admissionEnforced:true}) : null;
   // Quiesce every retained task before other services publish terminal evidence.
   // Cleanup still runs if an individual private lifecycle hook fails.
   const fenceTasks = (): unknown[] => {
