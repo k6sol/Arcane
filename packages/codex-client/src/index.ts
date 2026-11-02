@@ -216,7 +216,7 @@ export async function connectCodexClient(options: ConnectOptions): Promise<Codex
       let overrides = arcaneIsolationOverrides(inventory, profile.nodeExecutable, profile.agentToken);
       const historySpec = { ...discoverySpec, args: [...discoverySpec.args, ...overrides], env: { ...discoverySpec.env } };
       framePhase = 'discovery-close';
-      await closeConstructed(session);
+      await session.closeUnconfigured();constructed.delete(session);
       if (hooks) {
         const validatedSpec = processSpec;
         let credential: unknown;

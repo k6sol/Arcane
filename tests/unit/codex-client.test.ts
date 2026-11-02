@@ -67,6 +67,12 @@ function answer(approval: Approval, decision: 'accept' | 'decline' | 'cancel' = 
 const inputs = (records: Receipt[]) => records.flatMap(record => record.message ? [record.message] : []);
 const replies = (records: Receipt[]) => inputs(records).filter(message => !message.method);
 
+test('configured threads cannot use metadata-only EOF shutdown',async t=>{
+  const f=await open(t),id=f.session.snapshot().thread!.threadId;
+  await assert.rejects(f.session.closeUnconfigured(),code('STATE'));
+  assert.equal(f.session.snapshot().connected,true);assert.equal(f.session.snapshot().thread!.threadId,id);
+});
+
 test('actual native peer receives original inline PNG with text; echoed media stays out of public state',async t=>{
   const f=await open(t,'image-input'),references=[referenceInput()];
   await f.session.startTurn({...INPUT,references});

@@ -829,6 +829,11 @@ export class CodexSession {
     const transport=settled[0]!;
     if(transport.status==='rejected')throw transport.reason;
   }
+  /** Factory-only metadata discovery: never a configured thread or history peer. */
+  async closeUnconfigured():Promise<void>{
+    if(this.#thread||this.#historyRead||this.#turnOperation)fail('STATE','Only unconfigured native discovery may close on EOF.');
+    this.revokeTaskContinuation();this.#retireNativeAssets();await this.#transport.closeIdle();
+  }
   #ensureReady(): void {
     if (!this.#ready || !this.#transport.connected || this.#assetsRetired) fail('DISCONNECTED', 'A ready local connection is required.');
   }

@@ -7,6 +7,8 @@ test('the same failure has a stable readable reference instead of a job-specific
   assert.equal(userError('NATIVE_FRAME_LIMIT'),USER_ERRORS[411]);
   assert.equal(userError('TASK_RECOVERY_REQUIRED'),USER_ERRORS[412]);
   assert.equal(userError('ACTION_LIMIT'),USER_ERRORS[429]);
+  assert.equal(userError('PROCESS_EXIT_UNCONFIRMED'),USER_ERRORS[440]);
+  assert.match(userErrorText(USER_ERRORS[440]),/output streams closed.*does not establish that your sign-in expired/);
   assert.match(userErrorText(USER_ERRORS[429]),/API credits are separate/);
   assert.match(userErrorText(userError('FRAME_LIMIT')),/^Error 411 · .+size.+unconfirmed/i);
   assert.match(userErrorText(USER_ERRORS[412]),/Reconnecting does not settle/);

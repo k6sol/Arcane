@@ -2,6 +2,7 @@
 export interface UserError {readonly number:number;readonly title:string;readonly explanation:string;readonly nextStep:string}
 const entry=(number:number,title:string,explanation:string,nextStep:string):UserError=>Object.freeze({number,title,explanation,nextStep});
 export const USER_ERRORS=Object.freeze({
+  440:entry(440,'Connection cleanup unconfirmed','Arcane could not confirm that a native connection process and its output streams closed.','Inspect the original connection status before reconnecting. Nothing is retried automatically; this does not establish that your sign-in expired.'),
   439:entry(439,'Evidence preview unavailable','Arcane could not read or display the exact submitted image.','Check the failing stage and reason. Request an updated submission if the evidence changed.'),
   411:entry(411,'Connection message exceeded a limit','A message on the local ChatGPT connection exceeded the size Arcane can accept. Its outcome is unconfirmed.','Check the recorded status before trying again. Nothing is resent automatically.'),
   412:entry(412,'Earlier tasks need review','Arcane has not confirmed how earlier tasks finished. Their records are kept.','Review those task records before acknowledging this notice. Reconnecting does not settle them.'),
@@ -25,6 +26,7 @@ export const USER_ERRORS=Object.freeze({
 });
 export type UserErrorNumber=keyof typeof USER_ERRORS;
 const CODES:Readonly<Record<string,UserErrorNumber>>=Object.freeze({
+  PROCESS_EXIT_UNCONFIRMED:440,
   FRAME_LIMIT:411,NATIVE_FRAME_LIMIT:411,TASK_RECOVERY_REQUIRED:412,AUTH_REQUIRED:413,AUTH:413,
   LOGIN_UNCONFIRMED:414,DISCONNECTED:415,CONNECTION_UNAVAILABLE:415,STALE_CONNECTION:416,STALE_CONTEXT:416,
   ACTION_LIMIT:429,

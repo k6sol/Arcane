@@ -19,6 +19,7 @@ import {PassThrough} from 'node:stream';
 export const events=[];
 export function spawn(){
   const child=new EventEmitter();child.stdin=new PassThrough();child.stdout=new PassThrough();child.stderr=new PassThrough();
+  child.stdin.on('finish',()=>{events.push({event:'stdin-ended'});if(globalThis.scenario==='eof-graceful')setTimeout(()=>{events.push({event:'child-close'});child.emit('close',0,null);},20);});
   child.kill=signal=>{
     events.push({event:'kill',signal:signal??'SIGTERM'});
     if(globalThis.scenario==='kill-throws')throw Error('Synthetic kill refusal');
@@ -46,9 +47,9 @@ const {limits}=await import(prefix+'validation.js');
 const {JsonlTransport}=await import(prefix+'transport.js');
 const {CodexSession}=await import(prefix+'session.js');
 const spec={command:process.execPath,args:[],cwd:root,env:{}};
-const owned=kind==='session'?new CodexSession(spec,limits(),'spawned-node-fixture'):
+const owned=kind.endsWith('session')?new CodexSession(spec,limits(),'spawned-node-fixture'):
   new JsonlTransport(spec,limits(),()=>{},error=>events.push({event:'disconnect',code:error.code}));
-const settle=async()=>{try{await owned.close();events.push({event:'returned',confirmed:true});}
+const settle=async()=>{try{await (kind==='discovery-session'?owned.closeUnconfigured():kind==='discovery-transport'?owned.closeIdle():owned.close());events.push({event:'returned',confirmed:true});}
   catch(error){events.push({event:'returned',confirmed:false,code:error.code});}};
 await Promise.all([settle(),settle()]);await settle();
 console.log(JSON.stringify(events));
@@ -70,6 +71,13 @@ async function fixture(t:test.TestContext,scenario:string,kind='transport'){
   });
   return JSON.parse(stdout) as {event:string;signal?:string;confirmed?:boolean;code?:string}[];
 }
+
+for(const kind of ['discovery-session','discovery-transport'])test('idle '+kind+' allows EOF cleanup and still joins actual close',async t=>{
+  const events=await fixture(t,'eof-graceful',kind),closed=events.findIndex(e=>e.event==='child-close');
+  assert.equal(events.filter(e=>e.event==='stdin-ended').length,1);assert.equal(events.filter(e=>e.event==='kill').length,0);
+  assert.ok(closed>=0);assert.equal(events.filter(e=>e.event==='returned').length,3);
+  assert.ok(events.every((e,i)=>e.event!=='returned'||e.confirmed===true&&i>closed));
+});
 
 for(const scenario of ['graceful','forced'])test('native transport joins '+scenario+' closure across concurrent and repeated close calls',async t=>{
   const events=await fixture(t,scenario),closed=events.findIndex(e=>e.event==='child-close');
@@ -121,6 +129,13 @@ test('deliberate transport close marks only its original pending error object',{
     assert.equal(first.transport.isOwnedCloseRequestError(copy),false);
   const later=await first.request();assert.equal(first.transport.isOwnedCloseRequestError(later),false);
   await first.transport.close();assert.equal(first.transport.isOwnedCloseRequestError(original),true);
+});
+
+test('idle closure refuses pending requests without flushing or retiring them',{timeout:10000},async t=>{
+  const f=await requestFixture(t),pending=f.request();await f.entered;
+  await assert.rejects(f.transport.closeIdle(),error=>error instanceof CodexClientError&&error.code==='STATE');
+  assert.equal(f.transport.connected,true);await f.transport.close();const original=await pending;
+  assert.equal(f.transport.isOwnedCloseRequestError(original),true);
 });
 for(const [mode,code]of [['remote','REMOTE_REJECTED'],['malformed','PROTOCOL'],['exit','DISCONNECTED'],['timeout','TIMEOUT']]as const)
 test('later deliberate close cannot relabel the actual '+mode+' request failure',{timeout:10000},async t=>{

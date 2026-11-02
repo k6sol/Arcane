@@ -198,7 +198,7 @@ export class JsonlTransport {
   stop(reason = new CodexClientError('DISCONNECTED', 'Local client disconnected.')): void {
     this.#stop(reason, false);
   }
-  #stop(reason: CodexClientError, ownedClose: boolean): void {
+  #stop(reason: CodexClientError, ownedClose: boolean, idleEof=false): void {
     if (this.#closed) return;
     this.#closed = true;
     this.#frame = Buffer.alloc(0); this.#partBytes = 0;
@@ -212,12 +212,22 @@ export class JsonlTransport {
     }
     this.#pending.clear();
     this.onDisconnect(reason);
-    this.#child.stdin.destroy();
-    if (!this.#exited) { try { this.#child.kill(); } catch { /* close() reports an unconfirmed exit after bounded escalation. */ } }
+    if(idleEof){try{this.#child.stdin.end();}catch{/* The same bounded join still escalates and requires actual close. */}}
+    else{
+      this.#child.stdin.destroy();
+      if (!this.#exited) { try { this.#child.kill(); } catch { /* close() reports an unconfirmed exit after bounded escalation. */ } }
+    }
   }
   close(): Promise<void> {
     this.#stop(new CodexClientError('DISCONNECTED', 'Local client disconnected.'), true);
     return this.#joining ??= this.#join();
+  }
+  /** Metadata-only discovery may drain its peers on EOF before force escalation.
+   * Pending requests cannot be flushed by this path. Actual close is still required. */
+  closeIdle():Promise<void>{
+    if(this.#pending.size) return Promise.reject(new CodexClientError('STATE','Idle native closure requires no pending requests.'));
+    this.#stop(new CodexClientError('DISCONNECTED','Local discovery disconnected.'),true,true);
+    return this.#joining??=this.#join();
   }
   async #waitForClose(): Promise<void> {
     let timer: NodeJS.Timeout | undefined;
