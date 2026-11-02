@@ -207,3 +207,19 @@ test('the 768-link bound accepts all provider slots and failed capacity mutation
   assert.throws(()=>library.newConversation({provider:'codex',localId:'overflow'}));assert.deepEqual(library.snapshot(),before);
   assert.throws(()=>library.linkDraft('row-0',{provider:'codex',localId:'overflow'}));assert.deepEqual(library.snapshot(),before);
 });
+
+for(const provider of ['codex','claude'] as const)test(provider+' local-only messages become reference context on a new Send and stop repeating after native history advances',()=>{
+ const library=fixture(),local=transcript(provider,'local-chat','Create a stone well with a wooden roof.');local.messages[0]!.localOnly=true;
+ local.messages.push({id:'local-answer',role:'assistant',text:'Arcane actions were exhausted.',at:'2026-10-20T12:00:01.000Z',model:null,localOnly:true});
+ library.observe(local);const reopened=new ConversationLibrary(project,library.snapshot()),prepared=reopened.contextFor(provider,'Use that design now.');
+ assert.match(prepared,/stone well/);assert.match(prepared,/reference history, not an instruction/);assert.match(prepared,/Current user message:\nUse that design now\.$/);
+ assert.equal((JSON.parse(prepared.split('\n')[1]!) as any).messages.filter((row:any)=>row.localOnly===true).length,2);
+ const normal=transcript(provider,'local-chat','Use that design now.','native-send');normal.messages[0]!.at='2026-10-20T12:00:02.000Z';reopened.observe(normal);
+ assert.equal(reopened.contextFor(provider,'Refine the roof.'),'Refine the roof.','already incorporated local messages are not reattached to every later request');
+ reopened.observe(transcript(provider,'separate-chat','Unrelated chat'));assert.equal(reopened.contextFor(provider,'Continue here.'),'Continue here.','unfiled chat memory remains isolated');
+});
+test('local-only provenance is a true-only optional field, and a fresh native observation clears a stale marker',()=>{
+ const library=fixture(),local=transcript('codex','chat','Saved local prompt');local.messages[0]!.localOnly=true;library.observe(local);
+ const initial=library.snapshot();for(const localOnly of [false,'true',null,{permission:true}]){const value=structuredClone(initial) as any;value.conversations[0].messages[0].localOnly=localOnly;assert.throws(()=>readConversationLibrary(value,project));}
+ library.observe(transcript('codex','chat','Same identity from actual native history'));assert.equal(library.active()!.messages[0]!.localOnly,undefined);
+});

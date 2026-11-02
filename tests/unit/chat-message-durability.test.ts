@@ -158,3 +158,9 @@ test('an exhausted prompt and Arcane reply survive storage and merge once withou
   assert.match(codexMessageDetails(again[0]!,null),/No model request/);assert.match(codexMessageDetails(again[0]!,null),/Transmitted text: 0 UTF-8 bytes/);
  }finally{db.close();}
 });
+
+test('the actual Codex public transcript producer preserves local-only provenance for the user message and Arcane reply',()=>{
+ const local=receipt({turnId:null,state:'rejected',errorCode:'ACTION_LIMIT',finishedAt:stamp,transmittedBytes:0,localReply:'Arcane action allowance exhausted.'}),submitted={provider:'codex' as const,projectPath:'project',...binding,earlierCount:0,messages:[local]};
+ const rows=mergeSubmittedMessages([],submitted),receiver={tabs:null,state:{projectPath:'project',submittedMessages:submitted},snapshot:()=>({thread:binding}),displayMessages:()=>rows,api:{safe:(text:string)=>text}};
+ const actual=CodexChat.prototype.recordedTranscript.call(receiver as unknown as CodexChat);assert.equal(actual.messages.length,2);assert.ok(actual.messages.every(row=>row.localOnly===true));
+});

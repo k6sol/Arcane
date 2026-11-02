@@ -2881,6 +2881,7 @@ test('local action exhaustion reply completes a sent message and leaves the comp
  b.emit({type:'message',message:{id:'local-1',role:'assistant',text:'You have run out of Arcane actions. Reset: 1 December 2026. Open Plans and credits.',at,delivery}});
  b.emit({type:'done',ok:true,error:null,usage:null,localOnly:true});await tick();
  assert.equal(f.input.value,'');assert.equal(f.bubbles().length,2);assert.match(f.bubbles()[1]!.text,/1 December 2026/);
+ assert.equal(f.chat.recordedTranscript().messages.filter(row=>row.localOnly).length,2,'both saved messages retain their untransmitted provenance');
  f.type('Another saved message');assert.equal(f.submit.disabled,false);await f.chat.send();assert.equal(sends(b).length,2);
 });
 test('a local action-limit reply during a running stream does not replace or finish that original reply',async t=>{

@@ -36,7 +36,7 @@ export type ChatState = Omit<CodexProductState, 'snapshot' | 'lastSnapshot' | 'n
 /** Safe public conversation text for the workspace's shared history. Tool inputs and authority are excluded. */
 export interface RecordedChatTranscript {
   provider:'codex'|'claude'|'arcane';projectPath:string|null;conversationId:string|null;sessionId:string|null;earlierCount:number;
-  messages:{id:string;role:'user'|'assistant'|'error';text:string;source:'history'|'live'|'submission';at:string|null;model:string|null}[];
+  messages:{localOnly?:true;id:string;role:'user'|'assistant'|'error';text:string;source:'history'|'live'|'submission';at:string|null;model:string|null}[];
 }
 export type BeforeMessageSubmit=(draft:string)=>string|Promise<string>;
 /** Defense in depth for public text moved between chat surfaces; this never reads a secret store. */
@@ -3295,7 +3295,7 @@ export class CodexChat {
     return boundRecordedChatTranscript({provider:'codex',projectPath:this.state?.projectPath??null,conversationId:thread?.threadId??null,sessionId:thread?.sessionId??null,
       earlierCount:submissions&&submissions.threadId===thread?.threadId&&submissions.sessionId===thread?.sessionId?submissions.earlierCount:0,
       messages:this.displayMessages().filter(message=>message.role!=='tool').map(message=>({id:message.receipt?'send:'+message.receipt.requestId:message.role==='human'&&uuid(message.key)?'send:'+message.key:JSON.stringify(message.key.split('\0')),role:message.role==='human'?'user' as const:'assistant' as const,
-        text:this.api.safe(message.text),source:message.source??'live',at:message.receipt?.createdAt??null,model:message.receipt?.model??null}))});
+        text:this.api.safe(message.text),source:message.source??'live',at:message.receipt?.createdAt??null,model:message.receipt?.model??null,...(message.local||message.receipt?.localReply?{localOnly:true as const}:{})}))});
   }
   private publishState():void {
     const catalogueScope=this.pickerCatalogueScope();if(catalogueScope!==this.pickerCatalogueSignature){this.pickerCatalogueSignature=catalogueScope;this.pickerCatalogueEpoch++;}

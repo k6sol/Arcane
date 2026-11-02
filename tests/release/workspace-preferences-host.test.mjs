@@ -975,3 +975,10 @@ test('queue saves require encryption and exact active frame; failed saves retain
   const old=f.event;f.setEvent({...old,senderFrame:{url:origin+'/studio'}});await assert.rejects(f.queue('read','codex'),ERROR);f.setEvent(old);
   assert.deepEqual(json((await f.queue('read','codex')).rows),queueSnapshot().rows);
 });
+
+test('local-only conversation context survives encrypted host save/reopen without accepting false or grant-shaped markers',async()=>{
+ const f=fixture({includeLibrary:true}),value=librarySnapshot();value.conversations[0].messages[0].localOnly=true;
+ await f.library('save',value);const reopened=fixture({disk:f.disk,safeStorage:f.safeStorage,includeLibrary:true});assert.deepEqual(json((await reopened.library('read')).preferences),value);
+ for(const localOnly of [false,'true',{grant:true}]){const invalid=structuredClone(value);invalid.conversations[0].messages[0].localOnly=localOnly;await assert.rejects(reopened.library('save',invalid));}
+ assert.deepEqual(json((await reopened.library('read')).preferences),value);
+});

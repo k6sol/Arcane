@@ -553,7 +553,7 @@ export class ClaudeChat {
     const tab=this.activeTab(),messages=this.active?this.shown:this.cachedMessages.get(tab?.key??'')??[];
     return boundRecordedChatTranscript({provider:this.profile.provider,projectPath:this.preferenceStore?.projectPath??null,conversationId:tab?.conversationId??null,sessionId:null,earlierCount:0,
       messages:messages.filter(message=>message.role!=='tool'&&!message.tool).map((message,index)=>({id:message.id||'local:'+tab?.key+':'+index+':'+(message.delivery?.startedAt??message.at),role:message.role as 'user'|'assistant'|'error',text:publicChatText(message.text),
-        source:message.delivery?'live' as const:'history' as const,at:message.at||message.delivery?.startedAt||null,model:message.delivery?.model??null}))});
+        source:message.delivery?'live' as const:'history' as const,at:message.at||message.delivery?.startedAt||null,model:message.delivery?.model??null,...(message.delivery?.localOnly?{localOnly:true as const}:{})}))});
   }
   private publishTranscript():void {
     const signature=JSON.stringify(this.recordedTranscript());if(signature===this.transcriptSignature)return;this.transcriptSignature=signature;

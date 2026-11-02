@@ -15,6 +15,9 @@ The previous7d workspace restored saved sign-in/history and hides existing empty
 
 ## Implemented and verified
 
+- [[Bugs/Local Chat Context]] is a newer follow-up to zero-action chat: preserved local-only provenance supplies reference history on the next explicit Send, with no denied-operation replay and no repeated attachment after native history advances. Strict660,162 affected cases and62 encrypted host/preload cases pass. Frozen delivery candidatef8 predates it.
+
+
 - [[Bugs/Action Code Redemption]] changes reusable test code to1,000 actions, not API credits, with durable local admission, carryover and permanent request dedup. [[Bugs/Zero Action Chat]] keeps zero-action messages saved and replies locally; [[Bugs/Playtest History Presentation]] removes the checked-empty archive panel. Strict660 and the final176-case controlled UI run pass. These newer source changes are not installed.
 
 
