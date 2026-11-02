@@ -13,6 +13,8 @@ The loaded7d workspace restores saved sign-in/history and hides existing empty s
 
 ## Implemented and verified
 
+- [[Bugs/Stable Windows Shortcuts]] fixes a stale Start Menu entry that targeted an older recorded release. Actual Desktop/Start Menu links now both target the stable launcher, repaired in place without restarting the app. Nine focused release/native COM cases pass; future installer behavior maintains these fixed entries.
+
 - [[Bugs/Mesh Keep Failure Details]] retains bounded replacement stages through plugin receipts and durable host storage, then explains them on the card. Legacy unknown stages no longer imply moderation. Strict660 compile,23 standalone Luau/compiler and33 frozen compiled service/UI cases pass; hosted checks and customer delivery remain separate.
 
 - [[Bugs/Mesh Keep Preparation]] prepares all procedural replacement appearances before publishing any mesh. Second-clone failure and late allocation revocation preserve original ownership and returned upload IDs; all23 focused standalone Luau/compiler cases pass. PBR image persistence and native Studio acceptance remain open.

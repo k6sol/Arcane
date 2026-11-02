@@ -8,31 +8,10 @@ import policy from '../apps/desktop/electron/policy.cjs';
 import updates from '../apps/desktop/electron/desktop-updates.cjs';
 import {createWindowsInstallation} from './windows-installation.mjs';
 import {runBoundedChild} from './check-windows-executable.mjs';
+import {createDesktopShortcuts} from './desktop-shortcuts.mjs';
 const repository=resolve(fileURLToPath(new URL('..',import.meta.url)));
 const digest=bytes=>createHash('sha256').update(bytes).digest('hex');
 const launcherFiles=['installer/Launcher.cs','installer/InstalledRecord.cs','installer/OperationLease.cs','installer/PayloadArchive.cs','installer/launcher.manifest','apps/desktop/electron/icon.ico'];
-const shortcutProgram=String.raw`
-$ErrorActionPreference='Stop'
-$desktop=[Environment]::GetFolderPath('Desktop')
-if(-not $desktop){throw 'Desktop unavailable.'}
-$target=$env:ARCANE_DESKTOP_LAUNCHER
-$shortcutPath=Join-Path $desktop 'Arcane.lnk'
-$shell=New-Object -ComObject WScript.Shell
-if(Test-Path -LiteralPath $shortcutPath){
-  $existing=$shell.CreateShortcut($shortcutPath)
-  if($existing.TargetPath -ne $target -or $existing.Arguments){throw 'An unrelated Arcane shortcut already exists.'}
-}
-$temporary=Join-Path $desktop ('.Arcane-'+[Guid]::NewGuid().ToString()+'.lnk')
-$shortcut=$shell.CreateShortcut($temporary)
-$shortcut.TargetPath=$target
-$shortcut.WorkingDirectory=[IO.Path]::GetDirectoryName($target)
-$shortcut.IconLocation=$target+',0'
-$shortcut.Description='Arcane'
-$shortcut.Save()
-Move-Item -LiteralPath $temporary -Destination $shortcutPath -Force
-if(-not(Test-Path -LiteralPath $shortcutPath)){throw 'Desktop shortcut was not saved.'}
-Write-Output $shortcutPath
-`;
 async function sourceDigest(root){const rows=[];for(const file of launcherFiles){await policy.directPath(join(root,file),'file');rows.push(file+':'+digest(await readFile(join(root,file))));}return digest(Buffer.from(rows.join('\n')));}
 async function buildLauncher(root){
   if(process.platform!=='win32')throw Error('Build the desktop launcher on Windows.');
@@ -47,18 +26,10 @@ async function buildLauncher(root){
   if(result.code!==0)throw Error('Desktop launcher compilation failed: '+owner);
   await policy.directPath(output,'file');return output;
 }
-async function createShortcut(launcher){
-  const executable=join(process.env.SystemRoot??'C:/Windows','System32/WindowsPowerShell/v1.0/powershell.exe');
-  const result=await runBoundedChild(executable,['-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(shortcutProgram,'utf16le').toString('base64')],
-    {cwd:dirname(launcher),env:{SystemRoot:process.env.SystemRoot,USERPROFILE:process.env.USERPROFILE,APPDATA:process.env.APPDATA,LOCALAPPDATA:process.env.LOCALAPPDATA,
-      ARCANE_DESKTOP_LAUNCHER:launcher},deadlineMs:30000});
-  if(result.code!==0)throw Error('The installed app is ready, but the desktop shortcut could not be created. '+result.output.slice(0,1000));
-  return result.output.trim();
-}
 
 /** Local verified-build deployment. Reuses the installation engine's immutable releases and atomic active record.
  * Never starts the app or interrupts an already open window. Host seams are for owned fixture tests only. */
-export function createDesktopInstaller({engine=createWindowsInstallation(),launcherBuilder=buildLauncher,shortcut=createShortcut,sourceRoot=repository}={}){
+export function createDesktopInstaller({engine=createWindowsInstallation(),launcherBuilder=buildLauncher,shortcut=createDesktopShortcuts,sourceRoot=repository}={}){
   return Object.freeze({async install({bundle,installRoot}){
     const root=policy.localPath(installRoot),launcher=join(root,'Arcane.exe'),receiptPath=join(root,'desktop-launcher.json');
     const sourceSha256=await sourceDigest(sourceRoot);

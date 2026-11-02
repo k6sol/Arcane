@@ -5,6 +5,10 @@ tags: [arcane]
 ---
 # Next session
 
+Latest request: enforce exhausted actions at authoritative work admission, and add an Enter code form at the bottom of Plans and credits. The exact code `test` must grant1,000 credits and be deliberately reusable. Current ActionsLedger is informational and cannot enforce this by itself. Implement durable redemption with request idempotency and server/host admission across providers/tools; do not merely disable the UI or fabricate a purchased balance. Keep navigation/account/redeeming usable when exhausted. This work remains unimplemented.
+
+[[Bugs/Stable Windows Shortcuts]] now has actual readback: both existing Arcane shortcuts point to the stable installed launcher. Nine focused release/native COM cases pass. The unrelated Design Test shortcut remains untouched; current app stays open. Do not rerun the completed repair helper.
+
 Continue [[Bugs/Mesh Keep Preparation]] with exact-source hosted checks. Procedural clone preparation is verified in23 focused standalone Luau/compiler cases, not native Studio. Persistent image uploads require their own explicit upload plan/consent, durable result attribution and appearance rebinding; do not add them under geometry-only consent.
 
 Procedural publication rollback now also covers a reproduced second-parent failure, explicit finish without reupload, failed recording close, unexpected authored children and source edits during allocation. All23 expanded standalone cases pass. [[Bugs/Mesh Keep Failure Details]] now preserves the bounded stage in procedural/converted receipts and renders the corresponding explanation, including honest legacy unknowns. Strict660 compile and33 frozen compiled service/UI cases pass. Follow exact-source hosted checks; do not infer native acceptance or replay uploads.
