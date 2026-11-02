@@ -5,6 +5,12 @@ tags: [arcane]
 ---
 # Session log
 
+## 2026-11-02 · Chat context and GUI workflow
+
+Signed81cec41 enforces local subscription action admission before model work; all seven original component jobs passed. Its native Ubuntu download failed HTTP403 before conversion and remains recorded separately from Windows success. Signedaf0dd61 retains provider saved-chat refusal details, with54 frozen UI/controller passes. Signed2d08932 shares bounded recorded context inside folders while isolating other folders and unfiled chats, with42 frozen cases. The current candidate's original native41477106948 passed both platforms; component41476854180 remains pending. Installed/loaded source remains7d3aa19.
+
+[[Architecture/Figma GUI Workflow]] retains the complete new requirement: account sign-in, automatic design-file creation and all previews, feedback, approvals and import comparisons inside Arcane. Guidance is published; actual connection/review/import implementation remains open. [[Operations/Vault Guide]] now explicitly establishes Obsidian as the context source of truth. The old contradictory handoff is preserved in [[Sessions/2026-11-02 Handoff Archive]], and [[Operations/Next Session]] is reconciled around current work rather than superseded instructions.
+
 ## 2026-10-30 · Runtime-bound fixture corrections
 
 All six strict compiler/build lanes passed on the connected handoff. Retained actual Linux failures and corrected three fixture files at their original producer, complete-host readiness, payload-review and shutdown authorization boundaries. No production guard or deadline changed.

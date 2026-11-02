@@ -1,5 +1,11 @@
 # Arcane working context
 
+Obsidian is Arcane's single source of truth for project context, requirements,
+decisions and goals. `docs/vault` is its versioned shared mirror. Check for local
+vault edits before synchronization and reconcile important changes rather than
+overwriting them. Keep the active handoff current; archive superseded statuses
+without losing their evidence or completed-attempt protections.
+
 At the start of Arcane work, read `docs/vault/Home.md`,
 `docs/vault/Operations/Current State.md` and
 `docs/vault/Operations/Next Session.md`. Read the linked goal, architecture and

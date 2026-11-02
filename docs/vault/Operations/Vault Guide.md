@@ -7,13 +7,17 @@ tags: [arcane]
 
 ## Ownership
 
-`docs/vault` is the versioned source for shared knowledge. `.agents/skills/arcane-*` contains developer skills. `skills/arcane` remains the executable product skill source. The sync projects these into Obsidian as notes, `Development Skills` and `Skill Library/Arcane`; it does not duplicate skill authority in the repo.
+Obsidian is the single source of truth for Arcane project context: requirements, decisions, goals, verified milestones and unfinished work. `docs/vault` is the versioned shared mirror used for GitHub commits and safe synchronization. Review changes made in Obsidian and reconcile them into that mirror before publishing; never overwrite a local edit with an older repository copy. Source, CI, artifacts and the running app supply evidence that must be recorded accurately in the vault.
+
+`.agents/skills/arcane-*` contains developer skills. `skills/arcane` remains the executable product skill source. Sync makes those available in Obsidian as `Development Skills` and `Skill Library/Arcane`. Editing a projected skill requires review and reconciliation into its executable source; a note alone cannot change product behavior.
 
 The development vault is intentionally outside desktop release payloads. It stays available in Git and Obsidian, while the product skill library and ordinary product documentation continue to ship. Preserve the existing package/install path policies rather than relaxing them for developer-note filenames. See [[Bugs/Development Vault Packaging]].
 
 ## Daily workflow
 
 Open [[Home]], choose a goal from [[Delivery/Goal Board]], use the relevant skill and complete a concrete implementation. Record the actual result before changing a checkbox. At a meaningful milestone update [[Operations/Current State]], [[Operations/Next Session]] and [[Operations/Session Log]]. Use [[Templates/Session]] for a longer session.
+
+Record new requirements when they arrive. For each meaningful change retain its revision, changed behavior, verification scope, unresolved risks and next action. Keep the active handoff short and consistent; move superseded instructions into a dated session archive rather than silently deleting context or leaving contradictory directions active. Before a restart or handoff, distinguish pushed source, downloaded artifacts, installed source and actual loaded source, and retain original live/completed job identities.
 
 ## Sync safely
 
