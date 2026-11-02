@@ -206,7 +206,7 @@ async function syntheticDaemon({ failWithCredentials = false, unsafePngHeaders =
 
 async function runAcceptance(options = {}) {
   const { root, write } = await fixture({ daemon: '(' + syntheticDaemon.toString() + ')(' + JSON.stringify(options) + ');\n' });
-  for (const file of ['create-local-release.mjs', 'product-doctor.mjs', 'check-local-release.mjs']) await write('scripts/' + file, await readFile(new URL('../../scripts/' + file, import.meta.url)));
+  for (const file of ['create-local-release.mjs', 'managed-worker-query.mjs', 'product-doctor.mjs', 'check-local-release.mjs']) await write('scripts/' + file, await readFile(new URL('../../scripts/' + file, import.meta.url)));
   const release = await createLocalRelease({ repository: root });
   for (const path of ['node_modules/@modelcontextprotocol/sdk/package.json', 'node_modules/@modelcontextprotocol/sdk/client/index.js', 'node_modules/zod/package.json', 'node_modules/zod/index.cjs']) {
     const target = join(release.directory, path);

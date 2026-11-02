@@ -1,5 +1,8 @@
 import { execFile as nodeExecFile } from 'node:child_process';
-import { win32 } from 'node:path';
+import { win32,join } from 'node:path';
+import {fileURLToPath} from 'node:url';
+import {lstatSync,realpathSync,readFileSync} from 'node:fs';
+import {createHash} from 'node:crypto';
 
 /** Exact identity of one host-owned asset worker process.
  * Recorded only by the supervisor that spawned it; never accepted from HTTP, MCP or a model.
@@ -32,13 +35,27 @@ type ExecCallback = (error: ExecError, stdout: string, stderr: string) => void;
 /** The owned helper process handle, when the host exposes one (Node's ChildProcess does). */
 export interface OwnedQuery { kill?(): boolean }
 export interface ProcessQueryHost {
+  /** Host-owned fixed executable only; no caller or model configuration. */
+  readonly nativeQueryExecutable?:string;
   platform: string;
   systemRoot: string | undefined;
   execFile(file: string, args: readonly string[], options: {
     cwd: string; env: Record<string, string>; shell: false; windowsHide: true; timeout: number; maxBuffer: number; encoding: 'utf8';
   }, callback: ExecCallback): OwnedQuery | undefined | void;
 }
+const NATIVE_WORKER_QUERY_PIN = Object.freeze({"schemaVersion":1,"kind":"arcane-windows-worker-query","sourceSha256":"da17f3d8a510a2734c6d1594e9bba0ea4ad480f3936214a0985927b287f7e43d","sha256":"a9477cf439f90dacc0330fc18fec93f9843cd779bbfd3c7c80ee6c81824960bb","bytes":5632});
+function nativeWorkerQuery():string {
+  const root=fileURLToPath(new URL('../../../../',import.meta.url));
+  const files=['workers/windows/WorkerIdentity.cs','apps/desktop/host-tools/worker-query/ArcaneWorkerQuery.exe','apps/desktop/host-tools/worker-query/manifest.json'];
+  const bytes=files.map(name=>{const path=join(root,name),info=lstatSync(path);if(!info.isFile()||info.isSymbolicLink()||info.nlink!==1||info.size>1024*1024||realpathSync(path).toLowerCase()!==path.toLowerCase())throw Error('Native worker query is unavailable.');return readFileSync(path);});
+  const [source,binary,receipt]=bytes;
+  if(!source||!binary||!receipt||source.length>65536||binary.length!==NATIVE_WORKER_QUERY_PIN.bytes||receipt.length>4096)throw Error('Native worker query is unavailable.');
+  const manifest:unknown=JSON.parse(receipt.toString('utf8'));
+  if(!manifest||typeof manifest!=='object'||Array.isArray(manifest)||Object.keys(manifest).length!==Object.keys(NATIVE_WORKER_QUERY_PIN).length||Object.entries(NATIVE_WORKER_QUERY_PIN).some(([key,value])=>(manifest as Record<string,unknown>)[key]!==value)||createHash('sha256').update(source.toString('utf8').replace(/\r\n/g,'\n')).digest('hex')!==NATIVE_WORKER_QUERY_PIN.sourceSha256||createHash('sha256').update(binary).digest('hex')!==NATIVE_WORKER_QUERY_PIN.sha256)throw Error('Native worker query is unavailable.');
+  return join(root,files[1]!);
+}
 export const defaultProcessQueryHost: ProcessQueryHost = {
+  get nativeQueryExecutable(){return nativeWorkerQuery();},
   platform: process.platform,
   systemRoot: process.env.SystemRoot,
   execFile: (file, args, options, callback) => nodeExecFile(file, [...args], options, (error, stdout, stderr) =>
@@ -236,9 +253,11 @@ export function workerQueryInvocation(host: ProcessQueryHost, pid: number) {
   const systemRoot = host.systemRoot;
   if (!localAbsolute(systemRoot)) throw new Error('Trusted system root unavailable.');
   const system32 = win32.join(systemRoot, 'System32');
+  const native=host.nativeQueryExecutable;
+  if(native!==undefined&&!localAbsolute(native))throw Error('Invalid native worker query path.');
   return Object.freeze({
-    file: win32.join(system32, 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
-    args: Object.freeze(['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', ENCODED_SCRIPT]),
+    file: native??win32.join(system32, 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+    args: Object.freeze(native?[]:['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', ENCODED_SCRIPT]),
     options: Object.freeze({ cwd: system32, env: Object.freeze({ SystemRoot: systemRoot, ARCANE_WORKER_PID: String(pid) }),
       shell: false as const, windowsHide: true as const, timeout: QUERY_TIMEOUT_MS, maxBuffer: QUERY_MAX_OUTPUT_BYTES, encoding: 'utf8' as const }),
   });

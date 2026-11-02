@@ -41,18 +41,19 @@ async function fixture(t: TestContext, native: boolean, legacy = false, fail: Fa
     // The shipped faces (studio.css @font-face, same-origin /fonts) are part of the product page.
     ...(await readdir(resolve('apps/desktop/public/fonts'))).filter(name => name.endsWith('.woff2')).map(name => ['/fonts/' + name, [resolve('apps/desktop/public/fonts', name), 'font/woff2']] as [string, [string, string]]),
   ]);
-  // The actual compiled desktop module graph, by exact top-level name only (no fixed list to go stale).
-  const moduleFile = async (path: string) => {
-    const match = /^\/([a-z0-9-]+)\.js$/.exec(path); if (!match) return null;
-    const full = resolve(build, 'apps/desktop/src', match[1] + '.js');
-    try { return await readFile(full); } catch { return null; }
-  };
+  // Snapshot the exact static fixture before opening Edge. Request handlers perform
+  // no lazy source reads; full production modules and original navigation deadlines remain.
+  const staticFiles=new Map(await Promise.all([...files].map(async([path,file])=>[path,{bytes:await readFile(file[0]!),type:file[1]!}] as const)));
+  const modules=new Map<string,Buffer>();
+  for(const name of await readdir(resolve(build,'apps/desktop/src'))){
+    if(/^[a-z0-9-]+\.js$/.test(name))modules.set('/'+name,await readFile(resolve(build,'apps/desktop/src',name)));
+  }
   const server = createServer((request, reply) => { void (async () => {
     const path = new URL(request.url ?? '/', origin).pathname;
     const send = (value: unknown, status = 200) => { reply.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); reply.end(JSON.stringify(value)); };
-    const file = files.get(path);
-    if (file && request.method === 'GET') { reply.writeHead(200, { 'Content-Type': file[1]! }); reply.end(await readFile(file[0]!)); return; }
-    const module = request.method === 'GET' ? await moduleFile(path) : null;
+    const file = staticFiles.get(path);
+    if (file && request.method === 'GET') { reply.writeHead(200, { 'Content-Type': file.type }); reply.end(file.bytes); return; }
+    const module = request.method === 'GET' ? modules.get(path) : null;
     if (module) { reply.writeHead(200, { 'Content-Type': 'text/javascript' }); reply.end(module); return; }
     if (path === '/favicon.ico') { reply.writeHead(204); reply.end(); return; }
     assert.equal(request.headers.authorization, 'Bearer ' + TOKEN);

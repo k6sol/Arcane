@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { copyFile, lstat, realpath, rm } from 'node:fs/promises';
 import { isAbsolute, join, relative, sep, win32 } from 'node:path';
-import { captureWorkerIdentity, attestRecordedWorker, canonicalTimestamp, defaultProcessQueryHost, QUERY_MAX_OUTPUT_BYTES, QUERY_WATCHDOG_MS,
+import { captureWorkerIdentity, attestRecordedWorker, canonicalTimestamp, defaultProcessQueryHost, workerQueryInvocation, QUERY_MAX_OUTPUT_BYTES, QUERY_WATCHDOG_MS,
   type ProcessQueryHost, type WorkerIdentity } from '../../packages/asset-pipeline/src/worker-identity.js';
 import { makeFixtureDirectory, fixtureTempDirectory } from './windows-fixture-paths.js';
 
@@ -125,6 +125,7 @@ async function capture(t: TestContext, child: { pid: number; executable: string 
 
 test('actual default Windows same-handle query captures a held Node child and proves its original close', { skip: process.platform !== 'win32', timeout: 30000 }, async t => {
   const f = await fixture(t), child = await f.start(await realpath(process.execPath));
+  const query=workerQueryInvocation(defaultProcessQueryHost,child.pid);assert.match(query.file,/ArcaneWorkerQuery\.exe$/);assert.deepEqual(query.args,[]);
   const identity = await capture(t, child); t.signal.throwIfAborted();
   assert.deepEqual(await attestRecordedWorker(identity), { verdict: 'same-worker-running', reason: 'identity-matched' });
   const second = await capture(t, child); assert.ok(second.processCreatedAt === identity.processCreatedAt, 'Repeated native creation time must remain exact.');

@@ -1,3 +1,4 @@
+import {WORKER_QUERY_FILES,validateWorkerQueryFiles} from './managed-worker-query.mjs';
 import { createHash } from 'node:crypto';
 import { readFile, writeFile, readdir, lstat, realpath, mkdir, mkdtemp } from 'node:fs/promises';
 import { resolve, join, relative, dirname, isAbsolute, sep } from 'node:path';
@@ -72,7 +73,7 @@ export const REQUIRED_FRONTEND_FILES = [
   ...FONT_FILES, 'apps/desktop/public/fonts/manifest.json',
   'apps/desktop/public/fonts/OFL-IBM-Plex-Sans.txt', 'apps/desktop/public/fonts/OFL-Archivo.txt', 'apps/desktop/public/fonts/OFL-IBM-Plex-Mono.txt',
 ];
-const CONTROLLED_FILES = new Set([BRAND_BITMAP_PATH, 'apps/desktop/electron/icon.png', 'apps/desktop/electron/icon.ico', 'apps/desktop/electron/taskbar.ico', 'scripts/setup-arcane.ps1', 'scripts/launch-arcane.cmd', 'installer/setup.manifest', 'installer/launcher.manifest', 'installer/uninstaller.manifest', 'apps/desktop/public/vendor/three/LICENSE', ...FONT_FILES, ...MANAGED_LUAU_FILES]);
+const CONTROLLED_FILES = new Set([BRAND_BITMAP_PATH, 'apps/desktop/electron/icon.png', 'apps/desktop/electron/icon.ico', 'apps/desktop/electron/taskbar.ico', 'scripts/setup-arcane.ps1', 'scripts/launch-arcane.cmd', 'installer/setup.manifest', 'installer/launcher.manifest', 'installer/uninstaller.manifest', 'apps/desktop/public/vendor/three/LICENSE', ...FONT_FILES, ...MANAGED_LUAU_FILES, ...WORKER_QUERY_FILES]);
 const FIRST_RUN_FILES = ['scripts/setup-arcane.ps1', 'scripts/launch-arcane.cmd', 'docs/build/FIRST_RUN.md'];
 const allowedFile = path => EXTENSIONS.test(path) || CONTROLLED_FILES.has(path);
 export function validateBrandBitmap(bytes) {
@@ -335,6 +336,7 @@ export async function createLocalRelease({ repository = REPOSITORY } = {}) {
   }
   validateCompiledSources(files);
   validateManagedLuauFiles(files);
+  validateWorkerQueryFiles(files);
   verifyManagedLuauCompiler(repository);
   const outputRoot = join(repository, 'runtime', 'releases');
   if (!inside(repository, outputRoot)) throw new Error('Release output escapes the repository.');
@@ -391,6 +393,7 @@ export async function verifyLocalRelease(directory) {
   }
   await inventory();
   validateManagedLuauFiles(verifiedFiles);
+  validateWorkerQueryFiles(verifiedFiles);
   if (manifest.totalBytes !== totalBytes) throw new Error('Release byte count mismatch.');
   return { files: seen.size, bytes: totalBytes, manifestSha256: hash(manifestBytes),
     integrityOnly: true, signed: false, runtimeVerified: false, mutableRootsNotVerified: MUTABLE_ROOTS };

@@ -38,3 +38,7 @@ Verify exact first-Send draft correlation through persistence, native acknowledg
 [[Delivery/Goal Board]] · [[Operations/Evidence Ledger]]
 
 Historical exact baseline `1f87ea3` passed all nine jobs in runs41002979317/41002979268, followed by5b in41087633471/41087633487. Selected installed5d supersedes their desktop baseline; complete unchanged native input comparison retains the two passing669 jobs in41094897137. Actual installed chat evidence remains scoped to the single fresh conversation above.
+
+## Latest release work
+
+[[Operations/Next Session]] is the current source/run/install checkpoint. Installedf8 retains a new Error440; source2e has seven passing component jobs but a Windows native query failure. The native-helper and key-fixture follow-up is locally verified and still needs exact-source hosted/package/customer acceptance. Earlier source/install paragraphs are historical evidence, not the current selected installation. No whole-goal completion is inferred.

@@ -77,3 +77,7 @@ Work in Arcane only; do not operate Roblox Studio or work on ArchLiquid. Preserv
 ## Action-balance correction
 
 [[Bugs/Action Meter Labels]] now implements the customer's explicit available-actions / normal-plan-cap format, with separate planLimit and spendable limit, e.g.1000 /500. All33 frozen Plans/CSS cases pass after strict660 compilation; actual installed acceptance is pending. Original2e2fd38 native Windows run failed before Blender at the first PowerShell-host query with no progress marker. Ubuntu native conversion passed. The failed original is retained and the query deadline is unchanged; the native-helper prototype is not wired or accepted.
+
+## Native query and fixture verification
+
+[[Bugs/Windows Native Worker Query]] removes the PowerShell host from default Windows worker checks with a reviewed5.6KB helper. Strict660,81 frozen worker/recovery cases, five isolated actual-runtime pin guards and final198 release cases pass; actual Node/Unicode/exit observations are91-111ms locally. The original2e Windows native failure remains retained, and new hosted verification is still required. [[Bugs/Browser Fixture Asset Loading]] addresses the separate281 Windows release navigation fixture with eight passing browser cases and unchanged deadlines. All seven original2e component/package jobs passed; that does not erase its native failure or accept customer startup.
