@@ -1330,10 +1330,13 @@ def plan_broadleaf(params, seed, budget_total):
             # Only real outer branch rings can carry foliage. Pruned chains remain
             # shape guides; they never become attachment points or invented rods.
             for i in range(max(1, len(stations) // 2), len(stations) - 1):
+                ring = bark.vertices[first + i * n:first + (i + 1) * n]
+                centre = tuple(sum(v[k] for v in ring) / n for k in range(3))
                 for j in range(n):
                     skin.append((bark.vertices[first + i * n + j], stations[i][3],
                                  {"radius": max(TUBE_MIN_RADIUS, radii[i]), "axis": a["id"],
-                                  "vertex": first + i * n + j, "ring": first + i * n, "sides": n}))
+                                  "vertex": first + i * n + j, "ring": first + i * n, "sides": n,
+                                  "outward": norm(sub(bark.vertices[first + i * n + j], centre))}))
         samples += list(zip(spine, radii))
         if joint:
             junctions.append((spine[0], radii[0], joint["rp"] * scale))
@@ -1621,6 +1624,18 @@ def cluster(leaves, style, p, kind, spray, n, centre, deep, rng, roots):
         side = norm(side) if dot(side, side) > 1e-9 else perpendicular(tangent)
         fan = rng.uniform(.35, 1.0)
         t = norm(add(add(mul(tangent, math.cos(fan)), mul(side, math.sin(fan))), (0.0, 0.0, -style["droop"])))
+        if roots.skin is not None:
+            # A shell target may lie across this particular branch. Keep the
+            # original random fan, but constrain its axis to this emitted ring's
+            # outward cone before shaping the card. The margin accommodates the
+            # card's bend/thickness; a surface-root alone cannot prevent a stalk
+            # pointing into bark. No added RNG draws or post-build half-turns.
+            outward = roots.skin[root]["outward"]
+            facing = dot(t, outward)
+            if facing < .4:
+                along_skin = sub(t, mul(outward, facing))
+                t = (norm(add(mul(norm(along_skin), math.sqrt(1 - .4 ** 2)), mul(outward, .4)))
+                     if dot(along_skin, along_skin) > 1e-12 else outward)
         length = spray * rng.uniform(.85, 1.15)
         width = length * style["aspect"] * rng.uniform(.92, 1.08)
         # The spray lies in the plane of its twig and its fan (a flat shoot), turned to the light.
@@ -1689,6 +1704,7 @@ def rebind_leaf_cards(parts):
             centre = tuple(sum(v[k] for v in ring) / len(ring) for k in range(3))
             attachment["root"] = root
             attachment["radius"] = max(math.dist(v, centre) for v in ring)
+            attachment["outward"] = norm(sub(root, centre))
 
 
 # ------------------------------------------------------- natural conifer ---

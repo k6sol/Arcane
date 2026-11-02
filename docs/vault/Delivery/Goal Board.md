@@ -22,7 +22,7 @@ Check a goal off only when its acceptance criteria pass and its evidence is reco
 
 ## Execution
 
-Current functional checkpoint: selected desktopcdda8e4 combines direct sign-in, stable numbered errors and bounded independent chat recovery. All seven original hosted jobs and4673-file installed integrity verification pass. Actual native metadata Connect also succeeds with the saved subscription, without a thread/model turn. The open window is still old447; loaded customer acceptance, historical continuations and broader product acceptance remain outstanding. Whole-goal checkboxes stay open. See [[Sessions/2026-10-31 Verified Chat Recovery Delivery]].
+Current functional checkpoint: verified chat release candidate7d includes folder dragging, hidden unsent drafts, stable notices and explicit draft recovery. All seven original hosted jobs and thirteen archive digest checks pass; installation awaits current Windows memory headroom. The actual customer window remains e813. Preserve its unsent text. Separately, initial leaf fan orientation now follows its owning emitted branch ring, with pure generator evidence; final native projection, rendered asset quality and broader product acceptance remain open. See [[Operations/Current State]] and [[Bugs/Leaf Stalk Emergence]].
 
 Start with G01. Work in parallel on chat/session reliability, asset/plugin integration and task/runtime correctness once the baseline is clear. Diagnostics accompanies all three. Accounts and billing are a public-launch requirement, not a reason to delay usable local development.
 

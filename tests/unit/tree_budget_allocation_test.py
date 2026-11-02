@@ -51,6 +51,29 @@ class TreeBudgetAllocation(unittest.TestCase):
             base = p.mul(p.add(leaves.vertices[first], leaves.vertices[first + 5]), .5)
             self.assertLess(math.dist(base, attachment["root"]), 1e-9)
 
+    def test_initial_stalk_surfaces_emerge_outward_from_their_own_branch_ring(self):
+        # The retained seed73129 oak had attached roots but inward-facing opaque
+        # stalks. Test the actual front/back apex rays, including their bend and
+        # thickness, rather than only the nominal card axis or declared normal.
+        for species in ("oak", "birch"):
+            for seed in (31, 73129):
+                for height in (2, 6, 20):
+                    with self.subTest(species=species, seed=seed, height=height):
+                        bark, leaves = [row[2] for row in p.plan(request(species, height=height, seed=seed))]
+                        self.assert_skin_bindings(bark, leaves)
+                        for attachment in leaves.attachments:
+                            first = attachment["first"]
+                            ring = bark.vertices[attachment["ring"]:attachment["ring"] + attachment["sides"]]
+                            centre = tuple(sum(v[k] for v in ring) / len(ring) for k in range(3))
+                            radial = p.sub(attachment["root"], centre)
+                            # Independent unnormalised half-space check. A card
+                            # can start on the skin and still point through it.
+                            for apex in (6, 7):
+                                stalk = p.sub(leaves.vertices[first + apex], attachment["root"])
+                                self.assertGreater(p.dot(stalk, radial), 0)
+                            self.assertAlmostEqual(math.sqrt(p.dot(attachment["outward"], attachment["outward"])), 1)
+                            self.assertLess(math.dist(attachment["outward"], p.norm(radial)), 1e-12)
+
     def test_inspected_oak_retains_real_tertiary_wood_and_all_canopy_regions(self):
         bark, leaves = [part[2] for part in p.plan(request())]
         orders = collections.Counter(a["order"] for a in bark.wood["axisDetails"])
