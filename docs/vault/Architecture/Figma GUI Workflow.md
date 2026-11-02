@@ -15,6 +15,8 @@ Reviewed official documentation on 2026-11-02: [remote setup](https://developers
 
 No Figma tools are connected in the current agent session, and plugin discovery returned unavailable. Arcane itself has no verified Figma connection. Choose an accepted first-party integration route after confirming support, or obtain client acceptance; do not label a fabricated Connect button as functioning authentication. Do not impersonate a supported client. Keep authentication tokens out of model context, logs and shared notes, using the existing trusted encrypted host boundary when implementation proceeds.
 
+[[Bugs/Submitted Image Review]] now supplies a working in-app component for exact submitted PNG evidence, using existing human review controls and hash revalidation. This is a static image review component; Figma account/file authoring, interactive prototypes and durable approval of a complete Figma revision remain separate requirements.
+
 ## Native connection protocol evidence
 
 The installed Codex executable generated its own current JSON schemas successfully in an isolated output directory:320 files,3,676,687 bytes, exit0 and both output pipes closed. This starts no authentication, model inference or Studio work. Its schema includes mcpServer/oauth/login, mcpServer/oauthLogin/completed and mcpServer/tool/call. Login accepts the configured server name and optional threadId; the response returns authorizationUrl and optional loginId. Completion also carries an optional loginId, so an integration must bind the original attempt rather than accept an unrelated late event. Tool calls require a threadId, server and tool: a successful account login alone is insufficient to call design tools.

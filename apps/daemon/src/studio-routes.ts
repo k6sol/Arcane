@@ -131,6 +131,13 @@ export function studioRoutes(store: StudioStore, cwd: string, work?: WorkStore, 
       // A script change view shows full before/after sources to the person only; models read scripts through their granted tools.
       if (url.pathname.startsWith('/v1/studio/script-diff/') && !human) throw new ArcaneError('SCOPE', 'Script change views are available to the local launcher session only.');
       if (request.method === 'GET' && !plugin) {
+        if(work&&url.pathname==='/v1/work/evidence-image'){
+          if(!human)throw new ArcaneError('SCOPE','Evidence image review is available only in the human panel.');
+          const q=url.searchParams;
+          if([...q.keys()].sort().join(',')!=='index,sha256,taskId'||!/^\d{1,2}$/.test(q.get('index')??'')||! /^[a-f0-9]{64}$/.test(q.get('sha256')??''))throw new ArcaneError('INPUT','Choose one exact submitted image.');
+          const data=work.evidenceImage(q.get('taskId')??'',Number(q.get('index')),q.get('sha256')!);
+          response.writeHead(200,{'Content-Type':'image/png','Content-Length':data.length,'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Content-Security-Policy':"default-src 'none'"});response.end(data);return true;
+        }
         if (work && url.pathname === '/v1/work/runs') { send(200, { runs: human?work.runs():work.runsReadOnly().filter(run=>boundAllowed(run.id)) }); return true; }
         if (work && url.pathname.startsWith('/v1/work/runs/')) {
           const runId=url.pathname.slice('/v1/work/runs/'.length);

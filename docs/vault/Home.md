@@ -9,7 +9,7 @@ tags: [arcane, dashboard]
 
 [[Operations/Current State|Current state]] · [[Operations/Next Session|Resume work]] · [[Delivery/Goal Board|Ten release goals]] · [[Arcane Map.canvas|Explore the map]]
 
-The verified loaded desktop is **7d3aa19**. Saved sign-in/history restored, and explicit draft recovery retained the original unreadable bytes before saving. A saved chat displays history but its native open remains unresolved. Newer [[Bugs/API Credit Codes|API credit codes]] and [[Bugs/Subscription Action Admission|subscription admission]] are source changes awaiting desktop delivery; a GitHub push alone does not trigger an installed update banner. All whole-product goals remain open. See [[Operations/Current State]] for verification boundaries.
+The installed and loaded desktop is **2d08932**. Original component/native jobs, archive/payload and independent installed checks pass, and the update banner was actually observed. Customer startup still fails: connect was rejected with PROCESS_EXIT_UNCONFIRMED, shown as Error499 on the sign-in screen. Authentication loss is unproven; no request was retried. See [[Sessions/2026-11-02 Folder Context Desktop Delivery]]. [[Bugs/Submitted Image Review]] is a newer verified source feature, not part of that installed candidate. All whole-product goals remain open.
 
 - [[Operations/Requirements Ledger|Customer requirements]] — preserve the complete brief and acceptance scope.
 - [[Skills/Development Skills|Build Arcane]] · [[Skills/Production Upgrade|Upgrade product skills]] · [[Skills/Skill Catalog|Skill evidence and status]].

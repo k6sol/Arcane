@@ -5,6 +5,12 @@ tags: [arcane]
 ---
 # Session log
 
+## 2026-11-02 · Submitted image review and installed chat update
+
+[[Bugs/Submitted Image Review]] adds in-app exact-hash PNG previews with human-only reads, stable modal layout, phone bounds and explicit Error439 read/decode details. All45 affected cases pass; the final complete work-review browser case also passes after desktop/phone visual refinement. This source feature is newer than the installed2d candidate.
+
+[[Sessions/2026-11-02 Folder Context Desktop Delivery]] records both original hosted suites,13 archive checks, canonical plugin/source checks, independent installed integrity, observed update banner and actual stable-launcher reopen. The new app opens its sign-in screen with a rejected connect PROCESS_EXIT_UNCONFIRMED, not a successful customer session. No login or native retry was attempted. Original native transport/factory cleanup is the next functional priority; preserve the original custody records and existing deadlines.
+
 ## 2026-11-02 · Chat context and GUI workflow
 
 Signed81cec41 enforces local subscription action admission before model work; all seven original component jobs passed. Its native Ubuntu download failed HTTP403 before conversion and remains recorded separately from Windows success. Signedaf0dd61 retains provider saved-chat refusal details, with54 frozen UI/controller passes. Signed2d08932 shares bounded recorded context inside folders while isolating other folders and unfiled chats, with42 frozen cases. The current candidate's original native41477106948 passed both platforms; component41476854180 remains pending. Installed/loaded source remains7d3aa19.

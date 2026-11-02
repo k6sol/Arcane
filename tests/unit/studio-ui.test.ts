@@ -661,7 +661,7 @@ test('browser HTTP fixtures: API keys, masks, copy, dismissal, navigation, revoc
 
 test('real browser and daemon: human API keys, key connection and revocation, durable WorkStore create, human Origin review, hash conflicts, readiness, scoped token and restart', { skip: !browserModule, timeout: 90000 }, async t => {
   const directory = await mkdtemp(join(tmpdir(), 'arcane-ui-work-'));
-  const evidencePath = join(directory, 'proof.txt'); await writeFile(evidencePath, 'submitted proof');
+  const evidencePath = join(directory, 'proof.txt'); await writeFile(evidencePath, 'submitted proof'); await writeFile(join(directory,'design.png'),png());
   let studioStore = new StudioStore({ directory: join(directory, 'studio') });
   let workStore = new WorkStore({ directory: join(directory, 'work'), projectPath: directory });
   let app = await createConnectionLab({ cwd: resolve('.'), projectPath: directory, stateDirectory: join(directory, 'preferences'), studioStore, workStore, probe: async () => [], codexConnect: refuseNativeCodex });
@@ -749,9 +749,42 @@ test('real browser and daemon: human API keys, key connection and revocation, du
   let run = workStore.runs()[0]!; assert.equal(run.tasks.length, 2); const first = run.tasks[0]!, second = run.tasks[1]!;
   assert.deepEqual(workStore.ready().map(t => t.key), ['first']);
   const lease = await post('/v1/work/claim', { taskId: first.id, worker: 'Actual HTTP browser-test worker' }); assert.equal(lease.status, 200);
-  assert.equal((await post('/v1/work/submit', { taskId: first.id, leaseToken: lease.data.leaseToken, evidence: [{ path: 'proof.txt', note: '<img src=x onerror=alert(1)> actual hashed proof' }] })).status, 200);
+  assert.equal((await post('/v1/work/submit', { taskId: first.id, leaseToken: lease.data.leaseToken, evidence: [{ path: 'proof.txt', note: '<img src=x onerror=alert(1)> actual hashed proof' },{path:'design.png',note:'GUI preview fixture'}] })).status, 200);
   await refresh(); await page.locator('[data-task-id="' + first.id + '"]').click(); await text('#work-task-evidence', 'SHA-256');
   assert.equal(await page.locator('#work-task-evidence img').count(), 0); assert.equal(await page.locator('#work-approve').isDisabled(), true);
+  const artifact=workStore.task(first.id).evidence[1]!,previewPath='/v1/work/evidence-image?taskId='+first.id+'&index=1&sha256='+artifact.sha256;
+  assert.equal((await fetch(app.origin+previewPath)).status,401);
+  assert.equal((await fetch(app.origin+previewPath,{headers:{Authorization:'Bearer '+app.agentToken}})).status,403);
+  await page.evaluate(()=>{const w=window as any;w.evidenceURLs={created:[],revoked:[]};const create=URL.createObjectURL.bind(URL),revoke=URL.revokeObjectURL.bind(URL);URL.createObjectURL=value=>{const id=create(value);w.evidenceURLs.created.push(id);return id;};URL.revokeObjectURL=id=>{w.evidenceURLs.revoked.push(id);revoke(id);};});
+  const previewResponse=page.waitForResponse((r:any)=>r.url()===app.origin+previewPath);
+  await page.getByRole('button',{name:'Preview image',exact:true}).click();const imageReply=await previewResponse;
+  assert.equal(imageReply.status(),200);assert.equal(imageReply.headers()['cache-control'],'no-store');
+  await page.waitForFunction(()=>{const i=document.querySelector<HTMLImageElement>('.work-evidence-dialog img');return i&&!i.hidden&&i.naturalWidth===128;});
+  assert.equal(await page.locator('.work-evidence-dialog').count(),1);assert.equal(workStore.task(first.id).state,'needs_review');
+  const originalTheme=await page.evaluate(()=>document.documentElement.getAttribute('data-theme'));
+  await page.evaluate(()=>document.documentElement.setAttribute('data-theme','dark'));
+  if(process.env.ARCANE_UI_SCREENSHOT)await page.locator('.work-evidence-dialog').screenshot({path:process.env.ARCANE_UI_SCREENSHOT+'.evidence-preview.png'});
+  await page.setViewportSize({width:390,height:844});
+  const previewBounds=await page.locator('.work-evidence-dialog').boundingBox();assert.ok(previewBounds&&previewBounds.x>=0&&previewBounds.y>=0&&previewBounds.x+previewBounds.width<=390&&previewBounds.y+previewBounds.height<=844);
+  if(process.env.ARCANE_UI_SCREENSHOT)await page.locator('.work-evidence-dialog').screenshot({path:process.env.ARCANE_UI_SCREENSHOT+'.evidence-preview-mobile.png'});
+  await page.setViewportSize({width:1440,height:1100});await page.evaluate((theme:string|null)=>{if(theme===null)document.documentElement.removeAttribute('data-theme');else document.documentElement.setAttribute('data-theme',theme);},originalTheme);
+  await page.getByRole('button',{name:'Actual size',exact:true}).click();await page.getByRole('button',{name:'Fit',exact:true}).click();
+  await page.getByRole('button',{name:'Close preview',exact:true}).click();await page.waitForFunction(()=>!document.querySelector('.work-evidence-dialog'));
+  const urlState=await page.evaluate(()=>(window as any).evidenceURLs);assert.equal(urlState.created.length,1);assert.deepEqual(urlState.revoked,urlState.created);
+  const held=await page.evaluate(async()=>{
+    const path='/studio.js',module=await import(path),w=window as any;let firstSignal:AbortSignal|undefined;
+    const first=new Promise<Blob>(resolve=>{w.releaseFirstEvidence=resolve;}),second=new Promise<Blob>(resolve=>{w.releaseSecondEvidence=resolve;});
+    module.openWorkEvidenceImage(document,'Held first image',(signal:AbortSignal)=>{firstSignal=signal;return first;});await Promise.resolve();
+    module.openWorkEvidenceImage(document,'Replacement image',()=>second);await Promise.resolve();
+    return{aborted:firstSignal?.aborted,dialogs:document.querySelectorAll('.work-evidence-dialog').length};
+  });assert.deepEqual(held,{aborted:true,dialogs:1});
+  await page.getByRole('button',{name:'Close preview',exact:true}).click();
+  await page.evaluate((bytes:number[])=>{const w=window as any,blob=new Blob([new Uint8Array(bytes)],{type:'image/png'});w.releaseFirstEvidence(blob);w.releaseSecondEvidence(blob);},[...png()]);
+  await page.waitForFunction(()=>!document.querySelector('.work-evidence-dialog'));
+  const finalURLs=await page.evaluate(()=>(window as any).evidenceURLs);assert.deepEqual(finalURLs,urlState,'late blobs cannot allocate or reopen a retired preview');
+  await writeFile(join(directory,'design.png'),png(true));
+  const stale=await fetch(app.origin+previewPath,{headers:{Authorization:'Bearer '+app.token}});assert.equal(stale.status,400);assert.match(await stale.text(),/changed/);
+
   await page.locator('#work-review-note').fill('Check changed evidence is rejected'); await writeFile(evidencePath, 'changed after submission');
   await page.locator('#work-approve').click(); await text('#confirm-title', 'Approve submitted work'); assert.equal(await page.locator('#confirm-action').isDisabled(), true); await page.locator('#confirm-cancel').click(); assert.equal(workStore.task(first.id).state, 'needs_review');
   await page.locator('#work-approve').click(); await page.locator('#confirm-check').check(); await page.locator('#confirm-action').click(); await text('#work-notice', 'EVIDENCE_CHANGED'); assert.equal(workStore.task(first.id).state, 'needs_review'); assert.equal(workStore.ready().some(t => t.id === second.id), false);

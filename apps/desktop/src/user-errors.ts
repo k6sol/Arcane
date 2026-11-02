@@ -2,6 +2,7 @@
 export interface UserError {readonly number:number;readonly title:string;readonly explanation:string;readonly nextStep:string}
 const entry=(number:number,title:string,explanation:string,nextStep:string):UserError=>Object.freeze({number,title,explanation,nextStep});
 export const USER_ERRORS=Object.freeze({
+  439:entry(439,'Evidence preview unavailable','Arcane could not read or display the exact submitted image.','Check the failing stage and reason. Request an updated submission if the evidence changed.'),
   411:entry(411,'Connection message exceeded a limit','A message on the local ChatGPT connection exceeded the size Arcane can accept. Its outcome is unconfirmed.','Check the recorded status before trying again. Nothing is resent automatically.'),
   412:entry(412,'Earlier tasks need review','Arcane has not confirmed how earlier tasks finished. Their records are kept.','Review those task records before acknowledging this notice. Reconnecting does not settle them.'),
   413:entry(413,'Sign-in required','The selected provider has not confirmed a usable account session.','Continue with the provider sign-in and finish in your browser.'),

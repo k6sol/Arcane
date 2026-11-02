@@ -1,5 +1,5 @@
 import { startScriptEditorDrafts, type ScriptDraftTarget, type AppliedScriptDraft } from './script-editor-drafts.js';
-import {userError,userErrorText} from './user-errors.js';
+import {userError,userErrorText,USER_ERRORS} from './user-errors.js';
 import type { EditorDraft } from './editor-drafts.js';
 import { EditorDraftStore, type EditorDraftBridge } from './editor-drafts.js';
 import { startProjectMemory } from './project-memory.js';
@@ -675,6 +675,37 @@ function workerStatusMessage(error:unknown):string{
     ?'The worker check’s outcome is unknown. Refresh the recorded job before checking again.'
     :'The worker status check could not finish. Refresh the recorded job and try again.';
 }
+/** A modal keeps evidence review out of page flow and owns its fetch/blob lifetime. */
+const workEvidencePreviews=new WeakMap<Document,()=>void>();
+export function openWorkEvidenceImage(doc:Document,title:string,load:(signal:AbortSignal)=>Promise<Blob>):void{
+  const view=doc.defaultView;if(!view)return;
+  workEvidencePreviews.get(doc)?.();
+  const dialog=doc.createElement('dialog');dialog.className='work-evidence-dialog';
+  const heading=doc.createElement('h2');heading.id='work-evidence-title-'+view.crypto.randomUUID();heading.textContent=title;
+  dialog.setAttribute('aria-labelledby',heading.id);
+  const close=doc.createElement('button');close.type='button';close.textContent='Close preview';
+  const status=doc.createElement('p');status.setAttribute('role','status');status.textContent='Loading submitted image?';
+  const canvas=doc.createElement('div');canvas.className='work-evidence-canvas';
+  const image=doc.createElement('img');image.alt='Submitted evidence: '+title;image.hidden=true;canvas.append(image);
+  const controls=doc.createElement('div'),fit=doc.createElement('button'),zoom=doc.createElement('button');
+  fit.className=zoom.className='quiet';
+  fit.type=zoom.type='button';fit.textContent='Fit';zoom.textContent='Actual size';fit.disabled=zoom.disabled=true;
+  fit.onclick=()=>{image.style.maxWidth='100%';image.style.width='';};zoom.onclick=()=>{image.style.maxWidth='none';image.style.width=image.naturalWidth+'px';};
+  const header=doc.createElement('header');controls.append(fit,zoom,close);header.append(heading,controls);dialog.append(header,status,canvas);doc.body.append(dialog);
+  const controller=new AbortController();let retired=false,url:string|null=null,stage='Read submitted image';
+  const cleanup=()=>{if(retired)return;retired=true;controller.abort();if(url)view.URL.revokeObjectURL(url);view.removeEventListener('pagehide',cleanup);if(workEvidencePreviews.get(doc)===cleanup)workEvidencePreviews.delete(doc);dialog.remove();};
+  workEvidencePreviews.set(doc,cleanup);
+  dialog.addEventListener('close',cleanup,{once:true});close.onclick=()=>{dialog.close();cleanup();};view.addEventListener('pagehide',cleanup,{once:true});
+  try{dialog.showModal();close.focus();}catch{cleanup();return;}
+  void Promise.resolve().then(()=>retired?null:load(controller.signal)).then(async blob=>{
+    if(retired||blob===null)return;
+    if(blob.type!=='image/png'||!blob.size||blob.size>4*1024*1024)throw Error('The submitted preview is not a supported PNG.');
+    stage='Decode image';url=view.URL.createObjectURL(blob);image.src=url;await image.decode();if(retired)return;
+    if(image.naturalWidth<1||image.naturalWidth>2048||image.naturalHeight<1||image.naturalHeight>2048)throw Error('The preview exceeds the image dimensions supported here.');
+    image.hidden=false;status.textContent='Submitted image. Approval still requires your review decision.';fit.disabled=zoom.disabled=false;
+  }).catch(error=>{if(!retired){image.hidden=true;status.textContent=userErrorText(USER_ERRORS[439])+' '+stage+': '+(error instanceof StudioRequestError?error.message:'The PNG could not be decoded within the supported preview bounds.');}});
+}
+
 export class StudioApi {
   constructor(private readonly token: string, private readonly transport: typeof fetch = fetch, private readonly deadline = 12000) {}
   async request<T>(path: string, input?: unknown, format: 'json' | 'preview' = 'json', deadline = this.deadline, signal?:AbortSignal): Promise<T> {
@@ -686,7 +717,7 @@ export class StudioApi {
     const historyStatusRoute=path==='/v1/assets/history-status',historyChangeRoute=path==='/v1/assets/rebuild-history'||path==='/v1/assets/confirm-history';
     const exactWorkRun=/^\/v1\/work\/runs\/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(path);
     if(exactWorkRun&&(input!==undefined||format!=='json'))throw new StudioRequestError('Recorded work lookup is read-only.','rejected');
-    if (!(exactWorkRun || nativeRoute || conversationRoute || workerRoute || historyRestoreRoute || historyStatusRoute || historyChangeRoute || /^\/v1\/(?:studio\/(?:sessions|keys(?:\/(?:revoke|rotate))?|pairing|revoke|restore|commands(?:\/[a-zA-Z0-9_%.-]+)?)|product\/(?:state|mcp-token)|work\/(?:runs|ready|create|review)|assets\/(?:jobs|probe|start|cancel|manifest|preview))(?:\?[^#]*)?$/.test(path)) || new URL(path, 'http://127.0.0.1').pathname !== path.split('?')[0]) throw new StudioRequestError('Unsupported local control route.', 'rejected');
+    if (!(exactWorkRun || nativeRoute || conversationRoute || workerRoute || historyRestoreRoute || historyStatusRoute || historyChangeRoute || /^\/v1\/(?:studio\/(?:sessions|keys(?:\/(?:revoke|rotate))?|pairing|revoke|restore|commands(?:\/[a-zA-Z0-9_%.-]+)?)|product\/(?:state|mcp-token)|work\/(?:runs|ready|create|review|evidence-image)|assets\/(?:jobs|probe|start|cancel|manifest|preview))(?:\?[^#]*)?$/.test(path)) || new URL(path, 'http://127.0.0.1').pathname !== path.split('?')[0]) throw new StudioRequestError('Unsupported local control route.', 'rejected');
     if(workerRoute&&(!record(input)||Object.keys(input).length!==1||!workerJobId(input.jobId)||format!=='json'))throw new StudioRequestError('Choose one exact interrupted asset job.','rejected');
     if(historyRestoreRoute&&(!record(input)||Object.keys(input).length!==1||!workerJobId(input.jobId)||format!=='json'))throw new StudioRequestError('Choose one exact archived asset job.','rejected');
     if(historyStatusRoute&&(input!==undefined||format!=='json'))throw new StudioRequestError('History health is a read-only request.','rejected');
@@ -777,6 +808,10 @@ export class StudioApi {
   assetPreview(jobId: string, path: string) {
     if (!['preview-hero.png', 'preview-side.png', 'preview-structure.png'].includes(path)) throw new StudioRequestError('Choose a fixed manifest preview.', 'rejected');
     return this.request<Blob>('/v1/assets/preview?jobId=' + encodeURIComponent(jobId) + '&path=' + encodeURIComponent(path), undefined, 'preview');
+  }
+  workEvidenceImage(taskId:string,index:number,sha256:string,signal?:AbortSignal):Promise<Blob>{
+    if(!/^[a-f0-9-]{36}$/i.test(taskId)||!Number.isInteger(index)||index<0||index>19||!/^[a-f0-9]{64}$/.test(sha256))throw new StudioRequestError('Choose one submitted image.','rejected');
+    return this.request<Blob>('/v1/work/evidence-image?taskId='+encodeURIComponent(taskId)+'&index='+index+'&sha256='+sha256,undefined,'preview',this.deadline,signal);
   }
   runs() { return this.request<{ runs: WorkRun[] }>('/v1/work/runs'); }
   run(runId:string) {
@@ -1675,9 +1710,13 @@ export class StudioWorkbench {
     this.identity('work-task-meta', [['Task / run', task.id + ' / ' + task.runId], ['State', task.state.replaceAll('_', ' ')], ['Scopes', task.scope.join('\n')], ['Dependencies', task.dependencies.join(', ') || 'None'], ['Worker / lease', (task.worker ?? 'Unassigned') + ' / ' + (task.leaseUntil ?? 'No active lease')], ['Progress', task.progress || 'None recorded'], ['Last review', task.reviewNote ?? 'No human review recorded'], ['Updated', task.updatedAt]]);
     const evidence = this.el('work-task-evidence'); evidence.replaceChildren();
     if (!task.evidence.length) evidence.append(this.make('p', 'No evidence submitted.', 'empty'));
-    for (const artifact of task.evidence) {
+    for (const [index,artifact] of task.evidence.entries()) {
       const item = this.make('article', undefined, 'evidence-artifact');
       item.append(this.make('h3', artifact.path), this.make('p', artifact.note), this.make('p', 'SHA-256 ' + artifact.sha256, 'mono'), this.make('p', artifact.bytes + ' bytes · submitted ' + artifact.addedAt, 'hint'));
+      if(artifact.path.toLowerCase().endsWith('.png')&&artifact.bytes<=4*1024*1024){
+        const preview=this.make('button','Preview image','quiet');preview.type='button';
+        preview.addEventListener('click',()=>openWorkEvidenceImage(this.doc,artifact.path,signal=>this.api.workEvidenceImage(task.id,index,artifact.sha256,signal)));item.append(preview);
+      }
       const copy = this.make('button', 'Copy evidence path', 'quiet'); copy.type = 'button'; copy.addEventListener('click', () => { void this.copy(artifact.path); }); item.append(copy); evidence.append(item);
     }
     this.el('work-review-form').hidden = task.state !== 'needs_review';

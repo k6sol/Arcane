@@ -78,9 +78,10 @@ export function detachPlain(value: unknown, budget = { nodes: 4096 }, depth = 0)
 const samePath = (a: string, b: string) => process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
 /** Direct, single-link, bounded regular file read with descriptor identity checked before and after;
  * the cap is enforced before allocation and during the read. Cooperative checks, not an OS sandbox. */
-function verifyDirectFile(full: string): { sha256: string; bytes: number } {
+function verifyDirectFile(full: string, retain=false): { sha256: string; bytes: number; content?:Buffer } {
   const before = lstatSync(full);
   if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || before.size > EVIDENCE_MAX_BYTES) throw new ArcaneError('EVIDENCE', 'Evidence must be a direct single-link file <=16 MiB.');
+  if(retain&&before.size>4*1024*1024)throw new ArcaneError('EVIDENCE','Image previews must be at most4 MiB.');
   const fd = openSync(full, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
   try {
     const opened = fstatSync(fd);
@@ -91,7 +92,7 @@ function verifyDirectFile(full: string): { sha256: string; bytes: number } {
     if (length !== before.size || after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.nlink !== 1 || !after.isFile() ||
         named.dev !== before.dev || named.ino !== before.ino || named.size !== before.size || named.mtimeMs !== before.mtimeMs || named.nlink !== 1 || !named.isFile() || named.isSymbolicLink())
       throw new ArcaneError('EVIDENCE', 'Evidence changed while reading.');
-    return { sha256: hash(buffer.subarray(0, length)), bytes: length };
+    return { sha256: hash(buffer.subarray(0, length)), bytes: length,...(retain?{content:buffer.subarray(0,length)}:{}) };
   } finally { closeSync(fd); }
 }
 
@@ -300,6 +301,19 @@ export class WorkStore {
     const verified = verifyDirectFile(full);
     if (!samePath(realpathSync(direct), full)) throw new ArcaneError('EVIDENCE', 'Evidence path changed while reading.');
     return { path: relative(this.project, full).split(sep).join('/'), ...verified };
+  }
+  /** Human preview of one already submitted artifact, never an arbitrary file read. */
+  evidenceImage(taskId:string,index:number,sha256:string):Buffer {
+    const task=this.task(taskId),entry=Number.isSafeInteger(index)&&index>=0?task.evidence[index]:undefined;
+    if(!entry||entry.sha256!==sha256||entry.bytes>4*1024*1024||!entry.path.toLowerCase().endsWith('.png'))throw new ArcaneError('EVIDENCE','Choose a submitted PNG image of at most4 MiB.');
+    const direct=resolve(this.project,this.scoped(entry.path)),full=realpathSync(direct);
+    if(!samePath(full,direct)||full!==this.project&&!full.startsWith(this.project+sep))throw new ArcaneError('EVIDENCE','Evidence must be a direct in-project file.');
+    const current=verifyDirectFile(full,true),data=current.content!;
+    if(current.sha256!==entry.sha256||current.bytes!==entry.bytes||!samePath(realpathSync(direct),full))throw new ArcaneError('EVIDENCE','Submitted evidence changed. Request an updated submission before reviewing it.');
+    if(data.length<33||!data.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10]))||data.readUInt32BE(8)!==13||data.toString('ascii',12,16)!=='IHDR'||
+      data.readUInt32BE(16)<1||data.readUInt32BE(16)>2048||data.readUInt32BE(20)<1||data.readUInt32BE(20)>2048)
+      throw new ArcaneError('EVIDENCE','Image preview requires a PNG no larger than2048 pixels per side.');
+    return data;
   }
   private buildRun(input: unknown): WorkRun {
     const a = object(input); const title = textField(a.title, 'run title', 200); const objective = textField(a.objective, 'objective', 8000);

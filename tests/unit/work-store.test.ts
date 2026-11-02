@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync,linkSync,unlinkSync } from 'node:fs';
+import {png} from '../../packages/asset-pipeline/testing/fixture.js';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { WorkStore } from '../../packages/storage/src/work-store.js';
@@ -11,6 +12,28 @@ function fixture(t: test.TestContext) {
   const tasks = [{ key: 'asset', title: 'Make prop', instructions: 'Create actual Blender prop.', scope: ['art/prop'], dependencies: [], acceptance: 'Validated GLB, preview and mesh metrics.' }, { key: 'game', title: 'Use prop', instructions: 'Use verified asset.', scope: ['src'], dependencies: ['asset'], acceptance: 'Actual fixture behavior.' }];
   return { dir, project, store, tasks, advance: (ms: number) => { now += ms; } };
 }
+test('submitted image reads preserve exact evidence identity and never approve work',t=>{
+  const f=fixture(t),run=f.store.create({title:'Review',objective:'Inspect submitted design',tasks:[f.tasks[0]]}),id=run.tasks[0]!.id;
+  const path=join(f.project,'design.png'),bytes=png();writeFileSync(path,bytes);
+  const lease=f.store.claim({taskId:id,worker:'image-fixture'});
+  const task=f.store.submit({taskId:id,leaseToken:lease.leaseToken,evidence:[{path:'design.png',note:'Original GUI preview'}]}),sha=task.evidence[0]!.sha256;
+  assert.deepEqual(f.store.evidenceImage(id,0,sha),bytes);assert.equal(f.store.task(id).state,'needs_review');
+  assert.throws(()=>f.store.evidenceImage(id,-1,sha));assert.throws(()=>f.store.evidenceImage(id,1,sha));assert.throws(()=>f.store.evidenceImage(id,0,'0'.repeat(64)));
+  linkSync(path,join(f.project,'linked.png'));assert.throws(()=>f.store.evidenceImage(id,0,sha),/single-link/);unlinkSync(join(f.project,'linked.png'));
+  const changed=Buffer.from(bytes);changed[changed.length-1]=changed[changed.length-1]!^1;writeFileSync(path,changed);assert.throws(()=>f.store.evidenceImage(id,0,sha),/changed/);
+  writeFileSync(path,Buffer.alloc(4*1024*1024+1));assert.throws(()=>f.store.evidenceImage(id,0,sha),/4 MiB/);
+});
+
+test('image previews refuse non-PNG content and oversized dimensions in submitted files',t=>{
+  const f=fixture(t);let count=0;
+  for(const bytes of [Buffer.from('not an image'),(()=>{const p=png();p.writeUInt32BE(2049,16);return p;})()]){
+    const run=f.store.create({title:'Preview',objective:'Validate image bounds',tasks:[{...f.tasks[0],scope:['unique-'+count]}]}),id=run.tasks[0]!.id,path='bad-'+count+'.png';count++;
+    writeFileSync(join(f.project,path),bytes);const lease=f.store.claim({taskId:id,worker:'image-fixture'});
+    const task=f.store.submit({taskId:id,leaseToken:lease.leaseToken,evidence:[{path,note:'Invalid preview fixture'}]});
+    assert.throws(()=>f.store.evidenceImage(id,0,task.evidence[0]!.sha256),/PNG/);assert.equal(f.store.task(id).state,'needs_review');
+  }
+});
+
 test('dependency graph rejects cycles, missing keys and unsafe scopes', t => {
   const f = fixture(t); const create = (tasks: unknown) => f.store.create({ title: 'Workflow', objective: 'Produce playable feature', tasks });
   assert.throws(() => create([{ ...f.tasks[0], dependencies: ['game'] }, f.tasks[1]]), /cycle/);
