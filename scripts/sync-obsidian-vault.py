@@ -9,7 +9,9 @@ import hashlib
 import json
 import os
 import subprocess
+import struct
 import tempfile
+import zlib
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = '.arcane-sync.json'
@@ -22,6 +24,51 @@ def git(*args):
 
 def digest(data):
     return hashlib.sha256(data).hexdigest()
+
+
+def validate_content(relative, data):
+    """Permit bounded PNG review images; preserve the text-only skill boundary."""
+    if relative.startswith('Assets/Reviews/') and relative.endswith('.png'):
+        if not data.startswith(b'\x89PNG\r\n\x1a\n'):
+            raise ValueError('Invalid review PNG: ' + relative)
+        offset, header, image, ended, compressed = 8, False, False, False, []
+        while offset < len(data):
+            if ended or offset + 12 > len(data):
+                raise ValueError('Incomplete or trailing review PNG data: ' + relative)
+            size = struct.unpack_from('>I', data, offset)[0]
+            kind = data[offset + 4:offset + 8]
+            end = offset + 12 + size
+            if not all(65 <= c <= 90 or 97 <= c <= 122 for c in kind) or kind[2] & 32 or end > len(data) or zlib.crc32(data[offset + 4:end - 4]) != struct.unpack_from('>I', data, end - 4)[0]:
+                raise ValueError('Invalid review PNG chunk: ' + relative)
+            if not header:
+                if kind != b'IHDR' or size != 13:
+                    raise ValueError('Missing review PNG header: ' + relative)
+                width, height, depth, color, compression, filtering, interlace = struct.unpack('>IIBBBBB', data[offset + 8:end - 4])
+                if not (1 <= width <= 2048 and 1 <= height <= 2048 and depth == 8 and color in (2, 6) and compression == filtering == interlace == 0):
+                    raise ValueError('Unsupported review PNG dimensions or encoding: ' + relative)
+                header = True
+            elif kind == b'IHDR':
+                raise ValueError('Duplicate review PNG header: ' + relative)
+            elif kind == b'IDAT':
+                image = True
+                compressed.append(data[offset + 8:end - 4])
+            elif kind == b'IEND':
+                if size or not image:
+                    raise ValueError('Incomplete review PNG image: ' + relative)
+                ended = True
+            elif not kind or kind[0] & 32 == 0 and kind != b'PLTE':
+                raise ValueError('Unsupported critical review PNG chunk: ' + relative)
+            offset = end
+        if not ended:
+            raise ValueError('Missing review PNG end: ' + relative)
+        row_bytes = width * (4 if color == 6 else 3) + 1
+        expected = row_bytes * height
+        decoder = zlib.decompressobj()
+        pixels = decoder.decompress(b''.join(compressed), expected + 1)
+        if len(pixels) != expected or not decoder.eof or decoder.unused_data or decoder.unconsumed_tail or any(pixels[i] > 4 for i in range(0, expected, row_bytes)):
+            raise ValueError('Invalid or oversized review PNG pixels: ' + relative)
+    elif b'\0' in data:
+        raise ValueError('Binary content is outside the knowledge projection: ' + relative)
 
 
 def safe_target(vault, relative):
@@ -107,8 +154,7 @@ def main():
         if len(data) != size or batch[offset:offset + 1] != b'\n':
             raise ValueError('Incomplete committed object response.')
         offset += 1
-        if b'\0' in data:
-            raise ValueError('Binary content is outside the knowledge projection: ' + relative)
+        validate_content(relative, data)
         projected[relative] = data
     if offset != len(batch):
         raise ValueError('Unexpected trailing committed object data.')

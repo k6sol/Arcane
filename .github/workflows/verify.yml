@@ -79,6 +79,9 @@ jobs:
       - name: Test offline skill contracts
         if: matrix.suite == 'release'
         run: node --test tests/skills/*.test.mjs
+      - name: Verify Obsidian review images and conflict preservation
+        if: matrix.suite == 'release'
+        run: python tests/unit/obsidian_projection_test.py
       - name: Verify desktop setup and model previews in Edge
         if: runner.os == 'Windows' && matrix.suite == 'release'
         shell: pwsh

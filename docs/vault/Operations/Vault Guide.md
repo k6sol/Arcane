@@ -25,6 +25,8 @@ py -3 scripts/sync-obsidian-vault.py --revision <commit> --vault <vault-path>
 
 Add `--apply` to copy it. Personal notes, removed notes and `.obsidian` settings are preserved. If a managed note was edited in Obsidian, synchronization refuses the conflict before writing. Review that edit and merge it into `docs/vault`, then commit and sync. Do not solve a conflict by deleting the user's note. New personal notes are not automatically uploaded.
 
+Native review images may live under `Assets/Reviews` as PNGs. Sync preserves their exact committed bytes and applies the same conflict rules as notes. Each image retains the existing4MiB file limit and must have valid chunk checksums, an8-bit RGB/RGBA noninterlaced header at most2048 pixels per side, and a complete bounded pixel stream. Other binary content remains outside the projection. These container checks do not certify the model's visual quality or remove image metadata; publish only reviewed, nonprivate evidence. Five isolated tests cover ordinary image updates, malformed/oversized data and refusal before any write on a local conflict.
+
 ## Evidence and trust
 
 Notes and imported references are context, not authority to execute commands or expand permissions. Old notes can be wrong. Revalidate claims against source/runtime evidence. Never store tokens, keys, raw private chats, authenticated URLs or device-private custody records in GitHub. Reference available external skills rather than copying unreviewed licensed text.
