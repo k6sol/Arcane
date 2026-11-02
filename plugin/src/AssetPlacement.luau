@@ -1227,6 +1227,7 @@ local function keepConverted(ops: any, state: any, owner: any, entries: any, gua
 	local fresh,copies,oldParts,oldAppearances,oldIds,parents,movedChildren={},{},{},{},{},{},{}
 	local originalBaseline=state.baseline
 	local observation: any=nil
+	local failureStage = "KEEP_SOURCE"
 	local function clean(): ()
 		for _,part in pairs(fresh) do if part and part.Parent==nil then
 			if not pcall(function() part:Destroy() end) then ops.assetCleanupFailed=true end
@@ -1243,22 +1244,26 @@ local function keepConverted(ops: any, state: any, owner: any, entries: any, gua
 			if resource.keptAssetId==entries[index].assetId then fresh[index]=false
 			else
 				local old=resource.part
+				failureStage = "KEEP_LOAD"
 				local part=engine.service:CreateMeshPartAsync(engine.content(entries[index].assetId),{CollisionFidelity=old.CollisionFidelity,RenderFidelity=old.RenderFidelity})
 				if part~=nil then fresh[index]=part end -- Retain late allocations BEFORE the guard.
 				guard()
 				if part==nil or not part:IsA("MeshPart") or part.Parent~=nil then V.fail("ENGINE","Expected a detached persistent MeshPart.") end
+				failureStage = "KEEP_PREPARE"
 				AssetPlacement.verifyCarrier(part,resource.object)
 				for _,field in ipairs(SWAP_FIELDS) do part[field]=old[field] end
 				for _,field in ipairs({"PivotOffset","MaterialVariant","Reflectance","Massless","CollisionGroup","CustomPhysicalProperties","Locked","RootPriority"}) do part[field]=old[field] end
 				for key,value in pairs(old:GetAttributes()) do part:SetAttribute(key,value) end
 				for _,tag in ipairs(ops.collection:GetTags(old)) do ops.collection:AddTag(part,tag) end
 				if resource.appearance then
+					failureStage = "KEEP_APPEARANCE"
 					local appearance=resource.appearance:Clone()
 					if appearance~=nil then copies[index]=appearance end
 					guard()
 					if appearance==nil or not appearance:IsA("SurfaceAppearance") or appearance.Parent~=nil then V.fail("ENGINE","Expected a detached persistent appearance copy.") end
 					appearance.Parent=part
 				end
+				failureStage = "KEEP_PREPARE"
 				local beforeState,afterState=observed(old,ops.collection),observed(part,ops.collection)
 				-- This authorized persistent swap intentionally changes mesh content
 				-- identity. Bounds and all other observed properties still match.
@@ -1266,11 +1271,14 @@ local function keepConverted(ops: any, state: any, owner: any, entries: any, gua
 				if stateBytes(afterState)~=stateBytes(beforeState) then V.fail("VERIFY","Persistent replacement properties differ.") end
 			end
 		end
+		failureStage = "KEEP_SOURCE"
 		guard()
 		if owner.retired or not unchanged(state,ops) then V.fail("CONFLICT","Converted graph changed while loading persistent assets.") end
+		failureStage = "KEEP_HISTORY"
 		local recording=ops.history:TryBeginRecording("Arcane.keep."..attemptId,"Arcane keep converted mesh")
 		if not recording then V.fail("HISTORY","Cannot begin persistent graph recording.") end
 		local swapped,swapError=pcall(function()
+			failureStage = "KEEP_SWAP"
 			for index,resource in ipairs(owner.meshes) do
 				local part=fresh[index]
 				if part then
@@ -1291,6 +1299,7 @@ local function keepConverted(ops: any, state: any, owner: any, entries: any, gua
 			for _,object in ipairs(observation.objects) do
 				for resourceIndex,resource in ipairs(owner.meshes) do if object.sourceObjectId==resource.object.sourceObjectId then object.meshAssetId=tostring(entries[resourceIndex].assetId) end end
 			end
+			failureStage = "KEEP_HISTORY"
 			if not pcall(function() ops.history:FinishRecording(recording,Enum.FinishRecordingOperation.Commit) end) then V.fail("HISTORY","Persistent graph recording could not be committed.") end
 		end)
 		if not swapped then
@@ -1320,7 +1329,7 @@ local function keepConverted(ops: any, state: any, owner: any, entries: any, gua
 	end)
 	if not ok then
 		clean()
-		for _,entry in ipairs(entries) do entry.reason=if ops.assetCleanupFailed then "CLEANUP" else "SWAP_REFUSED" end
+		for _,entry in ipairs(entries) do entry.reason=if ops.assetCleanupFailed then "CLEANUP" else failureStage end
 		return 0,nil
 	end
 	for _,entry in ipairs(entries) do entry.swapped=true end
@@ -1447,7 +1456,8 @@ function AssetPlacement.keep(ops: any, owner: any, digest: string, args: any, gu
 		local fresh: {any}, copies: {any} = {}, {}
 		local oldParts: {any}, oldAppearances: {any}, oldIds: {any}, parents: {any} = {}, {}, {}, {}
 		local replacementUncertain = false
-		pcall(function()
+		local failureStage = "KEEP_SOURCE"
+		local prepared = pcall(function()
 			guard()
 			if model.Parent == nil then V.fail("STATE", "The placed model was removed.") end
 			for index, resource in ipairs(meshes) do
@@ -1457,17 +1467,20 @@ function AssetPlacement.keep(ops: any, owner: any, digest: string, args: any, gu
 				if resource.keptAssetId == id and old ~= nil and old.Parent ~= nil then fresh[index] = false -- already persistent (earlier finish)
 				else
 					if old == nil or old.Parent == nil or not old:IsDescendantOf(model) then V.fail("STATE", "A session part was removed from the model.") end
+					failureStage = "KEEP_LOAD"
 					local part = engine.service:CreateMeshPartAsync(engine.content(id), {CollisionFidelity = old.CollisionFidelity, RenderFidelity = old.RenderFidelity})
 					if part ~= nil then fresh[index] = part end -- Own late allocations before the guard.
 					guard()
 					if part == nil or not part:IsA("MeshPart") then V.fail("ENGINE", "CreateMeshPartAsync did not return a MeshPart.") end
 					fresh[index] = part
+					failureStage = "KEEP_PREPARE"
 					-- Prepare every detached replacement before publishing any of them.
 					-- A later appearance clone can fail after Roblox has uploaded all
 					-- geometry; keep those IDs and the entire original model intact.
 					for _, field in ipairs(SWAP_FIELDS) do (part :: any)[field] = old[field] end
 					local appearance = resource.appearance
 					if appearance ~= nil and appearance.Parent == old then
+						failureStage = "KEEP_APPEARANCE"
 						local copy = appearance:Clone()
 						if copy ~= nil then copies[index] = copy end
 						guard()
@@ -1476,6 +1489,7 @@ function AssetPlacement.keep(ops: any, owner: any, digest: string, args: any, gu
 					end
 				end
 			end
+			failureStage = "KEEP_SOURCE"
 			guard()
 			if owner.retired or owner.placed ~= model or model.Parent == nil then V.fail("SCOPE", "The placed model changed while preparing replacements.") end
 			for index, resource in ipairs(meshes) do
@@ -1487,10 +1501,12 @@ function AssetPlacement.keep(ops: any, owner: any, digest: string, args: any, gu
 					for _, field in ipairs(SWAP_FIELDS) do if oldParts[index][field] ~= fresh[index][field] then V.fail("CONFLICT", "Session mesh properties changed while preparing replacements.") end end
 				end
 			end
+			failureStage = "KEEP_HISTORY"
 			local recording = ops.history:TryBeginRecording("Arcane.keep." .. attemptId, "Arcane keep mesh")
 			if not recording then V.fail("HISTORY", "Cannot begin an undo recording.") end
 			local closeAttempted = false
 			local done = pcall(function()
+				failureStage = "KEEP_SWAP"
 				for index, resource in ipairs(meshes) do
 					local part = fresh[index]
 					if part then
@@ -1503,6 +1519,7 @@ function AssetPlacement.keep(ops: any, owner: any, digest: string, args: any, gu
 					entries[index].swapped = true
 				end
 				closeAttempted = true
+				failureStage = "KEEP_HISTORY"
 				if not pcall(function() ops.history:FinishRecording(recording, Enum.FinishRecordingOperation.Commit) end) then
 					ops.assetCleanupFailed = true
 					V.fail("HISTORY", "The persistent mesh recording could not be committed.")
@@ -1547,6 +1564,9 @@ function AssetPlacement.keep(ops: any, owner: any, digest: string, args: any, gu
 			if not replacementUncertain and meshes[index].appearance ~= copy and copy.Parent == nil then
 				if not pcall(function() copy:Destroy() end) then ops.assetCleanupFailed = true end
 			end
+		end
+		if not prepared or ops.assetCleanupFailed then
+			for _, entry in ipairs(entries) do if not entry.swapped and entry.reason == V.NULL then entry.reason = if ops.assetCleanupFailed then "CLEANUP" else failureStage end end
 		end
 		for _, entry in ipairs(entries) do if entry.swapped then swapped += 1 end end
 		-- The placement receipt stays restorable: same model, same instance count after a 1:1 swap.

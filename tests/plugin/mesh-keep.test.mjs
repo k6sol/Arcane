@@ -55,6 +55,7 @@ local function setup(meshCount: number): any
     local base = getmetatable(part)
     local wrapped = table.clone(base)
     wrapped.__newindex = function(self: any, key: string, value: any): ()
+      if s.failField == key then error("private engine property detail") end
       if key == "Parent" and value == model then
         s.publishCalls += 1
         if s.failPublishAt == s.publishCalls then error("injected publication failure") end
@@ -166,6 +167,7 @@ check(s.owner.meshes[1].part.Parent == s.model and s.parts == 0, "session parts 
 s = setup(2); s.partFails = true
 receipt = AssetPlacement.keep(s.ops, s.owner, digest, args(), guard, s.engine)
 check(receipt.state == "uploaded" and receipt.swapped == 0 and receipt.meshes[2].assetId == 9002 and s.commits == 0, "uploaded, swap pending")
+check(receipt.meshes[1].reason == "KEEP_LOAD" and receipt.meshes[2].reason == "KEEP_LOAD", "load failure records only its bounded stage")
 s.partFails = false
 local finished = AssetPlacement.keep(s.ops, s.owner, digest, args({finish = true, assetIds = V.array({9001, 9002})}), guard, s.engine)
 check(finished.state == "kept" and #s.uploads == 2 and finished.uploadsStarted == 0 and s.parts == 2, "finish swaps without uploading")
@@ -229,6 +231,7 @@ local beforeAppearances = {s.owner.meshes[1].appearance, s.owner.meshes[2].appea
 s.failCloneAt = s.cloneCalls + 2
 receipt = AssetPlacement.keep(s.ops, s.owner, digest, args(), guard, s.engine)
 check(receipt.state == "uploaded" and receipt.swapped == 0 and s.commits == 0, "later clone failure starts no placement transaction")
+check(receipt.meshes[1].reason == "KEEP_APPEARANCE" and receipt.meshes[2].reason == "KEEP_APPEARANCE", "appearance failure records its stage without raw engine text")
 for index, resource in ipairs(s.owner.meshes) do
   check(resource.part == beforeParts[index] and resource.appearance == beforeAppearances[index] and resource.keptAssetId == nil, "later clone failure preserves every owner")
   check(resource.part.Parent == s.model and resource.appearance.Parent == resource.part, "later clone failure preserves original hierarchy")
@@ -261,6 +264,7 @@ placedOwner = s.ops.registry.owned[s.model]
 s.failPublishAt = 2
 receipt = AssetPlacement.keep(s.ops, s.owner, digest, args(), guard, s.engine)
 check(receipt.state == "uploaded" and receipt.swapped == 0, "publication failure rolls back earlier replacements")
+check(receipt.meshes[1].reason == "KEEP_SWAP" and receipt.meshes[2].reason == "KEEP_SWAP", "publication failure records replacement stage")
 check(s.ops.registry.owned[s.model] == placedOwner and placedOwner.placed.count == 4, "publication rollback preserves placement ownership")
 for index, resource in ipairs(s.owner.meshes) do
   check(resource.part == beforeParts[index] and resource.appearance == beforeAppearances[index] and resource.keptAssetId == nil, "publication rollback restores every resource")
@@ -278,6 +282,7 @@ local closeCalls = 0
 s.ops.history.FinishRecording = function(): () closeCalls += 1; error("injected commit failure") end
 receipt = AssetPlacement.keep(s.ops, s.owner, digest, args(), guard, s.engine)
 check(closeCalls == 1 and s.ops.assetCleanupFailed and receipt.state == "uploaded" and receipt.swapped == 0, "uncertain recording close is fenced without retry or false keep")
+check(receipt.meshes[1].reason == "CLEANUP", "unsafe recording closure records cleanup uncertainty")
 for index, resource in ipairs(s.owner.meshes) do
   check(resource.part == beforeParts[index] and resource.part.Parent == s.model and receipt.meshes[index].assetId == 9000 + index, "failed recording retains original parts and uploaded IDs")
 end
@@ -298,7 +303,12 @@ beforeParts = {s.owner.meshes[1].part, s.owner.meshes[2].part}
 s.afterCreate = function(): () if s.parts == 2 then beforeParts[1].Name = "User edited name" end end
 receipt = AssetPlacement.keep(s.ops, s.owner, digest, args(), guard, s.engine)
 check(receipt.state == "uploaded" and receipt.swapped == 0 and s.commits == 0 and beforeParts[1].Name == "User edited name", "source edits during preparation refuse publication without overwriting the edit")
+check(receipt.meshes[1].reason == "KEEP_SOURCE", "source conflict records its preflight stage")
 for index, resource in ipairs(s.owner.meshes) do check(resource.part == beforeParts[index] and resource.part.Parent == s.model and s.freshParts[index]._destroyed, "source conflict retains placed parts and retires replacements") end
+
+s = setup(1); s.failField = "Name"
+receipt = AssetPlacement.keep(s.ops, s.owner, digest, args(), guard, s.engine)
+check(receipt.state == "uploaded" and receipt.swapped == 0 and receipt.meshes[1].reason == "KEEP_PREPARE", "property preparation failure is not misreported as a load failure and excludes raw engine text")
 print("Arcane mesh keep checks passed: " .. count)
 `;
 

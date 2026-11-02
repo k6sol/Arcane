@@ -190,6 +190,40 @@ test('keep: uploaded-but-not-swapped offers Finish keeping (no upload); finish r
   assert.match(candidate.receipt!.message, /^Kept\./);
 });
 
+test('keep: recorded replacement stages survive storage and explain uploaded results without guessing moderation', async t => {
+  const cases = [
+    ['KEEP_LOAD', /could not load an uploaded mesh/],
+    ['KEEP_APPEARANCE', /could not prepare the replacement materials/],
+    ['KEEP_PREPARE', /could not prepare or verify replacement mesh properties/],
+    ['KEEP_SOURCE', /source model or its connection changed/],
+    ['KEEP_HISTORY', /could not complete the undo recording/],
+    ['KEEP_SWAP', /could not complete mesh replacement/],
+    ['CLEANUP', /could not confirm replacement cleanup/],
+    ['SWAP_REFUSED', /could not complete mesh replacement/],
+    ['UNRECOGNIZED', /does not identify the failing stage/],
+  ] as const;
+  for (const [reason, explanation] of cases) {
+    const f = fixture(t); f.keep.enableConsentChannel();
+    const prepared = await f.keep.prepare({ digest, sessionId: f.sessionId });
+    f.keep.acceptConsent({ type: MESH_KEEP_CONSENT_MESSAGE, protocolVersion: 1, prepareId: prepared.prepareId, consent });
+    await f.keep.start({ prepareId: prepared.prepareId, consent });
+    f.answer({ state: 'uploaded', meshes: [mesh(1, 111, 'succeeded', false, reason)], uploadsStarted: 1, swapped: 0, persistence: 'studio-session-only', creatorId: 78, ref: null });
+    const candidate = (await f.keep.state()).candidates[0]!;
+    assert.equal(candidate.receipt!.assets[0]!.reason, reason);
+    assert.equal(candidate.receipt!.state, 'uploaded');
+    assert.match(candidate.receipt!.message, explanation);
+    assert.match(candidate.receipt!.message, /111/);
+    assert.doesNotMatch(candidate.receipt!.message, /moderat|processing|UNRECOGNIZED/);
+    const saved = JSON.parse(readFileSync(join(f.directory, 'mesh-keep', 'receipts.json'), 'utf8'));
+    assert.equal(saved.receipts[0].assets[0].reason, reason);
+    assert.equal(saved.receipts[0].message, candidate.receipt!.message);
+    assert.equal(f.store.commands(f.sessionId).filter(c => c.method === 'asset.keep_mesh').length, 1, 'reading failure details never uploads again');
+  }
+  const legacy = meshKeepMessage('uploaded', { assets: [mesh(1, 111, 'succeeded', false)], meshCount: 1 });
+  assert.match(legacy, /does not identify the failing stage/);
+  assert.doesNotMatch(legacy, /moderat|processing/);
+});
+
 test('keep: unknown outcomes block a new keep until the person checked; engine rejections name quota and moderation', async t => {
   const f = fixture(t); f.keep.enableConsentChannel();
   const prepared = await f.keep.prepare({ digest, sessionId: f.sessionId });

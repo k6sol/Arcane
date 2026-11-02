@@ -13,6 +13,8 @@ The verified installed and loaded desktop remains **e8139e1**. Its authorized re
 
 ## Implemented and verified
 
+- [[Bugs/Mesh Keep Failure Details]] retains bounded replacement stages through plugin receipts and durable host storage, then explains them on the card. Legacy unknown stages no longer imply moderation. Strict660 compile,23 standalone Luau/compiler and33 frozen compiled service/UI cases pass; hosted checks and customer delivery remain separate.
+
 - [[Bugs/Mesh Keep Preparation]] prepares all procedural replacement appearances before publishing any mesh. Second-clone failure and late allocation revocation preserve original ownership and returned upload IDs; all23 focused standalone Luau/compiler cases pass. PBR image persistence and native Studio acceptance remain open.
 
 - The same keep path now restores exact original ownership after a controlled mid-publication failure. Source edits refuse publication; unexpected authored children are retained under the cleanup-failure fence. Failed recording closure is not retried or labelled kept. The expanded23-case standalone selection passes; hosted delivery and native acceptance remain distinct.

@@ -88,7 +88,18 @@ export function meshKeepMessage(state: MeshKeepReceiptState, receipt: Pick<MeshK
     case 'uploading': return 'Uploading to your Roblox account…';
     case 'finishing': return 'Swapping in the uploaded meshes…';
     case 'kept': return `Kept. Saved to your Roblox account (asset ${ids}). The model now uses these meshes and stays after reconnecting, Play and reopening once you save the place.`;
-    case 'uploaded': return `Uploaded to your account (asset ${ids}), but Studio could not load the new mesh yet. Roblox may still be processing or moderating it. Try Finish keeping in a few minutes; nothing is uploaded again.`;
+    case 'uploaded': {
+      const recorded = new Set(receipt.assets.map(a => a.reason));
+      const detail = recorded.has('CLEANUP') ? 'Arcane could not confirm replacement cleanup. Review the current Studio model before continuing.'
+        : recorded.has('KEEP_SOURCE') ? 'The source model or its connection changed before replacement. Review the current Studio model before using Finish keeping.'
+        : recorded.has('KEEP_HISTORY') ? 'Studio could not complete the undo recording for replacement. Review the current Studio model before using Finish keeping.'
+        : recorded.has('KEEP_APPEARANCE') ? 'Arcane could not prepare the replacement materials. Review the current Studio model before using Finish keeping.'
+        : recorded.has('KEEP_PREPARE') ? 'Arcane could not prepare or verify replacement mesh properties. Review the current Studio model before using Finish keeping.'
+        : recorded.has('KEEP_SWAP') || recorded.has('SWAP_REFUSED') ? 'Arcane could not complete mesh replacement. Review the current Studio model before using Finish keeping.'
+        : recorded.has('KEEP_LOAD') ? 'Studio could not load an uploaded mesh for replacement. Use Finish keeping when the mesh is available.'
+        : 'Mesh replacement did not complete; the original receipt does not identify the failing stage. Review the current Studio model before using Finish keeping.';
+      return `Uploaded to your account (asset ${ids}). ${detail} Nothing is uploaded again by Finish keeping.`;
+    }
     case 'partial': return `Only some meshes uploaded (asset ${ids}). The model still uses session meshes. Check Creator Hub before trying again; Arcane never re-uploads automatically.`;
     case 'unknown': return 'The upload outcome is unknown (Studio disconnected or did not answer). Check your Roblox inventory (Creator Hub, Development Items, Meshes) before keeping it again.' + (ids ? ` Known asset: ${ids}.` : '');
     case 'failed':
