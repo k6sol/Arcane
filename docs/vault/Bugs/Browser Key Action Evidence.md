@@ -5,7 +5,7 @@ tags: [arcane, chat, ci, diagnostics]
 ---
 # Browser key-action evidence
 
-The Windows Edge job125044718435 in [original run41372156431](https://github.com/k6sol/Arcane/actions/runs/41372156431) failed the Claude activity/change-card/queue scenario while pressing Enter for the second queued message. The locator resolved the real composer; its input action then exceeded the existing8-second timeout. The job has102 passes and one failure with zero skips. This proves the original input action did not complete by its deadline, not whether the key handler ran or whether the queued effect was recorded. No failure-time DOM observation was collected for that action.
+The Windows Edge job125044718435 in [original run41372156431](https://github.com/k6sol/Arcane/actions/runs/41372156431) failed the Claude activity/change-card/queue scenario while pressing Enter for the first queued message after the tool-activity events. The locator resolved the real composer; its input action then exceeded the existing8-second timeout. The job has102 passes and one failure with zero skips. This proves the original input action did not complete by its deadline, not whether the key handler ran or whether the queued effect was recorded. No failure-time DOM observation was collected for that action. The exact prior compiled-file hash matches a retained local copy, whose reported line2592 identifies this first queue action.
 
 The complete unchanged file passes103 local cases, zero skips, against all2,725 prior strict-compiled/source/UI input hashes. This does not establish the CI failure's cause or erase it. The failing run was not rerun to obtain a passing label; its original log is retained privately.
 
