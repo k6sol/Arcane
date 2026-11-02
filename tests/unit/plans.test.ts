@@ -63,7 +63,7 @@ test('actions ledger: one entry per id, per-month/day/conversation totals, hash 
   assert.equal(ledger.record({ kind: 'studio-change', source: 'studio', id: 'cmd-1', at: new Date('2026-09-30T09:00:00Z') }), true);
   assert.equal(ledger.record({ kind: 'build-turn', source: 'codex', id: 'bad id with spaces' }), false);
   const summary = ledger.summary(now);
-  assert.deepEqual(summary.month, { key: '2026-10', used: 2 }); assert.deepEqual(summary.today, { key: '2026-10-17', used: 1 });
+  assert.deepEqual(summary.month, { key: '2026-10', used: 2,limit:500,resetsAt:'2026-11-01T00:00:00.000Z' }); assert.deepEqual(summary.today, { key: '2026-10-17', used: 1 });
   assert.deepEqual(summary.byKind, { 'build-turn': 2, 'studio-change': 0 }); assert.equal(summary.enforced, false);
   assert.deepEqual(summary.conversations, [{ conversation: 'chat-b', used: 1 }, { conversation: 'thread-a', used: 1 }]);
   assert.equal(summary.days.length, 14); assert.equal(summary.integrity, 'verified');
@@ -314,19 +314,21 @@ test('real Edge: Plans & credits page and balance chip render, and buying says c
   await page.locator('#plans-list .plans-buy-primary').click();
   await page.waitForFunction(() => !(document.getElementById('plans-notice') as HTMLElement).hidden);
   assert.match(await page.locator('#plans-notice').textContent() ?? '', /Checkout isn.t connected yet.*Nothing was charged/);
-  await page.evaluate(()=>{
-    const w=window as any;w.redemptions=[];w.planOptions.desktop={runtime:'desktop',billing:{redeemCode:async(code:string,requestId:string)=>{
-      w.redemptions.push({code,requestId});return w.redemptions.length===1?{version:1,state:'unknown'}:{version:1,state:'redeemed',granted:1000,balance:(w.redemptions.length-1)*1000,replayed:w.redemptions.length===2};
-    }}};
+  const redemptions:{code:string;requestId:string}[]=[],initialRemaining=500-ledger.summary().month.used;
+  await page.route('**/v1/actions/redeem',async (route:import('playwright-core').Route)=>{
+    redemptions.push(route.request().postDataJSON() as {code:string;requestId:string});
+    const actual=await route.fetch();
+    if(redemptions.length===1)await route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({state:'unknown'})});
+    else await route.fulfill({response:actual});
   });
   await page.locator('#plans-code-input').fill('test');
   await page.locator('#plans-code-input').press('Enter');
   await page.waitForFunction(()=>document.getElementById('plans-code-status')?.textContent?.includes('could not be confirmed'));
   await page.locator('#plans-code-submit').click();
-  await page.waitForFunction(()=>document.getElementById('plans-code-status')?.textContent?.includes('Balance: 1,000'));
+  await page.waitForFunction(()=>document.getElementById('plans-code-status')?.textContent?.includes('API credits are unchanged.'));
+  assert.match(await page.locator('#plans-code-status').textContent()??'',new RegExp((initialRemaining+1000).toLocaleString('en-US')+' actions remaining'));
   await page.locator('#plans-code-input').fill('test');await page.locator('#plans-code-input').press('Enter');
-  await page.waitForFunction(()=>document.getElementById('plans-code-status')?.textContent?.includes('Balance: 2,000'));
-  const redemptions=await page.evaluate(()=>(window as any).redemptions as {code:string;requestId:string}[]);
+  await page.waitForFunction((expected:string)=>document.getElementById('plans-code-status')?.textContent?.includes(expected),(initialRemaining+2000).toLocaleString('en-US')+' actions remaining');
   assert.equal(redemptions.length,3);assert.equal(redemptions[0]!.requestId,redemptions[1]!.requestId,'unknown reply retains exact grant request');
   assert.notEqual(redemptions[1]!.requestId,redemptions[2]!.requestId,'deliberate reusable redemption receives a new request');
   assert.equal(await page.locator('#plans-code-input').inputValue(),'');
@@ -353,4 +355,33 @@ test('markup and styles: Settings section, top-bar chip, studio boot hook and a 
   const block = css.slice(start, end).replace(/\/\*[\s\S]*?\*\//g, '');
   assert.doesNotMatch(block, /transition|animation/); assert.match(block, /forced-colors:active/); assert.match(block, /var\(--text\)/); assert.match(block, /var\(--accent\)/);
   for (const size of block.matchAll(/font(?:-size)?:[^;}]*?(\d+(?:\.\d+)?)px/g)) assert.ok(Number(size[1]) >= 12, 'Readable text: ' + size[0]);
+});
+
+test('reusable action code restores subscription admission durably, carries unused grants through reset and survives compaction',async t=>{
+ const directory=await temp(),now=new Date('2026-11-02T00:00:00Z'),ledger=new ActionsLedger(directory,{maxEntries:10});t.after(()=>rm(directory,{recursive:true,force:true}));
+ for(let i=0;i<500;i++)assert.equal(ledger.admit('codex','spent-'+i,now).admitted,true);
+ assert.equal(ledger.admit('claude','exhausted',now).admitted,false);
+ assert.deepEqual(ledger.redeemCode('test','grant-1',now),{granted:1000,balance:1000,replayed:false});
+ assert.deepEqual(ledger.redeemCode('test','grant-1',now),{granted:1000,balance:1000,replayed:true});
+ assert.equal(ledger.admit('claude','restored',now).admitted,true);
+ const reopened=new ActionsLedger(directory,{maxEntries:10});assert.deepEqual(reopened.redeemCode('test','grant-1',now),{granted:1000,balance:999,replayed:true});
+ assert.deepEqual(reopened.redeemCode('test','grant-2',now),{granted:1000,balance:1999,replayed:false});
+ const next=new Date('2026-12-01T00:00:00Z');assert.equal(reopened.summary(next).month.limit,2499);assert.equal(reopened.summary(next).month.used,0);
+ assert.equal(reopened.summary(now).month.used,501);assert.equal(reopened.summary(now).month.limit,2500);
+ for(let i=0;i<12;i++)reopened.admit('codex','later-'+i,next);
+ assert.equal(new ActionsLedger(directory).redeemCode('test','grant-1',next).replayed,true);
+ assert.throws(()=>reopened.redeemCode('wrong','grant-3',now));
+});
+
+test('local action redemption requires the human token and same origin, accepts only the fixed code, and never records usage',async t=>{
+ const f=await routeServer(t,{admissionEnforced:true});
+ const input={code:'test',requestId:'redeem-1'};
+ assert.equal((await f.call('/v1/actions/redeem',{method:'POST',bearer:'model-token',body:input})).status,401);
+ assert.equal((await f.call('/v1/actions/redeem',{method:'POST',origin:'https://foreign.example',body:input})).status,403);
+ assert.equal((await f.call('/v1/actions/redeem',{method:'POST',origin:null,body:input})).status,403);
+ assert.equal((await f.call('/v1/actions/redeem',{method:'POST',body:{...input,amount:999999}})).status,400);
+ const first=await(await f.call('/v1/actions/redeem',{method:'POST',body:input})).json() as any;
+ assert.equal(first.unit,'action');assert.equal(first.granted,1000);assert.equal(first.balance,1500);assert.equal(first.replayed,false);
+ assert.equal((await(await f.call('/v1/actions/redeem',{method:'POST',body:input})).json() as any).replayed,true);
+ assert.equal(f.ledger.summary().month.used,0);assert.equal(f.ledger.summary().month.limit,1500);
 });

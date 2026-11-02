@@ -271,9 +271,9 @@ function createBilling(options) {
     try{
       const {gateway}=await resolve();if(!gateway)return result('not-connected');
       const token=await readToken(gateway);if(!token)return result('signed-out');
-      const response=await gatewayPost(gateway,'/v1/credits/redeem',{code},token,requestId),value=response.value;
-      if(response.status===200&&value&&value.granted===1000&&Number.isSafeInteger(value.balance)&&value.balance>=0&&typeof value.replayed==='boolean')
-        return Object.freeze({version:1,state:'redeemed',granted:1000,balance:value.balance,replayed:value.replayed});
+      const response=await gatewayPost(gateway,'/v1/actions/redeem',{code},token,requestId),value=response.value;
+      if(response.status===200&&value&&value.unit==='action'&&value.granted===1000&&Number.isSafeInteger(value.balance)&&value.balance>=0&&typeof value.replayed==='boolean')
+        return Object.freeze({version:1,state:'redeemed',unit:'action',granted:1000,balance:value.balance,replayed:value.replayed});
       if(response.status===401)return result('signed-out');
       if(response.status===400&&value?.error==='invalid_code')return result('invalid-code');
       if(response.status===409&&value?.error==='balance_limit')return result('balance-limit');

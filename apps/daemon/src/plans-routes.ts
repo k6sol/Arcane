@@ -109,7 +109,7 @@ export function plansRoutes(options: PlansRouteOptions) {
 
   async function handle(request: IncomingMessage, response: ServerResponse, url: URL, token: string, origin: string): Promise<boolean> {
     const path = url.pathname;
-    if (path !== '/v1/plans/state' && path !== '/v1/plans/checkout' && path !== '/v1/actions/record' && path !== '/v1/actions/admit') {
+    if (path !== '/v1/plans/state' && path !== '/v1/plans/checkout' && path !== '/v1/actions/record' && path !== '/v1/actions/admit' && path !== '/v1/actions/redeem') {
       if (path.startsWith('/v1/codex/') || path.startsWith('/v1/studio/')) observe();
       return false;
     }
@@ -123,6 +123,11 @@ export function plansRoutes(options: PlansRouteOptions) {
     if (request.headers.origin !== origin) { send(response, 403, { error: 'ORIGIN', message: 'Writes require the local panel origin.' }); return true; }
     const input = await body(request);
     if (!input) { send(response, 400, { error: 'INPUT', message: 'Expected a small JSON object.' }); return true; }
+    if(path==='/v1/actions/redeem'){
+      if(Object.keys(input).length!==2||typeof input.code!=='string'||input.code.length>64||input.code.trim().toLowerCase()!=='test'||typeof input.requestId!=='string'||!ID.test(input.requestId)){send(response,400,{state:'invalid-code'});return true;}
+      try{send(response,200,{version:1,state:'redeemed',unit:'action',...options.ledger.redeemCode(input.code,input.requestId,now())});}
+      catch{send(response,503,{state:'unknown'});}return true;
+    }
     if(path==='/v1/actions/admit'){
       if(!options.admissionEnforced||Object.keys(input).length!==2||input.source!=='claude'||typeof input.turnId!=='string'||!ID.test(input.turnId)){
         send(response,400,{error:'INPUT',message:'Expected one original Claude subscription request.'});return true;

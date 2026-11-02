@@ -1270,7 +1270,7 @@ test('connect Arcane account: disabled by default; device sign-in on the allowli
       calls.push({ url, auth: init.headers.Authorization ?? null, redirect: init.redirect, requestId:init.headers['Idempotency-Key']??null });
       const path = new URL(url).pathname;
       const body = path === '/v1/auth/device' ? { deviceCode: 'D'.repeat(43), userCode: 'BCDF-GHJK', verificationUrl: 'https://gw.arcane.test/v1/auth/verify', verificationUrlComplete: verification, interval: 5, expiresIn: 600 }
-        : path === '/v1/auth/token' ? (++polls < 2 ? { error: 'authorization_pending' } : { token: TOKEN, tokenType: 'Bearer' }) : path === '/v1/credits/redeem' ? {granted:1000,balance:1000,replayed:false} : { signedOut: true };
+        : path === '/v1/auth/token' ? (++polls < 2 ? { error: 'authorization_pending' } : { token: TOKEN, tokenType: 'Bearer' }) : path === '/v1/actions/redeem' ? {unit:'action',granted:1000,balance:1000,replayed:false} : { signedOut: true };
       return new Response(JSON.stringify(body), { status: path === '/v1/auth/token' && !body.token ? 400 : 200 });
     };
     const make = (overrides = {}) => requireHost('billing.cjs').createBilling({ loadPlans: async () => plans, configDirectory: () => root, getWindow: () => window,
@@ -1311,8 +1311,8 @@ test('connect Arcane account: disabled by default; device sign-in on the allowli
     assert.deepEqual({ ...await billing.accountCredential() }, { base: 'https://gw.arcane.test', token: TOKEN });
     assert.equal((await billing.connectAccount()).state, 'signed-in');
     const redemptionId='00000000-0000-4000-8000-000000000001';
-    assert.deepEqual({...await billing.redeemCode('test',redemptionId)},{version:1,state:'redeemed',granted:1000,balance:1000,replayed:false});
-    assert.equal(calls.at(-1).url,'https://gw.arcane.test/v1/credits/redeem');
+    assert.deepEqual({...await billing.redeemCode('test',redemptionId)},{version:1,state:'redeemed',unit:'action',granted:1000,balance:1000,replayed:false});
+    assert.equal(calls.at(-1).url,'https://gw.arcane.test/v1/actions/redeem');
     assert.equal(calls.at(-1).auth,'Bearer '+TOKEN);assert.equal(calls.at(-1).requestId,redemptionId);
     const beforeInvalid=calls.length;assert.equal((await billing.redeemCode('test','invalid')).state,'invalid-code');assert.equal(calls.length,beforeInvalid);
 

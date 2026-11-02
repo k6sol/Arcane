@@ -424,23 +424,22 @@ export function startPlans(doc: Document, options: PlansOptions) {
     const input=el<HTMLInputElement>('plans-code-input'),button=el<HTMLButtonElement>('plans-code-submit'),status=el('plans-code-status');
     if(!input||!button||!status)return;
     const code=input.value.trim();
-    if(!code||code.length>64){input.setAttribute('aria-invalid','true');status.textContent='Enter a credit code.';input.focus();return;}
+    if(!code||code.length>64){input.setAttribute('aria-invalid','true');status.textContent='Enter an action code.';input.focus();return;}
     input.removeAttribute('aria-invalid');
     if(!redemption||redemption.code!==code)redemption={code,requestId:crypto.randomUUID()};
-    const request=redemption,bridge=options.desktop?.billing;
-    if(!bridge?.redeemCode){status.textContent='Open the Arcane desktop app to redeem a code.';return;}
+    const request=redemption;
     redeeming=true;button.disabled=true;button.setAttribute('aria-busy','true');status.textContent='Redeeming code…';
-    void bridge.redeemCode(request.code,request.requestId).then(value=>{
+    void doFetch('/v1/actions/redeem',{method:'POST',headers:{...headers(),'Content-Type':'application/json'},body:JSON.stringify(request)}).then(response=>response.json()).then(value=>{
       const reply=obj(value);
-      if(reply?.state==='redeemed'&&reply.granted===1000&&int(reply.balance)){
-        status.textContent='1,000 API credits added. Balance: '+formatCount(reply.balance)+' credits. Subscription actions are unchanged.';
+      if(reply?.state==='redeemed'&&reply.unit==='action'&&reply.granted===1000&&int(reply.balance)){
+        status.textContent='1,000 Arcane actions added. '+formatCount(reply.balance)+' actions remaining. API credits are unchanged.';
         if(input.value.trim()===request.code)input.value='';redemption=null;void refresh();
-      }else if(reply?.state==='invalid-code'){status.textContent='This credit code is not valid.';input.setAttribute('aria-invalid','true');}
+      }else if(reply?.state==='invalid-code'){status.textContent='This action code is not valid.';input.setAttribute('aria-invalid','true');}
       else if(reply?.state==='signed-out')status.textContent='Connect your Arcane account above to redeem this code.';
-      else if(reply?.state==='not-connected')status.textContent='The Arcane Credits service is not connected yet. No credits were added.';
-      else if(reply?.state==='balance-limit')status.textContent='Your credit balance cannot accept this grant.';
-      else status.textContent='The redemption could not be confirmed. Try again to check the same request; it cannot add credits twice.';
-    }).catch(()=>{status.textContent='The redemption could not be confirmed. Try again to check the same request; it cannot add credits twice.';})
+      else if(reply?.state==='not-connected')status.textContent='Action redemption is unavailable. No actions were confirmed.';
+      else if(reply?.state==='balance-limit')status.textContent='Your action balance cannot accept this grant.';
+      else status.textContent='The redemption could not be confirmed. Try again to check the same request; it cannot add actions twice.';
+    }).catch(()=>{status.textContent='The redemption could not be confirmed. Try again to check the same request; it cannot add actions twice.';})
     .finally(()=>{redeeming=false;button.disabled=false;button.removeAttribute('aria-busy');});
   });
 

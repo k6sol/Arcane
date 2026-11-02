@@ -29,12 +29,14 @@ export interface CheckpointEntry {
   months: Record<string, number>; days: Record<string, number>;
   /** Folded refs kept for dedup (bounded). */
   refs: string[];
+  grantedActions?:number; grantRefs?:string[];
   prev: string; hash: string;
 }
-type Line = ActionEntry | CheckpointEntry;
+interface GrantEntry { type:'grant';v:1;seq:number;at:string;amount:1000;ref:string;prev:string;hash:string }
+type Line = ActionEntry | CheckpointEntry | GrantEntry;
 export interface RecordInput { kind: ActionKind; source: ActionSource; id: string; conversation?: string | null; at?: Date }
 export interface ActionsSummary {
-  unit: 'action'; month: { key: string; used: number }; today: { key: string; used: number };
+  unit: 'action'; month: { key: string; used: number; limit:number; resetsAt:string }; today: { key: string; used: number };
   byKind: Record<ActionKind, number>; bySource: Record<ActionSource, number>;
   days: { key: string; used: number }[];
   conversations: { conversation: string; used: number }[];
@@ -60,6 +62,7 @@ export class ActionsLedger {
   #refs = new Set<string>();
   #head = GENESIS; #seq = 0; #integrity: 'verified' | 'mismatch' = 'verified';
   #loaded = false;
+  #grantedActions=0; #grantRefs=new Set<string>();
   readonly #maxEntries: number;
 
   constructor(readonly directory: string, options: { maxEntries?: number } = {}) {
@@ -75,10 +78,28 @@ export class ActionsLedger {
     const summary=this.summary(now);
     if(summary.integrity==='mismatch')throw Error('Subscription usage needs review before more work can start.');
     if(this.#refs.has(sha(source+'\u0000'+id)))return{admitted:true,recorded:false};
+    limit+=Math.max(0,summary.month.limit-500);
     if(summary.month.used>=limit)return{admitted:false,recorded:false};
     try{if(!this.record({kind:'build-turn',source,id,at:now},true))throw Error('Subscription action could not be recorded.');}
     catch(error){this.#integrity='mismatch';throw error;}
     return{admitted:true,recorded:true};
+  }
+
+  /** Explicit human test-code grant. Request IDs are permanent across compaction;
+   * action overages consume the grant, and unused actions carry across months. */
+  redeemCode(code:string,requestId:string,now=new Date()):{granted:1000;balance:number;replayed:boolean} {
+    if(typeof code!=='string'||code.trim().toLowerCase()!=='test'||!SAFE_ID.test(requestId))throw Error('Invalid action code.');
+    const current=this.summary(now);if(current.integrity==='mismatch')throw Error('Action usage needs review.');
+    const ref=sha('action-code\u0000'+requestId),replayed=this.#grantRefs.has(ref);
+    if(!replayed){
+      if(this.#grantRefs.size>=20000||!Number.isSafeInteger(this.#grantedActions+1000))throw Error('Action grant capacity reached.');
+      this.#ensureDirectory();const entry=this.#seal<GrantEntry>({type:'grant',v:1,seq:this.#seq+1,at:now.toISOString(),amount:1000,ref,prev:this.#head});
+      try{appendFileSync(this.file,JSON.stringify(entry)+'\n',{mode:0o600,flush:true});}
+      catch(error){this.#integrity='mismatch';throw error;}
+      this.#seq=entry.seq;this.#head=entry.hash;this.#grantedActions+=1000;this.#grantRefs.add(ref);
+      if(lstatSync(this.file).size>MAX_FILE_BYTES)this.#compact();
+    }
+    const after=this.summary(now);return{granted:1000,balance:Math.max(0,after.month.limit-after.month.used),replayed};
   }
 
   #ensureDirectory(): void {
@@ -107,8 +128,14 @@ export class ActionsLedger {
       prev = hash;
       this.#seq = Math.max(this.#seq, Number.isSafeInteger(line.seq) ? line.seq : this.#seq);
       if (line.type === 'checkpoint') {
+        if(line.grantedActions!==undefined&&(!Number.isSafeInteger(line.grantedActions)||line.grantedActions<0)||line.grantRefs!==undefined&&(!Array.isArray(line.grantRefs)||line.grantRefs.length>20000||line.grantRefs.some(ref=>typeof ref!=='string'||! /^[a-f0-9]{64}$/.test(ref)))){this.#integrity='mismatch';continue;}
+        this.#grantedActions=line.grantedActions??0;this.#grantRefs=new Set(line.grantRefs??[]);
+        if(this.#grantRefs.size!==(line.grantRefs??[]).length||this.#grantedActions!==this.#grantRefs.size*1000){this.#integrity='mismatch';continue;}
         this.#checkpoint = line;
         for (const ref of Array.isArray(line.refs) ? line.refs : []) this.#refs.add(String(ref));
+      } else if(line.type==='grant'){
+        if(line.amount!==1000||typeof line.ref!=='string'||! /^[a-f0-9]{64}$/.test(line.ref)||this.#grantRefs.has(line.ref)||!Number.isFinite(Date.parse(line.at))||!Number.isSafeInteger(this.#grantedActions+1000)||this.#grantRefs.size>=20000){this.#integrity='mismatch';continue;}
+        this.#grantedActions+=1000;this.#grantRefs.add(line.ref);
       } else if (line.type === 'action' && typeof line.ref === 'string' && !Number.isNaN(Date.parse(line.at))) {
         this.#entries.push(line); this.#refs.add(line.ref);
       } else this.#integrity = 'mismatch';
@@ -153,7 +180,7 @@ export class ActionsLedger {
     for (const key of Object.keys(days).sort().slice(0, -400)) delete days[key];
     const refs = [...(this.#checkpoint?.refs ?? []), ...folded.map(entry => entry.ref)].slice(-MAX_REFS);
     let prev = GENESIS, seq = this.#seq;
-    const checkpoint = this.#seal<CheckpointEntry>({ type: 'checkpoint', v: 1, seq: ++seq, at: new Date().toISOString(), months, days, refs, prev });
+    const checkpoint = this.#seal<CheckpointEntry>({ type: 'checkpoint', v: 1, seq: ++seq, at: new Date().toISOString(), months, days, refs, grantedActions:this.#grantedActions,grantRefs:[...this.#grantRefs],prev });
     prev = checkpoint.hash;
     const rechained: ActionEntry[] = [];
     for (const entry of kept) {
@@ -190,11 +217,14 @@ export class ActionsLedger {
       const key = dayKey(new Date(now.getTime() - offset * 86400000));
       recent.push({ key, used: days.get(key) ?? 0 });
     }
+    const monthTotals={...(this.#checkpoint?.months??{})};for(const entry of this.#entries){const key=monthKey(new Date(entry.at));monthTotals[key]=(monthTotals[key]??0)+1;}
+    const spentBefore=Object.entries(monthTotals).reduce((total,[key,used])=>total+(key<month?Math.max(0,used-500):0),0);
+    const limit=500+Math.max(0,this.#grantedActions-spentBefore),reset=new Date(Date.UTC(now.getUTCFullYear(),now.getUTCMonth()+1,1)).toISOString();
     return {
-      unit: 'action', month: { key: month, used: monthUsed }, today: { key: today, used: days.get(today) ?? 0 },
+      unit: 'action', month: { key: month, used: monthUsed,limit,resetsAt:reset }, today: { key: today, used: days.get(today) ?? 0 },
       byKind, bySource, days: recent,
       conversations: [...conversations].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 8).map(([conversation, used]) => ({ conversation, used })),
-      integrity: this.#entries.length || this.#checkpoint ? this.#integrity : this.#integrity === 'mismatch' ? 'mismatch' : 'empty',
+      integrity: this.#entries.length || this.#checkpoint || this.#grantRefs.size ? this.#integrity : this.#integrity === 'mismatch' ? 'mismatch' : 'empty',
       entries: this.#entries.length, enforced: false,
     };
   }
