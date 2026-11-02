@@ -12,6 +12,8 @@ tags: [arcane]
 5. Exercise the new explicit **Save open drafts** recovery in the loaded candidate, preserving its old sealed bytes and current text. Then verify a distinct authorized chat scenario with GPT-6.1 Sol low and new ownership. Do not resend the original refused synthetic greeting. Recovery itself must produce no native submission. Record actual acceptance/replies and remaining limits.
 6. Continue old/new history, provider/model switching, cancellation, preview return and restart acceptance; then task lifetimes, connected import and task/playtest work at their allowed scopes. Do not borrow quarantined old native authority or claim Studio acceptance from fixtures. **No Roblox Studio operation.**
 
+7. Initial leaf fan correction **e66c315** is pushed and independent of chat candidate7d. Seven attachment/allocation and38 full generator cases pass; four original-source comparisons preserve bark, leaf topology/UV/counts/scheduling and RNG states. Poll original component run41368322342 and native run41368322324; neither has terminal success yet. Do not restart them on observation timeout. Final BVH-normal handling and rendered acceptance remain open in [[Bugs/Leaf Stalk Emergence]].
+
 ## Completed evidence: do not replay
 
 - [[Bugs/Draft Storage Recovery]]: strict660 compile, final150 frozen compiled/browser and155 complete host/compiler passes, no skips/cancellations. Runtime95 remains unchanged through the4ed inventory correction; another compile/test replay is unnecessary without a relevant change/failure.
