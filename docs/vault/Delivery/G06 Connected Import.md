@@ -32,6 +32,8 @@ Resolve listed dependencies, then reproduce the missing outcome before editing.
 
 ## Current controlled acceptance
 
+[[Bugs/Mesh Keep Preparation]] reproduces a second-appearance clone failure that previously published the first procedural replacement. Detached preparation now preserves the original model on that failure and on late scope revocation, retains uploaded IDs and supports explicit finish without reupload. All23 focused standalone Luau/compiler cases pass with engine doubles. Persistent PBR image uploads and native Studio acceptance remain open.
+
 [[Bugs/Import Reply Recovery]] verifies a lost desktop reply after an actual stored file import. Error421 preserves uncertainty; an explicit asset-list read recovers the same record without repeating native import. All three real-browser file-import/model/effect journeys pass. This strengthens library/preview recovery, not native Studio upload or the whole connected-import goal.
 
 [[Bugs/Studio Packet Poll Fairness]] preserves strict continuity and ownership while allowing genuine plugin I/O after the next original packet is queued. Local verification covers 57 staging/MCP/diagnostic cases, the unchanged 20 MiB PBR stage/seal/reconstruct/recover case and a 141-packet zero-idle pacing transfer. Actual Studio rendering, reviewed model import, upload/Asset Manager registration, later revisions and authorized scene deletion still require their own acceptance.

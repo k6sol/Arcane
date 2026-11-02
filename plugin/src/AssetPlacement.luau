@@ -1458,8 +1458,21 @@ function AssetPlacement.keep(ops: any, owner: any, digest: string, args: any, gu
 					guard()
 					if part == nil or not part:IsA("MeshPart") then V.fail("ENGINE", "CreateMeshPartAsync did not return a MeshPart.") end
 					fresh[index] = part
+					-- Prepare every detached replacement before publishing any of them.
+					-- A later appearance clone can fail after Roblox has uploaded all
+					-- geometry; keep those IDs and the entire original model intact.
+					for _, field in ipairs(SWAP_FIELDS) do (part :: any)[field] = old[field] end
+					local appearance = resource.appearance
+					if appearance ~= nil and appearance.Parent == old then
+						local copy = appearance:Clone()
+						if copy ~= nil then copies[index] = copy end
+						guard()
+						if copy == nil or not copy:IsA("SurfaceAppearance") or copy.Parent ~= nil then V.fail("ENGINE", "Expected a detached persistent appearance copy.") end
+						copy.Parent = part
+					end
 				end
 			end
+			guard()
 			local recording = ops.history:TryBeginRecording("Arcane.keep." .. attemptId, "Arcane keep mesh")
 			if not recording then V.fail("HISTORY", "Cannot begin an undo recording.") end
 			local done = pcall(function()
@@ -1467,14 +1480,6 @@ function AssetPlacement.keep(ops: any, owner: any, digest: string, args: any, gu
 					local part = fresh[index]
 					if part then
 						local old = resource.part
-						for _, field in ipairs(SWAP_FIELDS) do (part :: any)[field] = old[field] end
-						local appearance = resource.appearance
-						if appearance ~= nil and appearance.Parent == old then
-							local copy = appearance:Clone()
-							if copy == nil then V.fail("ENGINE", "SurfaceAppearance could not be copied to the kept mesh.") end
-							copies[index] = copy
-							copy.Parent = part
-						end
 						part.Parent = old.Parent
 						old.Parent = nil
 						resource.part, resource.keptAssetId = part, entries[index].assetId

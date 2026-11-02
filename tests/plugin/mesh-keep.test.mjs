@@ -84,12 +84,14 @@ local function scalarMaterial(s: any): any
   local maps = {MetalnessMapContent = {Object = metal}, RoughnessMapContent = {Object = rough}}
   local template = Instance.new("SurfaceAppearance")
   s.cloneCalls = 0
+  s.appearanceClones = {}
   local function clone(self: any): any
     s.cloneCalls += 1
     if s.failCloneAt == s.cloneCalls then error("injected appearance clone failure") end
     local copy = Instance.new("SurfaceAppearance")
     copy.MetalnessMapContent, copy.RoughnessMapContent = self.MetalnessMapContent, self.RoughnessMapContent
     copy.Clone = clone
+    table.insert(s.appearanceClones, copy)
     return copy
   end
   template.MetalnessMapContent, template.RoughnessMapContent, template.Clone = maps.MetalnessMapContent, maps.RoughnessMapContent, clone
@@ -207,6 +209,37 @@ check(s.owner.meshes[1].part == oldPart and s.owner.meshes[1].appearance == oldA
 check(s.owner.materials == materialOwner and s.ops.registry.owned[s.model] == placedOwner and placedOwner.placed.count == 2, "failed clone preserves owner records")
 check(#s.uploads == 1 and s.uploads[1].assetType == enums.AssetType.Mesh and not material.editableImages.MetalnessMap._destroyed and not material.editableImages.RoughnessMap._destroyed, "failed clone never uploads or disposes backing images")
 check(#s.freshParts == 1 and s.freshParts[1]._destroyed and s.freshParts[1].Parent == nil, "failed clone destroys unused replacement part")
+
+-- A later appearance failure must not publish an earlier replacement.
+s = setup(2); material = scalarMaterial(s)
+local beforeParts = {s.owner.meshes[1].part, s.owner.meshes[2].part}
+local beforeAppearances = {s.owner.meshes[1].appearance, s.owner.meshes[2].appearance}
+s.failCloneAt = s.cloneCalls + 2
+receipt = AssetPlacement.keep(s.ops, s.owner, digest, args(), guard, s.engine)
+check(receipt.state == "uploaded" and receipt.swapped == 0 and s.commits == 0, "later clone failure starts no placement transaction")
+for index, resource in ipairs(s.owner.meshes) do
+  check(resource.part == beforeParts[index] and resource.appearance == beforeAppearances[index] and resource.keptAssetId == nil, "later clone failure preserves every owner")
+  check(resource.part.Parent == s.model and resource.appearance.Parent == resource.part, "later clone failure preserves original hierarchy")
+  check(receipt.meshes[index].assetId == 9000 + index and not receipt.meshes[index].swapped, "later clone failure retains every uploaded ID")
+  check(s.freshParts[index]._destroyed and s.freshParts[index].Parent == nil, "later clone failure retires every detached replacement")
+end
+check(s.appearanceClones[3]._destroyed, "later clone failure retires the earlier prepared appearance")
+local uploadCount = #s.uploads
+s.failCloneAt = nil
+receipt = AssetPlacement.keep(s.ops, s.owner, digest, args({finish = true, assetIds = V.array({9001, 9002})}), guard, s.engine)
+check(receipt.state == "kept" and receipt.swapped == 2 and #s.uploads == uploadCount and receipt.uploadsStarted == 0, "finish completes original uploaded IDs without reupload")
+
+-- Revocation after the last clone still precedes all placed-model mutation.
+s = setup(2); material = scalarMaterial(s)
+beforeParts = {s.owner.meshes[1].part, s.owner.meshes[2].part}
+receipt = AssetPlacement.keep(s.ops, s.owner, digest, args(), function(): ()
+  if s.cloneCalls == 4 then error("revoked after appearance allocation") end
+end, s.engine)
+check(receipt.state == "uploaded" and receipt.swapped == 0 and s.commits == 0, "late clone guard refuses before publication")
+for index, resource in ipairs(s.owner.meshes) do
+  check(resource.part == beforeParts[index] and resource.part.Parent == s.model and resource.keptAssetId == nil, "late clone guard preserves original parts")
+  check(receipt.meshes[index].assetId == 9000 + index and s.freshParts[index]._destroyed and s.appearanceClones[index + 2]._destroyed, "late clone guard retains IDs and retires allocated parts and appearances")
+end
 print("Arcane mesh keep checks passed: " .. count)
 `;
 
