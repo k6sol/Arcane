@@ -1857,8 +1857,11 @@ test('Edge: Claude activity lines, change card, queue chips, usage meter and the
   for (const scheme of ['dark', 'light'] as const) {
     const page = await browser.newPage({ viewport: { width: 1280, height: 900 }, colorScheme: scheme }); page.setDefaultTimeout(8000);
     const errors: string[] = []; page.on('pageerror', error => errors.push(error.message));
-    // Observe only a failed original wait; never replace its predicate, deadline or rejection.
-    const waitPhase = async (phase: 'ready'|'provider-visible'|'first-send'|'queued-send'|'failed-turn-paused', wait: () => Promise<unknown>) => {
+    let crashed = false; page.on('crash', () => { crashed = true; });
+    // Observe only a failed original action/wait; never replay its key, replace
+    // its predicate/deadline, or turn an uncertain action into test success.
+    const waitPhase = async (phase: 'ready'|'provider-visible'|'first-send'|'queued-send'|'failed-turn-paused'|'first-enter'|'first-queue-enter'|'second-queue-enter', wait: () => Promise<unknown>) => {
+      const started = performance.now();
       try { await wait(); }
       catch (original) {
         let timer: ReturnType<typeof setTimeout> | undefined;
@@ -1887,12 +1890,16 @@ test('Edge: Claude activity lines, change card, queue chips, usage meter and the
                 queueStates, queueRowCount: Math.min(rows.length, 65),
                 tabsHidden: hidden('claude-chat-tabs'), queueHidden: hidden('claude-chat-queue'),
                 composerDisabled: composer?.disabled ?? null,
+                composerFocused: composer === document.activeElement,
+                composerCharacters: composer ? Math.min(composer.value.length, 131073) : null,
+                commandMenuHidden: hidden('composer-command-menu'),
                 documentVisibility: document.visibilityState === 'visible' ? 'visible' : document.visibilityState === 'hidden' ? 'hidden' : 'other',
               };
             }).then(state => ({ availability: 'available' as const, state }), () => ({ availability: 'evaluation-failed' as const })),
             new Promise<{ availability: 'observation-deadline' }>(done => { timer = setTimeout(() => done({ availability: 'observation-deadline' }), 250); }),
           ]);
-          t.diagnostic(JSON.stringify({ schemaVersion: 1, phase, scheme, pageErrorCount: Math.min(errors.length, 65), observation }));
+          t.diagnostic(JSON.stringify({ schemaVersion: 1, phase, scheme, actionElapsedMs: Math.round(performance.now() - started),
+            crashed, pageErrorCount: Math.min(errors.length, 65), observation }));
         } catch { /* Diagnostic collection or output must preserve the original wait failure. */ }
         finally { if (timer !== undefined) clearTimeout(timer); }
         throw original;
@@ -1904,7 +1911,7 @@ test('Edge: Claude activity lines, change card, queue chips, usage meter and the
     await waitPhase('provider-visible', () => page.waitForFunction(() => !document.getElementById('claude-chat-tabs')!.hidden));
     await page.evaluate(() => (window as any).fx.refreshed);
     const composer = page.locator('#codex-composer');
-    await composer.fill('Add a spawn platform with a spawner script'); await composer.press('Enter');
+    await composer.fill('Add a spawn platform with a spawner script'); await waitPhase('first-enter', () => composer.press('Enter'));
     await waitPhase('first-send', () => page.waitForFunction(() => (window as any).fx.calls.length === 1));
     await page.evaluate(() => {
       const fx = (window as any).fx, ref = (root: string, ...pathSegments: string[]) => ({ instanceId: 'i', sessionId: 's', root, pathSegments, className: 'Script' });
@@ -1923,8 +1930,8 @@ test('Edge: Claude activity lines, change card, queue chips, usage meter and the
       ['Reading Workspace', 'Creating Part "SpawnPlatform" in Workspace', 'Updating script ServerScriptService.Spawner', 'Updating Workspace.Lobby.Door (Color)', 'Starting a playtest…']);
     assert.equal(await page.locator('#codex-messages .tool-details[open]').count(), 0, 'no raw JSON by default');
     // Queue two messages while the reply runs.
-    await composer.fill('Now make the platform glow'); await composer.press('Enter');
-    await composer.fill('Then add a checkpoint'); await composer.press('Enter');
+    await composer.fill('Now make the platform glow'); await waitPhase('first-queue-enter', () => composer.press('Enter'));
+    await composer.fill('Then add a checkpoint'); await waitPhase('second-queue-enter', () => composer.press('Enter'));
     assert.deepEqual(await page.locator('#claude-chat-queue .queue-text').allInnerTexts(), ['Now make the platform glow', 'Then add a checkpoint']);
     await page.locator('#codex-messages .tool-activity').nth(4).scrollIntoViewIfNeeded();
     await page.screenshot({ path: join(shots, 'activity-running-' + scheme + '.png') });
