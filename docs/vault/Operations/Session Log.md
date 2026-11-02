@@ -5,6 +5,10 @@ tags: [arcane]
 ---
 # Session log
 
+## 2026-11-02 ? Native discovery closure and CSS cascade
+
+The actual installed-CLI metadata-only check in [[Bugs/Native Discovery Shutdown]] passed with the saved subscription/eight models and original child exit0/close/both stream EOFs after one stdin end and no kill. No model prompt, thread, bearer or Studio call. [[Bugs/Submitted Image Review]] records the CI-revealed final reduced-motion cascade correction and26 passing affected contracts. Other original Windows timeout/continuity failures remain open; customer app connection is not accepted by the discovery-only check.
+
 ## 2026-11-02 ? Explicit Windows taskbar branding
 
 [[Bugs/Windows Taskbar Branding]] records the customer-observed Electron icon, corrected Arcane A PNG/ICO, explicit Windows taskbar properties and controlled packaging. Three focused package cases pass, including rejection after a changed icon is rehashed only in the outer manifest. Source syntax, platform-specific property execution and visual inspection pass. This is not installed taskbar acceptance. Legacy stable-launcher migration remains separate. [[Bugs/Native Discovery Shutdown]] is now pushed as e5aea4c; actual startup verification remains open.

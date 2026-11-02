@@ -4895,6 +4895,17 @@ body.arcane-app::after{content:"";position:fixed;inset:0;z-index:2147483647;back
   *::details-content{animation:none!important;transition:none!important}
 }
 /* end C31 motion */
+/* Submitted evidence stays in a modal, outside transcript and page layout. */
+.work-evidence-dialog{width:min(1100px,94vw);max-height:92vh;padding:20px;border:1px solid var(--line);border-radius:16px;background:var(--panel);color:var(--text)}
+.work-evidence-dialog::backdrop{background:rgba(0,0,0,.75)}
+.work-evidence-dialog h2{font-size:18px;overflow-wrap:anywhere;margin:0;min-width:0}
+.work-evidence-dialog>header{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}
+.work-evidence-dialog>header>div{display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap}
+.work-evidence-dialog button{min-height:44px;padding:8px 16px}
+.work-evidence-canvas{overflow:auto;max-height:68vh;text-align:center}
+.work-evidence-canvas img{max-width:100%;height:auto;display:block;margin:auto}
+.work-evidence-canvas img[hidden]{display:none}
+
 /* ---- Studio output severity: the top-bar Studio pill shows the state of the last Studio output read.
    Owned block; keep before the reduced-motion reset. Static: no transitions, no animation, no keyframes; colour, edge and
    weight only, so the pill and count keep their existing geometry at every breakpoint.
@@ -4939,14 +4950,3 @@ body.arcane-app::after{content:"";position:fixed;inset:0;z-index:2147483647;back
 }
 /* ---- End Studio output severity ---- */
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
-
-/* Submitted evidence stays in a modal, outside transcript and page layout. */
-.work-evidence-dialog{width:min(1100px,94vw);max-height:92vh;padding:20px;border:1px solid var(--line);border-radius:16px;background:var(--panel);color:var(--text)}
-.work-evidence-dialog::backdrop{background:rgba(0,0,0,.75)}
-.work-evidence-dialog h2{font-size:18px;overflow-wrap:anywhere;margin:0;min-width:0}
-.work-evidence-dialog>header{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}
-.work-evidence-dialog>header>div{display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap}
-.work-evidence-dialog button{min-height:44px;padding:8px 16px}
-.work-evidence-canvas{overflow:auto;max-height:68vh;text-align:center}
-.work-evidence-canvas img{max-width:100%;height:auto;display:block;margin:auto}
-.work-evidence-canvas img[hidden]{display:none}

@@ -16,3 +16,7 @@ Strict compilation covers660 sources. All45 affected storage, error-reference an
 This is the submitted-image review component. It does not implement Figma sign-in, design creation, interactive prototypes, revision-bound Figma approval or GUI import. Those remain in [[Architecture/Figma GUI Workflow]]. The verified desktop candidate2d08932 predates this feature; do not claim it is installed with that candidate.
 
 [[Architecture/Figma GUI Workflow]] · [[Operations/Current State]] · [[Operations/Next Session]]
+
+## CI cascade correction
+
+The original e07 workflow exposed a CSS ordering regression: submitted-image modal styles followed the universal reduced-motion reset. The image styles now precede the owned Studio severity block, leaving that block and the final preference reset in their required order. All19 motion release contracts and7 severity CSS contracts pass without weakening either assertion. Other Windows timeout/staging-continuity failures in that original run remain under investigation; these local CSS passes do not resolve those failures.
