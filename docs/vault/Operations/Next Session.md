@@ -17,6 +17,8 @@ All seven original component jobs on81 passed in [run41472080965](https://github
 
 ## Customer state and next functional work
 
+[[Bugs/Windows Taskbar Branding]] records the observed Electron taskbar icon, corrected Arcane A PNG/ICO, explicit Windows taskbar identity and source-bound packaging. The installed2d app is unchanged; actual updated taskbar acceptance remains open. The stable launcher keeps its existing embedded icon until a verified migration.
+
 [[Bugs/Native Discovery Shutdown]] now gives only idle/unconfigured metadata discovery an EOF drain before the unchanged bounded escalation, and maps PROCESS_EXIT_UNCONFIRMED to Error440. Strict660 and245 frozen controlled cases pass. The actual app still runs2d; no claim that startup is repaired. Next perform one separately owned, source-bound installed-CLI metadata check with no thread, inference or Studio calls, then follow the exact hosted check and package scope. Preserve the original failed app request and custody; no automatic replay.
 
 [[Bugs/Submitted Image Review]] adds human-only, exact-hash PNG previews in a modal with Fit/Actual size, Error439 explanations and owned abort/blob cleanup. Strict660,45 complete affected cases and the final desktop/phone work-review case pass. It is newer than candidate2d and is not included in that install. It does not complete Figma sign-in, design creation or revision-bound import approval.

@@ -315,7 +315,7 @@ async function assembleWindowsPackage({ repository = REPOSITORY, electronDist,
       hash(await regularBytes(join(repository, 'package-lock.json'))) !== releaseManifest.files.find(file => file.path === 'package-lock.json')?.sha256) {
     throw new Error('Package metadata changed before the source snapshot.');
   }
-  for (const file of [...HOST_FILES, ...(await exists(join(hostRoot, 'icon.png')) ? ['icon.png'] : [])]) {
+  for (const file of [...HOST_FILES, ...(await exists(join(hostRoot, 'icon.png')) ? ['icon.png'] : []), ...(await exists(join(hostRoot, 'taskbar.ico')) ? ['taskbar.ico'] : [])]) {
     const entry = releaseManifest.files.find(entry => entry.path === 'apps/desktop/electron/' + file);
     if (!entry || hash(await regularBytes(join(hostRoot, file))) !== entry.sha256) {
       throw new Error('Host file is absent from or differs from the verified source snapshot: ' + file);
@@ -364,6 +364,11 @@ async function assembleWindowsPackage({ repository = REPOSITORY, electronDist,
     const icon = await regularBytes(join(hostRoot, 'icon.png'));
     if (icon.length <= 8 || !icon.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) throw new Error('Invalid host icon PNG.');
     await copy(join(hostRoot, 'icon.png'), 'resources/app/icon.png');
+  }
+  if (await exists(join(hostRoot, 'taskbar.ico'))) {
+    const icon = await regularBytes(join(hostRoot, 'taskbar.ico'));
+    if (icon.length < 22 || icon.readUInt16LE(0) !== 0 || icon.readUInt16LE(2) !== 1 || icon.readUInt16LE(4) !== 1 || icon.readUInt32LE(18) !== 22 || icon.readUInt32LE(14) !== icon.length - 22) throw new Error('Invalid taskbar icon ICO.');
+    await copy(join(hostRoot, 'taskbar.ico'), 'resources/app/taskbar.ico');
   }
   context.phase = 'copy-node'; context.lastBundlePath = null;
   await progress.phase(context.phase);
@@ -423,7 +428,7 @@ async function assembleWindowsPackage({ repository = REPOSITORY, electronDist,
     if (toolVersion !== '5.0.2' || toolPackage.name !== 'rcedit' || toolPackage.version !== toolVersion || lock.packages?.['node_modules/rcedit']?.version !== toolVersion) throw new Error('Expected the exact pinned build-only resource editor.');
     const tool = join(toolRoot, 'bin/rcedit-x64.exe');
     const toolBytes = await regularBytes(tool); windowsX64Exe(toolBytes, 'Resource editor');
-    const icon = join(hostRoot, 'icon.ico'), iconBytes = await regularBytes(icon);
+    const icon = join(hostRoot, await exists(join(hostRoot, 'taskbar.ico')) ? 'taskbar.ico' : 'icon.ico'), iconBytes = await regularBytes(icon);
     if (iconBytes.length < 22 || iconBytes.readUInt16LE(0) !== 0 || iconBytes.readUInt16LE(2) !== 1 || iconBytes.readUInt16LE(4) !== 1 || iconBytes.readUInt32LE(18) !== 22 || iconBytes.readUInt32LE(14) !== iconBytes.length - 22) throw new Error('Invalid controlled Arcane icon.');
     const executable = join(directory, 'Arcane.exe');
     const env = { ...process.env }; delete env.NODE_OPTIONS; delete env.ELECTRON_RUN_AS_NODE;
@@ -520,7 +525,7 @@ export async function verifyWindowsBundle(directory) {
   const dependencies = await productionDependencies(product, pkg, lock);
   if (JSON.stringify(dependencies) !== JSON.stringify(manifest.dependencies)) throw new Error('Production dependency inventory mismatch.');
   const release = await json(join(product, 'release-manifest.json'));
-  for (const file of [...HOST_FILES, ...(seen.has('resources/app/icon.png') ? ['icon.png'] : [])]) {
+  for (const file of [...HOST_FILES, ...(seen.has('resources/app/icon.png') ? ['icon.png'] : []), ...(release.files.some(file => file.path === 'apps/desktop/electron/taskbar.ico') ? ['taskbar.ico'] : [])]) {
     const source = release.files.find(entry => entry.path === 'apps/desktop/electron/' + file);
     if (!source || hash(await regularBytes(join(directory, 'resources/app/' + file))) !== source.sha256) {
       throw new Error('Host differs from the verified product snapshot: ' + file);
@@ -536,7 +541,7 @@ export async function verifyWindowsBundle(directory) {
     } else if (path.startsWith('resources/product/')) {
       if (!productFiles.has(path)) throw new Error('Unlisted product snapshot payload.');
     } else if (path.startsWith('resources/app/')) {
-      if (!['package.json', ...HOST_FILES, 'icon.png'].includes(path.slice('resources/app/'.length))) throw new Error('Unexpected host payload.');
+      if (!['package.json', ...HOST_FILES, 'icon.png', 'taskbar.ico'].includes(path.slice('resources/app/'.length))) throw new Error('Unexpected host payload.');
     } else if (path.startsWith('resources/node/')) {
       if (!['resources/node/node.exe', 'resources/node/LICENSE'].includes(path)) throw new Error('Unexpected Node payload.');
     } else if (path === 'resources/source-manifest.json') { /* Its full hash and deployment projection were verified above. */

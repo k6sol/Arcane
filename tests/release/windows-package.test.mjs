@@ -91,6 +91,8 @@ async function fixture(t) {
   await write('toolchains/electron/dist/resources/default_app.asar', 'Never package the default application.');
   for (const file of ['main.cjs', 'diagnostics-host.cjs', 'diagnostics-storage.cjs', 'diagnostics-directory.cjs', 'policy.cjs', 'preload.cjs', 'code-verification.cjs', 'provider-setup.cjs', 'provider-login.cjs', 'studio-key-vault.cjs', 'workspace-preferences.cjs', 'runtime-recovery.cjs', 'native-handoff.cjs', 'native-handoff-host.cjs', 'app-asset-host.cjs', 'native-handoff-ipc.cjs', 'claude-chat.cjs', 'arcane-chat.cjs', 'plugin-install.cjs', 'in-app-dialog.cjs', 'project-permissions.cjs', 'billing.cjs', 'build-notifications.cjs', 'pyx-bar-host.cjs', 'pyx-preload.cjs', 'mesh-keep.cjs', 'asset-import.cjs', 'desktop-updates.cjs', 'trusted-dialog.cjs', 'trusted-dialog-preload.cjs', 'trusted-dialog.html', 'trusted-dialog.css', 'trusted-dialog.js']) await write('apps/desktop/electron/' + file, '// Secure host fixture: ' + file + '\n');
   await write('apps/desktop/electron/icon.png', png);
+  const ico = Buffer.alloc(22); ico.writeUInt16LE(1, 2); ico.writeUInt16LE(1, 4); ico.writeUInt16LE(1, 10); ico.writeUInt16LE(32, 12); ico.writeUInt32LE(png.length, 14); ico.writeUInt32LE(22, 18);
+  await write('apps/desktop/electron/taskbar.ico', Buffer.concat([ico, png]));
   await write('apps/desktop/electron/node-LICENSE.txt', fixtureLicense);
   const nodeExecutable = join(root, 'toolchains/node/node.exe');
   await write('toolchains/node/node.exe', pe());
@@ -194,6 +196,7 @@ test('directory package has a real PE exe, explicit app entry, standalone Node a
     name: 'arcane-desktop', productName: 'Arcane', version: '0.1.0', private: true, main: 'main.cjs', type: 'commonjs',
   });
   assert.ok(data.files.some(file => file.path === 'resources/app/icon.png'));
+  assert.deepEqual(await readFile(join(result.directory, 'resources/app/taskbar.ico')), await readFile(join(root, 'apps/desktop/electron/taskbar.ico')));
   assert.ok(data.files.some(file => file.path === 'resources/app/code-verification.cjs'));
   assert.ok(data.files.some(file => file.path === 'resources/app/studio-key-vault.cjs'));
   assert.ok(data.files.some(file => file.path === 'resources/app/workspace-preferences.cjs'));
@@ -406,7 +409,7 @@ test('optional host icon is copied only when present; unknown Electron payloads 
 
 test('host code must equal its source snapshot even if an outer file descriptor is rehashed', async t => {
   const { options } = await fixture(t);
-  for (const path of ['resources/app/policy.cjs', 'resources/app/code-verification.cjs', 'resources/app/provider-login.cjs', 'resources/app/studio-key-vault.cjs', 'resources/app/workspace-preferences.cjs', 'resources/app/native-handoff.cjs', 'resources/app/native-handoff-host.cjs', 'resources/app/app-asset-host.cjs', 'resources/app/native-handoff-ipc.cjs']) {
+  for (const path of ['resources/app/taskbar.ico', 'resources/app/policy.cjs', 'resources/app/code-verification.cjs', 'resources/app/provider-login.cjs', 'resources/app/studio-key-vault.cjs', 'resources/app/workspace-preferences.cjs', 'resources/app/native-handoff.cjs', 'resources/app/native-handoff-host.cjs', 'resources/app/app-asset-host.cjs', 'resources/app/native-handoff-ipc.cjs']) {
     const result = await packageWindows(options), bytes = Buffer.from('// Changed host policy fixture.\n');
     await writeFile(join(result.directory, path), bytes);
     await mutateManifest(result.directory, data => {

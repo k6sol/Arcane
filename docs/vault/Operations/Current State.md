@@ -15,6 +15,10 @@ The previous7d workspace restored saved sign-in/history and hides existing empty
 
 ## Implemented and verified
 
+- [[Bugs/Windows Taskbar Branding]] corrects the Arcane A image and explicitly binds Windows taskbar identity to a packaged ICO. Three focused offline packaging cases pass, including source-binding rejection. The running2d app and legacy launcher icon are unchanged; actual updated taskbar acceptance remains open.
+
+- [[Bugs/Native Discovery Shutdown]] is signed and pushed as e5aea4c with245 controlled passes. The actual installed app is still2d and its startup has not been repaired or retried.
+
 - [[Bugs/Submitted Image Review]] adds a human-only exact-hash submitted PNG preview, with a modal, Fit/Actual size, stage-specific Error439 and fetch/blob retirement. Strict660,45 full affected cases and a final real-Edge desktop/phone work-review case pass. It is source work newer than candidate2d, not an installed Figma connection or interactive design review.
 
 - [[Bugs/Folder Context Boundaries]] now includes recorded sibling chats from the selected folder, preserving other-folder and unfiled isolation. Strict660 and42 frozen controller/data cases pass. Bounded sibling context is supplied per request; incremental context delivery and native customer acceptance remain open.

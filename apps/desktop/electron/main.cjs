@@ -685,6 +685,9 @@ function makeWindow() {
     titleBarStyle: 'hidden', titleBarOverlay: { color: '#200b0f', symbolColor: '#ffffff', height: 48 },
     webPreferences: { preload: join(__dirname, 'preload.cjs'), sandbox: true, contextIsolation: true, nodeIntegration: false, nodeIntegrationInWorker: false, nodeIntegrationInSubFrames: false, webSecurity: true, allowRunningInsecureContent: false, webviewTag: false, navigateOnDragDrop: false, spellcheck: false, devTools: !app.isPackaged, partition: 'arcane-workspace' } });
   const owner = window; if (deferWindowShow) { recoveryWindow = owner; recoveryWindowFailure = null; }
+  // An explicit window icon also binds the taskbar button; do not rely on
+  // Explorer choosing an executable resource inherited from Electron.
+  if (process.platform === 'win32') owner.setAppDetails({ appId: 'com.arcane.desktop', appIconPath: join(__dirname, 'taskbar.ico'), appIconIndex: 0 });
   const session = owner.webContents.session;
   installClipboardForWindow(owner);
   session.setDevicePermissionHandler(() => false);

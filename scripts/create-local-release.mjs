@@ -72,7 +72,7 @@ export const REQUIRED_FRONTEND_FILES = [
   ...FONT_FILES, 'apps/desktop/public/fonts/manifest.json',
   'apps/desktop/public/fonts/OFL-IBM-Plex-Sans.txt', 'apps/desktop/public/fonts/OFL-Archivo.txt', 'apps/desktop/public/fonts/OFL-IBM-Plex-Mono.txt',
 ];
-const CONTROLLED_FILES = new Set([BRAND_BITMAP_PATH, 'apps/desktop/electron/icon.png', 'apps/desktop/electron/icon.ico', 'scripts/setup-arcane.ps1', 'scripts/launch-arcane.cmd', 'installer/setup.manifest', 'installer/launcher.manifest', 'installer/uninstaller.manifest', 'apps/desktop/public/vendor/three/LICENSE', ...FONT_FILES, ...MANAGED_LUAU_FILES]);
+const CONTROLLED_FILES = new Set([BRAND_BITMAP_PATH, 'apps/desktop/electron/icon.png', 'apps/desktop/electron/icon.ico', 'apps/desktop/electron/taskbar.ico', 'scripts/setup-arcane.ps1', 'scripts/launch-arcane.cmd', 'installer/setup.manifest', 'installer/launcher.manifest', 'installer/uninstaller.manifest', 'apps/desktop/public/vendor/three/LICENSE', ...FONT_FILES, ...MANAGED_LUAU_FILES]);
 const FIRST_RUN_FILES = ['scripts/setup-arcane.ps1', 'scripts/launch-arcane.cmd', 'docs/build/FIRST_RUN.md'];
 const allowedFile = path => EXTENSIONS.test(path) || CONTROLLED_FILES.has(path);
 export function validateBrandBitmap(bytes) {

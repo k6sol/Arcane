@@ -5,6 +5,10 @@ tags: [arcane]
 ---
 # Session log
 
+## 2026-11-02 ? Explicit Windows taskbar branding
+
+[[Bugs/Windows Taskbar Branding]] records the customer-observed Electron icon, corrected Arcane A PNG/ICO, explicit Windows taskbar properties and controlled packaging. Three focused package cases pass, including rejection after a changed icon is rehashed only in the outer manifest. Source syntax, platform-specific property execution and visual inspection pass. This is not installed taskbar acceptance. Legacy stable-launcher migration remains separate. [[Bugs/Native Discovery Shutdown]] is now pushed as e5aea4c; actual startup verification remains open.
+
 ## 2026-11-02 · Submitted image review and installed chat update
 
 [[Bugs/Submitted Image Review]] adds in-app exact-hash PNG previews with human-only reads, stable modal layout, phone bounds and explicit Error439 read/decode details. All45 affected cases pass; the final complete work-review browser case also passes after desktop/phone visual refinement. This source feature is newer than the installed2d candidate.
