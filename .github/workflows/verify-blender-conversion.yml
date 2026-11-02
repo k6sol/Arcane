@@ -148,11 +148,6 @@ jobs:
           PYTHONDONTWRITEBYTECODE: '1'
           PYTHONUTF8: '1'
         run: python tests/unit/asset_worker_failure_test.py
-      - name: Verify bounded rock texture detail and unchanged512 defaults
-        env:
-          PYTHONDONTWRITEBYTECODE: '1'
-          PYTHONUTF8: '1'
-        run: python tests/unit/rock_texture_resolution_test.py
       - name: Verify costed branch station fidelity
         env:
           PYTHONDONTWRITEBYTECODE: '1'
@@ -190,6 +185,8 @@ jobs:
         run: node --test tests/native/procedural-material-slots.test.mjs
       - name: Verify height-aware oak atlas contracts in actual Blender
         run: node --test tests/native/oak-height-atlas.test.mjs
+      - name: Verify bounded rock texture detail and unchanged512 defaults in actual Blender
+        run: node --test tests/native/rock-texture-resolution.test.mjs
       - name: Verify weathered boulder joint contracts in actual Blender
         run: node --test tests/native/rock-joints.test.mjs
       - name: Verify actual foliage card attachment and native save/reopen
