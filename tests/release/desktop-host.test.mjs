@@ -588,7 +588,7 @@ test('preload exposes immutable identity and only the bounded Luau verification 
   assert.equal(Object.isFrozen(exposed.runtimeRecovery), true);
   assert.deepEqual(Object.keys(exposed.runtimeRecovery).sort(), ['acknowledge','onCheckpoint','onState','ready','retry','status','version']);
   assert.equal(Object.isFrozen(exposed.billing), true);
-  assert.deepEqual(Object.keys(exposed.billing).sort(), ['connectAccount', 'disconnectAccount', 'openCheckout', 'status', 'version']);
+  assert.deepEqual(Object.keys(exposed.billing).sort(), ['connectAccount', 'disconnectAccount', 'openCheckout', 'redeemCode', 'status', 'version']);
   assert.equal(exposed.billing.version, 1);
   assert.equal(Object.isFrozen(exposed.notifications), true);
   assert.deepEqual(Object.keys(exposed.notifications).sort(), ['notify', 'onActivate', 'version']);
@@ -1267,10 +1267,10 @@ test('connect Arcane account: disabled by default; device sign-in on the allowli
     const safeStorage = { isEncryptionAvailable: () => true,
       encryptString: plain => Buffer.from('enc:' + Buffer.from(plain).toString('base64')), decryptString: buffer => Buffer.from(String(buffer).slice(4), 'base64').toString() };
     const fetch = async (url, init) => {
-      calls.push({ url, auth: init.headers.Authorization ?? null, redirect: init.redirect });
+      calls.push({ url, auth: init.headers.Authorization ?? null, redirect: init.redirect, requestId:init.headers['Idempotency-Key']??null });
       const path = new URL(url).pathname;
       const body = path === '/v1/auth/device' ? { deviceCode: 'D'.repeat(43), userCode: 'BCDF-GHJK', verificationUrl: 'https://gw.arcane.test/v1/auth/verify', verificationUrlComplete: verification, interval: 5, expiresIn: 600 }
-        : path === '/v1/auth/token' ? (++polls < 2 ? { error: 'authorization_pending' } : { token: TOKEN, tokenType: 'Bearer' }) : { signedOut: true };
+        : path === '/v1/auth/token' ? (++polls < 2 ? { error: 'authorization_pending' } : { token: TOKEN, tokenType: 'Bearer' }) : path === '/v1/credits/redeem' ? {granted:1000,balance:1000,replayed:false} : { signedOut: true };
       return new Response(JSON.stringify(body), { status: path === '/v1/auth/token' && !body.token ? 400 : 200 });
     };
     const make = (overrides = {}) => requireHost('billing.cjs').createBilling({ loadPlans: async () => plans, configDirectory: () => root, getWindow: () => window,
@@ -1310,6 +1310,11 @@ test('connect Arcane account: disabled by default; device sign-in on the allowli
     assert.ok(!stored.includes(TOKEN), 'token never stored in plain text');
     assert.deepEqual({ ...await billing.accountCredential() }, { base: 'https://gw.arcane.test', token: TOKEN });
     assert.equal((await billing.connectAccount()).state, 'signed-in');
+    const redemptionId='00000000-0000-4000-8000-000000000001';
+    assert.deepEqual({...await billing.redeemCode('test',redemptionId)},{version:1,state:'redeemed',granted:1000,balance:1000,replayed:false});
+    assert.equal(calls.at(-1).url,'https://gw.arcane.test/v1/credits/redeem');
+    assert.equal(calls.at(-1).auth,'Bearer '+TOKEN);assert.equal(calls.at(-1).requestId,redemptionId);
+    const beforeInvalid=calls.length;assert.equal((await billing.redeemCode('test','invalid')).state,'invalid-code');assert.equal(calls.length,beforeInvalid);
 
     // The token is bound to its gateway origin.
     await writeFile(join(root, 'billing-service.json'), JSON.stringify({ version: 1, gatewayUrl: 'https://gw2.arcane.test' }));
@@ -1320,6 +1325,8 @@ test('connect Arcane account: disabled by default; device sign-in on the allowli
     billing.installIpc({ handle(channel, handler) { handlers.set(channel, handler); } }, { trusted: event => event.ok === true });
     await assert.rejects(handlers.get('arcane:billing-account-connect')({ ok: false }), /unavailable/);
     await assert.rejects(handlers.get('arcane:billing-account-disconnect')({ ok: true }, 'x'), /unavailable/);
+    await assert.rejects(handlers.get('arcane:billing-redeem')({ok:false},'test',redemptionId),/unavailable/);
+    await assert.rejects(handlers.get('arcane:billing-redeem')({ok:true},'test'),/unavailable/);
     assert.ok(!JSON.stringify(await handlers.get('arcane:billing-status')({ ok: true })).includes(TOKEN));
     assert.deepEqual({ ...await handlers.get('arcane:billing-account-disconnect')({ ok: true }) }, { version: 1, state: 'signed-out', message: 'Your Arcane account is disconnected.' });
     await assert.rejects(access(join(root, 'arcane-account.bin')));

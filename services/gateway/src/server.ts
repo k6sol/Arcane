@@ -7,6 +7,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { DatabaseSync } from 'node:sqlite';
 import { authenticate, confirmLink, describeLink, normalizeEmail, normalizeUserCode, pollToken, requestLink, revoke, startDevice, sweepAuth, type MailSender } from './auth.ts';
 import { applyWebhookEvent, balanceOf, usageOf } from './billing.ts';
+import {redeemCredits} from './promo-codes.ts';
 import { findOffer, OFFER_ID, type GatewayConfig } from './config.ts';
 import { accountByEmail, audit, tx, type Account, type Row } from './db.ts';
 import { ConcurrencyCap, RateLimiter } from './limits.ts';
@@ -329,6 +330,15 @@ export function createGateway(deps: GatewayDeps) {
         pricing: { inputPerMTok: creditsFor({ inputPerMTok: model.inputPerMTok, outputPerMTok: 0 }, 1_000_000, 0, config.markupBps),
           outputPerMTok: creditsFor({ inputPerMTok: 0, outputPerMTok: model.outputPerMTok }, 0, 1_000_000, config.markupBps) }, tools: true })) });
       case 'GET /v1/balance': return json(res, 200, balanceOf(requireAccount(req)));
+      case 'POST /v1/credits/redeem': {
+        ipLimit(req);const account=requireAccount(req),key=req.headers['idempotency-key'];
+        if(typeof key!=='string'||!IDEMPOTENCY_KEY.test(key))throw new HttpError(400,'bad_idempotency_key','Use a unique redemption request ID.');
+        const input=await readJson(req,2048);
+        if(Object.keys(input).length!==1||typeof input.code!=='string'||input.code.length>64)throw new HttpError(400,'invalid_code','Enter a valid credit code.');
+        const result=redeemCredits(db,account.id,input.code,key,now());
+        if(!result.ok)throw new HttpError(result.error==='balance_limit'?409:400,result.error,result.error==='balance_limit'?'The credit balance cannot accept this grant.':'This credit code is not valid.');
+        return json(res,200,{granted:result.granted,balance:result.balance,replayed:result.replayed});
+      }
       case 'GET /v1/usage': return json(res, 200, usageOf(db, requireAccount(req).id, new Date(now())));
       case 'POST /v1/chat':
       case 'POST /v1/chat/stream': return chatRoute(req, res);

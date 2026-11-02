@@ -10,6 +10,7 @@
 !services/gateway/src/account-ui.ts
 !services/gateway/src/auth.ts
 !services/gateway/src/billing.ts
+!services/gateway/src/promo-codes.ts
 !services/gateway/src/config.ts
 !services/gateway/src/db.ts
 !services/gateway/src/diagnostics-config.ts

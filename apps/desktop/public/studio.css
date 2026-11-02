@@ -3691,6 +3691,8 @@ body.arcane-app.shell-compact .workspace-topbar{min-height:48px;padding:12px 24p
   .arcane-app .workspace-topbar .workspace-search:focus-within{border-color:Highlight;outline:2px solid Highlight;outline-offset:2px;box-shadow:none}
 }
 /* end C30 topbar */
+.arcane-app .plans-code input{flex:1;min-width:0}
+.arcane-app #plans-code-status{min-height:3em;overflow-wrap:anywhere}
 /* C30 sidebar */
 /* ---- C30 sidebar: the design canvas sidebar (AppMain) on the real shell. A 280px column holding one inset glass panel:
    wordmark; the New chat pill with its keycap and a search button (the visible twin of Ctrl K); Folders (a tree with a

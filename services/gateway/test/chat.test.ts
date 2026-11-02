@@ -60,21 +60,23 @@ test('insufficient balance is refused with 402 before any upstream call', async 
   } finally { await h.close(); }
 });
 
-test('a plan action covers one turn up to the allowance; extra usage comes from credits', async () => {
+test('API chat spends credits only and cannot substitute subscription actions', async () => {
   const h = await startHarness();
   try {
     const token = await signIn(h);
     setCredits(h, 0, ', plan_id = \'pro\', plan_actions = 2');
-    // Worst-case hold for 1000 output tokens: needs <= 50 allowance credits.
+    assert.equal((await ask(h, token, { turnId: 'turn-1', maxTokens: 1000 })).status,402,'available subscription actions do not fund API requests');
+    setCredits(h,1000);
     const first = await events(await ask(h, token, { turnId: 'turn-1', maxTokens: 1000 }));
-    assert.deepEqual(first.at(-1), { type: 'done', creditsUsed: 0, actionsUsed: 1 });
+    const charged=creditsFor(model,1000,200,12000);
+    assert.deepEqual(first.at(-1), { type: 'done', creditsUsed: charged, actionsUsed: 0 });
     const second = await events(await ask(h, token, { turnId: 'turn-1', maxTokens: 1000 }));
-    assert.deepEqual(second.at(-1), { type: 'done', creditsUsed: 0, actionsUsed: 0 }, 'same turn, no new action');
+    assert.deepEqual(second.at(-1), { type: 'done', creditsUsed: charged, actionsUsed: 0 }, 'same turn still spends only API credits');
     const balance = await (await fetch(h.base + '/v1/balance', { headers: bearer(token) })).json() as any;
-    assert.equal(balance.actionsRemaining, 1);
-    const left = (h.db.prepare("SELECT allowance_left FROM turns WHERE turn_id = 'turn-1'").get() as any).allowance_left;
-    assert.equal(left, 50 - 2 * creditsFor(model, 1000, 200, 12000));
-    assert.deepEqual(await (await fetch(h.base + '/v1/usage', { headers: bearer(token) })).json(), { period: '2026-10', creditsUsed: 0, actionsUsed: 1 });
+    assert.equal(balance.actionsRemaining, 2);
+    assert.equal(balance.credits,1000-2*charged);
+    assert.equal(h.db.prepare("SELECT allowance_left FROM turns WHERE turn_id = 'turn-1'").get(),undefined);
+    assert.deepEqual(await (await fetch(h.base + '/v1/usage', { headers: bearer(token) })).json(), { period: '2026-10', creditsUsed: 2*charged, actionsUsed: 0 });
   } finally { await h.close(); }
 });
 

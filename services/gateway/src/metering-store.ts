@@ -1,8 +1,8 @@
 /**
  * Credit reservations for streaming chat. Before a stream starts, the worst-case cost is held (moved out of the
- * balance); when it ends, the actual cost is charged and the rest refunded. A turn that starts with plan/pack actions
- * available consumes ONE action, which covers up to ACTION_CREDIT_ALLOWANCE credits of usage for that turnId; usage
- * beyond the allowance is paid from credits.
+ * balance); when it ends, the actual cost is charged and the rest refunded.
+ * API model requests use credits only. Subscription actions are independent.
+ * Legacy allowance holds can still settle/recover under their original terms.
  */
 import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
@@ -14,26 +14,18 @@ export interface Hold { id: string; accountId: string; turnId: string | null; fr
 export type ReserveResult = { ok: true; hold: Hold } | { ok: false; available: number; required: number };
 
 export function reserve(db: DatabaseSync, config: GatewayConfig, accountId: string, turnId: string | null, required: number, now = Date.now()): ReserveResult {
+  if(!Number.isSafeInteger(required)||required<0)throw new RangeError('Expected a non-negative whole credit reservation.');
+  void config;void turnId;
   return tx(db, () => {
     const account = getAccount(db, accountId);
     if (!account) return { ok: false, available: 0, required };
-    const turn = turnId ? db.prepare('SELECT allowance_left FROM turns WHERE account_id = ? AND turn_id = ?').get(accountId, turnId) as Row | undefined : undefined;
-    const consumeAction = !!turnId && !turn && account.plan_actions + account.pack_actions > 0 && config.actionCreditAllowance > 0;
-    const allowance = turn ? Number(turn.allowance_left) : consumeAction ? config.actionCreditAllowance : 0;
-    if (allowance + account.credits < required) {
-      audit(db, accountId, 'chat.refused_balance', { required, available: allowance + account.credits });
-      return { ok: false, available: allowance + account.credits, required };
+    if (account.credits < required) {
+      audit(db, accountId, 'chat.refused_balance', { required, available: account.credits });
+      return { ok: false, available: account.credits, required };
     }
-    const fromAllowance = Math.min(required, allowance), fromCredits = required - fromAllowance;
-    if (consumeAction) {
-      db.prepare(account.plan_actions > 0 ? 'UPDATE accounts SET plan_actions = plan_actions - 1 WHERE id = ?' : 'UPDATE accounts SET pack_actions = pack_actions - 1 WHERE id = ?').run(accountId);
-      db.prepare('INSERT INTO turns (account_id, turn_id, allowance_left, created_at) VALUES (?, ?, ?, ?)').run(accountId, turnId, allowance - fromAllowance, now);
-      db.prepare('INSERT INTO usage (account_id, period, credits, actions, request_id, created_at) VALUES (?, ?, 0, 1, ?, ?)').run(accountId, periodKey(new Date(now)), turnId, now);
-    } else if (turn && fromAllowance) {
-      db.prepare('UPDATE turns SET allowance_left = allowance_left - ? WHERE account_id = ? AND turn_id = ?').run(fromAllowance, accountId, turnId);
-    }
+    const fromAllowance = 0, fromCredits = required;
     if (fromCredits) db.prepare('UPDATE accounts SET credits = credits - ? WHERE id = ?').run(fromCredits, accountId);
-    const hold: Hold = { id: randomUUID(), accountId, turnId: (consumeAction || turn) ? turnId : null, fromAllowance, fromCredits, actionConsumed: consumeAction };
+    const hold: Hold = { id: randomUUID(), accountId, turnId: null, fromAllowance, fromCredits, actionConsumed: false };
     db.prepare('INSERT INTO holds (id, account_id, turn_id, from_allowance, from_credits, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(hold.id, accountId, hold.turnId, fromAllowance, fromCredits, now);
     return { ok: true, hold };
   });

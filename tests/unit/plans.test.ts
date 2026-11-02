@@ -264,7 +264,7 @@ test('real Edge: Plans & credits page and balance chip render, and buying says c
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, colorScheme: 'dark' });
   const page = await context.newPage(), errors: string[] = []; page.on('pageerror', (e: Error) => errors.push(e.message));
   await page.goto(origin + '/fixture');
-  await page.evaluate(async (token: string) => { const path: string = '/plans.js'; const m = await import(path); (window as any).plans = m.startPlans(document, { token: () => token, desktop: null }); }, token);
+  await page.evaluate(async (token: string) => { const path: string = '/plans.js'; const m = await import(path); (window as any).planOptions={token:()=>token,desktop:null};(window as any).plans = m.startPlans(document, (window as any).planOptions); }, token);
   await page.waitForFunction(() => !(document.getElementById('arcane-balance-chip') as HTMLElement).hidden);
   assert.equal(await page.locator('#arcane-balance-chip-value').textContent(), String(ledger.summary().month.used));
   assert.match(await page.locator('#arcane-balance-chip').getAttribute('aria-label') ?? '', /used this month/);
@@ -285,6 +285,22 @@ test('real Edge: Plans & credits page and balance chip render, and buying says c
   await page.locator('#plans-list .plans-buy-primary').click();
   await page.waitForFunction(() => !(document.getElementById('plans-notice') as HTMLElement).hidden);
   assert.match(await page.locator('#plans-notice').textContent() ?? '', /Checkout isn.t connected yet.*Nothing was charged/);
+  await page.evaluate(()=>{
+    const w=window as any;w.redemptions=[];w.planOptions.desktop={runtime:'desktop',billing:{redeemCode:async(code:string,requestId:string)=>{
+      w.redemptions.push({code,requestId});return w.redemptions.length===1?{version:1,state:'unknown'}:{version:1,state:'redeemed',granted:1000,balance:(w.redemptions.length-1)*1000,replayed:w.redemptions.length===2};
+    }}};
+  });
+  await page.locator('#plans-code-input').fill('test');
+  await page.locator('#plans-code-input').press('Enter');
+  await page.waitForFunction(()=>document.getElementById('plans-code-status')?.textContent?.includes('could not be confirmed'));
+  await page.locator('#plans-code-submit').click();
+  await page.waitForFunction(()=>document.getElementById('plans-code-status')?.textContent?.includes('Balance: 1,000'));
+  await page.locator('#plans-code-input').fill('test');await page.locator('#plans-code-input').press('Enter');
+  await page.waitForFunction(()=>document.getElementById('plans-code-status')?.textContent?.includes('Balance: 2,000'));
+  const redemptions=await page.evaluate(()=>(window as any).redemptions as {code:string;requestId:string}[]);
+  assert.equal(redemptions.length,3);assert.equal(redemptions[0]!.requestId,redemptions[1]!.requestId,'unknown reply retains exact grant request');
+  assert.notEqual(redemptions[1]!.requestId,redemptions[2]!.requestId,'deliberate reusable redemption receives a new request');
+  assert.equal(await page.locator('#plans-code-input').inputValue(),'');
   if (shots) {
     await page.locator('#settings-drawer').screenshot({ path: join(shots, 'plans-checkout-not-connected-dark.png') });
     await page.locator('#plans-credits').scrollIntoViewIfNeeded(); await page.locator('#settings-drawer').screenshot({ path: join(shots, 'plans-credits-dark.png') });

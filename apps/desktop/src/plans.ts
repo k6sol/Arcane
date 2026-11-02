@@ -158,6 +158,7 @@ interface ClaudeBridge { onEvent(listener: (event: unknown) => void): () => void
  * from trusted config, checks the allowlist, confirms in an Arcane dialog and opens the system browser. Fixed replies only.
  */
 export interface BillingBridge {
+  redeemCode?(code:string,requestId:string):Promise<unknown>;
   version?: number; status?(): Promise<unknown>; openCheckout(productId: string): Promise<unknown>;
   /** Connect Arcane account (gateway sign-in). The host owns the URL, the code dialog and the encrypted token. */
   connectAccount?(): Promise<unknown>; disconnectAccount?(): Promise<unknown>;
@@ -197,6 +198,7 @@ export function startPlans(doc: Document, options: PlansOptions) {
     const node = doc.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = text; return node;
   };
   let current: PlansState | null = null, pending = false, timer: number | null = null;
+  let redemption:{code:string;requestId:string}|null=null,redeeming=false;
   const headers = (json = false): Record<string, string> => ({ Authorization: 'Bearer ' + options.token(), ...(json ? { 'Content-Type': 'application/json' } : {}) });
 
   function notice(kind: 'info' | 'error' | 'ready', title: string, text: string): void {
@@ -417,6 +419,30 @@ export function startPlans(doc: Document, options: PlansOptions) {
   el('arcane-balance-chip')?.addEventListener('click', openSection);
   for (const control of Array.from(doc.querySelectorAll<HTMLElement>('[data-settings-section-target="' + PLANS_SECTION_ID + '"]'))) control.addEventListener('click', () => { void refresh(); });
   el('plans-refresh')?.addEventListener('click', () => { void refresh(); });
+  el('plans-code-form')?.addEventListener('submit',event=>{
+    event.preventDefault();if(redeeming)return;
+    const input=el<HTMLInputElement>('plans-code-input'),button=el<HTMLButtonElement>('plans-code-submit'),status=el('plans-code-status');
+    if(!input||!button||!status)return;
+    const code=input.value.trim();
+    if(!code||code.length>64){input.setAttribute('aria-invalid','true');status.textContent='Enter a credit code.';input.focus();return;}
+    input.removeAttribute('aria-invalid');
+    if(!redemption||redemption.code!==code)redemption={code,requestId:crypto.randomUUID()};
+    const request=redemption,bridge=options.desktop?.billing;
+    if(!bridge?.redeemCode){status.textContent='Open the Arcane desktop app to redeem a code.';return;}
+    redeeming=true;button.disabled=true;button.setAttribute('aria-busy','true');status.textContent='Redeeming code…';
+    void bridge.redeemCode(request.code,request.requestId).then(value=>{
+      const reply=obj(value);
+      if(reply?.state==='redeemed'&&reply.granted===1000&&int(reply.balance)){
+        status.textContent='1,000 API credits added. Balance: '+formatCount(reply.balance)+' credits. Subscription actions are unchanged.';
+        if(input.value.trim()===request.code)input.value='';redemption=null;void refresh();
+      }else if(reply?.state==='invalid-code'){status.textContent='This credit code is not valid.';input.setAttribute('aria-invalid','true');}
+      else if(reply?.state==='signed-out')status.textContent='Connect your Arcane account above to redeem this code.';
+      else if(reply?.state==='not-connected')status.textContent='The Arcane Credits service is not connected yet. No credits were added.';
+      else if(reply?.state==='balance-limit')status.textContent='Your credit balance cannot accept this grant.';
+      else status.textContent='The redemption could not be confirmed. Try again to check the same request; it cannot add credits twice.';
+    }).catch(()=>{status.textContent='The redemption could not be confirmed. Try again to check the same request; it cannot add credits twice.';})
+    .finally(()=>{redeeming=false;button.disabled=false;button.removeAttribute('aria-busy');});
+  });
 
   function stop(): void {
     if (timer !== null) view?.clearInterval(timer); timer = null; unsubscribe?.(); unsubscribe = null;

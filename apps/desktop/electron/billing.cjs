@@ -162,11 +162,11 @@ function createBilling(options) {
     try { await fs.rename(temporary, file); } catch (error) { await fs.rm(temporary, { force: true }).catch(() => {}); throw error; }
   }
   /** Small JSON POST to the gateway: no redirects, no cookies, 10 s timeout, reply capped at 4 KiB. */
-  async function gatewayPost(gateway, path, body, token) {
+  async function gatewayPost(gateway, path, body, token, requestId) {
     const url = new URL(gateway.base + path);
     if (url.origin !== gateway.origin || url.protocol !== 'https:') throw new Error(ACCOUNT_MESSAGES.unavailable);
     const response = await doFetch(url.href, { method: 'POST', redirect: 'error', credentials: 'omit', signal: AbortSignal.timeout(10000),
-      headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) }, body: JSON.stringify(body) });
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}), ...(requestId ? {'Idempotency-Key':requestId}: {}) }, body: JSON.stringify(body) });
     const reader = response.body?.getReader(); const chunks = []; let size = 0;
     if (reader) for (;;) {
       const { done, value } = await reader.read(); if (done) break;
@@ -264,6 +264,23 @@ function createBilling(options) {
     return Object.freeze({ ...(service ? reply('ready', MESSAGES.ready) : reply('not-connected', MESSAGES.notConnected)), account: await accountState(gateway) });
   }
 
+  async function redeemCode(code,requestId) {
+    const result=state=>Object.freeze({version:1,state});
+    if(typeof code!=='string'||code.length<1||code.length>64||typeof requestId!=='string'||! /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(requestId))return result('invalid-code');
+    if(!enabled)return result('not-connected');
+    try{
+      const {gateway}=await resolve();if(!gateway)return result('not-connected');
+      const token=await readToken(gateway);if(!token)return result('signed-out');
+      const response=await gatewayPost(gateway,'/v1/credits/redeem',{code},token,requestId),value=response.value;
+      if(response.status===200&&value&&value.granted===1000&&Number.isSafeInteger(value.balance)&&value.balance>=0&&typeof value.replayed==='boolean')
+        return Object.freeze({version:1,state:'redeemed',granted:1000,balance:value.balance,replayed:value.replayed});
+      if(response.status===401)return result('signed-out');
+      if(response.status===400&&value?.error==='invalid_code')return result('invalid-code');
+      if(response.status===409&&value?.error==='balance_limit')return result('balance-limit');
+      return result('unknown');
+    }catch{return result('unknown');}
+  }
+
   async function openCheckout(productId) {
     if (typeof productId !== 'string' || !OFFER_ID.test(productId)) return reply('unknown-offer', MESSAGES.unknownOffer);
     if (!enabled) return reply('not-connected', MESSAGES.notConnected);
@@ -294,6 +311,10 @@ function createBilling(options) {
 
   /** Renderer IPC: the trusted main window only; zero or one exact string argument; fixed replies. */
   function installIpc(ipcMain, { trusted }) {
+    ipcMain.handle('arcane:billing-redeem',async(event,...args)=>{
+      if(args.length!==2||typeof args[0]!=='string'||typeof args[1]!=='string'||!trusted(event))throw new Error(MESSAGES.unavailable);
+      return redeemCode(args[0],args[1]);
+    });
     ipcMain.handle('arcane:billing-status', async (event, ...args) => {
       if (args.length || !trusted(event)) throw new Error(MESSAGES.unavailable);
       return status();
@@ -311,7 +332,7 @@ function createBilling(options) {
       return disconnectAccount();
     });
   }
-  return Object.freeze({ status, openCheckout, connectAccount, disconnectAccount, accountCredential, installIpc });
+  return Object.freeze({ status, openCheckout, connectAccount, disconnectAccount, accountCredential, redeemCode, installIpc });
 }
 
 module.exports = { createBilling, BILLING_MESSAGES: MESSAGES, BILLING_STATES: STATES, BILLING_CONFIG_FILE: CONFIG_FILE, billingBase,

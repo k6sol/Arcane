@@ -804,6 +804,17 @@ const accountReply = value => {
   return { version: 1, state: value.state, message: value.message };
 };
 const billing = Object.freeze({ version: 1,
+  redeemCode: async (...args) => {
+    if(args.length!==2||typeof args[0]!=='string'||args[0].length<1||args[0].length>64||typeof args[1]!=='string'||! /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(args[1]))throw new Error(BILLING_UNAVAILABLE);
+    const value=await ipcRenderer.invoke('arcane:billing-redeem',args[0],args[1]);
+    if(!value||value.version!==1||!['redeemed','invalid-code','signed-out','not-connected','unknown','balance-limit'].includes(value.state))throw new Error(BILLING_UNAVAILABLE);
+    if(value.state==='redeemed'){
+      if(Object.keys(value).sort().join(',')!=='balance,granted,replayed,state,version'||value.granted!==1000||!Number.isSafeInteger(value.balance)||value.balance<0||typeof value.replayed!=='boolean')throw new Error(BILLING_UNAVAILABLE);
+      return{version:1,state:'redeemed',granted:1000,balance:value.balance,replayed:value.replayed};
+    }
+    if(Object.keys(value).sort().join(',')!=='state,version')throw new Error(BILLING_UNAVAILABLE);
+    return{version:1,state:value.state};
+  },
   status: async (...args) => {
     try { if (args.length) throw new Error(); return billingReply(await ipcRenderer.invoke('arcane:billing-status'), true); }
     catch { throw new Error(BILLING_UNAVAILABLE); }
