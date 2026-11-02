@@ -57,6 +57,18 @@ class ReviewImages(unittest.TestCase):
             with self.subTest(length=len(data)), self.assertRaises((ValueError, zlib.error)):
                 sync.validate_content('Assets/Reviews/Oak.png', data)
 
+    def test_metadata_is_refused_and_explicit_preparation_preserves_pixel_chunks(self):
+        clean = png()
+        for kind in (b'tEXt', b'zTXt', b'iTXt', b'eXIf'):
+            raw = clean[:-12] + chunk(kind, b'File\0private source location') + clean[-12:]
+            with self.subTest(kind=kind):
+                with self.assertRaisesRegex(ValueError, 'metadata'):
+                    sync.validate_content('Assets/Reviews/Oak.png', raw)
+                self.assertEqual(sync.prepare_review_png(raw), clean)
+        self.assertEqual(sync.prepare_review_png(clean), clean)
+        with self.assertRaises(ValueError):
+            sync.prepare_review_png(b'\0' * (4 * 1024 * 1024 + 1))
+
     def test_real_git_projection_preserves_exact_images_and_refuses_conflicts_before_any_write(self):
         with tempfile.TemporaryDirectory(prefix='arcane-vault-png-', dir=Path.cwd()) as temporary:
             base = Path(temporary).resolve()
@@ -100,6 +112,7 @@ class ReviewImages(unittest.TestCase):
                 project(tree(), True)
             self.assertEqual(projected.read_bytes(), local)
             self.assertEqual((vault / 'Home.md').read_bytes(), original_home)
+
             self.assertEqual((vault / sync.MANIFEST).read_bytes(), original_manifest)
             self.assertFalse((vault / 'New.md').exists())
             self.assertEqual(settings.read_bytes(), b'{"personal":true}\n')
@@ -109,6 +122,29 @@ class ReviewImages(unittest.TestCase):
             with self.assertRaises(ValueError):
                 project(tree(), True)
             self.assertEqual((vault / 'Home.md').read_bytes(), original_home)
+            image_path.write_bytes(png()[:-12] + chunk(b'tEXt', b'File\0private source location') + png()[-12:])
+            with self.assertRaisesRegex(ValueError, 'metadata'):
+                project(tree(), True)
+            self.assertEqual((vault / 'Home.md').read_bytes(), original_home)
+            self.assertEqual((vault / sync.MANIFEST).read_bytes(), original_manifest)
+
+    def test_preparation_cli_preserves_the_original_and_never_overwrites_a_destination(self):
+        with tempfile.TemporaryDirectory(prefix='arcane-review-cli-', dir=Path.cwd()) as temporary:
+            folder = Path(temporary)
+            source, target = folder / 'raw render.png', folder / 'prepared.png'
+            clean = png()
+            raw = clean[:-12] + chunk(b'tEXt', b'File\0private source location') + clean[-12:]
+            source.write_bytes(raw)
+            command = [sys.executable, str(SCRIPT.with_name('prepare-review-image.py')),
+                       '--input', str(source), '--output', str(target)]
+            result = subprocess.run(command, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(target.read_bytes(), clean)
+            self.assertEqual(source.read_bytes(), raw)
+            self.assertNotEqual(subprocess.run(command, capture_output=True).returncode, 0)
+            self.assertEqual(target.read_bytes(), clean)
+            self.assertEqual(source.read_bytes(), raw)
+
 
 
 if __name__ == '__main__':

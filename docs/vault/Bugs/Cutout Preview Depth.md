@@ -28,3 +28,5 @@ The controlled renders use the retained6m seed73129 scene, not a new export of t
 The preceding signede66 source has all seven original component jobs passing in [run41368322342](https://github.com/k6sol/Arcane/actions/runs/41368322342), plus both native jobs in [run41368322324](https://github.com/k6sol/Arcane/actions/runs/41368322324). Those results do not verify this newer preview-policy edit. The separate prepared chat7d update still awaits sufficient installation memory.
 
 [[Sessions/2026-11-02 Native Foliage Review]] ? [[Delivery/G05 Blender Quality]] ? [[Operations/Current State]]
+
+Shared review PNGs omit text/EXIF metadata; original evidence remains private. Pixel and color-management chunks are exact. Current copies do not include source-path tags. Earlier Git commits were not rewritten.

@@ -9,7 +9,7 @@ Signed implementation **e66c315** passes both original jobs in [native Blender r
 
 ## Current views
 
-These unchanged Windows-native review images are retained for the next quality iteration. The9m oak uses seed31, 16,000-triangle limit, leaf density0.7 and three branch levels. They are technical review output, not approved art.
+These Windows-native review images, with pixel/color chunks preserved and nonvisual metadata removed, are retained for the next quality iteration. The9m oak uses seed31, 16,000-triangle limit, leaf density0.7 and three branch levels. They are technical review output, not approved art.
 
 ![[Assets/Reviews/2026-11-02 Oak Hero.png]]
 

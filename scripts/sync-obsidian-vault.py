@@ -26,7 +26,7 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def validate_content(relative, data):
+def validate_content(relative, data, *, allow_metadata=False):
     """Permit bounded PNG review images; preserve the text-only skill boundary."""
     if relative.startswith('Assets/Reviews/') and relative.endswith('.png'):
         if not data.startswith(b'\x89PNG\r\n\x1a\n'):
@@ -56,6 +56,8 @@ def validate_content(relative, data):
                 if size or not image:
                     raise ValueError('Incomplete review PNG image: ' + relative)
                 ended = True
+            elif kind in (b'tEXt', b'zTXt', b'iTXt', b'eXIf') and not allow_metadata:
+                raise ValueError('Remove review PNG metadata before committing: ' + relative)
             elif not kind or kind[0] & 32 == 0 and kind != b'PLTE':
                 raise ValueError('Unsupported critical review PNG chunk: ' + relative)
             offset = end
@@ -69,6 +71,22 @@ def validate_content(relative, data):
             raise ValueError('Invalid or oversized review PNG pixels: ' + relative)
     elif b'\0' in data:
         raise ValueError('Binary content is outside the knowledge projection: ' + relative)
+
+
+def prepare_review_png(data):
+    """Strip metadata without decoding/re-encoding pixels; never used implicitly by sync."""
+    if len(data) > 4 * 1024 * 1024:
+        raise ValueError('Review PNG exceeds its bounded size.')
+    validate_content('Assets/Reviews/Prepared.png', data, allow_metadata=True)
+    parts, offset = [data[:8]], 8
+    while offset < len(data):
+        end = offset + 12 + struct.unpack_from('>I', data, offset)[0]
+        if data[offset + 4:offset + 8] not in (b'tEXt', b'zTXt', b'iTXt', b'eXIf'):
+            parts.append(data[offset:end])
+        offset = end
+    prepared = b''.join(parts)
+    validate_content('Assets/Reviews/Prepared.png', prepared)
+    return prepared
 
 
 def safe_target(vault, relative):
