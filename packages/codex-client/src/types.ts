@@ -30,6 +30,8 @@ export interface NativeConnectionLifecycle {
   failedInitializationClosed(): void;
 }
 export interface ConnectOptions {
+  /** Trusted host opt-in: read configured server names with plugins disabled, then verify actual tools at thread admission. */
+  discovery?: 'configuration';
   command: string; cwd: string; use: LocalUse; limits?: LimitOptions; arcaneMcp?: ArcaneMcpLaunchProfile; nativeAssetHooks?: NativeAssetHooks;
   connectionLifecycle?: NativeConnectionLifecycle;
   /** Host callback: text appended after the fixed task instructions on each Arcane thread start/resume (project memory). */

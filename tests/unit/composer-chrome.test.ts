@@ -4,8 +4,8 @@ import { codexContextWindow, composerContextLeft, composerEffortLevel, pyxSprite
 import type { TaskUsageView } from '../../apps/desktop/src/task-usage.js';
 import { claudeSubagentView } from '../../apps/desktop/src/claude-chat.js';
 
-test('closed model chip: effort becomes 1-3 pips; unknown efforts show none', () => {
-  assert.deepEqual(['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'High', 'x-high'].map(composerEffortLevel), [1, 1, 2, 3, 3, 3, 3, 3]);
+test('closed model chip: effort becomes 1-6 distinct pips; unknown efforts show none', () => {
+  assert.deepEqual(['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'High', 'x-high', 'ultra'].map(composerEffortLevel), [1, 1, 2, 3, 4, 5, 3, 4, 6]);
   assert.deepEqual(['', 'auto', null, undefined].map(composerEffortLevel), [0, 0, 0, 0]);
 });
 

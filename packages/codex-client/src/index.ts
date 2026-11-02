@@ -182,9 +182,10 @@ export async function connectCodexClient(options: ConnectOptions): Promise<Codex
   };
   const closeConstructed=async(session:CodexSession):Promise<void>=>{await session.close();constructed.delete(session);};
   try {
-  exact(options, ['command','cwd','use','limits','arcaneMcp','nativeAssetHooks','projectInstructions','connectionLifecycle']);
+  exact(options, ['command','cwd','use','limits','arcaneMcp','nativeAssetHooks','projectInstructions','connectionLifecycle','discovery']);
   if (options.projectInstructions !== undefined && typeof options.projectInstructions !== 'function') fail('ARGUMENTS', 'Project instructions must be a host callback.');
   const projectInstructions = options.projectInstructions;
+  if(options.discovery!==undefined&&options.discovery!=='configuration')fail('ARGUMENTS','Unknown discovery mode.');
   const hookField = Object.getOwnPropertyDescriptor(options, 'nativeAssetHooks');
   if (hookField && !Object.hasOwn(hookField, 'value') || !hookField && 'nativeAssetHooks' in options) fail('ARGUMENTS', 'Native asset hooks must be an own data option.');
   const hooks = hookField?.value === undefined ? undefined : validateNativeAssetHooks(hookField.value);
@@ -196,6 +197,8 @@ export async function connectCodexClient(options: ConnectOptions): Promise<Codex
   const profile = hooks ? { ...options.arcaneMcp! } : options.arcaneMcp;
   let processSpec = await prepareCodexProcess(executable, workspace, profile);
   const discoverySpec = profile ? prepareCodexDiscoveryProcess(executable, workspace) : processSpec;
+  const configurationDiscovery=!!profile&&options.discovery==='configuration';
+  if(configurationDiscovery){discoverySpec.args.push('-c','features.plugins=false','-c','features.apps=false');processSpec.args.push('-c','features.plugins=false','-c','features.apps=false');}
   let session = allocate(()=>new CodexSession(discoverySpec, bounds, 'installed-cli', profile ? 'arcane-only' : 'native-config'));
   let hooksAttached = false;
   let framePhase: NativeConnectFramePhase = profile ? 'discovery-initialize' : 'direct-initialize';
@@ -205,7 +208,9 @@ export async function connectCodexClient(options: ConnectOptions): Promise<Codex
       // Discovery may inventory inherited servers, but never receives Arcane authority.
       // Isolate only the final child, leaving the user's native configuration untouched.
       framePhase = 'discovery-inventory';
-      const inventory = await session.inspectMcpServers({ initiatedBy: 'human' });
+      const configuredNames=configurationDiscovery?await session.discoveryServerNames():null;
+      // A declared name supplies only a disable override, never a runtime capability or isolation proof.
+      const inventory = configuredNames===null?await session.inspectMcpServers({ initiatedBy: 'human' }):configuredNames.map(name=>({name,runtimeStatus:'disabled',toolNames:[],toolsError:false,plugin:false,pluginId:null}));
       const arcane = inventory.find(server => server.name === 'arcane');
       // Connection-level inventory has no thread runtime in the real CLI, so null
       // means unavailable, not enabled. This launch is host-constructed, secret-free
@@ -226,6 +231,7 @@ export async function connectCodexClient(options: ConnectOptions): Promise<Codex
         if (agentToken === profile.agentToken) fail('MCP_PROFILE', 'Native asset hooks require a fresh final bearer.');
         // Rebuild through the same trusted validator; never reuse the generic profile's bearer.
         processSpec = await prepareCodexProcess(executable, workspace, { ...profile, agentToken });
+        if(configurationDiscovery)processSpec.args.push('-c','features.plugins=false','-c','features.apps=false');
         if (['mcp_servers.arcane.command=', 'mcp_servers.arcane.args='].some(key =>
             processSpec.args.find(arg => arg.startsWith(key)) !== validatedSpec.args.find(arg => arg.startsWith(key))) ||
             processSpec.env.ARCANE_DAEMON_URL !== validatedSpec.env.ARCANE_DAEMON_URL) {

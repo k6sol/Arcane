@@ -94,7 +94,7 @@ button,input{font:inherit;color:inherit;margin:0}
 .pyx-model-divider{flex:none;width:1px;height:14px;background:var(--pyx-divider)}
 .pyx-model-pips{display:flex;flex:none;gap:3px}
 .pyx-pip{width:4px;height:4px;border-radius:1px;background:var(--pyx-red)}
-.pyx-model-pips[data-level="1"]>.pyx-pip:nth-child(n+2),.pyx-model-pips[data-level="2"]>.pyx-pip:nth-child(3){background:var(--pyx-pip-off)}
+.pyx-model-pips>.pyx-pip[data-active="false"]{background:var(--pyx-pip-off)}
 .pyx-model-chevron{flex:none;fill:none;stroke:var(--pyx-ink-meta);stroke-width:2.6;stroke-linecap:round;stroke-linejoin:round}
 
 .pyx-stop{display:flex;align-items:center;gap:6px;flex:none;height:40px;padding:0 12px 0 10px;border-radius:13px;border:1px solid var(--pyx-stop-line);background:var(--pyx-stop);color:#fff;

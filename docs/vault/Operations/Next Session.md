@@ -22,6 +22,14 @@ The NEW startup connect failed after roughly50seconds with PROCESS_EXIT_UNCONFIR
 
 The newer5ab49fb local-context commit now has all seven original component checks successful in run41510761647, but it was not included in the frozenf8 package. [[Bugs/Action Meter Labels]] is a newer follow-up:500 left replaces ambiguous0 /500 compact usage labels; strict660 and all21 frozen Plans checks including Edge pass. Remaining-action labels are not part of installedf8 either.
 
+## Startup latency and reasoning milestone
+
+[[Bugs/Provider Startup Latency]] now traces the real desktop-selected executable separately from the editor environment. Its original catalog scan took39.656seconds; the new configuration path takes about2.6seconds in separate original metadata-only checks, including the final native asset-hook profile. All those observers completed and must not be replayed. They prove original process/stream closure, subscription and eight models, not customer Send or Studio behavior. The actual f8 failed request/custody remains retained and unreviewed.
+
+Production now opts into config/read server-name discovery with child-local plugins/apps disabled. It neither rewrites user configuration nor exposes raw config. Only explicit method-not-found permits the older catalog path. Actual final thread/tool isolation and all existing frame/server/tool/time/close guards remain. Strict660,294 frozen broad cases and final126 guard/bootstrap/inventory/shutdown cases pass; the first38-case UI run's two failures remain recorded. [[Bugs/Reasoning Controls]] fixes the six-level dots and keeps a saved selection visible only while no native snapshot is available. A fresh catalog that excludes that choice still requires a supported choice.
+
+Next: observe the signed follow-up commit's original GitHub component checks, trigger/observe matching-source native artifacts if needed, and prepare a new exact source-bound desktop candidate only after required original jobs pass. Do not replay completed f8 delivery helpers or its original failed connection. The installed f8 app retains the exact unsent draft locally. This follow-up is not installed yet. Do not operate Roblox Studio or claim the original Error440 repaired until the new actual packaged connection is accepted.
+
 ## Preserve original outcomes
 
 [[Bugs/Native Discovery Shutdown]] is signede5aea4c. Controlled245 cases and separately owned actual installed-CLI discovery/full-factory metadata checks pass with subscription/eight models, original child/stream closure and no kills. They sent no thread, model prompt or Studio call. Both metadata attempts are complete; never replay them. The first factory observer stopped before spawn on normalized path spelling and remains recorded. These checks do not clear the older failed app custody or accept customer Send.

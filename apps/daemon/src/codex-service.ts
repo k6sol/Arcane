@@ -252,7 +252,7 @@ export function createCodexService(options: CodexServiceOptions) {
     try{const command = await locateNativeCli('codex');
     if (!command) throw new CodexClientError('CLI_MISSING', 'The native Codex executable is unavailable.');
     const profile=options.arcaneMcp?.();entered=true;
-    return await connectCodexClient({ command, cwd: projectPath, use: 'personal-local', ...(profile ? { arcaneMcp: profile } : {}), ...(nativeAssetHooks ? {nativeAssetHooks} : {}),...(connectionLifecycle?{connectionLifecycle}:{}),
+    return await connectCodexClient({ command, cwd: projectPath, use: 'personal-local', discovery:'configuration', ...(profile ? { arcaneMcp: profile } : {}), ...(nativeAssetHooks ? {nativeAssetHooks} : {}),...(connectionLifecycle?{connectionLifecycle}:{}),
       // Project memory (ARCANE.md) is read fresh per thread start/resume and follows the fixed task instructions.
       projectInstructions: async (cwd: string) => projectMemorySection((await readProjectMemory(cwd)).text) + learnedPreferenceSection(await options.learnedContext?.().catch(() => '')) });
     }catch(error){if(!entered)try{connectionLifecycle?.failedInitializationClosed();}catch{/* Custody latches the fault; preserve the original no-start failure. */}throw error;}

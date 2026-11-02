@@ -788,3 +788,18 @@ test('browser active Stop modes respect missing turn IDs, cancellation, freshnes
   assert.equal(await page.locator('#codex-submit').isDisabled(), false);
   assert.deepEqual(f.posts.map(input => input.action), ['turn-interrupt']);
 });
+
+
+test('browser saved model label remains visible while the provider is disconnected without enabling native work', { skip: !browserModule, timeout: 30000 }, async t => {
+  const initial=state();initial.snapshot!.thread=null;delete initial.workflowModel;
+  const f=await browserFixture(t,initial),{page}=f;
+  await page.evaluate(()=>(window as any).fixtureChat.enableChatTabs());
+  await f.choose('fixture-alpha');
+  const disconnected=f.observed();disconnected.snapshot=null;f.set(disconnected);await f.refresh();
+  assert.equal(await page.locator('#codex-model-label').textContent(),'fixture-alpha');
+  assert.equal(await page.locator('#codex-effort-label').textContent(),'low');
+  assert.match(await page.locator('#codex-model-trigger').getAttribute('aria-label')??'',/Saved Codex model: fixture-alpha.*Waiting for connection verification/);
+  assert.equal(await page.locator('#codex-model-trigger').isDisabled(),true);
+  assert.equal(await page.locator('#codex-submit').isDisabled(),true);
+  assert.equal(f.posts.length,0);
+});

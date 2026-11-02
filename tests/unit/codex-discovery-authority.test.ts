@@ -31,6 +31,7 @@ type HistoryAction = 'non-human' | 'foreign-thread' | 'foreign-session' | 'inval
 type HistoryResponse = 'wrong-thread' | 'wrong-session' | 'wrong-project';
 type ParentRetirement='before-launch'|'discovery-init'|'discovery-inventory'|'final-init'|'thread-inventory'|'turn-inventory'|'before-write'|'reentrant-abort'|'active'|'after-connect'|'mutated-owner'|'joined-close';
 interface FixtureOptions {
+  configuration?: 'valid'|'unsupported'|'apps-on'|'plugins-on'|'arcane-active'|'unsafe-name'|'malformed';
   framePhase?: 'discovery-initialize' | 'discovery-inventory' | 'final-initialize';
   profile?: boolean; mode?: Mode; thread?: boolean; history?: boolean; invalidProfile?: boolean;
   historyAction?: HistoryAction; historyResponse?: HistoryResponse; repeatHistory?: boolean;
@@ -88,6 +89,13 @@ createInterface({ input: process.stdin }).on('line', line => {
     (mode==='proposal-discovery-account'&&launch===1||mode==='proposal-final-account'&&launch===2)?'different@example.test':'synthetic@example.test' }, requiresOpenaiAuth: true });
   if (method === 'model/list') return result(id, { data: [{ id: 'picker-fixture', model: 'fixture-model', displayName: 'Fixture',
     supportedReasoningEfforts: [{ reasoningEffort: 'low' }] }], nextCursor: null });
+  if(method==='config/read'){
+    if(scenario.configuration==='unsupported')return send({id,error:{code:-32601,message:'Synthetic method unavailable'}});
+    const config={features:{plugins:scenario.configuration==='plugins-on',apps:scenario.configuration==='apps-on'},mcp_servers:{arcane:{enabled:scenario.configuration==='arcane-active',enabled_tools:[]},inherited:{env:{PRIVATE_SYNTHETIC:'DO_NOT_PUBLISH_CONFIGURATION_VALUE'}}}};
+    if(scenario.configuration==='unsafe-name')config.mcp_servers['unsafe.dot']={};
+    if(scenario.configuration==='malformed')config.mcp_servers=[];
+    return result(id,{config,origins:{},layers:null});
+  }
   if (method === 'mcpServerStatus/list') {
     if (params.cursor == null) inventoryReads++;
     if (launch === 1 && mode === 'inventory-failure') return reject(id);
@@ -213,7 +221,7 @@ try {
   };
   client = scenario.proposal ? await connectCodexProposalWorker({...options,
     accountIdentity:(await import('node:crypto')).createHash('sha256').update('codex-reported-account\0synthetic@example.test').digest('hex'),
-    selection:{model:'fixture-model',effort:'low'},owner}) : await connectCodexClient({...options,...(scenario.profile ? { arcaneMcp: profile } : {}),...(scenario.lifecycle?{connectionLifecycle:lifecycle}:{})});
+    selection:{model:'fixture-model',effort:'low'},owner}) : await connectCodexClient({...options,...(scenario.profile ? { arcaneMcp: profile } : {}),...(scenario.lifecycle?{connectionLifecycle:lifecycle}:{}),...(scenario.configuration?{discovery:'configuration'}:{})});
   record({ event: 'connected', snapshot: client.snapshot(), node: await realpath(process.execPath) });
   if(scenario.proposal) {
     record({event:'surface',keys:Object.keys(client)});
@@ -793,4 +801,40 @@ test('actual original '+framePhase+' overflow retains finite phase evidence with
   for(const method of ['thread/start','thread/resume','turn/start','turn/steer'])assert.equal(calls(records,method).length,0);
   assertSecretFree(events(records,'child')[0]!);
   assert.deepEqual(Object.keys(frame).sort(),['schemaVersion','direction','byteCountKind','byteCount','frameLimitBytes','pendingMethodMask','pendingCount','connectPhase'].sort());
+});
+
+
+test('configuration discovery reads only configured names, disables child plugins and still checks effective tools before native work',async t=>{
+  const {records}=await fixture(t,{configuration:'valid',thread:true});
+  const children=events(records,'child');assert.equal(children.length,2);
+  assertSecretFree(children[0]!);
+  for(const child of children){assert.ok(child.args!.includes('features.plugins=false'));assert.ok(child.args!.includes('features.apps=false'));}
+  assert.equal(calls(records,'config/read').length,1);
+  assert.equal(calls(records,'config/read')[0]!.params!.includeLayers,false);
+  assert.equal(calls(records,'mcpServerStatus/list').filter(row=>row.launch===1).length,0,'No inherited tool catalog is contacted during discovery');
+  assert.ok(calls(records,'mcpServerStatus/list').some(row=>row.launch===2&&row.params!.threadId==='fixture-thread'),'Actual final thread isolation is still required');
+  assert.ok(children[1]!.args!.some(arg=>arg.startsWith('mcp_servers.inherited=')));
+  assert.equal(JSON.stringify(records).includes('DO_NOT_PUBLISH_CONFIGURATION_VALUE'),false);
+  assert.equal(events(records,'configured')[0]!.snapshot!.mcpIsolation,'arcane-only-verified');
+});
+
+test('unsupported configuration read falls back only after an explicit method-not-found response',async t=>{
+  const {records}=await fixture(t,{configuration:'unsupported'});
+  assert.equal(events(records,'connected').length,1);
+  assert.equal(calls(records,'config/read').length,1);
+  assert.ok(calls(records,'mcpServerStatus/list').some(row=>row.launch===1));
+});
+
+for(const configuration of ['plugins-on','apps-on','arcane-active','unsafe-name','malformed'] as const)test('configuration discovery refuses '+configuration+' without final authority or catalog retry',async t=>{
+  const {records}=await fixture(t,{configuration});
+  assert.equal(events(records,'child').length,1);
+  assert.equal(events(records,'connected').length,0);
+  assert.equal(calls(records,'mcpServerStatus/list').length,0);
+});
+
+test('configuration names do not certify runtime isolation or admit an inherited final tool',async t=>{
+  const {records}=await fixture(t,{configuration:'valid',mode:'final-inherited',thread:true});
+  assert.equal(events(records,'configured').length,0);
+  assert.equal(calls(records,'turn/start').length,0);
+  assert.ok(calls(records,'mcpServerStatus/list').some(row=>row.launch===2));
 });

@@ -297,6 +297,14 @@ test('real Edge Pyx bar: pop open/close, ×, Escape, moving, no clipping, moods,
     assert.equal((await calls(page)).some((c:unknown[])=>c[0]==='submit'||c[0]==='expandToMain'),false);await page.keyboard.press('Escape');
     await page.locator('#pyx-pet').click();assert.deepEqual((await calls(page)).at(-1),['expandToMain']);
     assert.deepEqual(errors, []); assert.equal(await page.evaluate(() => (window as any).__csp ?? 0), 0, 'no CSP violations');
+    for(const [effort,level] of [['high',3],['xhigh',4],['max',5],['ultra',6]] as const){
+      await page.evaluate((effort: string)=>(window as any).__pyx.push({phase:'idle',provider:'codex',model:'Sol',effort}),effort);
+      assert.equal(await page.locator('#pyx-model-pips .pyx-pip').count(),6);
+      assert.equal(await page.locator('#pyx-model-pips .pyx-pip[data-active=true]').count(),level);
+      const colors=await page.locator('#pyx-model-pips .pyx-pip').evaluateAll((els: Element[])=>els.map((el: Element)=>getComputedStyle(el).backgroundColor));
+      assert.equal(colors.filter((color: string)=>color==='rgb(229, 50, 63)').length,level);
+    }
+    await page.evaluate(()=>(window as any).__pyx.push({phase:'idle',provider:'claude',model:'Opus 5.5',modelTitle:'Claude Opus 5.5',effort:'high'}));
     await context.close();
   }
 

@@ -154,10 +154,10 @@ export function readPyxSuggestions(value: unknown): PyxSuggestion[] {
   }
   return out;
 }
-/** Closed-chip effort pips, as the main composer: low or minimal 1, medium 2, high and above 3; unknown 0 (no pips). */
-export function pyxEffortLevel(effort: string | null | undefined): 0 | 1 | 2 | 3 {
+/** Closed-chip effort pips, as the main composer: low or minimal 1, medium 2, high 3, extra high 4, max 5, ultra 6; unknown 0 (no pips). */
+export function pyxEffortLevel(effort: string | null | undefined): 0 | 1 | 2 | 3 | 4 | 5 | 6 {
   const value = String(effort ?? '').trim().toLowerCase().replace(/[\s_-]+/g, '');
-  return value === 'minimal' || value === 'low' ? 1 : value === 'medium' ? 2 : ['high', 'xhigh', 'extrahigh', 'max'].includes(value) ? 3 : 0;
+  return value === 'minimal' || value === 'low' ? 1 : value === 'medium' ? 2 : value === 'high' ? 3 : ['xhigh', 'extrahigh'].includes(value) ? 4 : value === 'max' ? 5 : value === 'ultra' ? 6 : 0;
 }
 /** Mood priority, as on the composer perch: typing > alert > working > done (held 1.2 s) > idle. */
 export function pyxMood(input: { phase: PyxPhase; typing: boolean; doneUntil: number; now: number }): PyxMood {
@@ -314,6 +314,8 @@ export function startPyxBar(doc: Document, options: PyxBarOptions = {}): PyxBarC
       chipLogo.toggleAttribute('hidden', !provider);
     }
     chipName.textContent = state.model ?? 'Choose model';
+    if(pips.children.length!==6){pips.replaceChildren(...Array.from({length:6},()=>{const pip=doc.createElement('span');pip.className='pyx-pip';return pip;}));}
+    Array.from(pips.children).forEach((pip,index)=>{(pip as HTMLElement).dataset.active=String(index<level);});
     pips.dataset.level = String(level); pips.hidden = level === 0; pips.title = level && state.effort ? 'Reasoning: ' + state.effort.toLowerCase() : '';
     const divider = doc.getElementById('pyx-model-divider'); if (divider) divider.hidden = level === 0;
     chip.setAttribute('aria-label', pyxModelLabel(state));

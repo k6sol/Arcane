@@ -3,8 +3,8 @@ import { isAbsolute } from 'node:path';
 import { CODEX_LIMITS, CodexClientError, type Limits } from './types.js';
 import { fail, object } from './validation.js';
 
-type Method = 'initialize' | 'account/read' | 'account/rateLimits/read' | 'model/list' | 'thread/start' | 'thread/resume' | 'turn/start' | 'turn/steer' | 'turn/interrupt' | 'mcpServerStatus/list';
-const METHODS = new Set<Method>(['initialize', 'account/read', 'account/rateLimits/read', 'model/list', 'thread/start', 'thread/resume', 'turn/start', 'turn/steer', 'turn/interrupt', 'mcpServerStatus/list']);
+type Method = 'config/read' | 'initialize' | 'account/read' | 'account/rateLimits/read' | 'model/list' | 'thread/start' | 'thread/resume' | 'turn/start' | 'turn/steer' | 'turn/interrupt' | 'mcpServerStatus/list';
+const METHODS = new Set<Method>(['config/read', 'initialize', 'account/read', 'account/rateLimits/read', 'model/list', 'thread/start', 'thread/resume', 'turn/start', 'turn/steer', 'turn/interrupt', 'mcpServerStatus/list']);
 interface Pending { resolve(value: unknown): void; reject(error: CodexClientError): void; timer: NodeJS.Timeout; dispatched: boolean; method: Method }
 const FRAME_METHODS: readonly Method[] = ['initialize', 'account/read', 'account/rateLimits/read', 'model/list', 'thread/start', 'thread/resume', 'turn/start', 'turn/steer', 'turn/interrupt', 'mcpServerStatus/list'];
 const CONNECT_FRAME_PHASES = ['direct-initialize', 'discovery-initialize', 'discovery-inventory', 'discovery-close', 'final-initialize'] as const;
@@ -182,6 +182,8 @@ export class JsonlTransport {
   #frameFailure(direction: 'inbound' | 'outbound', bytes: number): CodexClientError {
     const error = new CodexClientError('FRAME_LIMIT', direction === 'inbound' ? 'Inbound frame exceeded its bound.' : 'Outbound frame exceeded its bound.');
     try {
+      // Configuration replies can contain private values. Keep their original refusal, without attaching public frame metadata.
+      if([...this.#pending.values()].some(pending=>pending.method==='config/read'))return error;
       let mask = 0;
       for (const pending of this.#pending.values()) mask |= 1 << FRAME_METHODS.indexOf(pending.method);
       const count = this.#pending.size, limit = this.bounds.maxFrameBytes;

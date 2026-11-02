@@ -69,3 +69,7 @@ Work in Arcane only; do not operate Roblox Studio or work on ArchLiquid. Preserv
 ## Latest installed checkpoint
 
 [[Sessions/2026-11-02 Local Chat Desktop Delivery]] records verifiedf8 installation/reopen and exact unsent draft restoration. A new native startup connection failed with Error440; native chat acceptance remains open. [[Bugs/Action Meter Labels]] clarifies remaining actions in newer source, with21 frozen Plans cases passing. Newer5ab local-context original component run41510761647 is fully successful, separate from installedf8.
+
+## Startup and reasoning follow-up
+
+[[Bugs/Provider Startup Latency]] records the actual desktop CLI mismatch,39.656-second catalog discovery and approximately2.6-second configuration-discovery checks. [[Bugs/Reasoning Controls]] adds distinct High/Extra high/Max/Ultra dots and saved selection during connection. Strict660 and294 frozen native/browser cases pass before the final additional built-in-app fence; the final126 guard/lifecycle cases also pass. Packaged delivery and customer Send must still be verified separately. Installedf8 still has the original new Error440. Do not retry or clear that custody to simulate acceptance.

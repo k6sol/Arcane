@@ -88,7 +88,7 @@ test('the bubble reports and asks what next; it never invents a reply', () => {
 });
 
 test('model chip: pips like the main composer, an honest label and the real provider marks', () => {
-  assert.deepEqual(['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'x-high', 'turbo', null].map(pyxEffortLevel), [1, 1, 2, 3, 3, 3, 3, 0, 0]);
+  assert.deepEqual(['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'x-high', 'ultra', 'turbo', null].map(pyxEffortLevel), [1, 1, 2, 3, 4, 5, 4, 6, 0, 0]);
   assert.equal(pyxModelLabel(state({ provider: 'claude', model: 'Opus 5.5', effort: 'high' })), 'Model: Claude Opus 5.5, reasoning high. Change model');
   assert.equal(pyxModelLabel(state({ provider: 'codex', model: 'gpt-5.5', modelTitle: 'GPT-5.5', effort: 'medium' })), 'Model: GPT-5.5, reasoning medium. Change model');
   assert.equal(pyxModelLabel(state({ provider: 'claude', model: 'Opus 5.5', effort: 'turbo' })), 'Model: Claude Opus 5.5. Change model');

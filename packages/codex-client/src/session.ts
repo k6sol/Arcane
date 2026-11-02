@@ -296,6 +296,22 @@ export class CodexSession {
       throw error;
     }
   }
+  /** Factory-only configuration discovery: no inherited server is contacted and no config values escape. */
+  async discoveryServerNames():Promise<string[]|null>{
+    this.#ensureReady();
+    if(this.mcpPolicy!=='arcane-only'||this.#thread||this.#historyRead||this.#turnOperation)fail('STATE','Configuration discovery requires an unconfigured Arcane connection.');
+    let response:unknown;
+    try{response=await this.#transport.request('config/read',{includeLayers:false,cwd:this.#cwd});}
+    catch(error){if(error instanceof CodexClientError&&error.code==='REMOTE_REJECTED'&&error.remoteCode===-32601)return null;throw error;}
+    const config=object(object(response).config),features=object(config.features),servers=object(config.mcp_servers);
+    if(features.plugins!==false||features.apps!==false)fail('MCP_ISOLATION','Discovery plugins and built-in apps were not disabled.');
+    const names=Object.keys(servers);
+    if(!names.length||names.length>32||!names.includes('arcane')||names.some(name=>!/^[A-Za-z0-9_-]{1,256}$/.test(name)))fail('MCP_ISOLATION','Configured server names cannot be safely isolated.');
+    for(const name of names)object(servers[name]);
+    const arcane=object(servers.arcane);
+    if(arcane.enabled!==false||!Array.isArray(arcane.enabled_tools)||arcane.enabled_tools.length)fail('MCP_ISOLATION','Configuration discovery must expose no Arcane tools.');
+    return names;
+  }
   /** Bounded native MCP inventory only; does not execute a tool, login, or expose endpoints/auth material. */
   async inspectMcpServers(action: HumanAction & {threadId?:string}): Promise<McpInventoryRow[]> {
     exact(action,['initiatedBy','threadId']);human({initiatedBy:action.initiatedBy});this.#ensureReady();

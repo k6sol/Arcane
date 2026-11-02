@@ -4188,12 +4188,14 @@ export class CodexChat {
   private renderPicker() {
     const popover = this.picker(); if (!popover || this.surfaceYielded) return;
     const snapshot = this.snapshot(), selection = this.displaySelection();
-    const reported = snapshot?.models.find(model => model.model === selection?.model);
-    this.text('codex-model-label', reported?.displayName ?? 'Choose model');
-    this.text('codex-effort-label', selection?.effort ?? ''); this.el('codex-effort-label').hidden = !selection;
+    // Saved presentation is available before native discovery; it never enables selection or Send.
+    const remembered = selection ?? (!snapshot ? this.tabs?.active()?.selection : null) ?? null;
+    const reported = snapshot?.models.find(model => model.model === remembered?.model);
+    this.text('codex-model-label', reported?.displayName ?? remembered?.model ?? 'Choose model');
+    this.text('codex-effort-label', remembered?.effort ?? ''); this.el('codex-effort-label').hidden = !remembered;
     const trigger = this.el<HTMLButtonElement>('codex-model-trigger'); trigger.disabled = !this.pickerCanOpen();
     trigger.setAttribute('aria-busy', String([...this.pending.values()].some(input => input.action === 'select')));
-    trigger.setAttribute('aria-label', this.api.safe(selection ? 'Codex reported model: ' + selection.model + ', effort: ' + selection.effort : 'Choose Codex model and effort'));
+    trigger.setAttribute('aria-label', this.api.safe(selection ? 'Codex reported model: ' + selection.model + ', effort: ' + selection.effort : remembered ? 'Saved Codex model: ' + remembered.model + ', effort: ' + remembered.effort + '. Waiting for connection verification.' : 'Choose Codex model and effort'));
     this.text('codex-model-picker-status', this.uncertain.size ? 'Check the unconfirmed request in the conversation first.' :
       this.pending.size ? 'Awaiting native acknowledgement.' : !snapshot ? 'Connect Codex to read its reported models.' :
       !this.canSelectModel() ? this.modelBlockReason()! :
@@ -4256,7 +4258,7 @@ export class CodexChat {
     if(reasoning){reasoning.textContent=this.api.safe('Reasoning'+(effort?' · '+effort:''));reasoning.disabled=!enabled||!snapshot?.models.some(item=>item.model===model);}
     this.el<HTMLButtonElement>('codex-picker-apply').disabled = this.el<HTMLButtonElement>('codex-select').disabled;
     const selected=snapshot?.models.find(item=>item.model===model);
-    const displayEffort=effort?effort.charAt(0).toUpperCase()+effort.slice(1):'Reasoning';
+    const displayEffort=/^(x[ -]?high|extra[ -]?high)$/i.test(effort)?'Extra high':effort?effort.charAt(0).toUpperCase()+effort.slice(1):'Reasoning';
     const effortValue=this.doc.getElementById('codex-picker-effort-value');if(effortValue)effortValue.textContent=this.api.safe(displayEffort);
     const modelValue=this.doc.getElementById('codex-picker-current-model-label');if(modelValue)modelValue.textContent=this.api.safe(selected?.displayName??'Choose model');
     const slider=this.doc.getElementById('codex-picker-effort-slider') as HTMLInputElement|null;

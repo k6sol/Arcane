@@ -201,10 +201,10 @@ const PYX_STATUS: Record<Exclude<PyxMood, 'alert'>, string> = { idle: 'Pyx is re
 const CONTEXT_RING = 34.56; // 2πr for r = 5.5
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
-/** Closed-chip effort pips: low 1, medium 2, high and above 3; unknown efforts show no pips. */
-export function composerEffortLevel(effort: string | null | undefined): 0 | 1 | 2 | 3 {
+/** Closed-chip effort pips: low 1, medium 2, high 3, extra high 4, max 5, ultra 6; unknown efforts show no pips. */
+export function composerEffortLevel(effort: string | null | undefined): 0 | 1 | 2 | 3 | 4 | 5 | 6 {
   const value = String(effort ?? '').trim().toLowerCase().replace(/[\s_-]+/g, '');
-  return value === 'minimal' || value === 'low' ? 1 : value === 'medium' ? 2 : ['high', 'xhigh', 'extrahigh', 'max'].includes(value) ? 3 : 0;
+  return value === 'minimal' || value === 'low' ? 1 : value === 'medium' ? 2 : value === 'high' ? 3 : ['xhigh', 'extrahigh'].includes(value) ? 4 : value === 'max' ? 5 : value === 'ultra' ? 6 : 0;
 }
 /** Whole percent of the context window left, or null without a reported window. */
 export function composerContextLeft(context: ComposerContextWindow | null | undefined): number | null {
@@ -376,14 +376,15 @@ export function startComposerChrome(doc: Document, options: ComposerChromeOption
       try { const next = options.providerLogo(provider); if (logo) logo.replaceWith(next); else trigger.prepend(next); } catch { /* The model name remains. */ }
     }
     let pips = trigger.querySelector<HTMLElement>(':scope > .effort-pips');
-    if (!pips) { pips = make('span', 'effort-pips'); pips.setAttribute('aria-hidden', 'true'); pips.append(make('span', 'effort-pip'), make('span', 'effort-pip'), make('span', 'effort-pip')); effort.before(pips); }
+    if (!pips) { pips = make('span', 'effort-pips'); pips.setAttribute('aria-hidden', 'true'); pips.append(...Array.from({length:6},()=>make('span','effort-pip'))); effort.before(pips); }
     const level = effort.hidden ? 0 : composerEffortLevel(effort.textContent);
     if (level) { if (trigger.dataset.effortLevel !== String(level)) trigger.dataset.effortLevel = String(level); } else if (trigger.dataset.effortLevel) delete trigger.dataset.effortLevel;
     if (pips.hidden !== !level) pips.hidden = !level;
+    Array.from(pips.children).forEach((pip,index)=>{const active=String(index<level);if((pip as HTMLElement).dataset.active!==active)(pip as HTMLElement).dataset.active=active;});
     // The capitalised word is drawn from data-word (CSS ::before); the host's label keeps the exact effort text for assistive tech.
     let word = trigger.querySelector<HTMLElement>(':scope > .effort-word');
     if (!word) { word = make('span', 'effort-word'); word.setAttribute('aria-hidden', 'true'); effort.after(word); }
-    const text = (effort.textContent ?? '').trim(), shown = effort.hidden ? '' : text.charAt(0).toUpperCase() + text.slice(1);
+    const text = (effort.textContent ?? '').trim(), shown = effort.hidden ? '' : /^(x[ -]?high|extra[ -]?high)$/i.test(text)?'Extra high':text.charAt(0).toUpperCase() + text.slice(1);
     if (word.dataset.word !== shown) word.dataset.word = shown;
     if (word.hidden !== !shown) word.hidden = !shown;
   };
