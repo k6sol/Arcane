@@ -20,3 +20,7 @@ Corrected fixture:
 All17 focused camera, failure-classification and Windows-path cases pass. Camera cases cover original under-floor geometry, multiple scales and pitches, unchanged view direction, unchanged hero position and invalid plans. The first camera run exposed an assumed fixed far-plane range at a much shallower pitch; the caller now derives far clipping from its actual camera distance. No operation deadline, budget or native acceptance requirement changes. The mandatory native workflow adds this camera check and now declares26 source input paths. Actual Blender5.2 boulder and broader model/material quality remain open.
 
 [[Delivery/G05 Blender Quality]] - [[Operations/Next Session]] - [[Bugs/Pinned Blender Archive Cache]]
+
+## Delivery verification
+
+The completed original8545 native run passes both OSes. Its actual Blender5.2 boulder side image removes the band; old/new exported GLB hashes and bounds are identical. This accepts the camera correction on the generated boulder, while material realism stays unaccepted. See [[Sessions/2026-11-02 Verified Preview Desktop Delivery]].

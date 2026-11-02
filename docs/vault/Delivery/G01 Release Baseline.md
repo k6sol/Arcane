@@ -42,3 +42,7 @@ Historical exact baseline `1f87ea3` passed all nine jobs in runs41002979317/4100
 ## Latest release work
 
 [[Operations/Next Session]] is the current source/run/install checkpoint. Installedf8 retains a new Error440; source2e has seven passing component jobs but a Windows native query failure. The native-helper and key-fixture follow-up is locally verified and still needs exact-source hosted/package/customer acceptance. Earlier source/install paragraphs are historical evidence, not the current selected installation. No whole-goal completion is inferred.
+
+## Delivery verification
+
+[[Sessions/2026-11-02 Verified Preview Desktop Delivery]] supersedes the earlier installed baseline with409ef4b, complete original jobs/archives/payload/plugin/integrity checks and actual new-release processes running. The user stopped UI verification with Escape before draft/sign-in/Send acceptance; G01 remains in progress at that boundary.

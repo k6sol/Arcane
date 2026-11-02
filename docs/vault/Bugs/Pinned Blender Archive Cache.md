@@ -14,3 +14,7 @@ A cold miss makes one original official download under the existing deadline, re
 The complete21-case isolated Windows Python suite passes, including warm/cold reuse, hash/length/link refusal, mutation during reading, no-overwrite, one-request HTTP403 failure, extraction traversal/alias bounds and environment safeguards. The initial sandbox run failed before fixture setup because temporary paths were denied; the first elevated run exposed Python3.14 Windows lstat/fstat ctime semantics. The correction compares ctime through the same handle and binds the named file through device/inode/size/mtime. The original failure is retained. No Blender, provider or Studio operation was performed by these tests. Actual hosted cache restoration and packaged customer acceptance remain open.
 
 [[Delivery/G01 Release Baseline]] - [[Bugs/Windows Native Worker Query]] - [[Operations/Next Session]]
+
+## Delivery verification
+
+Completed original8545 native logs prove actual cache hits on Windows and Linux, exact archive pins, and fresh successful native tests. Four-byte synthetic fixture markers are excluded. Original cold HTTP403 failures remain retained. See [[Sessions/2026-11-02 Verified Preview Desktop Delivery]].
