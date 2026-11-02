@@ -36,7 +36,7 @@ interface GrantEntry { type:'grant';v:1;seq:number;at:string;amount:1000;ref:str
 type Line = ActionEntry | CheckpointEntry | GrantEntry;
 export interface RecordInput { kind: ActionKind; source: ActionSource; id: string; conversation?: string | null; at?: Date }
 export interface ActionsSummary {
-  unit: 'action'; month: { key: string; used: number; limit:number; resetsAt:string }; today: { key: string; used: number };
+  unit: 'action'; month: { key: string; used: number; limit:number; planLimit?:number; resetsAt:string }; today: { key: string; used: number };
   byKind: Record<ActionKind, number>; bySource: Record<ActionSource, number>;
   days: { key: string; used: number }[];
   conversations: { conversation: string; used: number }[];
@@ -227,7 +227,7 @@ export class ActionsLedger {
     const spentBefore=Object.entries(monthTotals).reduce((total,[key,used])=>total+(key<month?Math.max(0,used-500):0),0);
     const limit=500+Math.max(0,this.#grantedActions-spentBefore),reset=new Date(Date.UTC(now.getUTCFullYear(),now.getUTCMonth()+1,1)).toISOString();
     return {
-      unit: 'action', month: { key: month, used: monthUsed,limit,resetsAt:reset }, today: { key: today, used: days.get(today) ?? 0 },
+      unit: 'action', month: { key: month, used: monthUsed,limit,planLimit:500,resetsAt:reset }, today: { key: today, used: days.get(today) ?? 0 },
       byKind, bySource, days: recent,
       conversations: [...conversations].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 8).map(([conversation, used]) => ({ conversation, used })),
       integrity: this.#entries.length || this.#checkpoint || this.#grantRefs.size ? this.#integrity : this.#integrity === 'mismatch' ? 'mismatch' : 'empty',

@@ -70,3 +70,7 @@ This is the durable customer brief. New priorities add to it; they do not erase 
 [[Bugs/Forest Blender Workflow]] records the small forest/well/building result shown on 30 October. The active app used scene-building steps, had failed skill selection and viewport capture, showed primitive vegetation over the bare baseplate, and had no newly placed session-only Blender mesh in its asset panel. This is incomplete output, not an accepted quality baseline.
 
 [[Operations/Current State]] · [[Operations/Next Session]] · [[Delivery/Goal Board]]
+
+## Available actions and plan cap
+
+The customer requires both compact meters to display available actions / normal plan allowance, including balances above the allowance:1000 /500 on the free plan. Redeemed actions must increase availability without changing that visible normal cap. This supersedes the intermediate remaining-only word left display. The ledger admission total and plan allowance are separate fields; no bonus balance is clipped for spending. [[Bugs/Action Meter Labels]] records implementation and browser verification; installed acceptance remains pending.

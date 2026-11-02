@@ -73,3 +73,7 @@ Work in Arcane only; do not operate Roblox Studio or work on ArchLiquid. Preserv
 ## Startup and reasoning follow-up
 
 [[Bugs/Provider Startup Latency]] records the actual desktop CLI mismatch,39.656-second catalog discovery and approximately2.6-second configuration-discovery checks. [[Bugs/Reasoning Controls]] adds distinct High/Extra high/Max/Ultra dots and saved selection during connection. Strict660 and294 frozen native/browser cases pass before the final additional built-in-app fence; the final126 guard/lifecycle cases also pass. Packaged delivery and customer Send must still be verified separately. Installedf8 still has the original new Error440. Do not retry or clear that custody to simulate acceptance.
+
+## Action-balance correction
+
+[[Bugs/Action Meter Labels]] now implements the customer's explicit available-actions / normal-plan-cap format, with separate planLimit and spendable limit, e.g.1000 /500. All33 frozen Plans/CSS cases pass after strict660 compilation; actual installed acceptance is pending. Original2e2fd38 native Windows run failed before Blender at the first PowerShell-host query with no progress marker. Ubuntu native conversion passed. The failed original is retained and the query deadline is unchanged; the native-helper prototype is not wired or accepted.

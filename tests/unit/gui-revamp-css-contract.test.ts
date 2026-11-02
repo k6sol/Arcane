@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
-const css = await readFile('apps/desktop/public/studio.css', 'utf8');
+const css = (await readFile('apps/desktop/public/studio.css', 'utf8')).replace(/\r\n/g, '\n');
 const html = await readFile('apps/desktop/public/studio.html', 'utf8');
 const start = css.indexOf('/* ---- C22 revamp'), end = css.indexOf('/* ---- End C22 revamp ---- */');
 const block = css.slice(start, end);

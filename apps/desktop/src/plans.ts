@@ -13,8 +13,8 @@ export interface PlanOffer extends Offer { actionsPerMonth: number; features: st
 export interface PackOffer extends Offer { actions: number }
 export interface CreditOffer extends Offer { credits: number }
 export interface UsageSummary {
-  /** limit/resetsAt: the plan allowance and its reset instant, when the plan feed supplies them (both optional). */
-  month: { key: string; used: number; limit?: number; resetsAt?: string }; today: { key: string; used: number };
+  /** limit includes available grants; planLimit is the normal monthly allowance shown as the denominator. */
+  month: { key: string; used: number; limit?: number; planLimit?:number; resetsAt?: string }; today: { key: string; used: number };
   days: { key: string; used: number }[]; conversations: { conversation: string; used: number }[];
   byKind: { 'build-turn': number; 'studio-change': number };
   integrity: 'verified' | 'mismatch' | 'empty';
@@ -80,13 +80,14 @@ export function readPlansState(value: unknown): PlansState | null {
   if (!['verified', 'mismatch', 'empty'].includes(String(usage.integrity))) return null;
   // Optional allowance fields: a positive whole limit and an ISO reset instant. Anything else is ignored, never guessed.
   const limit = Number.isSafeInteger(month.limit) && (month.limit as number) > 0 ? month.limit as number : null;
+  const planLimit=Number.isSafeInteger(month.planLimit)&&(month.planLimit as number)>0?month.planLimit as number:null;
   const resetsAt = str(month.resetsAt, 40) && Number.isFinite(Date.parse(month.resetsAt as string)) ? month.resetsAt as string : null;
   return {
     catalog: { placeholderPrices: catalog.placeholderPrices, currency: catalog.currency, action: { singular: action.singular, plural: action.plural, definition: action.definition },
       plans, packs, credits: { blurb: credits.blurb, offers: creditOffers } },
     billing: { state: billing.state as PlansState['billing']['state'], origins: [...billing.origins as string[]] },
     gateway: { state: gateway.state as PlansState['gateway']['state'], message: gateway.message, showInModelPicker: gateway.showInModelPicker },
-    usage: { month: { key: month.key, used: month.used, ...(limit === null ? {} : { limit }), ...(resetsAt === null ? {} : { resetsAt }) }, today: { key: today.key, used: today.used }, days, conversations,
+    usage: { month: { key: month.key, used: month.used, ...(limit === null ? {} : { limit }), ...(planLimit===null?{}:{planLimit}), ...(resetsAt === null ? {} : { resetsAt }) }, today: { key: today.key, used: today.used }, days, conversations,
       byKind: { 'build-turn': kinds['build-turn'], 'studio-change': kinds['studio-change'] }, integrity: usage.integrity as UsageSummary['integrity'] },
   };
 }
@@ -103,7 +104,7 @@ export const FREE_PLAN_ACTIONS_PER_MONTH = 500;
 export const ACTIONS_NEAR_LIMIT = 0.9;
 export type ActionsLevel = 'ok' | 'near' | 'over';
 export interface ActionsAllowance {
-  used: number; limit: number; left: number; over: number; ratio: number; level: ActionsLevel;
+  used: number; limit: number; planLimit:number; left: number; over: number; ratio: number; level: ActionsLevel;
   /** ISO instant the monthly count restarts; null when unknown. */
   resetsAt: string | null; source: 'feed' | 'free-plan';
 }
@@ -112,12 +113,12 @@ export interface ActionsAllowance {
  * the feed's `resetsAt` or the start of the next month of `usage.month.key` (the local ledger counts by UTC calendar month).
  */
 export function actionsAllowance(state: PlansState): ActionsAllowance {
-  const { used, key, limit: fed, resetsAt: fedReset } = state.usage.month;
+  const { used, key, limit: fed, planLimit, resetsAt: fedReset } = state.usage.month;
   const limit = fed ?? FREE_PLAN_ACTIONS_PER_MONTH;
   const match = /^(\d{4})-(\d{2})$/.exec(key);
   const derived = match ? new Date(Date.UTC(Number(match[1]), Number(match[2]), 1)).toISOString() : null;
   const ratio = limit > 0 ? used / limit : 0;
-  return { used, limit, left: Math.max(0, limit - used), over: Math.max(0, used - limit), ratio,
+  return { used, limit, planLimit:planLimit??limit, left: Math.max(0, limit - used), over: Math.max(0, used - limit), ratio,
     level: used >= limit ? 'over' : ratio >= ACTIONS_NEAR_LIMIT ? 'near' : 'ok', resetsAt: fedReset ?? derived, source: fed ? 'feed' : 'free-plan' };
 }
 /** "1 Nov": the reset day in UTC (the ledger's month boundary), or null. */
@@ -138,12 +139,12 @@ export function allowanceSentence(allowance: ActionsAllowance, singular = 'actio
   return formatCount(allowance.used) + ' of ' + formatCount(allowance.limit) + ' Arcane ' + (allowance.limit === 1 ? singular : plural) + ' used this month'
     + (allowance.over > 0 ? ', ' + formatCount(allowance.over) + ' over the limit' : ', ' + formatCount(allowance.left) + ' left') + (reset ? ', resets ' + reset : '');
 }
-/** Top-bar pill shows remaining actions; the tooltip and accessible sentence retain full usage and reset details. */
+/** Remaining actions / normal plan allowance. Bonus grants never enlarge the displayed denominator. */
 export function chipLabel(state: PlansState): { value: string; unit: string; aria: string; level: ActionsLevel; title: string } {
   const allowance = actionsAllowance(state);
-  return { value: formatCount(allowance.left), unit: 'left', level: allowance.level,
-    aria: allowanceSentence(allowance, state.catalog.action.singular, state.catalog.action.plural) + '. Open Plans and credits.',
-    title: 'Arcane actions this month: ' + usedOfLimit(allowance) + ' · ' + allowanceDetail(allowance) };
+  return { value: formatCount(allowance.left), unit: '/ '+formatCount(allowance.planLimit), level: allowance.level,
+    aria: actionsLabel(allowance.left)+' available. Monthly plan allowance: '+formatCount(allowance.planLimit)+'. '+allowanceDetail(allowance)+'. Open Plans and credits.',
+    title: actionsLabel(allowance.left)+' available. Monthly plan allowance: '+formatCount(allowance.planLimit)+'. '+formatCount(allowance.used)+' used. '+allowanceDetail(allowance) };
 }
 
 /** Only an https URL on an origin the daemon verified may leave the app. */
@@ -272,16 +273,17 @@ export function startPlans(doc: Document, options: PlansOptions) {
     // Show remaining actions beside the usage bar; keep the used/limit and reset breakdown in the tooltip/menu.
     const sidebar = el('sidebar-actions');
     if (sidebar) {
-      const allowance = actionsAllowance(state), sentence = allowanceSentence(allowance, state.catalog.action.singular, state.catalog.action.plural);
+      const allowance = actionsAllowance(state), balance=chipLabel(state);
       const value = el('sidebar-actions-value'), limit = el('sidebar-actions-limit'), meter = el('sidebar-actions-meter'), fill = el('sidebar-actions-fill');
       if (value) value.textContent = formatCount(allowance.left);
-      if (limit) limit.textContent = 'left';
+      if (limit) limit.textContent = '/ '+formatCount(allowance.planLimit);
       if (meter) {
-        meter.setAttribute('aria-valuemax', String(allowance.limit)); meter.setAttribute('aria-valuenow', String(Math.min(allowance.used, allowance.limit)));
-        meter.setAttribute('aria-valuetext', sentence); meter.hidden = false;
+        meter.setAttribute('aria-valuemax', String(allowance.planLimit)); meter.setAttribute('aria-valuenow', String(Math.min(allowance.left, allowance.planLimit)));
+        meter.setAttribute('aria-label','Arcane actions available');
+        meter.setAttribute('aria-valuetext', balance.aria); meter.hidden = false;
       }
-      fill?.style.setProperty('--actions-used', String(Math.min(1, Math.max(0, allowance.ratio))));
-      sidebar.dataset.level = allowance.level; sidebar.dataset.limitSource = allowance.source; sidebar.title = usedOfLimit(allowance) + ' · ' + allowanceDetail(allowance);
+      fill?.style.setProperty('--actions-used', String(Math.min(1, Math.max(0, allowance.left/allowance.planLimit))));
+      sidebar.dataset.level = allowance.level; sidebar.dataset.limitSource = allowance.source; sidebar.title = balance.title;
       const detail = el('sidebar-menu-usage'), detailText = el('sidebar-menu-usage-text');
       if (detail && detailText) { detailText.textContent = allowanceDetail(allowance); detail.dataset.level = allowance.level; detail.hidden = false; }
       sidebar.hidden = false;

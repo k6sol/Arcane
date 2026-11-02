@@ -63,7 +63,7 @@ test('actions ledger: one entry per id, per-month/day/conversation totals, hash 
   assert.equal(ledger.record({ kind: 'studio-change', source: 'studio', id: 'cmd-1', at: new Date('2026-09-30T09:00:00Z') }), true);
   assert.equal(ledger.record({ kind: 'build-turn', source: 'codex', id: 'bad id with spaces' }), false);
   const summary = ledger.summary(now);
-  assert.deepEqual(summary.month, { key: '2026-10', used: 2,limit:500,resetsAt:'2026-11-01T00:00:00.000Z' }); assert.deepEqual(summary.today, { key: '2026-10-17', used: 1 });
+  assert.deepEqual(summary.month, { key: '2026-10', used: 2,limit:500,planLimit:500,resetsAt:'2026-11-01T00:00:00.000Z' }); assert.deepEqual(summary.today, { key: '2026-10-17', used: 1 });
   assert.deepEqual(summary.byKind, { 'build-turn': 2, 'studio-change': 0 }); assert.equal(summary.enforced, false);
   assert.deepEqual(summary.conversations, [{ conversation: 'chat-b', used: 1 }, { conversation: 'thread-a', used: 1 }]);
   assert.equal(summary.days.length, 14); assert.equal(summary.integrity, 'verified');
@@ -265,9 +265,12 @@ test('actions read as used / plan limit: the free plan 500 unless the feed names
   assert.deepEqual([usedOfLimit(fed), fed.source, allowanceDetail(fed)], ['900 / 1,200', 'feed', '300 left · resets 15 Nov']);
   for (const limit of [0, -5, 1.5, '500']) assert.equal(actionsAllowance(reply({ key: '2026-10', used: 1, limit })).limit, 500, 'A malformed feed limit is ignored, never guessed: ' + String(limit));
   const chip = chipLabel(reply({ key: '2026-10', used: 750 }));
-  assert.deepEqual([chip.value, chip.unit, chip.level], ['0', 'left', 'over']);
-  assert.deepEqual([chipLabel(reply({ key: '2026-10', used: 0 })).value, chipLabel(reply({ key: '2026-10', used: 0 })).unit], ['500', 'left']);
-  assert.match(chip.aria, /^750 of 500 Arcane actions used this month, 250 over the limit, resets 1 Nov\. Open Plans and credits\.$/);
+  assert.deepEqual([chip.value, chip.unit, chip.level], ['0', '/ 500', 'over']);
+  assert.deepEqual([chipLabel(reply({ key: '2026-10', used: 0 })).value, chipLabel(reply({ key: '2026-10', used: 0 })).unit], ['500', '/ 500']);
+  assert.match(chip.aria, /^0 actions available\. Monthly plan allowance: 500\. 250 over.*resets 1 Nov/);
+  const topped=reply({key:'2026-10',used:500,limit:1500,planLimit:500});
+  assert.deepEqual([chipLabel(topped).value,chipLabel(topped).unit],['1,000','/ 500']);
+  assert.equal(actionsAllowance(topped).limit,1500,'Admission retains the full spendable allowance');
   assert.match(allowanceSentence(normal), /^312 of 500 Arcane actions used this month, 188 left, resets 1 Nov$/);
 });
 
@@ -297,10 +300,20 @@ test('real Edge: Plans & credits page and balance chip render, and buying says c
   await page.evaluate(async (token: string) => { const path: string = '/plans.js'; const m = await import(path); (window as any).planOptions={token:()=>token,desktop:null};(window as any).plans = m.startPlans(document, (window as any).planOptions); }, token);
   await page.waitForFunction(() => !(document.getElementById('arcane-balance-chip') as HTMLElement).hidden);
   assert.equal(await page.locator('#arcane-balance-chip-value').textContent(), String(500 - ledger.summary().month.used));
-  assert.equal(await page.locator('#arcane-balance-chip-unit').textContent(), 'left');
+  assert.equal(await page.locator('#arcane-balance-chip-unit').textContent(), '/ 500');
   assert.equal(await page.locator('#sidebar-actions-value').textContent(), String(500 - ledger.summary().month.used));
-  assert.equal(await page.locator('#sidebar-actions-limit').textContent(), 'left');
-  assert.match(await page.locator('#arcane-balance-chip').getAttribute('aria-label') ?? '', /used this month/);
+  assert.equal(await page.locator('#sidebar-actions-limit').textContent(), '/ 500');
+  assert.match(await page.locator('#arcane-balance-chip').getAttribute('aria-label') ?? '', /actions available.*Monthly plan allowance: 500/);
+  ledger.redeemCode('test','browser-bonus');
+  await page.evaluate(()=>(window as any).plans.refresh());
+  const available=1500-ledger.summary().month.used;
+  assert.equal(await page.locator('#arcane-balance-chip-value').textContent(),available.toLocaleString('en-US'));
+  assert.equal(await page.locator('#arcane-balance-chip-unit').textContent(),'/ 500');
+  assert.equal(await page.locator('#sidebar-actions-value').textContent(),available.toLocaleString('en-US'));
+  assert.equal(await page.locator('#sidebar-actions-meter').getAttribute('aria-valuemax'),'500');
+  assert.equal(await page.locator('#sidebar-actions-meter').getAttribute('aria-valuenow'),'500');
+  assert.equal(ledger.summary().month.limit,1500);
+
   await page.evaluate(() => {
     document.getElementById('provider-login-gate')?.setAttribute('hidden', ''); document.getElementById('workspace-stage')?.classList.remove('provider-required');
     const drawer = document.getElementById('settings-drawer') as HTMLDialogElement; drawer.showModal();
@@ -318,7 +331,7 @@ test('real Edge: Plans & credits page and balance chip render, and buying says c
   await page.locator('#plans-list .plans-buy-primary').click();
   await page.waitForFunction(() => !(document.getElementById('plans-notice') as HTMLElement).hidden);
   assert.match(await page.locator('#plans-notice').textContent() ?? '', /Checkout isn.t connected yet.*Nothing was charged/);
-  const redemptions:{code:string;requestId:string}[]=[],initialRemaining=500-ledger.summary().month.used;
+  const redemptions:{code:string;requestId:string}[]=[],initialRemaining=ledger.summary().month.limit-ledger.summary().month.used;
   await page.route('**/v1/actions/redeem',async (route:import('playwright-core').Route)=>{
     redemptions.push(route.request().postDataJSON() as {code:string;requestId:string});
     const actual=await route.fetch();
@@ -387,7 +400,7 @@ test('local action redemption requires the human token and same origin, accepts 
  const first=await(await f.call('/v1/actions/redeem',{method:'POST',body:input})).json() as any;
  assert.equal(first.unit,'action');assert.equal(first.granted,1000);assert.equal(first.balance,1500);assert.equal(first.replayed,false);
  assert.equal((await(await f.call('/v1/actions/redeem',{method:'POST',body:input})).json() as any).replayed,true);
- assert.equal(f.ledger.summary().month.used,0);assert.equal(f.ledger.summary().month.limit,1500);
+ assert.equal(f.ledger.summary().month.used,0);assert.equal(f.ledger.summary().month.limit,1500);assert.equal(f.ledger.summary().month.planLimit,500);
 });
 
 test('action exhaustion reply states the actual UTC reset and separates credits from subscription use',async t=>{
