@@ -85,7 +85,14 @@ local function reconstruct()
 end
 `;
 
-async function run(body) {
+function lua(value) {
+  if(value===null)return 'nil';
+  if(typeof value==='boolean'||typeof value==='number')return String(value);
+  if(typeof value==='string')return '"'+value.replace(/[^ -~]|["\\]/g,c=>'\\'+c.charCodeAt(0).toString().padStart(3,'0'))+'"';
+  if(Array.isArray(value))return '{'+value.map(lua).join(',')+'}';
+  return '{'+Object.entries(value).map(([k,v])=>'['+lua(k)+']='+lua(v)).join(',')+'}';
+}
+async function run(body, fixtureJson=null) {
   const directory = await mkdtemp(join(tmpdir(), 'arcane-texture-vm-'));
   try {
     let source = doubles;
@@ -93,7 +100,11 @@ async function run(body) {
       const production = (await readFile(join(root,'plugin/src',name+'.luau'),'utf8')).replace(/require\(script\.Parent\.(\w+)\)/g,'$1');
       source += '\nlocal '+name+'=(function()\n'+production+'\nend)()\n';
     }
-    source += await readFile(join(root,'tests/plugin/fixtures/asset-textures.luau'),'utf8');
+    if(fixtureJson) {
+      source+='local fixtureExpected='+lua(fixtureJson.expected)+'\nlocal fixturePackets='+lua(fixtureJson.packets)+'\nlocal fixtureDecoded={}\n';
+      for(const packet of fixtureJson.packets)source+='fixtureDecoded['+lua(packet)+']='+lua(JSON.parse(packet))+'\n';
+      source+='local fixtureMaps='+lua(fixtureJson.maps)+'\n';
+    } else source += await readFile(join(root,'tests/plugin/fixtures/asset-textures.luau'),'utf8');
     source += setup + body + '\nassert(unexpected==0)\nprint("TEXTURE_DELIVERY_OK")\n';
     const file=join(directory,'texture.luau'); await writeFile(file,source);
     for (const [binary,args] of [...(compiler ? [[compiler,['--null',file]]] : []),[runtime,[file]]]) {
@@ -212,4 +223,45 @@ Enum=nil
 assert(made.plan.alphaMode=='MASK' and made.surfaceAppearance.AlphaMode=='AlphaMode.Transparency')
 assert(made.meshPartProperties.Transparency==0 and made.meshPartProperties.DoubleSided==true)
 local pixels=made.editableImages.ColorMap.pixels;assert(buffer.readu8(pixels,3)==0 and buffer.readu8(pixels,7)==255,'binary coverage is written unchanged')
+-- A fractional source factor must be bound to the owned baked ColorMap.
+local fractional=material('MASK');fractional.baseColor[4]=0.5
+rejects(function() AssetMaterials.plan(fractional) end,'UNSUPPORTED_TEXTURE')
+rejects(function() AssetMaterials.admitTextures(fractional,maps({0,255},{255,255}),guard) end,'INPUT')
+local baked=maps({0,255},{255,255});baked.ColorMap.factors={1,1,1,0.25}
+rejects(function() AssetMaterials.admitTextures(fractional,baked,guard) end,'INPUT')
+baked.ColorMap.factors={1,1,1,0.5}
+local fractionalHandle=AssetMaterials.admitTextures(fractional,baked,guard)
+Enum={AlphaMode={Transparency='AlphaMode.Transparency'}}
+local ff,fs=factories();local fm=AssetMaterials.create(fractional,ff,guard,fractionalHandle)
+Enum=nil
+assert(fm.plan.source.baseColor[4]==0.5 and fm.surfaceAppearance.AlphaMode=='AlphaMode.Transparency')
+assert(buffer.readu8(fm.editableImages.ColorMap.pixels,3)==0 and buffer.readu8(fm.editableImages.ColorMap.pixels,7)==255)
+
 `));
+
+
+test('actual host MASK-factor packets preserve source alpha, sealed factors and exact plugin image coverage',options,async()=>{
+  const directory=await mkdtemp(join(tmpdir(),'arcane-mask-host-'));
+  try {
+    const output=join(directory,'mask.json');
+    const environment={...process.env,ARCANE_TEXTURE_MASK_FIXTURE_OUTPUT:output};delete environment.NODE_TEST_CONTEXT;
+    const generated=spawnSync(process.execPath,['--test','--test-name-pattern=MASK multiplies',join(root,'dist/tests/unit/studio-import-textures.test.js')],{encoding:'utf8',timeout:30000,windowsHide:true,env:environment});
+    assert.ifError(generated.error);assert.equal(generated.status,0,generated.stdout+'\n'+generated.stderr);
+    const fixture=JSON.parse(await readFile(output,'utf8'));
+    await run(`
+local r=receiver();feed(r)
+local entries=r:reconstruct(service,AssetMaterials.admitTextures)
+local renders=0
+Enum={AlphaMode={Transparency='AlphaMode.Transparency'}}
+for _,entry in ipairs(entries) do if entry.object.role=='render' then
+ renders+=1;assert(entry.material.baseColor[4]==0.5 and entry.material.alphaMode=='MASK')
+ local f,state=factories();local made=AssetMaterials.create(entry.material,f,guard,entry.textures)
+ assert(made.surfaceAppearance.AlphaMode=='AlphaMode.Transparency')
+ local pixels=made.editableImages.ColorMap.pixels
+ assert(buffer.readu8(pixels,3)==0 and buffer.readu8(pixels,7)==255 and buffer.readu8(pixels,11)==0 and buffer.readu8(pixels,15)==255)
+ for slot,expected in pairs(fixtureMaps) do assert(hash(made.editableImages[slot].pixels)==expected.sha256) end
+end end
+Enum=nil;assert(renders==2)
+`,fixture);
+  } finally {const child=relative(tmpdir(),directory);assert.ok(child.startsWith('arcane-mask-host-')&&!isAbsolute(child)&&!child.includes('..'));await rm(directory,{recursive:true,force:true});}
+});

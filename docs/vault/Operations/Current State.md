@@ -28,3 +28,7 @@ Arcane only. Do not operate Studio or touch ArchLiquid. Computer Use remains sto
 ## Newer authored rock detail
 
 [[Bugs/Rock Texture Detail]] implements a bounded1024-pixel natural-rock option with exact512 default-map preservation, strict audit resolution and tiled raster allocation. Host/NumPy/skill tests and one actual local4.5 generation/offline-import data check pass. It is newer than installed409 and still needs original hosted5.2/package/customer acceptance. Material realism and the full quality goal remain open.
+
+## Newer connected cutout import
+
+[[Bugs/Cutout Alpha Factors]] implements exact fractional-factor baking for textured MASK materials across host pixels, sealed transfer, source checks and owned plugin image admission. Controlled host and standalone-plugin tests pass; native Studio rendering and customer delivery remain unverified. Installed409 is unchanged.

@@ -90,6 +90,9 @@ export function materialStudioTexturePixels(material: StudioImportManifest['mate
   }
   if (material.alphaMode !== 'OPAQUE' && material.alphaMode !== 'MASK') fail('UNSUPPORTED_TEXTURE', 'Only OPAQUE and MASK alpha are delivered; BLEND is not approximated.');
   if (!Number.isFinite(material.alphaCutoff) || material.alphaCutoff < 0 || material.alphaCutoff > 1) fail('UNSUPPORTED_TEXTURE', 'alphaCutoff must be finite within [0,1].');
+  const alphaFactor = material.baseColor[3];
+  if (!Number.isFinite(alphaFactor) || alphaFactor < 0 || alphaFactor > 1 ||
+      (alphaFactor !== 1 && (material.alphaMode !== 'MASK' || !material.colorMap))) fail('UNSUPPORTED_TEXTURE', 'Fractional alpha requires a MASK ColorMap; scalar and blended transparency are not approximated.');
   const mask = material.alphaMode === 'MASK', cutoff = material.alphaCutoff;
   const output: StudioTexturePixels[] = [];
   for (const [semantic, use] of slots) {
@@ -98,13 +101,13 @@ export function materialStudioTexturePixels(material: StudioImportManifest['mate
     if (!image || use.texCoord !== 0) fail('CHECKSUM', 'Prepared material image was not decoded from its owned export.');
     if (semantic === 'NormalMap' && material.normalScale !== 1) fail('UNSUPPORTED_TEXTURE', 'Normal texture scale must be baked to 1 before delivery.');
     const pixels = materialPngPixels(image, semantic === 'ColorMap' ? 'rgba' : semantic === 'NormalMap' ? 'rgb' : use.channel);
-    const factors = semantic === 'ColorMap' ? material.baseColor.slice(0, 3) : semantic === 'NormalMap' ? [material.normalScale] : [semantic === 'RoughnessMap' ? material.roughness : material.metallic];
+    const factors = semantic === 'ColorMap' ? material.baseColor.slice(0, mask && alphaFactor !== 1 ? 4 : 3) : semantic === 'NormalMap' ? [material.normalScale] : [semantic === 'RoughnessMap' ? material.roughness : material.metallic];
     for (let i = 0; i < pixels.length; i += 4) {
       if (semantic === 'ColorMap') for (let c = 0; c < 3; c++) pixels[i + c] = factors[c] === 1 ? pixels[i + c]! : srgbByte(linear(pixels[i + c]!) * factors[c]!);
       else if (semantic !== 'NormalMap') { const value = Math.floor(pixels[i]! * factors[0]! + 0.5); pixels.fill(value, i, i + 3); }
       // glTF OPAQUE ignores source alpha; MASK is an exact binary cutout of
-      // ColorMap coverage (alpha/255 >= alphaCutoff). Data maps stay opaque.
-      pixels[i + 3] = mask && semantic === 'ColorMap' ? (pixels[i + 3]! / 255 >= cutoff ? 255 : 0) : 255;
+      // ColorMap coverage (alpha/255 * factor >= alphaCutoff). Data maps stay opaque.
+      pixels[i + 3] = mask && semantic === 'ColorMap' ? (pixels[i + 3]! / 255 * alphaFactor >= cutoff ? 255 : 0) : 255;
     }
     const metadata = { materialSha256: material.sha256, semantic, sourceSha256: image.sourceSha256, sourceRgbaSha256: image.rgbaSha256,
       channel: use.channel, factors, width: image.width, height: image.height, colorSpace: semantic === 'ColorMap' ? 'srgb' as const : 'linear' as const,

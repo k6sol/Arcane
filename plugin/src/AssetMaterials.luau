@@ -158,9 +158,9 @@ function AssetMaterials.plan(material: Material?, textures: any?): Plan
 	local roughness = scalar(value.roughness, 1, "roughness")
 	local cutoff = scalar(value.alphaCutoff, 1, "alphaCutoff")
 	-- MASK is a binary cutout already thresholded by the host (alpha >= cutoff
-	-- becomes 255, else 0). BLEND and fractional factor alpha are never approximated.
-	if (value.alphaMode ~= "OPAQUE" and value.alphaMode ~= "MASK") or baseColor[4] ~= 1 then
-		fail("UNSUPPORTED_MATERIAL", "alphaMode", "Only OPAQUE or MASK with alpha=1 is supported; blending is not approximated.")
+	-- times its original factor becomes 255, else 0). BLEND is never approximated.
+	if (value.alphaMode ~= "OPAQUE" and value.alphaMode ~= "MASK") or (baseColor[4] ~= 1 and (value.alphaMode ~= "MASK" or bundle == nil or bundle.maps.ColorMap == nil)) then
+		fail("UNSUPPORTED_MATERIAL", "alphaMode", "Fractional alpha requires an owned MASK ColorMap; blending is not approximated.")
 	end
 	local alphaMode: string = value.alphaMode
 	if type(value.doubleSided) ~= "boolean" then fail("INPUT", "doubleSided", "Expected a boolean.") end
@@ -232,6 +232,7 @@ function AssetMaterials.admitTextures(material: any, maps: any, guard: () -> ())
 			or buffer.len(map.bytes) ~= width * height * 4 or map.byteLength ~= width * height * 4 then fail("INPUT", field, "Expected bounded RGBA8 image bytes.") end
 		local expected = if slot == "ColorMap" then {baseColor[1], baseColor[2], baseColor[3]}
 			elseif slot == "NormalMap" then {material.normalScale} elseif slot == "RoughnessMap" then {roughness} else {metallic}
+		if slot == "ColorMap" and material.alphaMode == "MASK" and baseColor[4] ~= 1 then table.insert(expected, baseColor[4]) end
 		if type(map.factors) ~= "table" or getmetatable(map.factors) ~= nil or #map.factors ~= #expected then fail("INPUT", field, "Expected baked material factors.") end
 		for index, factor in ipairs(expected) do if map.factors[index] ~= factor then fail("INPUT", field, "Baked factor differs from material.") end end
 		count += 1; bytes += width * height * 4

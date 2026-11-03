@@ -200,7 +200,9 @@ function material(m: Json, doc: Json, images: StudioEmbeddedImages, version:1|2=
   const factor = m.emissiveFactor ?? [0,0,0], strength = ext.KHR_materials_emissive_strength?.emissiveStrength ?? 1;
   // glTF MASK is an exact per-texel cutout (alpha >= alphaCutoff); BLEND is never approximated.
   const alphaMode = m.alphaMode ?? 'OPAQUE', alphaCutoff = m.alphaCutoff ?? 0.5;
-  if ((alphaMode !== 'OPAQUE' && alphaMode !== 'MASK') || (p.baseColorFactor?.[3] ?? 1) !== 1) fail('UNSUPPORTED_MATERIAL', 'Payload v'+version+' requires OPAQUE or MASK with baseColorFactor alpha=1; BLEND is not approximated.');
+  const alphaFactor = p.baseColorFactor?.[3] ?? 1;
+  if ((alphaMode !== 'OPAQUE' && alphaMode !== 'MASK') || !Number.isFinite(alphaFactor) || alphaFactor < 0 || alphaFactor > 1 ||
+      (alphaFactor !== 1 && (alphaMode !== 'MASK' || !p.baseColorTexture))) fail('UNSUPPORTED_MATERIAL', 'Payload v'+version+' requires OPAQUE alpha=1 or MASK with a baked ColorMap; BLEND is not approximated.');
   if (typeof alphaCutoff !== 'number' || !Number.isFinite(alphaCutoff) || alphaCutoff < 0 || alphaCutoff > 1) fail('UNSUPPORTED_MATERIAL', 'alphaCutoff must be finite within [0,1].');
   return { baseColor: p.baseColorFactor ?? [1,1,1,1], metallic: p.metallicFactor ?? 1, roughness: p.roughnessFactor ?? 1,
     alphaMode, alphaCutoff, doubleSided: m.doubleSided ?? false, normalScale: m.normalTexture?.scale ?? 1,
