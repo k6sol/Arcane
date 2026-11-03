@@ -6235,7 +6235,7 @@ local function validateConvertedGeometry(begin: any, entry: any, actual: any, ch
 		local p=closed(sourceMaterial.pbrMetallicRoughness or {},{"baseColorFactor","metallicFactor","roughnessFactor","baseColorTexture","metallicRoughnessTexture","extras"})
 		closed(sourceMaterial.extensions or {},{"KHR_materials_emissive_strength"})
 		if sourceMaterial.alphaMode ~= nil and sourceMaterial.alphaMode ~= "OPAQUE" and sourceMaterial.alphaMode ~= "MASK" then fail("UNSUPPORTED_MATERIAL","Unsupported alpha semantics cannot be approximated.") end
-		if not equalData(entry.material.baseColor,p.baseColorFactor or {1,1,1,1}) or entry.material.baseColor[4] ~= 1 or entry.material.metallic ~= (p.metallicFactor or 1) or entry.material.roughness ~= (p.roughnessFactor or 1) or entry.material.doubleSided ~= (sourceMaterial.doubleSided or false) or entry.material.alphaMode ~= (sourceMaterial.alphaMode or "OPAQUE") or entry.material.alphaCutoff ~= (sourceMaterial.alphaCutoff or 0.5) then fail("IDENTITY","Supported PBR channels differ from actual source.") end
+		if not equalData(entry.material.baseColor,p.baseColorFactor or {1,1,1,1}) or (entry.material.baseColor[4] ~= 1 and (sourceMaterial.alphaMode ~= "MASK" or p.baseColorTexture == nil)) or entry.material.metallic ~= (p.metallicFactor or 1) or entry.material.roughness ~= (p.roughnessFactor or 1) or entry.material.doubleSided ~= (sourceMaterial.doubleSided or false) or entry.material.alphaMode ~= (sourceMaterial.alphaMode or "OPAQUE") or entry.material.alphaCutoff ~= (sourceMaterial.alphaCutoff or 0.5) then fail("IDENTITY","Supported PBR channels differ from actual source.") end
 		local factor=sourceMaterial.emissiveFactor or {0,0,0}
 		local extension=(sourceMaterial.extensions or {}).KHR_materials_emissive_strength
 		if extension ~= nil or not equalData(factor,{0,0,0}) then
@@ -6762,9 +6762,9 @@ function AssetMaterials.plan(material: Material?, textures: any?): Plan
 	local roughness = scalar(value.roughness, 1, "roughness")
 	local cutoff = scalar(value.alphaCutoff, 1, "alphaCutoff")
 	-- MASK is a binary cutout already thresholded by the host (alpha >= cutoff
-	-- becomes 255, else 0). BLEND and fractional factor alpha are never approximated.
-	if (value.alphaMode ~= "OPAQUE" and value.alphaMode ~= "MASK") or baseColor[4] ~= 1 then
-		fail("UNSUPPORTED_MATERIAL", "alphaMode", "Only OPAQUE or MASK with alpha=1 is supported; blending is not approximated.")
+	-- times its original factor becomes 255, else 0). BLEND is never approximated.
+	if (value.alphaMode ~= "OPAQUE" and value.alphaMode ~= "MASK") or (baseColor[4] ~= 1 and (value.alphaMode ~= "MASK" or bundle == nil or bundle.maps.ColorMap == nil)) then
+		fail("UNSUPPORTED_MATERIAL", "alphaMode", "Fractional alpha requires an owned MASK ColorMap; blending is not approximated.")
 	end
 	local alphaMode: string = value.alphaMode
 	if type(value.doubleSided) ~= "boolean" then fail("INPUT", "doubleSided", "Expected a boolean.") end
@@ -6836,6 +6836,7 @@ function AssetMaterials.admitTextures(material: any, maps: any, guard: () -> ())
 			or buffer.len(map.bytes) ~= width * height * 4 or map.byteLength ~= width * height * 4 then fail("INPUT", field, "Expected bounded RGBA8 image bytes.") end
 		local expected = if slot == "ColorMap" then {baseColor[1], baseColor[2], baseColor[3]}
 			elseif slot == "NormalMap" then {material.normalScale} elseif slot == "RoughnessMap" then {roughness} else {metallic}
+		if slot == "ColorMap" and material.alphaMode == "MASK" and baseColor[4] ~= 1 then table.insert(expected, baseColor[4]) end
 		if type(map.factors) ~= "table" or getmetatable(map.factors) ~= nil or #map.factors ~= #expected then fail("INPUT", field, "Expected baked material factors.") end
 		for index, factor in ipairs(expected) do if map.factors[index] ~= factor then fail("INPUT", field, "Baked factor differs from material.") end end
 		count += 1; bytes += width * height * 4

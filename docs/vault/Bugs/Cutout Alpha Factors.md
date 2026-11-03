@@ -18,3 +18,7 @@ Strict compilation covers660 product sources. Frozen host import, texture and tr
 The modular plugin builds and its canonical output check passes in an isolated directory. These are controlled host and standalone-plugin acceptance results. No Studio operation, upload, Asset Manager registration, customer update or native render is claimed. Installed409 remains unchanged; full release checks remain required.
 
 [[Delivery/G06 Connected Import]] - [[Delivery/G05 Blender Quality]] - [[Operations/Next Session]]
+
+## Canonical bundle follow-up
+
+All six component jobs on6c07b74 pass, but original packaged-startup job125648325395 refuses preflight with TRACKED_SOURCE_NOT_CLEAN. Its retained failure receipt identifies exactly the three generated plugin/build files: the source change had only been verified in an isolated output directory, while checked-in canonical artifacts were stale. The canonical modular bundle and manifest are now regenerated from the verified source, and build --check passes. No clean-source guard, digest requirement or startup proof is bypassed. The isolated plugin installer and tool-doc release checks pass15 cases; actual Studio plugin installation remains untouched. Fresh hosted packaged acceptance is still required.
