@@ -13,7 +13,7 @@ import { decodeMaterialPng, materialPngPixels } from '../../dist/packages/asset-
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const sha = value => createHash('sha256').update(value).digest('hex');
 const sourceNames = ['workers/blender/procedural.py', 'workers/blender/textures.py', 'tests/native/foliage-attachment.py',
-  'workers/blender/asset_worker.py', 'workers/blender/audit.py'];
+  'workers/blender/asset_worker.py', 'workers/blender/audit.py', 'tests/fixtures/materials/textures-512-baseline.py'];
 const sourceHashes = async () => Object.fromEntries(await Promise.all(sourceNames.map(async name => [name, sha(await readRegularFile(join(repository, name), 512 * 1024))])));
 
 function originalTextures(bytes) {
@@ -76,7 +76,7 @@ function originalTextures(bytes) {
 }
 
 test('reviewed foliage baseline preserves current layout and refuses unrelated source edits', async () => {
-  const text = (await readRegularFile(join(repository, 'workers/blender/textures.py'), 512 * 1024)).toString('utf8').replaceAll('\r\n', '\n');
+  const text = (await readRegularFile(join(repository, 'tests/fixtures/materials/textures-512-baseline.py'), 512 * 1024)).toString('utf8').replaceAll('\r\n', '\n');
   for (const [source, expected] of [[text, 'b869dc8be0f63281c3ca41c87e0acd775a08b47b3f623639fa0358c975bbd6e3'],
     [text.replaceAll('\n', '\r\n'), '797ea1d251d1b936b0c3d700724eb7a44fd857613c0e13b020005bb2d79e26f4']]) {
     const baseline = originalTextures(Buffer.from(source));
@@ -266,7 +266,7 @@ test('real Blender preserves a cupped foliage card declared root through native 
       } else { cleanup.retainedForUnprovedClosure = true; t.diagnostic('Owned data retained because child closure was not observed.'); }
     } finally { await persist(checked && supervision.closed && cleanup.temporaryDataRemoved); }
   });
-  const original = originalTextures(await readRegularFile(join(repository, 'workers/blender/textures.py'), 512 * 1024));
+  const original = originalTextures(await readRegularFile(join(repository, 'tests/fixtures/materials/textures-512-baseline.py'), 512 * 1024));
   await writeFile(join(root, 'baseline-textures.py'), original, { flag: 'wx' });
   let result;
   try {
