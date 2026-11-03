@@ -223,3 +223,45 @@ test('local-only provenance is a true-only optional field, and a fresh native ob
  const initial=library.snapshot();for(const localOnly of [false,'true',null,{permission:true}]){const value=structuredClone(initial) as any;value.conversations[0].messages[0].localOnly=localOnly;assert.throws(()=>readConversationLibrary(value,project));}
  library.observe(transcript('codex','chat','Same identity from actual native history'));assert.equal(library.active()!.messages[0]!.localOnly,undefined);
 });
+
+
+test('deleting a saved Arcane chat clears its folder context and blocks late provider resurrection after reload',()=>{
+  const library=fixture(),folder=library.createFolder('Shared');
+  library.observe(transcript('codex','deleted-thread','DELETED PRIVATE CONTEXT'));const removed=library.active()!.id;library.move(removed,folder);
+  library.observe(transcript('claude','deleted-claude','Deleted cross-provider context'),true);
+  library.observe(transcript('codex','surviving-thread','Surviving history'));const surviving=library.active()!.id;library.move(surviving,folder);
+  assert.match(library.contextFor('codex','Continue'),/DELETED PRIVATE CONTEXT/);
+  assert.equal(library.deleteConversation(removed),true);
+  assert.equal(library.active()!.id,surviving);assert.equal(library.snapshot().folders.length,1);
+  assert.doesNotMatch(library.contextFor('codex','Continue'),/DELETED PRIVATE CONTEXT|Deleted cross-provider/);
+  const reopened=new ConversationLibrary(project,library.snapshot()),before=reopened.snapshot();
+  assert.equal(reopened.observe(transcript('codex','deleted-thread','Late old update')),false);
+  assert.equal(reopened.observe(transcript('claude','deleted-claude','Late other provider')),false);
+  assert.deepEqual(reopened.snapshot(),before);
+  assert.equal(reopened.deleteConversation(removed),false);
+  assert.equal(reopened.observe(transcript('claude','deleted-thread','Different exact binding')),true);
+});
+
+test('deleting the selected chat removes associated draft links without touching another conversation',()=>{
+  const library=fixture();library.observe(transcript('codex','keep-thread','Keep'));const keep=library.active()!.id;
+  library.observe(transcript('claude','remove-thread','Remove'));const remove=library.active()!.id;
+  library.linkDraft(remove,{provider:'codex',localId:'associated-draft'});assert.equal(library.snapshot().draftLinks!.length,1);
+  assert.equal(library.deleteConversation(remove),true);assert.equal(library.snapshot().draftLinks,undefined);
+  assert.equal(library.active(),null);assert.deepEqual(library.snapshot().conversations.map(c=>c.id),[keep]);
+  assert.deepEqual(library.snapshot().deletedBindings,[{provider:'claude',conversationId:'remove-thread'}]);
+});
+
+test('deleted binding validation rejects duplicates, unknown providers and live overlap without accepting changed history',()=>{
+  const library=fixture();library.observe(transcript('codex','live-thread','Keep'));
+  for(const deletedBindings of [[{provider:'codex',conversationId:'live-thread'}],[{provider:'other',conversationId:'x'}],[{provider:'claude',conversationId:'gone'},{provider:'claude',conversationId:'gone'}],[]]){
+    assert.throws(()=>readConversationLibrary({...library.snapshot(),deletedBindings},project));
+  }
+  assert.equal(library.active()!.messages[0]!.text,'Keep');
+});
+
+
+test('full deleted-binding protection refuses atomically rather than forgetting earlier deletions',()=>{
+  const initial={version:1,projectPath:project,activeId:null,folders:[],conversations:[],deletedBindings:Array.from({length:768},(_,i)=>({provider:'codex',conversationId:'gone-'+i}))};
+  const library=new ConversationLibrary(project,initial,()=> 'surviving-chat');library.observe(transcript('codex','new-thread','Retain me'));
+  const before=library.snapshot();assert.throws(()=>library.deleteConversation('surviving-chat'),/chat was retained/);assert.deepEqual(library.snapshot(),before);
+});

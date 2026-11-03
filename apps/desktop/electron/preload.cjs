@@ -212,7 +212,8 @@ const workspacePreferenceInvoke = async (action, args, record = 'workspace') => 
 function librarySnapshot(value, scope) {
   const expanded=!!value&&typeof value==='object'&&Object.hasOwn(value,'expandedFolderIds');
   const drafts=!!value&&typeof value==='object'&&Object.hasOwn(value,'draftLinks');
-  workspacePreferenceFields(value, ['version','projectPath','activeId','folders','conversations',...(expanded?['expandedFolderIds']:[]),...(drafts?['draftLinks']:[])]);
+  const deleted=!!value&&typeof value==='object'&&Object.hasOwn(value,'deletedBindings');
+  workspacePreferenceFields(value, ['version','projectPath','activeId','folders','conversations',...(expanded?['expandedFolderIds']:[]),...(drafts?['draftLinks']:[]),...(deleted?['deletedBindings']:[])]);
   const projectPath=workspacePreferenceText(value.projectPath,4096);
   const array=(v,max)=>{if(!Array.isArray(v)||Object.getPrototypeOf(v)!==Array.prototype||v.length>max||Reflect.ownKeys(v).length!==v.length+1)workspacePreferenceError();return Array.from({length:v.length},(_,i)=>{const d=Object.getOwnPropertyDescriptor(v,String(i));if(!d?.enumerable||!Object.hasOwn(d,'value'))workspacePreferenceError();return d.value;});};
   const singleLine=(v,max)=>{const s=workspacePreferenceText(v,max);if(/[\x00-\x1f\x7f]/.test(s))workspacePreferenceError();return s;};
@@ -239,6 +240,15 @@ function librarySnapshot(value, scope) {
       const source=JSON.stringify([provider,localId]),target=JSON.stringify([libraryId,provider]);if(sources.has(source)||targets.has(target))workspacePreferenceError();sources.add(source);targets.add(target);return{provider,localId,libraryId};
     });
     if(!links.length)workspacePreferenceError();result.draftLinks=links;
+  }
+  if(deleted){
+    const seen=new Set();
+    const removed=array(value.deletedBindings,768).map(v=>{
+      const b=workspacePreferenceFields(v,['provider','conversationId']),provider=b.provider,conversationId=workspacePreferenceText(b.conversationId,256,true),key=JSON.stringify([provider,conversationId]);
+      if(!['codex','claude','arcane'].includes(provider)||seen.has(key)||nativeIds.has(key))workspacePreferenceError();
+      seen.add(key);return{provider,conversationId};
+    });
+    if(!removed.length)workspacePreferenceError();result.deletedBindings=removed;
   }
   if(activeId!==null&&!conversationIds.has(activeId)||count>1024||new TextEncoder().encode(JSON.stringify(result)).byteLength>480*1024)workspacePreferenceError();return result;
 }

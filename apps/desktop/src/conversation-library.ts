@@ -3,12 +3,13 @@ export type ConversationProvider = 'codex' | 'claude' | 'arcane';
 export interface LibraryBinding { provider: ConversationProvider; conversationId: string; sessionId: string | null }
 export interface LibraryMessage { localOnly?:true;provider: ConversationProvider; conversationId: string; id: string; role: 'user'|'assistant'|'error'; text: string; at: string|null; model: string|null }
 export interface LibraryConversation { id: string; title: string; folderId: string|null; bindings: LibraryBinding[]; messages: LibraryMessage[] }
+export interface DeletedLibraryBinding { provider:ConversationProvider; conversationId:string }
 export interface LibraryDraftSource { provider: ConversationProvider; localId: string }
 interface LibraryDraftLink extends LibraryDraftSource { libraryId: string }
 /** expandedFolderIds: the sidebar folders shown open. Optional and omitted when empty, so records without it stay valid. */
-export interface ConversationLibrarySnapshot { version: 1; projectPath: string; activeId: string|null; folders: {id:string;name:string}[]; conversations: LibraryConversation[]; expandedFolderIds?: string[]; draftLinks?: LibraryDraftLink[] }
+export interface ConversationLibrarySnapshot { version: 1; projectPath: string; activeId: string|null; folders: {id:string;name:string}[]; conversations: LibraryConversation[]; expandedFolderIds?: string[]; draftLinks?: LibraryDraftLink[]; deletedBindings?:DeletedLibraryBinding[] }
 export interface LibraryTranscript { provider: ConversationProvider; projectPath:string|null; conversationId:string|null; sessionId:string|null; messages: Omit<LibraryMessage,'provider'|'conversationId'>[] }
-export const LIBRARY_LIMITS=Object.freeze({folders:64,conversations:256,draftLinks:768,messages:1024,bytes:480*1024,contextBytes:24*1024});
+export const LIBRARY_LIMITS=Object.freeze({folders:64,conversations:256,draftLinks:768,deletedBindings:768,messages:1024,bytes:480*1024,contextBytes:24*1024});
 const provider=(v:unknown):v is ConversationProvider=>v==='codex'||v==='claude'||v==='arcane';
 const identifier=(v:unknown):v is string=>typeof v==='string'&&v.length>0&&v.length<=256&&/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(v);
 const localIdentifier=(v:unknown):v is string=>identifier(v)&&v.length<=128&&!/[^A-Za-z0-9._:-]/.test(v);
@@ -21,7 +22,8 @@ const list=(v:unknown,max:number):v is unknown[]=>Array.isArray(v)&&Object.getPr
 export function readConversationLibrary(value:unknown,projectPath:string):ConversationLibrarySnapshot {
   const expanded=!!value&&typeof value==='object'&&Object.hasOwn(value,'expandedFolderIds');
   const drafts=!!value&&typeof value==='object'&&Object.hasOwn(value,'draftLinks');
-  if(!fields(value,['version','projectPath','activeId','folders','conversations',...(expanded?['expandedFolderIds']:[]),...(drafts?['draftLinks']:[])])||value.version!==1||value.projectPath!==projectPath||!list(value.folders,LIBRARY_LIMITS.folders)||!list(value.conversations,LIBRARY_LIMITS.conversations))throw Error('Invalid conversation library.');
+  const deleted=!!value&&typeof value==='object'&&Object.hasOwn(value,'deletedBindings');
+  if(!fields(value,['version','projectPath','activeId','folders','conversations',...(expanded?['expandedFolderIds']:[]),...(drafts?['draftLinks']:[]),...(deleted?['deletedBindings']:[])])||value.version!==1||value.projectPath!==projectPath||!list(value.folders,LIBRARY_LIMITS.folders)||!list(value.conversations,LIBRARY_LIMITS.conversations))throw Error('Invalid conversation library.');
   const folders=new Set<string>(),ids=new Set<string>(),bindings=new Set<string>(),rowProviders=new Map<string,Set<ConversationProvider>>();let messages=0;
   for(const f of value.folders){if(!fields(f,['id','name'])||!identifier(f.id)||folders.has(f.id)||!text(f.name,160)||!f.name.trim()||/[\x00-\x1f\x7f]/.test(f.name))throw Error('Invalid chat folder.');folders.add(f.id);}
   for(const c of value.conversations){
@@ -40,6 +42,16 @@ export function readConversationLibrary(value:unknown,projectPath:string):Conver
       if(!fields(link,['provider','localId','libraryId'])||!provider(link.provider)||!localIdentifier(link.localId)||!identifier(link.libraryId)||!rowProviders.has(link.libraryId)||rowProviders.get(link.libraryId)!.has(link.provider))throw Error('Invalid conversation draft link.');
       const source=JSON.stringify([link.provider,link.localId]),target=JSON.stringify([link.libraryId,link.provider]);
       if(sources.has(source)||targets.has(target))throw Error('Conversation draft is already assigned.');sources.add(source);targets.add(target);
+    }
+  }
+  if(deleted){
+    if(!list(value.deletedBindings,LIBRARY_LIMITS.deletedBindings)||!value.deletedBindings.length)throw Error('Invalid deleted chat binding.');
+    const removed=new Set<string>();
+    for(const b of value.deletedBindings){
+      if(!fields(b,['provider','conversationId'])||!provider(b.provider)||!identifier(b.conversationId))throw Error('Invalid deleted chat binding.');
+      const key=JSON.stringify([b.provider,b.conversationId]);
+      if(removed.has(key)||bindings.has(key))throw Error('Deleted chat binding is duplicated or still active.');
+      removed.add(key);
     }
   }
   if(messages>LIBRARY_LIMITS.messages||!(value.activeId===null||typeof value.activeId==='string'&&ids.has(value.activeId))||new TextEncoder().encode(JSON.stringify(value)).length>LIBRARY_LIMITS.bytes)throw Error('Conversation library limit reached. Original provider history remains available.');
@@ -75,6 +87,19 @@ export class ConversationLibrary {
     this.change(s=>{s.conversations=s.conversations.filter(c=>c.id!==id);setDraftLinks(s,(s.draftLinks??[]).filter(link=>link.libraryId!==id));if(s.activeId===id)s.activeId=null;});
     return true;
   }
+  /** Remove Arcane's project history/context; provider-owned originals are not erased.
+   * Keep only native binding markers so late updates cannot recreate deleted text. */
+  deleteConversation(id:string):boolean{
+    const row=this.value.conversations.find(c=>c.id===id);if(!row)return false;
+    this.change(s=>{
+      const deleted=[...(s.deletedBindings??[]),...row.bindings.map(({provider,conversationId})=>({provider,conversationId}))];
+      if(deleted.length>LIBRARY_LIMITS.deletedBindings)throw Error('Deleted chat protection is full. This chat was retained.');
+      if(deleted.length)s.deletedBindings=deleted;
+      s.conversations=s.conversations.filter(c=>c.id!==id);
+      setDraftLinks(s,(s.draftLinks??[]).filter(link=>link.libraryId!==id));
+      if(s.activeId===id)s.activeId=null;
+    });return true;
+  }
   select(id:string|null):void{this.change(s=>{if(id!==null&&!s.conversations.some(c=>c.id===id))throw Error('This conversation is unavailable.');s.activeId=id;});}
   createFolder(name:string):string{const id=this.makeId();this.change(s=>s.folders.push({id,name:name.trim()}));return id;}
   renameFolder(id:string,name:string):void{this.change(s=>{const f=s.folders.find(f=>f.id===id);if(!f)throw Error('This folder is unavailable.');f.name=name.trim();});}
@@ -91,7 +116,9 @@ export class ConversationLibrary {
   observe(transcript:LibraryTranscript,attachToActive=false,source?:LibraryDraftSource):boolean{
     if(transcript.projectPath!==null&&transcript.projectPath!==this.value.projectPath||!transcript.conversationId||source!==undefined&&transcript.projectPath!==this.value.projectPath)return false;
     const draft=source===undefined?null:readDraftSource(source);
-    const nativeId=transcript.conversationId;const previous=JSON.stringify(this.value);
+    const nativeId=transcript.conversationId;
+    if(this.value.deletedBindings?.some(b=>b.provider===transcript.provider&&b.conversationId===nativeId))return false;
+    const previous=JSON.stringify(this.value);
     this.change(s=>{
       let c=s.conversations.find(c=>c.bindings.some(b=>b.provider===transcript.provider&&b.conversationId===nativeId));
       if(!c&&draft&&draft.provider!==transcript.provider)throw Error('Conversation draft provider does not match.');

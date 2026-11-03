@@ -982,3 +982,23 @@ test('local-only conversation context survives encrypted host save/reopen withou
  for(const localOnly of [false,'true',{grant:true}]){const invalid=structuredClone(value);invalid.conversations[0].messages[0].localOnly=localOnly;await assert.rejects(reopened.library('save',invalid));}
  assert.deepEqual(json((await reopened.library('read')).preferences),value);
 });
+
+
+test('encrypted shared-chat deletion markers survive reload and reject stale windows that restore deleted history',async()=>{
+  const f=fixture({includeLibrary:true}),before=librarySnapshot();await f.library('save',before);
+  const deleted={...before,activeId:null,conversations:[],deletedBindings:before.conversations[0].bindings.map(({provider,conversationId})=>({provider,conversationId}))};
+  assert.deepEqual(json(await f.library('save',deleted)),{saved:true});
+  const reopened=fixture({disk:f.disk,safeStorage:f.safeStorage,includeLibrary:true});assert.deepEqual(json((await reopened.library('read')).preferences),deleted);
+  await assert.rejects(f.library('save',before),ERROR);
+  await assert.rejects(f.library('save',{...before,activeId:null,conversations:[]}),ERROR);
+  assert.deepEqual(json((await reopened.library('read')).preferences),deleted);
+  const ciphertext=f.disk.node(win32.join(f.stateRoot,'conversation-library.v1.json')).bytes;
+  assert.equal(ciphertext.includes(Buffer.from('A private tree prompt')),false);
+});
+
+test('shared deletion marker schema refuses live overlap, duplicate IDs and unknown providers without changing the record',async()=>{
+  const f=fixture({includeLibrary:true}),before=librarySnapshot();await f.library('save',before);
+  for(const deletedBindings of [[{provider:'codex',conversationId:'thread-1'}],[{provider:'other',conversationId:'gone'}],[{provider:'claude',conversationId:'gone'},{provider:'claude',conversationId:'gone'}],[]]){
+    await assert.rejects(f.library('save',{...before,deletedBindings}),ERROR);assert.deepEqual(json((await f.library('read')).preferences),before);
+  }
+});
