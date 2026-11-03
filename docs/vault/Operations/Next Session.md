@@ -38,3 +38,8 @@ Arcane only; do not touch ArchLiquid or operate Studio. Root is sole compiler. E
 ## Connected cutout follow-up
 
 [[Bugs/Cutout Alpha Factors]] adds exact textured MASK-factor coverage with unchanged alpha-one identities and independently checked source/baked factors. Final controlled host and standalone-plugin acceptance passes; actual Studio/customer rendering is unverified. Keep scalar fractional alpha and BLEND explicitly unsupported. New source requires original component/native/package verification before delivery. The foliage-control correction0431b97 uses the frozen512 fixture with unchanged original control pins; observe its original native run41550305290 rather than replaying failed549 jobs.
+
+
+## Latest native control follow-up
+
+Original0431 native41550305290 passes foliage and actual1024 boulder generation on both OSes, then fails its stale legacy-request negative control. [[Bugs/Rock Texture Detail]] records the corrected complete legacy input and additional downgrade-rejection check, plus the retained original failed evidence. The inspected actual5.2 renders still require geological form/material improvement. Do not treat that failed run as full acceptance. Observe the new original correction runs; installed409 and the stopped Computer Use boundary remain unchanged.

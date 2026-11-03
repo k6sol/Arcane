@@ -54,6 +54,17 @@ async function inspectOfflineTextureImport(manifest, exports) {
 function requireCurrentBoulder(request) {
   assert.deepEqual(request, expectedRequest, 'Evidence must be the exact current explicit boulder request, never legacy omitted-form output.');
 }
+function legacyBoulderRequest() {
+  const legacy = { ...input.procedural }; delete legacy.form; delete legacy.moss; delete legacy.textureResolution;
+  return normalizeRequest({ ...input, procedural: legacy });
+}
+
+test('current boulder evidence rejects actual legacy requests and default-resolution substitutions', () => {
+  assert.doesNotThrow(() => requireCurrentBoulder(expectedRequest));
+  assert.throws(() => requireCurrentBoulder(legacyBoulderRequest()), /current explicit boulder/);
+  const lower = { ...input.procedural }; delete lower.textureResolution;
+  assert.throws(() => requireCurrentBoulder(normalizeRequest({ ...input, procedural: lower })), /current explicit boulder/);
+});
 function requireClosed(journal, job, result) {
   assert.equal(journal.schemaVersion, 1); assert.equal(journal.jobId, job.id); assert.equal(journal.directory, job.directory);
   assert.equal(journal.state, result.state); assert.notEqual(result.state, 'interrupted');
@@ -217,7 +228,7 @@ function exportedBounds(raw) {
   return { coordinateSpace: 'glTF-Y-up-meters', min, max, size, measuredVertices: vertices };
 }
 
-test('real current boulder: original native geometry, 512px world bake, saved scene and two actual review views', { timeout: TEST_TIMEOUT }, async t => {
+test('real current boulder: original native geometry, 1024px world bake, saved scene and two actual review views', { timeout: TEST_TIMEOUT }, async t => {
   const configured = process.env.ARCANE_TEST_BLENDER_EXECUTABLE;
   assert.ok(typeof configured === 'string' && isAbsolute(configured)); assert.equal(process.env.ARCANE_TEST_BLENDER_VERSION, '5.2.3');
   const executable = await realpath(configured), temporaryRoot = await realpath(tmpdir());
@@ -316,8 +327,7 @@ test('real current boulder: original native geometry, 512px world bake, saved sc
     identitySha256: worker.identity === null ? null : sha(Buffer.from(JSON.stringify(worker.identity))) })), allOriginalWorkersClosed: true };
   // Negative controls exercise this evidence gate with actual completed input,
   // without another generation or pretending edited metadata is native evidence.
-  const legacy = { ...input.procedural }; delete legacy.form; delete legacy.moss;
-  assert.throws(() => requireCurrentBoulder(normalizeRequest({ ...input, procedural: legacy })), /current explicit boulder/);
+  assert.throws(() => requireCurrentBoulder(legacyBoulderRequest()), /current explicit boulder/);
   assert.throws(() => requirePreview(undefined), /actual bounded preview/);
   assert.throws(() => requirePreview(Buffer.from('not a PNG')));
   const unclosed = JSON.parse(journalRaw.toString('utf8')), first = workers[0];
