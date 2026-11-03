@@ -11,7 +11,7 @@ Installed and selected runtime is **69d8a87**, with independent full-payload int
 
 [[Sessions/2026-11-02 Verified Preview Desktop Delivery]] records seven passing original component/package jobs, runtime-equal native checks, verified archives/payload/plugin source, one successful install, independent4684-file integrity and new-release processes running. The stable launcher is unchanged. This runtime includes faster provider metadata discovery, separate available actions and plan caps, distinct reasoning levels, local exhausted-action replies, folder-scoped context and the native-verified preview floor correction. Customer-visible behavior is accepted only where actually observed.
 
-Computer Use was stopped with Escape before the new window was checked. The private unsent-draft backup remains retained; restoration, sign-in, model/action controls and actual Send are unverified. Do not resume UI automation without user resumption or overwrite a changed draft. Do not operate Studio or touch ArchLiquid.
+Computer Use was initially stopped with Escape before the previous window check. The customer subsequently authorized continuing Arcane-only checks and reported testing the update. A current returned69d8a87 window and both2499 /500 meters were observed. The private historical draft backup remains retained; do not overwrite current text or repeat a message with it. Broader sign-in/model/Send acceptance is still unverified. User input invalidated the last UI observation, so refresh before further input. Do not operate Studio or touch ArchLiquid.
 
 ## New functionality and evidence
 
@@ -30,7 +30,7 @@ The original33d7e0a native run fails its new import fixture because it inherited
 
 [[Sessions/2026-11-03 Verified Import Desktop Delivery]] records69d8a87 with all seven original component/package jobs41564475365 and both native jobs41564475302 successful,13 authenticated archives, closed payload/source receipts, verified extraction/native evidence/canonical plugin and compatible unchanged launcher/shortcuts. The original immutable install and independent4684-file/533510313-byte integrity verification both exit0 with actual pipe closure.
 
-The32-release cap is unchanged: one fully verified unused inactive bundle was preserved by same-volume archive move with zero deletion, then only that exact slot was replaced. Other31 rows, profiles and protected code remain. The earlier fresh-resource refusal is retained; user-reported memory release allowed a subsequent fresh passing preflight. No app closure/launch or Studio/plugin operation occurred. Current-window restart, saved sign-in, draft, model/actions and actual Send remain unobserved; explicit Arcane-only Computer Use resumption has been requested.
+The32-release cap is unchanged: one fully verified unused inactive bundle was preserved by same-volume archive move with zero deletion, then only that exact slot was replaced. Other31 rows, profiles and protected code remain. The earlier fresh-resource refusal is retained; user-reported memory release allowed a subsequent fresh passing preflight. No app closure/launch or Studio/plugin operation occurred. The agent later observed a current69d8a87 window after the customer authorized continuing and reported testing. Agent-driven restart, broader saved-auth/draft/model/Send acceptance and native Studio behavior remain unverified.
 
 ## Remaining acceptance
 
