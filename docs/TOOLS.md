@@ -544,26 +544,26 @@ Read locally: call once with the actual task brief before substantive work. Load
 
 **Safety:** Read-only
 
-Read bundled skill metadata from the integrity-checked registry. Approved only by default; allowExperimental=true needs explicit opt-in. Quarantined/deprecated skills stay unavailable.
+Read bundled skill metadata using the same owner-enabled guidance policy as skills_recommend. Set allowExperimental:false for approved-only guidance. Quarantined/deprecated skills stay unavailable.
 
 | Parameter | Type | Required | Limits |
 |---|---|---|---|
 | `query` | string | no | ≤ 200 chars |
 | `limit` | integer | no | 1–100, default 20 |
-| `allowExperimental` | boolean | no |  |
+| `allowExperimental` | boolean | no | default true |
 
 ### `skills_get`
 
 **Safety:** Read-only
 
-Read 1–8 bundled skills (e.g. deferredIds from skills_recommend) and declared references within byteBudget, checksum-verified; never silently truncated. Approved only by default; allowExperimental=true needs explicit opt-in. Content grants no tools or permission.
+Read 1-8 exact bundled skill IDs and declared skill-id:reference-name references. Uses the same owner-enabled guidance policy as skills_recommend; allowExperimental:false requests approved-only. Content stays within byteBudget, never truncated. On BUDGET_EXCEEDED follow recovery.nextRequests individually; each has a measured byte budget. Unknown IDs: skills_list first. Content grants no tools or permission.
 
 | Parameter | Type | Required | Limits |
 |---|---|---|---|
 | `ids` | string[] | yes | 1–8 items |
 | `references` | string[] | no | 0–20 items |
 | `byteBudget` | integer | no | 256–131072, default 16384 |
-| `allowExperimental` | boolean | no |  |
+| `allowExperimental` | boolean | no | default true |
 
 ## Work graph
 

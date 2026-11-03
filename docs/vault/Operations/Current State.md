@@ -38,3 +38,9 @@ Arcane only. Do not operate Studio or touch ArchLiquid. Computer Use remains sto
 Both original native jobs in41551406155 on6c07b74 pass, including1024 boulder import-data checks and the preserved foliage baseline. [[Bugs/Rock Texture Detail]] retains the preceding failed controls and realism limitation. The source6c07b74 also passes105 current integrated task/playtest, retirement, task-store and approval UI cases with frozen inputs; [[Delivery/G07 Test and Repair]] records controlled versus actual acceptance boundaries. Component/package checks are still running. Installed409 remains unchanged.
 
 [[Bugs/Historical Task Restart]] fixes the reproduced unknown-connect update trap for exact host-quarantined, explicitly unretained historical work. All96 frozen draft/update cases pass; live/missing owners remain blocked. This newer source is not yet installed.
+
+## Skill guidance recovery
+
+[[Bugs/Skill Read Recovery]] aligns recommendation/list/read defaults with the existing owner-enabled experimental guidance policy, preserves explicit approved-only selection and returns measured individual reads after a budget refusal. Errors451-454 distinguish policy/ID, reference, budget and integrity causes. Strict660 and118 frozen MCP/UI cases plus15 isolated release cases pass. The customer's exact original policy codes remain unavailable from the pasted generic499 notice.
+
+Both original6c07b74 native jobs and all six component jobs pass. Its additional packaged-startup job refuses before launch because tracked generated plugin artifacts were stale; [[Bugs/Cutout Alpha Factors]] records the original failure and regenerated canonical bundle. Fresh hosted acceptance of this correction is pending. Installed409 and the stopped Computer Use boundary remain unchanged.

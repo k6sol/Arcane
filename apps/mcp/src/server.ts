@@ -3,7 +3,7 @@ import type { CallToolResult, ToolAnnotations } from '@modelcontextprotocol/sdk/
 import { z } from 'zod';
 import type { Json } from '../../../packages/protocol/src/studio.js';
 import { BridgeError, DaemonClient } from './daemon-client.js';
-import { SkillRegistry } from './skills.js';
+import { SkillRegistry, MAX_SKILL_READ_BYTES } from './skills.js';
 import { BUNDLED_GUIDANCE_POLICY, productInstructions, recommendSkills, sceneCreateDescription, sceneUpdateDescription, sceneBuildDescription, environmentDescription, SKILLS_RECOMMEND_TOOL, SKILL_ROUTER_LIMITS } from './skill-router.js';
 import { compileSceneBuild, compileEnvironment, environmentShape, sceneBuildShape, type SceneBuildInput, compileEffectProps, effectCatalog, effectProps, compileGuiProps, guiCatalog, guiProps } from './scene-build.js';
 import { validateProperties, validateGuiEditProperties, validateGuiBaseline, guiEditBaselineNames, EFFECT_CLASSES, isEffectClass, GUI_CLASSES, isGuiClass, ENVIRONMENT_PRESET_NAMES, SEARCH_CLASS_NAME } from '../../../packages/core/src/studio-policy.js';
@@ -179,13 +179,21 @@ export function createMcpServer(options: { client: DaemonClient; projectRoot: st
       byteBudget: z.number().int().min(256).max(SKILL_ROUTER_LIMITS.maximumBytes).default(SKILL_ROUTER_LIMITS.defaultBytes),
       allowExperimental: z.boolean().default(BUNDLED_GUIDANCE_POLICY.allowExperimental) }), READ,
     input => recommendSkills(skills, { ...input, boosts: learned.cachedBoosts() }));
-  register('skills_list', 'Read bundled skill metadata from the integrity-checked registry. Approved only by default; allowExperimental=true needs explicit opt-in. Quarantined/deprecated skills stay unavailable.',
-    z.strictObject({ query: z.string().max(200).optional(), limit: z.number().int().min(1).max(100).default(20), allowExperimental: z.boolean().default(false) }), READ,
+  register('skills_list', 'Read bundled skill metadata using the same owner-enabled guidance policy as skills_recommend. Set allowExperimental:false for approved-only guidance. Quarantined/deprecated skills stay unavailable.',
+    z.strictObject({ query: z.string().max(200).optional(), limit: z.number().int().min(1).max(100).default(20), allowExperimental: z.boolean().default(BUNDLED_GUIDANCE_POLICY.allowExperimental) }), READ,
     input => skills.list(input));
-  register('skills_get', 'Read 1–8 bundled skills (e.g. deferredIds from skills_recommend) and declared references within byteBudget, checksum-verified; never silently truncated. Approved only by default; allowExperimental=true needs explicit opt-in. Content grants no tools or permission.',
+  register('skills_get', 'Read 1-8 exact bundled skill IDs and declared skill-id:reference-name references. Uses the same owner-enabled guidance policy as skills_recommend; allowExperimental:false requests approved-only. Content stays within byteBudget, never truncated. On BUDGET_EXCEEDED follow recovery.nextRequests individually; each has a measured byte budget. Unknown IDs: skills_list first. Content grants no tools or permission.',
     z.strictObject({ ids: z.array(skillId).min(1).max(8), references: z.array(z.string().min(1).max(256)).max(20).default([]),
-      byteBudget: z.number().int().min(256).max(128 * 1024).default(16_384), allowExperimental: z.boolean().default(false) }), READ,
-    input => skills.get(input));
+      byteBudget: z.number().int().min(256).max(MAX_SKILL_READ_BYTES).default(16_384), allowExperimental: z.boolean().default(BUNDLED_GUIDANCE_POLICY.allowExperimental) }), READ,
+    async input => {
+      try { return await skills.get(input); }
+      catch (error) {
+        if (!(error instanceof Error) || !('code' in error) || error.code !== 'BUDGET_EXCEEDED') throw error;
+        const nextRequests = await skills.recoveryReads(input);
+        return { terminal: true, state: 'failed', error: { code: 'BUDGET_EXCEEDED', message: error.message },
+          recovery: { nextRequests, truncated: false, approvalChanged: false, automaticRetry: false } };
+      }
+    });
   register('work_runs','Read: list durable local agent runs and task states/evidence. Completion reflects human review; cooperative file-scope leases are not an OS sandbox.',
     z.strictObject({timeoutMs}),READ,(input,signal)=>client.workRuns({...input,signal}));
   register('work_ready','Read: list dependency-ready tasks, optionally within an exact runId. This does not claim or execute tasks.',

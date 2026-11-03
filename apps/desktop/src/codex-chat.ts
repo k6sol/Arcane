@@ -126,8 +126,11 @@ function mcpFailureMessage(failure:McpToolFailureSummary):string {
   if(code==='STUDIO_RECONSTRUCTION_REQUIRED')return 'Mesh reconstruction is missing. Prepare, stage and reconstruct this asset before placement.';
   if(code==='PLUGIN_UPDATE_REQUIRED')return 'The Studio plugin cannot place meshes. Update the plugin before importing.';
   if(code==='SESSION')return 'This Studio session is unavailable. Check the live session used for mesh reconstruction.';
-  if(code==='BUDGET_EXCEEDED')return 'The skill request exceeded its context budget. Select fewer relevant skills or references.';
-  if(['UNKNOWN_SKILL','UNAPPROVED','REFERENCES','SKILL_ROUTE_INPUT','SKILL_CATALOGUE_LIMIT'].includes(code))return 'The skill request or reference is unavailable under the current selection policy.';
+  if(code==='BUDGET_EXCEEDED')return 'Arcane requested more skill guidance than fits in one read. The assistant can follow the returned smaller requests; no content was truncated.';
+  if(code==='UNKNOWN_SKILL')return 'The requested skill ID is not in the bundled catalogue. The assistant should list available skills and use an exact ID.';
+  if(code==='UNAPPROVED')return 'This skill is excluded by the requested guidance policy. The assistant should use an eligible skill from the catalogue.';
+  if(code==='REFERENCES')return 'The requested reference is not declared by a selected skill. The assistant should use its exact catalogue reference name.';
+  if(['SKILL_ROUTE_INPUT','SKILL_CATALOGUE_LIMIT'].includes(code))return 'The skill selection could not be loaded. The assistant should check the bounded request and available catalogue.';
   if((MCP_SKILL_FAILURES as readonly string[]).includes(code))return 'Bundled skill content could not be verified. Repair or update Arcane before using it.';
   switch(code){
     case 'VIEWPORT_TOOL_UNSUPPORTED':return 'This Studio connection does not support the reviewed capture operation.';
@@ -1932,7 +1935,7 @@ export function renderCodexToolArticle(doc:Document,message:Pick<ChatMessage,'sc
   if(message.key)article.dataset.toolKey=message.key.slice(0,512);
   const fallback='The tool failed. No recognized safe error detail is available.';
   const described=state==='failed'&&!activity.reason&&!/ — /.test(activity.text)?{...activity,reason:fallback}:activity;
-  const display=failure?{...described,errorReference:userError(failure.code).number as UserErrorNumber}:described;
+  const display=failure?{...described,errorReference:userError(failure.code,failure.tool?.startsWith('skills_')?'skill':'general').number as UserErrorNumber}:described;
   const details=failure?message.scope+'\n'+(failure.tool?'Tool: '+failure.tool+'\n':'')+(failure.code?'Code: '+failure.code+'\n':'')+mcpFailureMessage(failure)
     :message.scope+(message.text?'\n'+message.text:state==='failed'?'\n'+fallback:'');
   article.append(...renderToolActivity(doc,display,state,safe(details)));

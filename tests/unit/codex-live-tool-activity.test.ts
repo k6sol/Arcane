@@ -206,3 +206,14 @@ test('the ChatGPT chat renders live tool lines from public state while the turn 
   assert.deepEqual(messages.querySelectorAll('.tool-activity-text').map(node => node.textContent),
     ['Creating Part "Tree1" in Workspace.Forest…', 'Creating Part "Tree2" in Workspace.Forest…']);
 });
+
+
+test('saved skill failure rows show distinct stable references and concrete recovery explanations',()=>{
+  for(const [code,number,explanation]of [['UNKNOWN_SKILL',451,/exact ID/],['UNAPPROVED',451,/eligible skill/],['REFERENCES',452,/exact catalogue reference/],['BUDGET_EXCEEDED',453,/returned smaller requests/],['INTEGRITY',454,/Repair or update/]]as const){
+    const doc=new DocumentFixture(false,null),failure={schemaVersion:1,kind:'arcane-code',tool:'skills_get',code};
+    const rendered=renderCodexToolArticle(doc as unknown as Document,{scope:'thread-1 ? turn-1 ? public-skill-failure',text:JSON.stringify({toolFailure:failure})});
+    const article=rendered.article as unknown as Element;
+    assert.match(article.textContent,new RegExp('Error '+number));
+    assert.match(article.querySelector('.tool-details pre')!.textContent,explanation);
+  }
+});

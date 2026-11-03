@@ -55,3 +55,10 @@ test('worker validation and review failures retain their stage instead of claimi
   assert.equal(userError('UNKNOWN','model','review-render-extra'),USER_ERRORS[431]);
   assert.equal(userError('private-RENDER_CONTENT'),USER_ERRORS[499]);
 });
+
+
+test('skill failures distinguish catalogue policy, reference, context budget and integrity',()=>{
+  for(const [code,number]of [['UNKNOWN_SKILL',451],['UNAPPROVED',451],['REFERENCES',452],['BUDGET_EXCEEDED',453],['INTEGRITY',454],['BUNDLE_INTEGRITY',454]]as const)assert.equal(userError(code,'skill').number,number);
+  assert.equal(userError('INTEGRITY').number,499,'Unrelated integrity errors must not be called skill failures.');
+  assert.match(userError('BUDGET_EXCEEDED').nextStep,/one at a time/);
+});

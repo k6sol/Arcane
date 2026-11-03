@@ -618,8 +618,8 @@ test('fixture SDK: skill registry defaults to approved only, explicit experiment
   const f=await fixture(t),project=await directory(t);
   await cp(join(ROOT,'scripts'),join(project,'scripts'),{recursive:true}); await cp(join(ROOT,'skills'),join(project,'skills'),{recursive:true});
   const client=await linked(t,f,project,TOKEN,new SkillRegistry({fixtureRoot:project}));
-  assert.deepEqual((await call(client,'skills_list')).data.items,[]);
-  const rejected=await call(client,'skills_get',{ids:['arcane-studio-context']}); assert.equal(rejected.result.isError,true); assert.equal(rejected.data.error.code,'UNAPPROVED');
+  assert.deepEqual((await call(client,'skills_list',{allowExperimental:false})).data.items,[]);
+  const rejected=await call(client,'skills_get',{ids:['arcane-studio-context'],allowExperimental:false}); assert.equal(rejected.result.isError,true); assert.equal(rejected.data.error.code,'UNAPPROVED');
   assert.ok((await call(client,'skills_list',{allowExperimental:true,query:'studio'})).data.items.length>0);
   const packed=await call(client,'skills_get',{ids:['arcane-studio-context'],allowExperimental:true}); assert.match(packed.data.context,/Experimental content/); assert.equal(packed.data.approvalChanged,false);
   assert.equal((await call(client,'skills_get',{ids:['arcane-studio-context'],allowExperimental:true,byteBudget:256})).data.error.code,'BUDGET_EXCEEDED');
@@ -635,7 +635,7 @@ test('fixture SDK: approved skill loading still excludes quarantined/deprecated 
   registry.skills[0].status='approved'; registry.skills[0].approved=true; registry.skills[0].evaluationRuns=[{outcome:'passed',evidence:'non-native-test-fixture-only'}];
   registry.skills[1].status='quarantined'; registry.skills[2].status='deprecated'; await writeFile(registryPath,JSON.stringify(registry));
   const client=await linked(t,f,project,TOKEN,new SkillRegistry({fixtureRoot:project}));
-  assert.deepEqual((await call(client,'skills_list')).data.items.map((item:any)=>item.id),['arcane-studio-context']);
+  assert.deepEqual((await call(client,'skills_list',{allowExperimental:false})).data.items.map((item:any)=>item.id),['arcane-studio-context']);
   assert.notEqual((await call(client,'skills_get',{ids:['arcane-studio-context']})).result.isError,true);
   for(const skill of registry.skills.slice(1,3)) assert.equal((await call(client,'skills_get',{ids:[skill.id],allowExperimental:true})).data.error.code,'UNAPPROVED');
 });

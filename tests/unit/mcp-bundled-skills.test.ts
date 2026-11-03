@@ -78,13 +78,13 @@ async function authentic(client: Client) {
   const listed = await call(client, 'skills_list', { limit: 100 });
   assert.notEqual(listed.result.isError, true);
   assert.equal(listed.data.defaultLoadPolicy, 'approved-only');
-  assert.equal(listed.data.allowExperimental, false);
-  assert.deepEqual(listed.data.items, registry.skills.filter(entry => entry.approved).map(metadata));
+  assert.equal(listed.data.allowExperimental, true);
+  assert.deepEqual(listed.data.items, registry.skills.filter(entry => entry.approved || entry.status === 'experimental').map(metadata));
   const optedIn = await call(client, 'skills_list', { allowExperimental: true, limit: 100 });
   assert.deepEqual(optedIn.data.items, registry.skills.filter(entry => entry.approved || entry.status === 'experimental').map(metadata));
   const entry = registry.skills.find(entry => entry.id === STUDIO)!;
   assert.equal(entry.status, 'experimental');
-  assert.equal((await call(client, 'skills_get', { ids: [STUDIO] })).data.error.code, 'UNAPPROVED');
+  assert.equal((await call(client, 'skills_get', { ids: [STUDIO], allowExperimental: false })).data.error.code, 'UNAPPROVED');
   const source = await readFile(join(ROOT, entry.path), 'utf8');
   assert.equal(hash(source), entry.sha256);
   const packed = await call(client, 'skills_get', { ids: [STUDIO], allowExperimental: true });
@@ -117,7 +117,7 @@ async function dataFixture(t: test.TestContext) {
   return { root, registry: await registryAt(root), save: (registry: Registry) => writeFile(join(root, 'skills/registry.json'), JSON.stringify(registry)) };
 }
 
-test('bundled MCP skills load authentic approved-only metadata and selected content in a fresh empty project', async t => {
+test('bundled MCP skills load authentic owner-enabled metadata and selected content in a fresh empty project', async t => {
   const project = await directory(t);
   assert.deepEqual(await readdir(project), []);
   const network = t.mock.method(globalThis, 'fetch', async () => { throw new Error('Skill tools must stay offline.'); });
@@ -251,8 +251,8 @@ test('explicit data fixture retains existing experimental opt-in, byte budget an
   await mkdir(join(fixture.root, 'scripts'));
   await writeFile(join(fixture.root, 'scripts/skill-pack.mjs'), "throw new Error('Fixture modules must never execute');\n");
   const client = await linked(t, project, new SkillRegistry({ fixtureRoot: fixture.root }));
-  assert.deepEqual((await call(client, 'skills_list')).data.items, []);
-  assert.equal((await call(client, 'skills_get', { ids: [STUDIO] })).data.error.code, 'UNAPPROVED');
+  assert.deepEqual((await call(client, 'skills_list', {allowExperimental:false})).data.items, []);
+  assert.equal((await call(client, 'skills_get', { ids: [STUDIO], allowExperimental: false })).data.error.code, 'UNAPPROVED');
   assert.ok((await call(client, 'skills_list', { allowExperimental: true, query: 'studio' })).data.items.length > 0);
   const packed = await call(client, 'skills_get', { ids: [STUDIO], allowExperimental: true });
   assert.match(packed.data.context, /Experimental content/); assert.equal(packed.data.approvalChanged, false);
@@ -270,7 +270,7 @@ test('explicit approved fixture retains quarantined/deprecated rejection and rec
   quarantined.status = 'quarantined'; deprecated.status = 'deprecated';
   await fixture.save(fixture.registry);
   const client = await linked(t, project, new SkillRegistry({ fixtureRoot: fixture.root }));
-  assert.deepEqual((await call(client, 'skills_list')).data.items.map((item: Entry) => item.id), [STUDIO]);
+  assert.deepEqual((await call(client, 'skills_list', {allowExperimental:false})).data.items.map((item: Entry) => item.id), [STUDIO]);
   assert.equal((await call(client, 'skills_get', { ids: [STUDIO] })).data.approvalChanged, false);
   for (const entry of [quarantined, deprecated]) {
     assert.equal((await call(client, 'skills_get', { ids: [entry.id], allowExperimental: true })).data.error.code, 'UNAPPROVED');
@@ -311,6 +311,8 @@ test('MCP schemas expose no fixture, module, path or root selectors', async t =>
   ] as const) {
     const schema = tools.find(tool => tool.name === name)!.inputSchema;
     assert.equal(schema.additionalProperties, false);
+    assert.equal((schema.properties!.allowExperimental as {default:boolean}).default,true);
+    if(name==='skills_get')assert.match(tools.find(tool=>tool.name===name)!.description!,/recovery.nextRequests/);
     assert.deepEqual(Object.keys(schema.properties ?? {}).sort(), [...keys].sort());
     for (const key of ['root', 'projectRoot', 'fixtureRoot', 'module', 'path', 'skillRegistry']) {
       const result = CallToolResultSchema.parse(await client.callTool({ name, arguments: { ...args, [key]: project } }));
@@ -343,7 +345,7 @@ test('actual bundled whole-game composition progressively loads intact presentat
   assert.equal(oversized.result.isError, true); assert.equal(oversized.data.error.code, 'BUDGET_EXCEEDED');
   for (const id of presentation.ids) {
     assert.ok(!reply.data.ids.includes(id)); assert.ok(!reply.data.context.includes(`## Loaded skill: ${id}\n`));
-    const refused = await call(client, 'skills_get', { ids: [id], byteBudget: 10_240 });
+    const refused = await call(client, 'skills_get', { ids: [id], byteBudget: 10_240, allowExperimental:false });
     assert.equal(refused.result.isError, true); assert.equal(refused.data.error.code, 'UNAPPROVED');
     const loaded = await call(client, 'skills_get', { ids: [id], allowExperimental: true, byteBudget: 10_240 });
     const entry: Entry | undefined = registry.skills.find(candidate => candidate.id === id); assert.ok(entry);
@@ -353,7 +355,7 @@ test('actual bundled whole-game composition progressively loads intact presentat
     assert.equal(loaded.data.bytes, Buffer.byteLength(loaded.data.context)); assert.ok(loaded.data.bytes <= 10_240);
     assert.equal(loaded.data.approvalChanged, false);
   }
-  assert.deepEqual((await call(client, 'skills_list')).data.items, []);
+  assert.deepEqual((await call(client, 'skills_list', {allowExperimental:false})).data.items, []);
   assert.deepEqual(await readFile(join(ROOT, 'skills/registry.json')), original);
   assert.equal(network.mock.callCount(), 0); assert.deepEqual(await readdir(project), []);
 });
@@ -367,9 +369,40 @@ test('staged eligibility does not bypass actual deferred content integrity or di
   const routed = await call(client, 'skills_recommend', { request: 'Build a complete racing game.' });
   assert.notEqual(routed.result.isError, true); assert.ok(!routed.data.ids.includes(audio.id));
   assert.ok(routed.data.composition.phases.some((phase: { ids: string[] }) => phase.ids.includes(audio.id)));
-  const refused = await call(client, 'skills_get', { ids: [audio.id] });
+  const refused = await call(client, 'skills_get', { ids: [audio.id], allowExperimental:false });
   assert.equal(refused.result.isError, true); assert.equal(refused.data.error.code, 'UNAPPROVED');
   const checked = await call(client, 'skills_get', { ids: [audio.id], allowExperimental: true });
   assert.equal(checked.result.isError, true); assert.equal(checked.data.error.code, 'INTEGRITY');
   assert.deepEqual(await readFile(join(fixture.root, 'skills/registry.json')), sourceRegistry);
+});
+
+
+test('recommended skills remain readable under the same omitted guidance policy without changing registry approvals',async t=>{
+  const project=await directory(t),client=await linked(t,project),before=await readFile(join(ROOT,'skills/registry.json'));
+  const recommended=await call(client,'skills_recommend',{request:'Build an original realistic forest in Blender',limit:3});
+  assert.notEqual(recommended.result.isError,true);assert.ok(recommended.data.ids.length>0);
+  for(const id of recommended.data.ids){
+    const loaded=await call(client,'skills_get',{ids:[id]});
+    assert.notEqual(loaded.result.isError,true);assert.ok(loaded.data.context.includes('## Loaded skill: '+id));assert.equal(loaded.data.approvalChanged,false);
+  }
+  assert.deepEqual(await readFile(join(ROOT,'skills/registry.json')),before);
+});
+
+test('budget refusal returns independently verified complete follow-up reads for every selected skill and reference',async t=>{
+  const project=await directory(t),client=await linked(t,project),registry=await registryAt();
+  const ids=[STUDIO,'arcane-natural-scenes','arcane-genre-adaptation'];
+  const references=registry.skills.find(entry=>entry.id==='arcane-genre-adaptation')!.references.slice(0,2).map(ref=>'arcane-genre-adaptation:'+ref.name);
+  assert.equal(references.length,2);
+  const failed=await call(client,'skills_get',{ids,references,byteBudget:256});
+  assert.equal(failed.result.isError,true);assert.equal(failed.data.error.code,'BUDGET_EXCEEDED');assert.equal(Object.hasOwn(failed.data,'context'),false);
+  assert.deepEqual([failed.data.recovery.truncated,failed.data.recovery.approvalChanged,failed.data.recovery.automaticRetry],[false,false,false]);
+  const seenIds=new Set<string>(),seenRefs:string[]=[];
+  for(const next of failed.data.recovery.nextRequests){
+    assert.equal(next.tool,'skills_get');assert.equal(next.arguments.ids.length,1);assert.ok(next.arguments.byteBudget<=128*1024);
+    const reply=await call(client,next.tool,next.arguments);assert.notEqual(reply.result.isError,true);
+    assert.equal(reply.data.bytes,next.arguments.byteBudget);assert.equal(reply.data.bytes,Buffer.byteLength(reply.data.context));
+    const id=next.arguments.ids[0];seenIds.add(id);seenRefs.push(...next.arguments.references);
+    assert.ok(reply.data.context.includes(await readFile(join(ROOT,registry.skills.find(entry=>entry.id===id)!.path),'utf8')));
+  }
+  assert.deepEqual([...seenIds].sort(),[...ids].sort());assert.deepEqual(seenRefs.sort(),references.sort());
 });

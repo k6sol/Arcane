@@ -141,8 +141,8 @@ test('automatic task routing loads authentic relevant experimental bodies and de
     assert.ok(data.context.includes(await readFile(join(ROOT, entry.path), 'utf8')));
   }
   assert.deepEqual(await readFile(join(ROOT, 'skills/registry.json')), original);
-  assert.deepEqual((await call(client, 'skills_list')).data.items, []);
-  assert.equal((await call(client, 'skills_get', { ids: ['arcane-studio-context'] })).data.error.code, 'UNAPPROVED');
+  assert.deepEqual((await call(client, 'skills_list', {allowExperimental:false})).data.items, []);
+  assert.equal((await call(client, 'skills_get', { ids: ['arcane-studio-context'], allowExperimental:false })).data.error.code, 'UNAPPROVED');
   assert.equal(network.mock.callCount(), 0);
 });
 
@@ -166,7 +166,7 @@ test('custom Blender brief receives the actual hash-bound props guidance and def
   const selected = data.selected.find((row: { id: string }) => row.id === props.id); assert.ok(selected);
   assert.equal(selected.status, 'experimental'); assert.equal(selected.approved, false);
   const referenceArgs = { ids: [props.id], references: ['arcane-blender-props:model-spec'], byteBudget: 32768 };
-  const refused = await call(client, 'skills_get', referenceArgs);
+  const refused = await call(client, 'skills_get', {...referenceArgs,allowExperimental:false});
   assert.equal(refused.result.isError, true); assert.equal(refused.data.error.code, 'UNAPPROVED');
   const loaded = await call(client, 'skills_get', { ...referenceArgs, allowExperimental: true });
   const referenceBytes = await readFile(join(f.root, reference.path));
@@ -177,7 +177,7 @@ test('custom Blender brief receives the actual hash-bound props guidance and def
   assert.equal(loaded.data.bytes, Buffer.byteLength(loaded.data.context)); assert.ok(loaded.data.bytes <= referenceArgs.byteBudget);
   const approvedOnly = await call(client, SKILLS_RECOMMEND_TOOL, { request, allowExperimental: false });
   assert.equal(approvedOnly.data.available, false); assert.equal(approvedOnly.data.context, '');
-  assert.equal(approvedOnly.data.approvalChanged, false); assert.deepEqual((await call(client, 'skills_list')).data.items, []);
+  assert.equal(approvedOnly.data.approvalChanged, false); assert.deepEqual((await call(client, 'skills_list', {allowExperimental:false})).data.items, []);
   assert.deepEqual(await readFile(registryPath), originalRegistry);
   assert.deepEqual(await readFile(join(ROOT, 'skills/registry.json')), originalRegistry);
   await writeFile(join(f.root, props.path), Buffer.concat([body, Buffer.from('\nTampered custom-asset guidance.\n')]));

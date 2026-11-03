@@ -5,7 +5,7 @@ tags: [arcane]
 ---
 # Product skill catalog
 
-Catalogued from `7e52f67546fb5409c41dd9f2bc9376fc33c15e9c`. 62 registered skills. The existing registry says `runtimeIntegrated: false` and load policy `approved-only`; presence here does not approve or enable a skill. Read `Skill Library/registry.json` for exact metadata. Original source and references are projected without modification; the repository LICENSE accompanies the library.
+Catalogued from `7e52f67546fb5409c41dd9f2bc9376fc33c15e9c`. 62 registered skills. The existing registry says `runtimeIntegrated: false` and load policy `approved-only`; presence here does not approve a skill. The runtime MCP tools apply the existing owner-enabled experimental guidance policy consistently across recommendation, listing and reads; explicit allowExperimental:false retains approved-only selection. See [[Bugs/Skill Read Recovery]]. Read `Skill Library/registry.json` for exact metadata. Original source and references are projected without modification; the repository LICENSE accompanies the library.
 
 ## Craft
 

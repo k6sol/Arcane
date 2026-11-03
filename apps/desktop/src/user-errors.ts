@@ -2,6 +2,11 @@
 export interface UserError {readonly number:number;readonly title:string;readonly explanation:string;readonly nextStep:string}
 const entry=(number:number,title:string,explanation:string,nextStep:string):UserError=>Object.freeze({number,title,explanation,nextStep});
 export const USER_ERRORS=Object.freeze({
+  451:entry(451,'Skill guidance unavailable','The requested skill is missing or excluded by the selected guidance policy.','The assistant should read the available skill catalogue and use an eligible exact skill ID.'),
+  452:entry(452,'Skill reference unavailable','The requested reference is not declared by a selected skill.','The assistant should use the exact reference names from the skill catalogue.'),
+  453:entry(453,'Skill guidance needs smaller reads','The requested skill guidance exceeds the context budget for one read.','The assistant can follow the returned measured requests one at a time. No guidance was truncated.'),
+  454:entry(454,'Skill integrity check failed','Arcane could not verify its bundled skill content.','Repair or update Arcane before using that guidance.'),
+
   440:entry(440,'Connection cleanup unconfirmed','Arcane could not confirm that a native connection process and its output streams closed.','Inspect the original connection status before reconnecting. Nothing is retried automatically; this does not establish that your sign-in expired.'),
   439:entry(439,'Evidence preview unavailable','Arcane could not read or display the exact submitted image.','Check the failing stage and reason. Request an updated submission if the evidence changed.'),
   411:entry(411,'Connection message exceeded a limit','A message on the local ChatGPT connection exceeded the size Arcane can accept. Its outcome is unconfirmed.','Check the recorded status before trying again. Nothing is resent automatically.'),
@@ -27,6 +32,8 @@ export const USER_ERRORS=Object.freeze({
 export type UserErrorNumber=keyof typeof USER_ERRORS;
 const CODES:Readonly<Record<string,UserErrorNumber>>=Object.freeze({
   PROCESS_EXIT_UNCONFIRMED:440,
+  UNKNOWN_SKILL:451,UNAPPROVED:451,SKILL_ROUTE_INPUT:451,SKILL_CATALOGUE_LIMIT:451,REFERENCES:452,BUDGET_EXCEEDED:453,
+
   FRAME_LIMIT:411,NATIVE_FRAME_LIMIT:411,TASK_RECOVERY_REQUIRED:412,AUTH_REQUIRED:413,AUTH:413,
   LOGIN_UNCONFIRMED:414,DISCONNECTED:415,CONNECTION_UNAVAILABLE:415,STALE_CONNECTION:416,STALE_CONTEXT:416,
   ACTION_LIMIT:429,
@@ -35,8 +42,9 @@ const CODES:Readonly<Record<string,UserErrorNumber>>=Object.freeze({
   FOLIAGE_ATTACHMENT:432,CONVERSION_COLLISION:432,RENDER_CONTENT:437,CONVERSION_RENDER:437,
   EXPORT_ROUNDTRIP:435,IMPORT_IDENTITY:435,STUDIO_STAGE_CONTINUITY:436,IMPORT_FAILED:436,PERMISSION_DENIED:438,APPROVAL_REJECTED:438,
 });
-export function userError(code:unknown,area:'general'|'model'|'preview'|'import'='general',stage?:unknown):UserError {
+export function userError(code:unknown,area:'general'|'model'|'preview'|'import'|'skill'='general',stage?:unknown):UserError {
   if(typeof code==='string'&&Object.hasOwn(CODES,code))return USER_ERRORS[CODES[code]!];
+  if(area==='skill'&&typeof code==='string'&&['BUNDLE_INTEGRITY','INTEGRITY','REGISTRY','FRONTMATTER','DESCRIPTION','LICENCE','FILE_LIMIT','INVALID_PATH','PATH_ESCAPE'].includes(code))return USER_ERRORS[454];
   if(area==='preview')return USER_ERRORS[437];
   if(area==='import')return USER_ERRORS[436];
   if(area==='model')return USER_ERRORS[stage==='mesh-validation'?432:stage==='texture-authoring'?434:stage==='review-render'?437:stage==='export'||stage==='export-roundtrip'||stage==='export-identity'?435:431];

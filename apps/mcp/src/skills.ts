@@ -42,6 +42,9 @@ interface SkillPackModule {
   }>;
 }
 
+interface SkillReadOptions { ids: string[]; byteBudget: number; allowExperimental: boolean; references: string[] }
+export const MAX_SKILL_READ_BYTES = 128 * 1024;
+
 export class SkillRegistry {
   readonly #root: string;
   // Code-only data fixture seam. Even fixtures execute the same bundled parser;
@@ -64,7 +67,20 @@ export class SkillRegistry {
         status: skill.status, approved: skill.approved, references: skill.references.map(reference => reference.name) })),
       truncated: eligible.length > options.limit };
   }
-  async get(options: { ids: string[]; byteBudget: number; allowExperimental: boolean; references: string[] }) {
+  /** Exact independently verified follow-ups, never truncated content or a larger aggregate response. */
+  async recoveryReads(options: SkillReadOptions) {
+    const requests: { tool: 'skills_get'; arguments: SkillReadOptions }[] = [];
+    for (const id of options.ids) {
+      const references = options.references.filter(reference => reference.startsWith(id + ':'));
+      for (const group of references.length ? references.map(reference => [reference]) : [[]]) {
+        const input = { ids: [id], references: group, allowExperimental: options.allowExperimental, byteBudget: MAX_SKILL_READ_BYTES };
+        const packed = await this.get(input);
+        requests.push({ tool: 'skills_get', arguments: { ...input, byteBudget: Math.max(256, packed.bytes) } });
+      }
+    }
+    return requests;
+  }
+  async get(options: SkillReadOptions) {
     return (await this.module()).packSkills(options.ids, { ...options, root: this.#root });
   }
 }
