@@ -69,6 +69,7 @@ test('Edge: header card, Menu sheet, Escape and focus return, choices, outside p
   const build = process.env.ARCANE_UI_BUILD_DIR; assert.ok(build, 'Controller interactions require an explicit compiled output.');
   const page_ = html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/g, '').replace('</body>', '<script type="module" src="/fixture.js"></script></body>');
   const fixture = `import {startWorkspaceShell} from '/workspace-shell.js';
+    import {startComposerChrome} from '/task-usage-ui.js';
     document.documentElement.dataset.providerView='workspace';document.getElementById('workspace-stage').classList.remove('provider-required');
     if (location.search.includes('host')) { window.expanded=0; window.arcaneDesktop=Object.freeze({panel:Object.freeze({version:1,expand:()=>{window.expanded++;return Promise.resolve(true);}})}); }
     document.getElementById('new-chat').disabled=false;
@@ -77,11 +78,11 @@ test('Edge: header card, Menu sheet, Escape and focus return, choices, outside p
     for (const name of ['Caves and spawn pillar','Swap placeholder trees']) { const b=document.createElement('button'); b.type='button'; b.className='library-chat'; b.textContent=name; b.addEventListener('click',()=>window.chosen.push(name)); list.append(b); }
     const banner=document.createElement('div'); banner.id='studio-connection-banner'; const again=document.createElement('button'); again.type='button'; again.className='studio-connection-reconnect'; again.textContent='Reconnect Studio';
     window.reconnects=0; again.addEventListener('click',()=>window.reconnects++); banner.append(again); document.getElementById('codex-messages').before(banner);
-    window.shell=startWorkspaceShell(document);`;
+    window.shell=startWorkspaceShell(document);window.composerChrome=startComposerChrome(document,{surface:()=> 'codex',contextWindow:()=>({usedTokens:152000,windowTokens:200000})});`;
   const server = createServer((request, response) => { void (async () => {
     const path = (request.url ?? '').split('?')[0] ?? '', name = /^\/([a-z-]+)\.js$/.exec(path)?.[1];
     const body = path === '/studio' ? page_ : path === '/studio.css' ? css : path === '/fixture.js' ? fixture
-      : name === 'workspace-shell' ? await readFile(join(build, 'apps/desktop/src', name + '.js'), 'utf8') : null;
+      : name && ['workspace-shell','task-usage-ui','task-usage'].includes(name) ? await readFile(join(build, 'apps/desktop/src', name + '.js'), 'utf8') : null;
     response.writeHead(body === null ? 404 : 200, { 'content-type': path === '/studio' ? 'text/html' : path === '/studio.css' ? 'text/css' : 'text/javascript' }); response.end(body ?? '');
   })(); });
   await new Promise<void>(done => server.listen(0, '127.0.0.1', done));
@@ -189,6 +190,43 @@ test('Edge: header card, Menu sheet, Escape and focus return, choices, outside p
     assert.deepEqual(await box('#app-sidebar').then(b => [b.x, b.y, b.w]), [8, 68, width - 16], String(width));
     await noOverflow(width + ' open');
     await page.keyboard.press('Escape');
+  }
+
+  // Actual composer chrome plus long native usage, through repeated preview cycles.
+  await page.evaluate(()=>{
+    const usage=document.getElementById('codex-task-usage')!;usage.hidden=false;usage.textContent='Last reported tokens 152,048 ? Included in plan ? Reported elapsed 10m 42s';
+    document.getElementById('codex-model-label')!.textContent='GPT-6.1-Sol';
+    for(const id of ['codex-composer','codex-submit','codex-model-trigger'])(document.getElementById(id) as HTMLButtonElement).disabled=false;
+    const message=document.createElement('article');message.className='codex-message codex';message.textContent='An isolated model review with the original unsent chat retained.';document.getElementById('codex-messages')!.append(message);
+  });
+  const draft='Keep this draft while reviewing the model.';
+  for(const width of [360,420,520,900]){
+    await page.setViewportSize({width,height:1000});await page.waitForTimeout(100);
+    await page.locator('#codex-composer').fill(draft);
+    for(let cycle=0;cycle<2;cycle++){
+      const closedHeight=await page.locator('#workspace-stage').evaluate(node=>node.getBoundingClientRect().height);
+      await page.locator('#workspace-preview-toggle').click();
+      await page.waitForFunction(()=>document.getElementById('workspace-preview-toggle')!.getAttribute('aria-expanded')==='true');
+      const openHeight=await page.locator('#workspace-stage').evaluate(node=>node.getBoundingClientRect().height);
+      assert.ok(openHeight>=closedHeight-1,JSON.stringify({width,cycle,closedHeight,openHeight}));
+      await page.locator('#codex-composer').fill(draft);
+      await page.locator('#workspace-preview-close').click();
+      await page.waitForFunction(()=>document.getElementById('workspace-preview-toggle')!.getAttribute('aria-expanded')==='false');
+      const measured=await page.evaluate(()=>{
+        const bounds=(node:Element)=>{const r=node.getBoundingClientRect();return {x:r.x,y:r.y,right:r.right,bottom:r.bottom,width:r.width,height:r.height};};
+        const form=document.getElementById('codex-compose')!,controls=form.querySelector('.composer-controls')!;
+        const children=Array.from(controls.children).filter(node=>!node.hasAttribute('hidden')&&getComputedStyle(node).display!=='none').map(node=>({id:node.id||node.className,...bounds(node)}));
+        return {form:bounds(form),stage:bounds(document.getElementById('workspace-stage')!),scroll:bounds(document.querySelector('.conversation-scroll')!),children};
+      });
+      assert.ok(measured.stage.bottom-measured.form.bottom<40,JSON.stringify({width,cycle,measured}));
+      const usage=measured.children.find(row=>row.id==='codex-task-usage')!,model=measured.children.find(row=>row.id==='composer-model-picker')!;
+      if(width<=520)assert.ok(usage.y>=model.bottom-1,'Detailed usage must have its own row instead of squeezing the model control.');
+      for(let a=0;a<measured.children.length;a++)for(let b=a+1;b<measured.children.length;b++){
+        const x=measured.children[a]!,y=measured.children[b]!;
+        assert.ok(Math.min(x.right,y.right)-Math.max(x.x,y.x)<=1||Math.min(x.bottom,y.bottom)-Math.max(x.y,y.y)<=1,JSON.stringify({width,overlap:[x,y]}));
+      }
+      assert.equal(await page.locator('#codex-composer').inputValue(),draft);await noOverflow('preview close '+width);
+    }
   }
   // With a desktop host that can restore the window, Expand shows and asks it.
   const hosted = await browser.newPage({ viewport: { width: 420, height: 900 }, reducedMotion: 'reduce', colorScheme: 'dark' });

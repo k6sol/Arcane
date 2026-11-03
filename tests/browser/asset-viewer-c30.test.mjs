@@ -21,7 +21,7 @@ const JOB = '11111111-1111-4111-8111-111111111111', TOKEN = 'a'.repeat(64);
 const files = [...(await readdir(resolve(dirname(fileURLToPath(import.meta.url)), '../../apps/desktop/public/fonts'))).filter(name => name.endsWith('.woff2')).map(name => '/fonts/' + name), '/studio.html', '/studio.css', '/asset-viewer-runtime.mjs', '/vendor/three/build/three.module.js', '/vendor/three/build/three.core.js',
   '/vendor/three/examples/jsm/loaders/GLTFLoader.js', '/vendor/three/examples/jsm/controls/OrbitControls.js',
   '/vendor/three/examples/jsm/utils/BufferGeometryUtils.js', '/vendor/three/examples/jsm/utils/SkeletonUtils.js'];
-const modules = ['asset-viewer', 'asset-downloads', 'glb-preflight', 'asset-review'];
+const modules = ['asset-viewer', 'asset-downloads', 'glb-preflight', 'asset-review', 'user-errors', 'workspace-shell', 'task-usage-ui', 'task-usage'];
 
 function glb({ uv = true } = {}) {
   const geometry = new BoxGeometry(2, 1, .7).toNonIndexed();
@@ -108,6 +108,8 @@ test('C30 viewer: real panel, real runtime, real studio.css', { skip: !process.e
   const emit = resolve(process.env.ARCANE_VIEWER_PRODUCT_EMIT);
   const sources = new Map(await Promise.all(files.map(async path => [path, await readFile(resolve(root, 'apps/desktop/public', '.' + path))])));
   for (const name of modules) sources.set('/' + name + '.js', await readFile(resolve(emit, 'apps/desktop/src', name + '.js')));
+  for(const name of modules)for(const match of sources.get('/'+name+'.js').toString().matchAll(/from\s*['"]\.\/([^'"]+)['"]/g))assert.ok(sources.has('/'+match[1]),'Viewer fixture is missing compiled dependency '+match[1]);
+
   sources.set('/studio.html', Buffer.from(sources.get('/studio.html').toString().replace(/<script type="module" src="\/studio\.js"><\/script>/, '<script type="module" src="/c30-fixture.mjs"></script>')));
   sources.set('/c30-fixture.mjs', Buffer.from(page));
   const browser = await chromium.launch({ headless: true,
@@ -205,6 +207,33 @@ test('C30 viewer: real panel, real runtime, real studio.css', { skip: !process.e
       assert.equal(moved, moves, reducedMotion + ' ' + JSON.stringify({ before, after }));
       assert.deepEqual(errors, []);
     }
+  });
+
+
+  await t.test('live model preview closes and reopens beside the real composer without losing its draft or canvas',async t=>{
+    const {tab,errors,forbidden}=await open(t,{width:420,height:1000});
+    await tab.evaluate(async()=>{
+      const {startWorkspaceShell}=await import('/workspace-shell.js');
+      const {startComposerChrome}=await import('/task-usage-ui.js');
+      document.documentElement.dataset.providerView='workspace';
+      window.shell=startWorkspaceShell(document);window.chrome=startComposerChrome(document,{surface:()=> 'codex',contextWindow:()=>({usedTokens:152000,windowTokens:200000})});
+      for(const id of ['codex-composer','codex-submit','codex-model-trigger'])document.getElementById(id).disabled=false;
+      const usage=document.getElementById('codex-task-usage');usage.hidden=false;usage.textContent='Last reported tokens 152,048 ? Included in plan ? Reported elapsed 10m 42s';
+    });
+    const draft='Original unsent draft retained through live model preview.';
+    for(const width of [360,420,520,900]){
+      await tab.setViewportSize({width,height:1000});await settle(tab);await tab.locator('#codex-composer').fill(draft);
+      await tab.locator('#workspace-preview-toggle').click();await settle(tab);
+      assert.equal(await tab.locator('#artifact-panel').isVisible(),true);
+      assert.ok(await tab.locator('#asset-viewer canvas').evaluate(canvas=>canvas.width>0&&canvas.height>0));
+      await tab.locator('#codex-composer').fill(draft);
+      await tab.locator('#workspace-preview-close').click();await settle(tab);
+      assert.equal(await tab.locator('#artifact-panel').isVisible(),false);
+      assert.equal(await tab.locator('#codex-composer').inputValue(),draft);
+      assert.equal(await tab.evaluate(()=>document.activeElement.id),'workspace-preview-toggle');
+      const bounds=await tab.locator('#codex-compose').boundingBox();assert.ok(bounds&&bounds.y+bounds.height<=1000&&bounds.y>500);
+    }
+    assert.deepEqual(errors,[]);assert.deepEqual(forbidden,[]);
   });
 
   await t.test('absent data is not shown; audited data is', async t => {

@@ -1661,7 +1661,12 @@ export function toolResultFacts(tool:string,args:Record<string,unknown>|null,res
 }
 /** A short, single-line reason for a failed call: the error message the tool returned, or its plain-text excerpt. */
 export function toolFailureReason(result:unknown):string|null {
-  const failure=readFailureEnvelope(result);if(failure)return mcpFailureMessage(failure);
+  const failure=readFailureEnvelope(result);
+  if(failure){
+    const message=mcpFailureMessage(failure);if(message.length<=96)return message;
+    const sentence=/^(.+?[.!?])(?:\s|$)/.exec(message)?.[1];
+    return sentence&&sentence.length<=96?sentence:message.slice(0,95).trimEnd()+'\u2026';
+  }
   const outcome=activityRecord(result),command=activityRecord(outcome?.command);
   const raw=typeof result==='string'?result:[activityRecord(outcome?.error)?.message,outcome?.error,activityRecord(command?.error)?.message,command?.error,outcome?.message]
     .find(value=>typeof value==='string'&&value.trim());

@@ -3243,7 +3243,7 @@ body.arcane-app{background:var(--vignette),var(--canvas);background-color:var(--
 .arcane-app #codex-compose>.composer-controls>#playtest-toggle{order:2}
 .arcane-app #codex-compose>.composer-controls>.composer-agents{order:3}
 .arcane-app #codex-compose>.composer-controls>.composer-context{order:4}
-.arcane-app #codex-compose>.composer-controls>#codex-task-usage{order:5;flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--c30-ink-55);font:400 12px/16px var(--font-ui)}
+.arcane-app #codex-compose>.composer-controls>#codex-task-usage{order:5;display:block;border:0;padding:0;flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--c30-ink-55);font:400 12px/16px var(--font-ui)}
 .arcane-app #codex-compose>.composer-controls>.composer-tool-context{order:6}
 .arcane-app #codex-compose>.composer-controls>.composer-model-picker{order:7;flex:0 1 auto;min-width:0;margin-left:auto}
 .arcane-app #codex-compose>.composer-controls>#codex-submit{order:8}
@@ -4669,6 +4669,18 @@ body.arcane-app #workspace-stage #provider-login-gate #provider-login-skip:disab
 }
 /* end C31 import */
 /* ---- End C22 revamp ---- */
+
+/* Size composer controls by the space this pane has, including beside a preview. */
+.arcane-app .workspace-stage #codex-compose.composer{container:chat-composer / inline-size}
+@container chat-composer (max-width:520px){
+  .arcane-app .workspace-stage #codex-compose>.composer-controls{flex-wrap:wrap;row-gap:8px}
+  .arcane-app .workspace-stage #codex-compose>.composer-controls>#codex-task-usage{order:9;flex:1 0 100%;white-space:normal;overflow-wrap:anywhere;line-height:18px}
+  .arcane-app .workspace-stage #codex-compose>.composer-controls>.composer-model-picker{flex:1 1 100px;min-width:0}
+  .arcane-app .workspace-stage #codex-compose #codex-model-trigger.composer-model-trigger{width:100%;max-width:100%;min-width:0}
+  .arcane-app .workspace-stage #codex-compose #codex-model-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .arcane-app .workspace-stage #codex-compose .composer-controls :is(.composer-agents-word,.composer-context-label,.effort-word){display:none}
+}
+
 /* C31 window chrome */
 /* ---- C31 window chrome: Arcane draws its own title bar. The desktop window hides the system caption (main.cjs:
    titleBarStyle 'hidden' with a dark titleBarOverlay), so the system minimise, maximise and close buttons, snap layouts and
