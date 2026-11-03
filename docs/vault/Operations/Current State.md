@@ -28,7 +28,9 @@ The original33d7e0a native run fails its new import fixture because it inherited
 
 ## Delivery candidate
 
-Candidate69d8a87 native run41564475302 is fully successful. In component run41564475365, all four unit shards and Ubuntu release pass; Windows release remains in progress and packaged startup has not yet started. The native workflow includes the converted adapter; push/PR selections match at30 paths. The candidate's exact-revision artifact selector is prepared privately, with no download or installation yet. Native evidence requires five cases, three successful conversions and proved cleanup. Preserve all original failures and never replay completed delivery operations. [[Operations/Next Session]] holds the execution order.
+[[Sessions/2026-11-03 Verified Import Desktop Staging]] records runtime69d8a87 with all seven original component/package jobs41564475365 and both native jobs41564475302 successful. All13 archive digests, closed4684-file payload/source receipts, fresh extraction, native evidence, canonical plugin and launcher compatibility validate. The current native input selection has30 paths; conversion requires five cases/three successful conversions.
+
+The verified update is staged but not installed. One unused inactive code bundle was preserved by same-volume archive move, with unchanged directory identity, zero deletions and unchanged active app/installation record. The fresh installer preflight then refused about669MiB available physical memory against its768MiB minimum; commit/disk checks pass. No installation attempt started. The user has been asked to free an unused app. Recheck fresh resources, then continue the prepared original installer once; never replay completed download/extract/preservation helpers. Installed409ef4b and the stopped Computer Use boundary remain.
 
 ## Remaining acceptance
 
