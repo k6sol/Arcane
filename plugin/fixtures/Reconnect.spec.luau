@@ -109,6 +109,22 @@ elseif mode == "definitive loss" then
 	assert(statusCount == 1 and connectCount == 2 and client.operations ~= oldOps and client.pending == nil
 		and client.highEpoch == 0 and next(client.cache) == nil, "replacement session only follows fresh exact-key loss status and has no old work")
 	unload()
+elseif mode == "play retains pairing" then
+	connected()
+	local original = client.pair
+	local connectionsBefore, statusesBefore = connectCount, statusCount
+	fixture.widget.Enabled = false
+	fixture.edit = false
+	cycle(); cycle()
+	assert(client.pair == original and connectCount == connectionsBefore and statusCount == statusesBefore,
+		"Play mode retains the original live pair without another handshake")
+	assert(fixture.pluginSettings[keySetting] == key and not fixture.widget.Enabled,
+		"Play mode neither forgets the saved key nor opens the panel")
+	fixture.edit = true
+	cycle(); cycle()
+	assert(client.pair == original and connectCount == connectionsBefore and statusCount == statusesBefore,
+		"return to Edit keeps the original pair without a reconnect")
+	unload()
 elseif mode == "loss during play" then
 	connected(); fixture.edit = false; revoked(409, "REVOKED")
 	local attempts = client.recovery.attempts

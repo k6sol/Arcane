@@ -141,8 +141,8 @@ local toolbar = plugin:CreateToolbar("Arcane")
 local button = toolbar:CreateButton("ArcaneBridge", "Open Arcane", "", "Arcane")
 button.ClickableWhenViewportHidden = true
 -- A new stable widget identity migrates the old compact layout once. Studio
--- owns floating-window placement; opening the UI never connects a place.
-local info = DockWidgetPluginGuiInfo.new(Enum.InitialDockState.Float, true, true, 300, 380, 264, 352)
+-- owns floating-window placement and saved visibility. Startup never forces the panel open.
+local info = DockWidgetPluginGuiInfo.new(Enum.InitialDockState.Float, false, false, 300, 380, 264, 352)
 local widget = plugin:CreateDockWidgetPluginGuiAsync("ArcaneLocalBridgeFloatingV4", info)
 widget.Title = "Arcane"
 widget.ZIndexBehavior = Enum.ZIndexBehavior.Sibling

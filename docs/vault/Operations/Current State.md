@@ -46,3 +46,5 @@ Both original native jobs in41551406155 on6c07b74 pass, including1024 boulder im
 Both original6c07b74 native jobs and all six component jobs pass. Its additional packaged-startup job refuses before launch because tracked generated plugin artifacts were stale; [[Bugs/Cutout Alpha Factors]] records the original failure and regenerated canonical bundle. Fresh hosted acceptance of this correction is pending. Installed409 and the stopped Computer Use boundary remain unchanged.
 
 [[Bugs/Preview Composer Layout]] fixes pane-relative compact usage/control layout and bounded skill-error summaries. Strict660,99 frozen checks and7 corrected real-GPU full-panel cases pass. Exact customer preview failure remains open; retained forest export failures and plugin playtest disconnect/forced popup are the next active issues. Source is newer than installed409.
+
+[[Bugs/Plugin Startup Visibility]] removes forced widget startup visibility, retains the stable saved state and passes246 package/standalone plugin cases including exact live pairing across Edit/Play/Edit. Canonical artifacts match source. Native customer disconnection remains unverified; this source is not installed.

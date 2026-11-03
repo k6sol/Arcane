@@ -430,9 +430,9 @@ test('Main exposes the branded Arcane widget, editable key, Connect/Reconnect/Co
   assert.doesNotMatch(byFile['TestProof.luau'], /SetAttribute\([^\n]*(?:apiKey|token|password|credential)/i);
 });
 
-test('native Main auto-opens a floating popup with an unobstructed standard key input', () => {
+test('native Main preserves saved widget visibility with an unobstructed standard key input', () => {
   const main = byFile['Main.server.luau'];
-  assert.match(main, /DockWidgetPluginGuiInfo\.new\(Enum\.InitialDockState\.Float, true, true, 300, 380, 264, 352\)/);
+  assert.match(main, /DockWidgetPluginGuiInfo\.new\(Enum\.InitialDockState\.Float, false, false, 300, 380, 264, 352\)/);
   assert.match(main, /padding\(content, 16, 16, 18, 16\)/);
   assert.match(main, /connectButton\.Parent = content/);
   assert.doesNotMatch(main, /ScrollingFrame|AutomaticCanvasSize|CanvasSize/);

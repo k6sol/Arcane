@@ -106,7 +106,7 @@ assert(keyInput.TextTransparency == 0 and keyInput.MaxVisibleGraphemes == -1 and
 assert(keyInput.ZIndex == 3 and keyInput.TextEditable, "native input has its own unobstructed editing layer")
 assert(keyInput.Active and keyInput.Selectable and keyInput.TextEditable, "key input accepts native focus and editing")
 assert(keyInput.Position[1] == 0 and keyInput.Position[2] == 0 and keyInput.Position[3] == 0 and keyInput.Position[4] == 0 and keyInput.Size[1] == 1 and keyInput.Size[2] == 0 and keyInput.Size[3] == 1 and keyInput.Size[4] == 0, "the entire key entry is an editable hit area")
-assert(fixture.widgetInfo[1] == Enum.InitialDockState.Float and fixture.widgetInfo[2] == true and fixture.widgetInfo[3] == true, "startup opens a floating popup even after a previously hidden session")
+assert(fixture.widgetInfo[1] == Enum.InitialDockState.Float and fixture.widgetInfo[2] == false and fixture.widgetInfo[3] == false, "startup remains closed and never overrides saved widget visibility")
 assert(fixture.widgetInfo[4] == 300 and fixture.widgetInfo[5] == 380 and fixture.widgetInfo[6] == 264 and fixture.widgetInfo[7] == 352, "branded default and minimum content area")
 assert(__arcaneRequire("Validation").VERSION == "0.2.0", "runtime advertises plugin 0.2.0")
 -- Brand: black glass card, white text, Arcane red mark and the #e01b2c -> #c8102e Connect gradient.
@@ -229,7 +229,9 @@ end
 local function idleMount(): ()
   assert(client.desiredPair == nil and client.pair == nil and fixture.requests == 0 and #fixture.setCalls == 0, "mount never connects, probes or writes settings")
   assert(control.BackgroundColor3 ~= green, "cached connection never makes restart green")
-  assert(fixture.widget.Enabled and fixture.button.active, "startup shows the popup and synchronizes toolbar state without connecting")
+  assert(not fixture.widget.Enabled and not fixture.button.active, "startup keeps the popup closed without connecting")
+  fixture.button.Click:Fire(); fixture.widget:GetPropertyChangedSignal("Enabled"):Fire()
+  assert(fixture.widget.Enabled and fixture.button.active, "toolbar opens the popup without connecting")
   fixture.button.Click:Fire(); fixture.widget:GetPropertyChangedSignal("Enabled"):Fire()
   assert(not fixture.widget.Enabled and not fixture.button.active, "toolbar closes the popup without connecting")
   fixture.button.Click:Fire(); fixture.widget:GetPropertyChangedSignal("Enabled"):Fire()
@@ -695,7 +697,7 @@ for (const format of ['source', 'generated']) {
     const savedKey = `fixture.pluginSettings["${LOCAL_KEY_SETTING}"] = "arcane_local_v1_45871_" .. string.rep("a", 64)\n`;
     const saved = savedKey + `fixture.pluginSettings["${LAST_CONNECTION_SETTING}"] = {connected = false}\n`;
     const cases = [
-      ['hidden connection'], ['explicit disconnect'], ['loss during play'],
+      ['hidden connection'], ['explicit disconnect'], ['play retains pairing'], ['loss during play'],
       ['receipt never crosses session'], ['unsafe receipt'], ['receipt conflict'], ['wrong lost session'], ['late revoked poll'],
       ['unknown handshake active'], ['unknown handshake absent'],
       ['bootstrap absent history', savedKey], ['bootstrap play', saved + 'fixture.edit = false\n'],
