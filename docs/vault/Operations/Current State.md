@@ -5,15 +5,15 @@ tags: [arcane, delivery]
 ---
 # Current state
 
-Installed customer code remains **409ef4b**. Candidate runtime **69d8a87** includes the newer chat, skills, preview, plugin and conversion changes below. Publication and controlled tests are separate from installation and customer acceptance. All [[Delivery/Goal Board|ten whole-product goals]] remain open.
+Installed and selected runtime is **69d8a87**, with independent full-payload integrity verified. The installer did not restart the customer app; its current loaded window is unobserved. Installation and controlled tests remain separate from customer acceptance. All [[Delivery/Goal Board|ten whole-product goals]] remain open.
 
-## Installed baseline
+## Previous verified baseline
 
 [[Sessions/2026-11-02 Verified Preview Desktop Delivery]] records seven passing original component/package jobs, runtime-equal native checks, verified archives/payload/plugin source, one successful install, independent4684-file integrity and new-release processes running. The stable launcher is unchanged. This runtime includes faster provider metadata discovery, separate available actions and plan caps, distinct reasoning levels, local exhausted-action replies, folder-scoped context and the native-verified preview floor correction. Customer-visible behavior is accepted only where actually observed.
 
 Computer Use was stopped with Escape before the new window was checked. The private unsent-draft backup remains retained; restoration, sign-in, model/action controls and actual Send are unverified. Do not resume UI automation without user resumption or overwrite a changed draft. Do not operate Studio or touch ArchLiquid.
 
-## Candidate functionality and evidence
+## New functionality and evidence
 
 - [[Bugs/Historical Task Restart]]: exact host-quarantined, explicitly unretained historical work no longer blocks draft-safe restart.96 frozen draft/update cases pass; live or missing ownership still blocks.
 - [[Bugs/Skill Read Recovery]]: consistent owner-enabled guidance policy, measured individual reads after budget refusal and specific451-454 details.118 frozen MCP/UI and15 isolated release cases pass. Explicit approved-only and integrity boundaries remain.
@@ -26,11 +26,11 @@ Computer Use was stopped with Escape before the new window was checked. The priv
 
 The original33d7e0a native run fails its new import fixture because it inherited tiled UV1.25; conversion/no-added-tangent checks pass. The separate corrected unit-UV fixture passes installed4.5 conversion/offline import (40 packets). Original tiled/nonuniform fidelity cases and runtime UV gates remain unchanged. Both corrected6741a2f native jobs and both candidate69d8a87 native jobs pass. The new conversion/import case is accepted at its isolated native/offline scope, not Studio gameplay.
 
-## Delivery candidate
+## Installed delivery
 
-[[Sessions/2026-11-03 Verified Import Desktop Staging]] records runtime69d8a87 with all seven original component/package jobs41564475365 and both native jobs41564475302 successful. All13 archive digests, closed4684-file payload/source receipts, fresh extraction, native evidence, canonical plugin and launcher compatibility validate. The current native input selection has30 paths; conversion requires five cases/three successful conversions.
+[[Sessions/2026-11-03 Verified Import Desktop Delivery]] records69d8a87 with all seven original component/package jobs41564475365 and both native jobs41564475302 successful,13 authenticated archives, closed payload/source receipts, verified extraction/native evidence/canonical plugin and compatible unchanged launcher/shortcuts. The original immutable install and independent4684-file/533510313-byte integrity verification both exit0 with actual pipe closure.
 
-The verified update is staged but not installed. One unused inactive code bundle was preserved by same-volume archive move, with unchanged directory identity, zero deletions and unchanged active app/installation record. The fresh installer preflight then refused about669MiB available physical memory against its768MiB minimum; commit/disk checks pass. No installation attempt started. The user has been asked to free an unused app. Recheck fresh resources, then continue the prepared original installer once; never replay completed download/extract/preservation helpers. Installed409ef4b and the stopped Computer Use boundary remain.
+The32-release cap is unchanged: one fully verified unused inactive bundle was preserved by same-volume archive move with zero deletion, then only that exact slot was replaced. Other31 rows, profiles and protected code remain. The earlier fresh-resource refusal is retained; user-reported memory release allowed a subsequent fresh passing preflight. No app closure/launch or Studio/plugin operation occurred. Current-window restart, saved sign-in, draft, model/actions and actual Send remain unobserved; explicit Arcane-only Computer Use resumption has been requested.
 
 ## Remaining acceptance
 

@@ -22,7 +22,7 @@ Check a goal off only when its acceptance criteria pass and its evidence is reco
 
 ## Execution
 
-Installed409ef4b has all original component/package and runtime-equal native jobs successful, verified archives/payload/plugin source, one successful install, independent integrity and new-release processes running. [[Sessions/2026-11-02 Verified Preview Desktop Delivery]] records the exact scope. Computer Use was stopped with Escape before checking the new window; draft restoration, saved sign-in and customer Send remain unverified. Actual boulder preview clearance and both OS archive cache hits are now verified, while model/material realism and broader native Studio/customer flows remain open. No whole-product goal is checked off. [[Operations/Next Session]] is the active handoff.
+Installed69d8a87 has all seven original component/package jobs and both native jobs successful, verified archives/payload/plugin source, one original successful immutable install and independent4684-file integrity. [[Sessions/2026-11-03 Verified Import Desktop Delivery]] records exact scope and preserved prior failures. The installer did not close or restart the app; the current window, draft, sign-in and customer Send remain unobserved. Computer Use is stopped pending requested resumption. Native Studio import, durable materials, model/art quality, game behavior and Figma workflows remain open. No whole-product goal is checked off. [[Operations/Next Session]] is the active handoff.
 
 Start with G01. Work in parallel on chat/session reliability, asset/plugin integration and task/runtime correctness once the baseline is clear. Diagnostics accompanies all three. Accounts and billing are a public-launch requirement, not a reason to delay usable local development.
 

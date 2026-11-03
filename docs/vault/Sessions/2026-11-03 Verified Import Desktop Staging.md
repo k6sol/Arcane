@@ -5,7 +5,7 @@ tags: [arcane, delivery, import]
 ---
 # Verified import desktop staging
 
-Runtime69d8a87 is verified and staged, but not installed. Installed customer code remains409ef4b. All [seven original component/package jobs](https://github.com/k6sol/Arcane/actions/runs/41564475365) and [both original native jobs](https://github.com/k6sol/Arcane/actions/runs/41564475302) succeed. Source SSH signatures validate remotely and locally. The native correction run41564110315 also passes both OSes; the earlier failed33d7e0a run remains retained.
+This records the original staging boundary, when runtime69d8a87 was verified but not installed and customer code remained409ef4b. The later successful installation is recorded in [[Sessions/2026-11-03 Verified Import Desktop Delivery]]; historical completed-attempt protections below remain. All [seven original component/package jobs](https://github.com/k6sol/Arcane/actions/runs/41564475365) and [both original native jobs](https://github.com/k6sol/Arcane/actions/runs/41564475302) succeed. Source SSH signatures validate remotely and locally. The native correction run41564110315 also passes both OSes; the earlier failed33d7e0a run remains retained.
 
 ## Completed once
 
