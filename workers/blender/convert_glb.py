@@ -322,8 +322,52 @@ def operate(operator, arguments, *, export_diagnostics=False, export_observation
     audit.require(result == {"FINISHED"}, reason)
 
 
+def blender_path(path):
+    """Keep Blender's fixed file operations on the identical owned directory.
+    Extended paths work for Python I/O but Blender's scene rename and exporters
+    require ordinary short spelling. Existing aliases are queried, never created.
+    """
+    import os
+    value = str(path)
+    if os.name != "nt":
+        return value
+    namespace = "\\\\?\\"
+
+    def ordinary(value):
+        if value[:8].upper() == namespace + "UNC\\":
+            return "\\\\" + value[8:]
+        return value[4:] if value.startswith(namespace) else value
+
+    def windows_length(value):
+        return len(value.encode("utf-16-le")) // 2
+
+    value = ordinary(value)
+    # Scene saving appends '@' to its temporary filename before atomic rename.
+    if windows_length(value) < 259:
+        return value
+    try:
+        import ctypes
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        short_path = kernel.GetShortPathNameW
+        short_path.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint]
+        short_path.restype = ctypes.c_uint
+        buffer = ctypes.create_unicode_buffer(32768)
+        count = short_path(str(path.parent), buffer, len(buffer))
+        if not count or count >= len(buffer):
+            raise ValueError()
+        alias = Path(buffer.value)
+        if not alias.is_absolute() or alias.resolve(strict=True) != path.parent.resolve(strict=True):
+            raise ValueError()
+        result = ordinary(str(alias / path.name))
+        if windows_length(result) >= 259:
+            raise ValueError()
+        return result
+    except (OSError, ValueError, AttributeError):
+        raise ValueError("Windows asset path has no verified short directory alias") from None
+
+
 def import_model(bpy, path):
-    operate(bpy.ops.import_scene.gltf, {"filepath": str(path), "import_pack_images": True,
+    operate(bpy.ops.import_scene.gltf, {"filepath": blender_path(path), "import_pack_images": True,
         "merge_vertices": False, "import_shading": "NORMALS", "import_select_created_objects": True,
         "import_scene_extras": True})
     bpy.context.view_layer.update()
@@ -346,7 +390,7 @@ def export_model(bpy, directory, filename, objects, materials):
     audit.require(not path.exists() and not path.is_symlink(), "IO_EXISTS")
     select_objects(bpy, objects)
     with _observe_export_save(bpy, path) as observation:
-        operate(bpy.ops.export_scene.gltf, {"filepath": str(path), "check_existing": False,
+        operate(bpy.ops.export_scene.gltf, {"filepath": blender_path(path), "check_existing": False,
         "export_format": "GLB", "use_selection": True, "export_extras": True,
         "export_yup": True, "export_apply": False, "export_texcoords": True,
         "export_normals": True, "export_tangents": True, "export_materials": materials,
@@ -800,7 +844,7 @@ def review_renders(bpy, directory, objects, request, source_doc, expected):
         audit.require(not path.exists() and not path.is_symlink(), "IO_EXISTS")
         camera.location = center + Vector(direction).normalized() * distance
         camera.rotation_euler = (center - camera.location).to_track_quat("-Z", "Y").to_euler()
-        scene.render.filepath = str(path)
+        scene.render.filepath = blender_path(path)
         bpy.context.view_layer.update()
         operate(bpy.ops.render.render, {"write_still": True})
         row = audit.render_metrics(path, bpy)
@@ -895,7 +939,7 @@ def run():
     proxy_hash = proxy_geometry(proxy, bpy)[0] if proxy is not None else None
     event("scene-save")
     pack_scene_images(bpy, objects)
-    operate(bpy.ops.wm.save_as_mainfile, {"filepath": str(directory / "asset.blend"), "check_existing": False})
+    operate(bpy.ops.wm.save_as_mainfile, {"filepath": blender_path(directory / "asset.blend"), "check_existing": False})
     saved_scene_hash = audit.sha(audit.read_owned(directory / "asset.blend", audit.BLEND_BYTES))
     event("export")
     render_raw = export_model(bpy, directory, "asset.glb", render_ancestors(bpy.context.scene, list(objects.values())), "EXPORT")
@@ -906,7 +950,7 @@ def run():
         models.append(exported_evidence(collision_raw, "collision.glb", request, mapping, expected, source_doc, source_bin, decoder, proxy_hash=proxy_hash))
     audit.require(len({model["generator"] for model in models}) == 1, "EXPORT")
     event("scene-reopen")
-    operate(bpy.ops.wm.open_mainfile, {"filepath": str(directory / "asset.blend"), "load_ui": False, "use_scripts": False})
+    operate(bpy.ops.wm.open_mainfile, {"filepath": blender_path(directory / "asset.blend"), "load_ui": False, "use_scripts": False})
     objects = mapped_objects(bpy.context.scene, mapping["parts"], request["sourceSha256"], True)
     _scene_nodes, reopened_hierarchy = mapped_scene_nodes(bpy.context.scene, mapping, request, True)
     audit.require(imported_hierarchy == reopened_hierarchy, "REOPEN")

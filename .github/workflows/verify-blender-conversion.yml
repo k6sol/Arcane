@@ -24,6 +24,7 @@ on:
       - 'tests/fixtures/materials/**'
       - 'tests/unit/rock_joints_test.py'
       - 'tests/unit/rock_texture_resolution_test.py'
+      - 'tests/unit/asset_worker_windows_paths_test.py'
       - 'tests/unit/tree_station_fidelity_test.py'
       - 'tests/unit/tree_budget_allocation_test.py'
       - 'tests/unit/procedural_generator_test.py'
@@ -54,6 +55,7 @@ on:
       - 'tests/fixtures/materials/**'
       - 'tests/unit/rock_joints_test.py'
       - 'tests/unit/rock_texture_resolution_test.py'
+      - 'tests/unit/asset_worker_windows_paths_test.py'
       - 'tests/unit/tree_station_fidelity_test.py'
       - 'tests/unit/tree_budget_allocation_test.py'
       - 'tests/unit/procedural_generator_test.py'
@@ -102,6 +104,11 @@ jobs:
           PYTHONDONTWRITEBYTECODE: '1'
           PYTHONUTF8: '1'
         run: python tests/native/blender_runtime_install_test.py
+      - name: Verify Blender file-path spellings
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+          PYTHONUTF8: '1'
+        run: python tests/unit/asset_worker_windows_paths_test.py
       - name: Verify conversion file custody and failure reasons
         env:
           PYTHONDONTWRITEBYTECODE: '1'

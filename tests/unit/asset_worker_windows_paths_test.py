@@ -51,9 +51,9 @@ class ShortPathCall:
         return len(self.value) if self.count is None else self.count
 
 
-def function(name, namespace):
-    node = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name)
-    exec(compile(ast.Module(body=[node], type_ignores=[]), source, "exec"), namespace)
+def function(name, namespace, source_tree=tree, source_path=source):
+    node = next(node for node in source_tree.body if isinstance(node, ast.FunctionDef) and node.name == name)
+    exec(compile(ast.Module(body=[node], type_ignores=[]), source_path, "exec"), namespace)
     return namespace[name]
 
 
@@ -116,6 +116,15 @@ class WindowsPathTests(unittest.TestCase):
         self.assertEqual(result, "C:\\JOB~1\\asset.blend")
         self.assertEqual(len(call.calls), 1)
 
+class ConversionWindowsPathTests(WindowsPathTests):
+    def setUp(self):
+        FakePath.targets = {}
+        conversion = str(Path(os.path.abspath(__file__)).parents[2] / "workers" / "blender" / "convert_glb.py")
+        conversion_tree = ast.parse(Path(conversion).read_text(encoding="utf-8"))
+        self.adapt = function("blender_path", {"Path": FakePath}, conversion_tree, conversion)
+
+
+class AssetPathFailureTests(unittest.TestCase):
     def test_path_failure_preserves_stage_and_artifact_without_raw_paths(self):
         report = function("failure_report", {"_failure_stage": "scene-save", "_failure_artifact": "asset.blend", "_failure_metrics": None, "_failure_audit": False})
         self.assertEqual(report(ValueError("Windows asset path has no verified short directory alias")),

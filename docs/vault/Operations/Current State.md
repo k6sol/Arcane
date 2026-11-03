@@ -48,3 +48,7 @@ Both original6c07b74 native jobs and all six component jobs pass. Its additional
 [[Bugs/Preview Composer Layout]] fixes pane-relative compact usage/control layout and bounded skill-error summaries. Strict660,99 frozen checks and7 corrected real-GPU full-panel cases pass. Exact customer preview failure remains open; retained forest export failures and plugin playtest disconnect/forced popup are the next active issues. Source is newer than installed409.
 
 [[Bugs/Plugin Startup Visibility]] removes forced widget startup visibility, retains the stable saved state and passes246 package/standalone plugin cases including exact live pairing across Edit/Play/Edit. Canonical artifacts match source. Native customer disconnection remains unverified; this source is not installed.
+
+## Verified Windows conversion correction
+
+[[Bugs/Windows Conversion Paths]] records the reproduced original oak export failure and successful conversions of unchanged oak, pine, axe and corrected selling-box sources after applying the existing Blender path adapter. All workers closed; no original job was replayed and no Studio operation occurred. Native import, model quality and game acceptance remain open. Installed customer code remains409ef4b; observe hosted checks for the new source independently.
