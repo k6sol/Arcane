@@ -131,7 +131,7 @@ function pack(doc, binary) {
   return output;
 }
 const quaternion = (axis, angle) => axis.map(value => value * Math.sin(angle / 2)).concat(Math.cos(angle / 2));
-function originalGlb(planar = false) {
+function originalGlb(planar = false, unitUv = false) {
   const doc = { asset: { version: '2.0' }, buffers: [{ byteLength: 0 }], bufferViews: [], accessors: [], meshes: [],
     materials: [
       { name: 'Leaf', doubleSided: true, alphaMode: 'MASK', alphaCutoff: .5,
@@ -162,7 +162,7 @@ function originalGlb(planar = false) {
     return { attributes: { POSITION: accessor(positions.flat(), 3), NORMAL: accessor(positions.flatMap(() => [0, 0, 1]), 3), TEXCOORD_0: accessor(uvs.flat(), 2) }, indices: accessor(indices, 1, true), material };
   }
   const leaf = primitive([[-.5, 0, 0], [.5, 0, 0], [-.5, 1, 0], [.5, 0, 0], [.5, 1, 0], [-.5, 1, 0]],
-    [[0, 0], [1, 0], [0, 1], [.25, 0], [.25, 1], [1.25, 1]], [0, 1, 2, 3, 4, 5], 0);
+    [[0, 0], [1, 0], [0, 1], [.25, 0], [.25, 1], [unitUv ? .75 : 1.25, 1]], [0, 1, 2, 3, 4, 5], 0);
   const stem = primitive([[-.04, -.2, 0], [.04, -.2, 0], [.04, 1.1, 0], [-.04, 1.1, 0]], [[0, 0], [1, 0], [1, 1], [0, 1]], [0, 1, 2, 0, 2, 3], 1);
   const otherLeaf = primitive([[-.3, 0, 0], [.3, 0, 0], [.3, .75, 0], [-.3, .75, 0]], [[0, 0], [1, 0], [1, 1], [0, 1]], [0, 1, 2, 0, 2, 3], 0);
   doc.meshes = [{ name: 'shared-two-material-mesh', primitives: [leaf, stem] }, { name: 'second-mesh', primitives: [otherLeaf] }];
@@ -459,9 +459,9 @@ test('real Blender static conversion acceptance', { timeout: 900000 }, async t =
     await assertSuccess(child, executable, expectedVersion + ' LTS', 'convex-hull');
   });
   await t.test('source without authored tangents converts into the real offline import payload without extra attributes', { timeout: CASE_TIMEOUT }, async child => {
-    const original=originalGlb(),length=original.readUInt32LE(12),doc=JSON.parse(original.subarray(20,20+length).toString('utf8'));
+    const original=originalGlb(false,true),length=original.readUInt32LE(12),doc=JSON.parse(original.subarray(20,20+length).toString('utf8'));
     const binary=Buffer.from(original.subarray(28+length));
-    // A separate rigid import fixture; the original nonuniform hierarchy cases
+    // A separate rigid, unit-UV import fixture; original tiled/nonuniform cases
     // above remain unchanged and continue to test broader conversion fidelity.
     for(const node of doc.nodes)if(node.scale)node.scale=[1,1,1];
     assert.ok(doc.meshes.every(mesh=>mesh.primitives.every(p=>!Object.hasOwn(p.attributes,'TANGENT'))));

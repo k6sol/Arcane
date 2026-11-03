@@ -16,3 +16,9 @@ Verification:74 Python fidelity cases and18 frozen converted-payload cases pass 
 These are offline import-data checks with synthetic targets: zero Studio commands, no uploads, no human approval and no Asset Manager registration. They do not establish native rendering, model art quality, collision/gameplay acceptance or completion of the requested game. Native/custom authored tangent representation remains outside the supported payload subset and is never silently approximated.
 
 [[Bugs/Windows Conversion Paths]] - [[Delivery/G06 Connected Import]] - [[Delivery/G05 Blender Quality]]
+
+## Native fixture correction
+
+Original33d7e0a native run41563019693 fails on both OSes in its added offline import case: conversion and the source-absent tangent assertion pass, then the importer correctly refuses the fixture's tiled UV coordinate1.25. The original tiled/nonuniform fidelity cases still pass, as do cancellation and planar-hull refusal. The final three-success aggregate also fails because that added case did not complete; no full native acceptance is claimed.
+
+Only the separate import fixture now uses a unit-UV leaf chart. The default original fixture retains its exact tiled chart and nonuniform transforms; no runtime UV validation or geometry fidelity limit changes. An isolated diagnostic using the corrected native source/parent constructors and installed Blender4.5 completes conversion and the production offline import transfer (40 packets), with all workers closed and no Studio operations. Initial diagnostic setup failures before process creation are retained privately. This is not hosted5.2 acceptance; observe the new original correction run.
