@@ -621,3 +621,22 @@ test('real journal reopen quarantines nonconnect uncertainty without retrying or
   assert.deepEqual(next.currentStateView().state!.actions,expected,'A new window still exposes every durable unknown receipt in recorded state.');
   assert.equal(posts,0);assert.equal(connections,0);assert.deepEqual(service.state().actions,expected,'Quarantine never rewrites or acknowledges the journal.');
 });
+
+
+test('restart checkpoints an exact draft with explicitly historical unretained work after a failed connect',async t=>{
+  const observed=state(),taskId=randomUUID();observed.actions=[unknownConnectRecord()];
+  observed.chatTasks=[{taskId,threadId:'historical-thread',sessionId:null,connectionId:randomUUID(),state:'working',round:0,reason:null,reportDigest:null,retained:false}];
+  observed.nativeRecovery={version:1,fingerprint:'a'.repeat(64),nativeReservations:0,legacyActions:0,legacyTasks:1,legacyThreads:0,legacyProposals:0,historicalActionIds:[],historicalTaskIds:[taskId],blockedThreadIds:[]};
+  const original=structuredClone(observed),doc=new DocumentFixture();let posts=0;const writes:ChatTabPreferences[]=[];
+  const chat=new CodexChat(doc.asDocument(),new CodexChatApi(TOKEN,async(_input,init)=>{if(init?.method==='POST'){posts++;assert.fail('Restart must never acknowledge, connect or dispatch.');}return Response.json({state:observed});}));t.after(()=>chat.stop());await chat.start();
+  await chat.enableChatTabs({preferences:{read:async()=>plainRow('Earlier draft').preferences,save:async value=>{writes.push(structuredClone(value));}}});await settle();
+  const input=doc.getElementById('codex-composer');input.value='  Keep this exact draft\n';input.dispatchEvent(new Event('input'));
+  await chat.prepareForRestart();
+  assert.equal(writes.at(-1)!.tabs[0]!.draft,input.value);assert.equal(chat.currentStateView().preferencesSaved,true);
+  assert.deepEqual(chat.currentStateView().state!.actions,original.actions);assert.deepEqual(chat.currentStateView().state!.chatTasks,original.chatTasks);assert.equal(posts,0);
+  observed.chatTasks![0]!.retained=true;await assert.rejects(chat.prepareForRestart(),/Finish or stop/);
+  delete observed.chatTasks![0]!.retained;await assert.rejects(chat.prepareForRestart(),/Finish or stop/);
+  observed.chatTasks![0]!.retained=false;observed.nativeRecovery={...observed.nativeRecovery!,historicalTaskIds:[],legacyTasks:0};
+  await assert.rejects(chat.prepareForRestart(),/Finish or stop/);assert.equal(posts,0);
+
+});

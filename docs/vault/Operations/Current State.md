@@ -32,3 +32,9 @@ Arcane only. Do not operate Studio or touch ArchLiquid. Computer Use remains sto
 ## Newer connected cutout import
 
 [[Bugs/Cutout Alpha Factors]] implements exact fractional-factor baking for textured MASK materials across host pixels, sealed transfer, source checks and owned plugin image admission. Controlled host and standalone-plugin tests pass; native Studio rendering and customer delivery remain unverified. Installed409 is unchanged.
+
+## Native and task verification checkpoint
+
+Both original native jobs in41551406155 on6c07b74 pass, including1024 boulder import-data checks and the preserved foliage baseline. [[Bugs/Rock Texture Detail]] retains the preceding failed controls and realism limitation. The source6c07b74 also passes105 current integrated task/playtest, retirement, task-store and approval UI cases with frozen inputs; [[Delivery/G07 Test and Repair]] records controlled versus actual acceptance boundaries. Component/package checks are still running. Installed409 remains unchanged.
+
+[[Bugs/Historical Task Restart]] fixes the reproduced unknown-connect update trap for exact host-quarantined, explicitly unretained historical work. All96 frozen draft/update cases pass; live/missing owners remain blocked. This newer source is not yet installed.

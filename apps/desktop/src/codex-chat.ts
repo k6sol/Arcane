@@ -3179,7 +3179,7 @@ export class CodexChat {
     // native work. Explicitly unretained unknown tasks survive the restart;
     // live owners, active work and missing ownership evidence still block it.
     if(!this.fresh||this.stopped||!this.state||this.state.displayLimited||this.snapshot()||!this.uncertain.size||
-      this.state.chatTasks?.some(task=>task.retained||['working','awaiting_verification','repair_queued','repairing'].includes(task.state)||task.state==='unknown'&&task.retained!==false))return false;
+      this.state.chatTasks?.some(task=>task.retained||['working','awaiting_verification','repair_queued','repairing'].includes(task.state)&&!(task.retained===false&&this.state?.nativeRecovery?.historicalTaskIds.includes(task.taskId))||task.state==='unknown'&&task.retained!==false))return false;
     return [...this.uncertain.values()].every(item=>item.read&&item.input.action==='connect'&&item.input.connectionId===null&&
       this.state!.actions.some(record=>record.requestId===item.input.requestId&&this.finishedUnknownConnect(record)));
   }

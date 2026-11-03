@@ -22,10 +22,12 @@ Depends on: 2, 4 and 6. Owner: task/playtest integration.
 
 ## Evidence
 
-No whole-goal completion evidence recorded yet. Add actual revision/run/artifact links and distinguish controlled tests from customer/native proof.
+Current source6c07b74 passes105 integrated checks with frozen source/compiled inputs: chat-task-loop, codex-task-retirement, chat-task-store and codex-chat-ui. The run includes real HTTP/SQLite persistence, spawned-node JSONL native-peer fixtures and actual Edge UI journeys; no installed Codex inference or Studio calls occur.
+
+The selection exercises one same-thread repair and reverify after native terminal plus fresh source checks, exact-job cancellation and permission revocation, missing capture/source/cleanup refusal, source edits, durable unknown ACK retention without replay, pending preflight Stop, navigation ownership, normal retirement, and human review after task completion. Approval UI decisions are checked against the actual policy. These controlled outcomes support implementation confidence; they do not prove real Studio scenario execution/restoration, complete-game quality, customer acceptance or whole-goal completion. Repaired and unplanned task acceptance still need explicit outcome-by-outcome audit.
 
 ## Next action
 
-Resolve listed dependencies, then reproduce the missing outcome before editing.
+Audit current scenario preparation/execution/restoration and explicit repaired/unplanned acceptance against their exact requirements. Preserve the controlled105-case checkpoint while keeping actual Studio execution unverified under the current restriction.
 
 [[Delivery/Goal Board]] · [[Operations/Evidence Ledger]]

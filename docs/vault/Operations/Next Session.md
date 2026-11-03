@@ -43,3 +43,5 @@ Arcane only; do not touch ArchLiquid or operate Studio. Root is sole compiler. E
 ## Latest native control follow-up
 
 Original0431 native41550305290 passes foliage and actual1024 boulder generation on both OSes, then fails its stale legacy-request negative control. [[Bugs/Rock Texture Detail]] records the corrected complete legacy input and additional downgrade-rejection check, plus the retained original failed evidence. The inspected actual5.2 renders still require geological form/material improvement. Do not treat that failed run as full acceptance. Observe the new original correction runs; installed409 and the stopped Computer Use boundary remain unchanged.
+
+[[Bugs/Historical Task Restart]] now passes its before/after reproducer and96 frozen draft/update regressions. Observe original hosted/package acceptance before delivery; exact unknown receipts and ownership records remain retained. The customer has reported repeated skills_get selection-policy and byte-budget errors; trace that active issue next.
