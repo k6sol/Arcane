@@ -59,3 +59,7 @@ Original6c07b74 native41551406155 succeeds on both OSes; component41551406119 ha
 ## Verified Windows conversion correction
 
 [[Bugs/Windows Conversion Paths]] records the reproduced original oak export failure and successful conversions of unchanged oak, pine, axe and corrected selling-box sources after applying the existing Blender path adapter. All workers closed; no original job was replayed and no Studio operation occurred. Native import, model quality and game acceptance remain open. Installed customer code remains409ef4b; observe hosted checks for the new source independently.
+
+## Plugin continuity timeline
+
+[[Bugs/Plugin Startup Visibility]] now records validated mode/epoch and marker-continuity transitions in the existing host event journal, without repeated heartbeat noise or private fields. Strict660 and69 frozen SQLite proof/store/test cases pass. The original579addc component/package run passes all seven jobs. Actual customer Play-mode disconnection remains unaccepted; collect the exact transition evidence without operating Studio.

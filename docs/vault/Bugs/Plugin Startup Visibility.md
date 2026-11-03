@@ -14,3 +14,13 @@ The canonical modular artifacts are regenerated and build --check passes. All246
 The reported native disconnection is still unaccepted: these controlled engine doubles do not establish actual Studio lifecycle behavior. Do not claim the popup correction proves that separate issue fixed. Further investigation needs exact original transition/poll/session diagnostics. No Studio operation, actual plugin installation/reload or credential read was performed.
 
 [[Delivery/G03 Persistent Sessions]] - [[Delivery/G07 Test and Repair]] - [[Bugs/Preview Composer Layout]] - [[Operations/Next Session]]
+
+## Session transition diagnostics
+
+The current retained local journal has an unrevoked session receiving heartbeats. It does not establish which mode the customer was in or reproduce the reported disconnect; historical revocation records alone cannot answer that question.
+
+The host now stores a sparse studio_continuity_changed event after validating a continuity observation. The event records previous/current mode and play epoch, plus connected/continuity-supported flags. Ordinary unchanged heartbeats remain silent. It includes no place name, marker name, bearer or model/source data. Events share the existing transaction, so invalid identity/mode/epoch observations cannot publish an accepted transition. Existing proof expiry, pairing and write fences are unchanged.
+
+Strict compilation verifies660 sources. The focused SQLite proof-clock, store, reservation and test-service run passes69 cases without skips against frozen source/compiled inputs. Cases cover exact six-second proof lifetime under changing clocks, Edit/Play/Edit without revocation, marker loss/recovery, quiet repeated polls, private-field exclusion and rejected observation rollback. This provides future diagnostic evidence; it does not itself fix or accept native Play-mode disconnection.
+
+Original hosted component run41558970298 for579addc passes all seven jobs, including packaged startup. Installed customer code remains409ef4b; source publication is not installation.

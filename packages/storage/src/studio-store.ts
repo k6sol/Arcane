@@ -1987,10 +1987,20 @@ export class StudioStore {
         if (s.proof && (p.playEpoch as number)<s.proof.playEpoch) throw new ArcaneError('IDENTITY','Plugin play epoch moved backwards; inspect and reconnect.');
         if (s.proof && p.pluginArtifactHash !== s.proof.pluginArtifactHash) throw new ArcaneError('IDENTITY','Loaded plugin source changed inside this lifetime.');
         if (s.proof && (p.markerName !== s.proof.markerName || p.mode !== s.proof.mode && (p.playEpoch as number)<=s.proof.playEpoch)) throw new ArcaneError('IDENTITY','Marker or mode continuity changed without a latched play transition.');
+        // Keep a sparse, authenticated lifecycle history. Repeated heartbeats
+        // refresh proof without hiding meaningful transitions in the event log.
+        const previous=s.proof;
+        const changed=!previous || previous.mode!==p.mode || previous.playEpoch!==p.playEpoch
+          || previous.connected!==p.connected || previous.continuitySupported!==p.continuitySupported;
         // Both ends belong to one observation; a second clock read would change its fixed lifetime.
         const observedAt=this.now();
         s.proof={sessionId:s.id,clientLifetimeId:s.clientSessionId,pluginArtifactHash:p.pluginArtifactHash,markerName:p.markerName,placeId:s.placeId,universeId:s.universeId,placeName:s.name,mode:p.mode as 'Edit'|'Play',playEpoch:p.playEpoch as number,continuitySupported:p.continuitySupported,connected:p.connected,observedAt:new Date(observedAt).toISOString(),expiresAt:new Date(observedAt+6000).toISOString()};
         this.saveSession(s);
+        if(changed)this.event('studio_continuity_changed',s.id,{
+          previousMode:previous?.mode ?? null,mode:s.proof.mode,
+          previousPlayEpoch:previous?.playEpoch ?? null,playEpoch:s.proof.playEpoch,
+          connected:s.proof.connected,continuitySupported:s.proof.continuitySupported,
+        });
       }
       if(executingCommand!==undefined)return []; // Never dispatch, renew a lease or adopt new work.
       const active = this.db.prepare("SELECT payload FROM commands WHERE session_id=? AND state IN ('dispatched','needs_reconciliation') ORDER BY created,rowid LIMIT 1").get(sessionId) as Row | undefined;
