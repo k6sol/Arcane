@@ -13,6 +13,10 @@ import { decodeMaterialPng, materialPngPixels } from '../../dist/packages/asset-
 import { noLinks, readRegularFile, regularFile } from '../../dist/packages/asset-pipeline/src/paths.js';
 import { parseWorkerRecords } from '../../dist/packages/asset-pipeline/src/worker-journal.js';
 import { validateGlb } from '../../dist/apps/desktop/src/glb-preflight.js';
+import {adaptCompletedConvertedStudioImport} from '../../dist/apps/daemon/src/converted-asset-import-adapter.js';
+import {createStudioImportManifestAuthority} from '../../dist/packages/asset-pipeline/src/studio-import-manifest.js';
+import {decodeStudioImportPayload} from '../../dist/packages/asset-pipeline/src/studio-import-payload.js';
+import {createStudioImportTransfer} from '../../dist/packages/asset-pipeline/src/studio-import-transfer.js';
 
 // Mandatory native acceptance, invoked only by the separate hosted Blender job.
 // There are no injected runners/probes, synthesized worker audits, optional skips,
@@ -445,7 +449,7 @@ test('real Blender static conversion acceptance', { timeout: 900000 }, async t =
   t.after(async () => {
     await saveEvidence('native-conversion.json', encode({ schemaVersion: 1, expectedVersion, runtimeAcquisition, nativeCases: results, attempts,
       successfulConversions: successes.length, inferenceStarted: false, studioOperations: 0, nativeStudioVerified: false,
-      complete: fixtureAssertionsComplete && results.length === 4 && successes.length === 2 && results.every(result => result.cleanup.temporaryDataRemoved && !result.cleanup.retainedForUnprovedClosure) }));
+      complete: fixtureAssertionsComplete && results.length === 5 && successes.length === 3 && results.every(result => result.cleanup.temporaryDataRemoved && !result.cleanup.retainedForUnprovedClosure) }));
   });
   runtimeAcquisition = await runtimeAcquisitionEvidence(executable);
   await t.test('none: actual hierarchy/material/UV/shared-mesh/open-card conversion and real retained previews', { timeout: CASE_TIMEOUT }, async child => {
@@ -453,6 +457,40 @@ test('real Blender static conversion acceptance', { timeout: 900000 }, async t =
   });
   await t.test('convex-hull: actual multimesh open-card source produces independently validated positive-volume collision', { timeout: CASE_TIMEOUT }, async child => {
     await assertSuccess(child, executable, expectedVersion + ' LTS', 'convex-hull');
+  });
+  await t.test('source without authored tangents converts into the real offline import payload without extra attributes', { timeout: CASE_TIMEOUT }, async child => {
+    const original=originalGlb(),length=original.readUInt32LE(12),doc=JSON.parse(original.subarray(20,20+length).toString('utf8'));
+    const binary=Buffer.from(original.subarray(28+length));
+    // A separate rigid import fixture; the original nonuniform hierarchy cases
+    // above remain unchanged and continue to test broader conversion fidelity.
+    for(const node of doc.nodes)if(node.scale)node.scale=[1,1,1];
+    assert.ok(doc.meshes.every(mesh=>mesh.primitives.every(p=>!Object.hasOwn(p.attributes,'TANGENT'))));
+    const source=pack(doc,binary),f=await caseWorkspace(child,executable),job=f.start(parentInput(source,'native-import-channels','none'),{deadlineMs:JOB_DEADLINE});
+    const result=await job.completion;
+    attempts.push({case:'import-channels',...JSON.parse(boundedResult(result))});
+    assert.equal(result.state,'succeeded',boundedResult(result));
+    const manifest=await f.pipeline.validateConversion(result.manifestPath),journal=await closedJournal(job);
+    assert.equal(manifest.runtime.version,expectedVersion+' LTS');
+    const files=new Map();
+    for(const name of ['request.json','source-map.json','conversion-audit.json','source.glb','import-source.glb','asset.glb'])files.set(name,await readRegularFile(join(job.directory,name),64*1024*1024));
+    assert.deepEqual(files.get('source.glb'),source);
+    const exported=files.get('asset.glb'),jsonLength=exported.readUInt32LE(12),output=JSON.parse(exported.subarray(20,20+jsonLength).toString('utf8'));
+    assert.ok(output.meshes.every(mesh=>mesh.primitives.every(p=>!Object.hasOwn(p.attributes,'TANGENT'))),'Export must not introduce a source-absent tangent channel.');
+    const generated=adaptCompletedConvertedStudioImport(manifest,files,sha(Buffer.from('native-converted-import-channels')),
+      {target:{sessionId:'offline-native-channels',placeId:0,universeId:0,root:'Workspace',parentRef:'offline-parent',creator:{kind:'user',id:'1'}},placement:{mode:'bottom-centre'},studsPerMeter:1/.28},null);
+    const authority=createStudioImportManifestAuthority({loadGeneratedFiles:async()=>generated});
+    let transfer;
+    try{
+      const prepared=await authority.prepare(await authority.admit(generated.revisionId));
+      const payload=decodeStudioImportPayload(prepared,new Map(generated.files.map(file=>[file.fileId,file.bytes])));
+      assert.equal(payload.formatVersion,2);transfer=createStudioImportTransfer(prepared,payload);
+      assert.ok(transfer.packets.length>0);
+    }finally{authority.close();}
+    successes.push('import-channels');
+    results.push({case:'import-channels',state:result.state,version:manifest.runtime.version,sourceSha256:sha(source),
+      packetCount:transfer.packets.length,transferBytes:transfer.byteLength,sourcePreserved:true,extraTangents:false,
+      syntheticOfflineTarget:true,studioOperations:0,humanApprovalGranted:false,allWorkersClosed:true,
+      workerRoles:journal.workers.map(worker=>worker.role),cleanup:f.cleanup});
   });
   await t.test('actual worker source-map event cancellation waits for owned close and never becomes a success or replay', { timeout: CASE_TIMEOUT }, async child => {
     const f = await caseWorkspace(child, executable), source = originalGlb(), input = parentInput(source, 'native-cancel', 'none', 1024, 64);
@@ -486,7 +524,7 @@ test('real Blender static conversion acceptance', { timeout: 900000 }, async t =
     results.push({ case: 'planar-refusal', state: result.state, code: result.error.code, stage: result.error.diagnostic.stage,
       reasonCode: result.error.diagnostic.reasonCode, allWorkersClosed: true, workerRoles: journal.workers.map(worker => worker.role), sourcePreserved: true, cleanup: f.cleanup });
   });
-  assert.equal(successes.length, 2); assert.equal(results.length, 4);
+  assert.equal(successes.length, 3); assert.equal(results.length, 5);
   assert.ok(results.every(result => result.cleanup.temporaryDataRemoved && !result.cleanup.retainedForUnprovedClosure), 'Every real owned worker must close before its exact temporary data is removed.');
   fixtureAssertionsComplete = true;
 });

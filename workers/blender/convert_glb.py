@@ -385,7 +385,7 @@ def select_objects(bpy, objects):
         bpy.context.view_layer.objects.active = objects[0]
 
 
-def export_model(bpy, directory, filename, objects, materials):
+def export_model(bpy, directory, filename, objects, materials, *, export_tangents=True):
     path = directory / filename
     audit.require(not path.exists() and not path.is_symlink(), "IO_EXISTS")
     select_objects(bpy, objects)
@@ -393,7 +393,7 @@ def export_model(bpy, directory, filename, objects, materials):
         operate(bpy.ops.export_scene.gltf, {"filepath": blender_path(path), "check_existing": False,
         "export_format": "GLB", "use_selection": True, "export_extras": True,
         "export_yup": True, "export_apply": False, "export_texcoords": True,
-        "export_normals": True, "export_tangents": True, "export_materials": materials,
+        "export_normals": True, "export_tangents": export_tangents, "export_materials": materials,
         "export_vertex_color": "ACTIVE", "export_all_vertex_colors": True,
         "export_active_vertex_color_when_no_material": True, "export_attributes": True,
         "export_image_format": "AUTO", "export_animations": False, "export_skins": False,
@@ -942,7 +942,10 @@ def run():
     operate(bpy.ops.wm.save_as_mainfile, {"filepath": blender_path(directory / "asset.blend"), "check_existing": False})
     saved_scene_hash = audit.sha(audit.read_owned(directory / "asset.blend", audit.BLEND_BYTES))
     event("export")
-    render_raw = export_model(bpy, directory, "asset.glb", render_ancestors(bpy.context.scene, list(objects.values())), "EXPORT")
+    # Preserve source-authored tangents. Do not introduce an extra vertex
+    # channel when the source relies on UV-derived tangents in the target.
+    export_tangents = any("TANGENT" in evidence["semantics"] for evidence in expected.values())
+    render_raw = export_model(bpy, directory, "asset.glb", render_ancestors(bpy.context.scene, list(objects.values())), "EXPORT", export_tangents=export_tangents)
     models = [exported_evidence(render_raw, "asset.glb", request, mapping, expected, source_doc, source_bin, decoder, source_hierarchy)]
     collision_raw = None
     if proxy is not None:

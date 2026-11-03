@@ -867,6 +867,20 @@ class ConversionFidelityPolicyTests(unittest.TestCase):
                     self.assertIs(arguments[key], False)
                 self.assertFalse((directory / "asset.glb").exists())
 
+    def test_export_can_omit_only_generated_tangents_without_disabling_other_fidelity_channels(self):
+        with tempfile.TemporaryDirectory(prefix="arcane-export-channels-") as temporary:
+            directory = Path(temporary).resolve()
+            for tangents in (False, True):
+                operator = ControlledOperator(failure=ValueError("controlled operator argument failure"))
+                bpy = SimpleNamespace(ops=SimpleNamespace(export_scene=SimpleNamespace(gltf=operator)),
+                                      context=SimpleNamespace(view_layer=SimpleNamespace(objects=ControlledViewObjects())))
+                self.refused("OPERATOR_ARGUMENT", lambda: worker.export_model(bpy, directory, "asset.glb", [], "EXPORT", export_tangents=tangents))
+                self.assertEqual(len(operator.calls), 1)
+                self.assertIs(operator.calls[0]["export_tangents"], tangents)
+                for key in ("export_texcoords", "export_normals", "export_all_vertex_colors", "export_attributes", "export_extras"):
+                    self.assertIs(operator.calls[0][key], True)
+                self.assertFalse((directory / "asset.glb").exists())
+
     def test_save_observer_forwards_once_and_restores_exact_binding_and_return_identity(self):
         calls = []; result = object(); argument = object(); keyword = object()
         def original(*arguments, **keywords):

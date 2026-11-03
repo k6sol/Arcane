@@ -63,3 +63,7 @@ Original6c07b74 native41551406155 succeeds on both OSes; component41551406119 ha
 ## Plugin continuity timeline
 
 [[Bugs/Plugin Startup Visibility]] now records validated mode/epoch and marker-continuity transitions in the existing host event journal, without repeated heartbeat noise or private fields. Strict660 and69 frozen SQLite proof/store/test cases pass. The original579addc component/package run passes all seven jobs. Actual customer Play-mode disconnection remains unaccepted; collect the exact transition evidence without operating Studio.
+
+## Converted import blocker resolved
+
+[[Bugs/Converted Export Attributes]] records the real next failure after path correction: conversion introduced source-absent tangents that the strict import decoder refused. Source-derived export now lets all four retained assets pass conversion and the production offline import/packet path. Authored tangent/color refusals remain;74 fidelity and18 frozen payload cases pass. Observe the new mandatory five-case native run after publication. Original3645 path-only native verification passes both OSes. No Studio command, upload, approval or game acceptance occurred; installed customer code remains409ef4b.
